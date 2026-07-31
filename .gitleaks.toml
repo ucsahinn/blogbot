@@ -1,0 +1,13 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated and dependency artifacts are outside the source-secret surface."
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)target/''',
+  '''(^|/)dist/''',
+  '''(^|/)output/''',
+  '''(^|/)\.playwright-mcp/''',
+  '''(^|/)\.serena/'''
+]

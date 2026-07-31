@@ -1,0 +1,12 @@
+{
+  "name": "@blogbot/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "stdio": "node --experimental-transform-types src/stdio-entrypoint.ts"
+  },
+  "dependencies": {
+    "pg-boss": "^12.26.3"
+  }
+}

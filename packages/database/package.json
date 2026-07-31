@@ -1,0 +1,19 @@
+{
+  "name": "@blogbot/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./backend-repository": "./src/backend-repository.ts",
+    "./in-memory-backend-store": "./src/in-memory-backend-store.ts",
+    "./local-persistence": "./src/local-persistence.ts",
+    "./pglite-backend-repository": "./src/pglite-backend-repository.ts",
+    "./encrypted-json": "./src/encrypted-json.ts",
+    "./source-repository": "./src/source-repository.ts"
+  },
+  "files": ["src"],
+  "dependencies": {
+    "@blogbot/editorial": "*",
+    "@electric-sql/pglite": "^0.5.4"
+  }
+}

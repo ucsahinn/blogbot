@@ -1,0 +1,1 @@
+{"desktop-main":{"identifier":"desktop-main","description":"Minimal capability set for the single trusted Blogbot window.","local":true,"windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]}}

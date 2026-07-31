@@ -1,0 +1,12 @@
+{
+  "name": "@blogbot/siberdergi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@blogbot/security": "*"
+  },
+  "exports": {
+    "./adapter": "./src/adapter.ts"
+  }
+}

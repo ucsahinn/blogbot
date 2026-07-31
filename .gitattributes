@@ -1,0 +1,4 @@
+apps/desktop/src-tauri/resources/pglite/pglite.data binary
+*.wasm binary
+*.png binary
+*.ico binary

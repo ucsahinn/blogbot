@@ -1,0 +1,11 @@
+{
+  "name": "@blogbot/security",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./markdown-policy": "./src/markdown-policy.ts",
+    "./source-document": "./src/source-document.ts",
+    "./url-policy": "./src/url-policy.ts"
+  }
+}

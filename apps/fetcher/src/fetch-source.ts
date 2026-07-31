@@ -1,0 +1,151 @@
+import {
+  assertSafeSourceUrl,
+  validateResolvedAddresses
+} from "../../../packages/security/src/url-policy.ts";
+
+export type FetchBoundaryCode =
+  | "TIMEOUT"
+  | "UNSUPPORTED_CONTENT_TYPE"
+  | "RESPONSE_TOO_LARGE"
+  | "TOO_MANY_REDIRECTS"
+  | "INVALID_REDIRECT"
+  | "UNSUPPORTED_CONTENT_ENCODING"
+  | "HTTP_STATUS";
+
+export class FetchBoundaryError extends Error {
+  constructor(
+    readonly code: FetchBoundaryCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "FetchBoundaryError";
+  }
+}
+
+export interface FetchRequestPlan {
+  url: string;
+  approvedAddresses: string[];
+  redirect: "manual";
+  timeoutMs: number;
+  /** Wall-clock deadline for the whole hop, including slow-drip bodies. */
+  deadlineAtMs?: number;
+  maxResponseBytes: number;
+}
+
+export interface FetchResponse {
+  status: number;
+  headers: Record<string, string | undefined>;
+  body: Uint8Array;
+}
+
+export interface FetchTransport {
+  resolve(hostname: string): Promise<string[]>;
+  request(plan: FetchRequestPlan): Promise<FetchResponse>;
+}
+
+export interface FetchSourceOptions {
+  timeoutMs?: number;
+  maxBytes?: number;
+  maxRedirects?: number;
+  allowedContentTypes?: string[];
+}
+
+export interface FetchedSource {
+  finalUrl: string;
+  contentType: string;
+  body: Uint8Array;
+}
+
+const redirectStatuses = new Set([301, 302, 303, 307, 308]);
+const defaultAllowedContentTypes = [
+  "text/html",
+  "application/rss+xml",
+  "application/atom+xml",
+  "application/xml",
+  "text/xml",
+  "application/json"
+];
+
+function headerValue(
+  headers: Record<string, string | undefined>,
+  name: string
+): string | undefined {
+  const match = Object.entries(headers).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase()
+  );
+  return match?.[1];
+}
+
+function mediaType(contentType: string | undefined): string {
+  return contentType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+export async function fetchSource(
+  inputUrl: string,
+  transport: FetchTransport,
+  options: FetchSourceOptions = {}
+): Promise<FetchedSource> {
+  const timeoutMs = options.timeoutMs ?? 8_000;
+  const maxBytes = options.maxBytes ?? 2_000_000;
+  const maxRedirects = options.maxRedirects ?? 5;
+  const allowedContentTypes = new Set(
+    options.allowedContentTypes ?? defaultAllowedContentTypes
+  );
+  let currentUrl = assertSafeSourceUrl(inputUrl);
+
+  for (let redirectCount = 0; ; redirectCount += 1) {
+    const parsed = new URL(currentUrl);
+    const approvedAddresses = validateResolvedAddresses(
+      await transport.resolve(parsed.hostname)
+    );
+    const response = await transport.request({
+      url: currentUrl,
+      approvedAddresses,
+      redirect: "manual",
+      timeoutMs,
+      deadlineAtMs: Date.now() + timeoutMs,
+      maxResponseBytes: maxBytes
+    });
+
+    if (redirectStatuses.has(response.status)) {
+      if (redirectCount >= maxRedirects) {
+        throw new FetchBoundaryError(
+          "TOO_MANY_REDIRECTS",
+          `source exceeded ${maxRedirects} redirects`
+        );
+      }
+      const location = headerValue(response.headers, "location");
+      if (!location) {
+        throw new FetchBoundaryError(
+          "INVALID_REDIRECT",
+          "redirect response did not include a location"
+        );
+      }
+      currentUrl = assertSafeSourceUrl(new URL(location, currentUrl).toString());
+      continue;
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new FetchBoundaryError(
+        "HTTP_STATUS",
+        `source returned HTTP ${response.status}`
+      );
+    }
+    if (response.body.byteLength > maxBytes) {
+      throw new FetchBoundaryError(
+        "RESPONSE_TOO_LARGE",
+        `source response exceeded ${maxBytes} bytes`
+      );
+    }
+
+    const contentType = mediaType(headerValue(response.headers, "content-type"));
+    if (!allowedContentTypes.has(contentType)) {
+      throw new FetchBoundaryError(
+        "UNSUPPORTED_CONTENT_TYPE",
+        `source response type is not allowed: ${contentType || "missing"}`
+      );
+    }
+
+    return { finalUrl: currentUrl, contentType, body: response.body };
+  }
+}

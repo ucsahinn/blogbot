@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "stagingDirectory": "REPLACE_WITH_OFFLINE_STAGING_DIRECTORY",
+  "requiredArtifacts": [
+    {
+      "name": "postgres.dump",
+      "producer": "pg_dump --format=custom",
+      "containsSecrets": true
+    },
+    {
+      "name": "content-manifest.json",
+      "producer": "Blogbot worker export",
+      "containsSecrets": false
+    }
+  ],
+  "archive": {
+    "format": "zip",
+    "sha256Sidecar": true,
+    "encryptOutsideRepository": true
+  },
+  "restorePolicy": {
+    "previewByDefault": true,
+    "requireExpectedSha256": true,
+    "refuseNonEmptyTarget": true
+  }
+}

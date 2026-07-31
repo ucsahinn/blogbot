@@ -1,0 +1,43 @@
+name: siberdergi-public
+
+services:
+  public-caddy:
+    image: ${BLOGBOT_CADDY_IMAGE:?set a digest-pinned Caddy image}
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SIBERDERGI_HOST: ${SIBERDERGI_HOST:-siberdergi.net}
+    volumes:
+      - ../caddy/public.Caddyfile:/etc/caddy/Caddyfile:ro
+      - /srv/siberdergi/current:/srv:ro
+      - public_caddy_data:/data
+      - public_caddy_config:/config
+    networks:
+      - public_edge
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  public_edge:
+
+volumes:
+  public_caddy_data:
+  public_caddy_config:

@@ -1,0 +1,49 @@
+{
+  "name": "blogbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.12.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node --test --experimental-transform-types \"tests/**/*.test.ts\" \"apps/desktop/tests/*.test.ts\"",
+    "test:all": "node --test --experimental-transform-types \"tests/**/*.test.ts\" \"apps/desktop/tests/*.test.ts\"",
+    "test:unit": "node --test --experimental-transform-types \"tests/unit/*.test.ts\"",
+    "test:integration": "node --test --experimental-transform-types \"tests/integration/*.test.ts\"",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run build --workspace @blogbot/desktop",
+    "build:engine": "node scripts/build-engine-sidecar.mjs",
+    "build:desktop": "npm run build:engine && npm run build --workspace @blogbot/desktop",
+    "smoke:engine": "node scripts/smoke-engine-sidecar.mjs",
+    "desktop:preflight": "node scripts/desktop-preflight.mjs",
+    "desktop:preflight:json": "node scripts/desktop-preflight.mjs --json",
+    "security:scan": "node --experimental-transform-types scripts/security-scan.ts",
+    "security:verify": "npm run security:scan && npm audit --audit-level=high --offline && gitleaks detect --no-git --redact --config .gitleaks.toml --source .",
+    "native:test": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
+    "native:lint": "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "check:all": "npm run test:all && npm run lint && npm run typecheck && npm run build && npm run build:engine && npm run smoke:engine && npm run security:verify && npm run native:test && npm run native:lint",
+    "icons:generate": "node --experimental-transform-types scripts/generate-desktop-icons.ts",
+    "backup:verify": "node --test --experimental-transform-types --test-name-pattern=\"backup creates\" tests/integration/siberdergi-infra.test.ts",
+    "restore:drill": "node --test --experimental-transform-types --test-name-pattern=\"backup creates\" tests/integration/siberdergi-infra.test.ts",
+    "pilot:report": "node --experimental-transform-types scripts/pilot-report.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.1.2",
+    "esbuild": "^0.25.12",
+    "eslint": "10.8.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.3",
+    "globals": "17.8.0",
+    "postject": "^1.0.0-alpha.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0"
+  }
+}

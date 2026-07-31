@@ -1,0 +1,13 @@
+{
+  "name": "@blogbot/editorial",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./automation": "./src/automation.ts",
+    "./quality-gates": "./src/quality-gates.ts",
+    "./revision": "./src/revision.ts",
+    "./sources": "./src/sources.ts",
+    "./workflow": "./src/workflow.ts"
+  }
+}

@@ -1,0 +1,52 @@
+const report = {
+  generatedAt: new Date().toISOString(),
+  status: "LOCAL_VERTICAL_SLICE_READY",
+  completed: [
+    "domain and workflow tests",
+    "local PGlite engine integration",
+    "durable local pg-boss queue integration",
+    "versioned stdio sidecar protocol",
+    "fetcher security boundaries",
+    "Codex mock and isolated CLI structured-output boundaries",
+    "publisher idempotency and path policy",
+    "credential-safe Codex/GitHub connector boundaries",
+    "native OPML preview and HTTPS source filtering",
+    "engine-backed candidate materialization and story deduplication",
+    "local recurring source scheduler with idempotent interval batches",
+    "instant-create URL evidence preservation",
+    "encrypted engine-owned editorial UI state",
+    "TR/EN RSS artifact generation",
+    "dynamic engine-backed dashboard and editorial snapshot",
+    "deterministic first-adapter sitemap/news-sitemap/robots contract",
+    "publication bundle crawl-index integration",
+    "metadata-free local WebP renderer",
+    "first certified site fixture adapter",
+    "infrastructure template audit",
+    "encrypted backup verify, preview, and empty-target restore",
+    "exact-hash high-risk second approval and checklist binding",
+    "plain-language setup inputs with local-only connector persistence",
+    "operation log with error, change, and debug filters",
+    "adapter-neutral site setup with local Astro format detection",
+    "publication enqueue preview-hash bridge",
+    "durable publication outbox reconciliation hook",
+    "persistent due-publication scheduler with preview/hash and six-hour eligibility gates",
+    "engine-owned GitHub device-flow authorization with encrypted local token storage",
+    "generic Astro adapter identity alignment between setup and publication preview",
+    "candidate promotion and revision edit draft queueing"
+  ],
+  approvalGates: {
+    nodeDependencies: "INSTALLED_AND_AUDITED",
+    rustToolchain: "INSTALLED_TESTED_AND_NATIVE_BUILD_PASSED",
+    windowsTauriRuntime: "LOCAL_ENGINE_SIDECAR_SMOKE_PASSED",
+    localPgliteAndPgBoss: "PERSISTENCE_AND_RESTART_TESTED",
+    nativePackagedSmoke: "TAURI_RELEASE_EXECUTABLE_AND_INSTALLERS_BUILT_GUI_INTERACTION_UNVERIFIED",
+    codexAuthAndModels: "CLI_DETECTED_ISOLATED_RUNNER_WIRED_STRUCTURED_SMOKE_PASSED_AUTH_IS_PER_USER_SETUP",
+    githubAppAndCi: "EXTERNAL_AUTHORIZATION_AND_REPOSITORY_TARGET_REQUIRED",
+    realSiteMigration: "USER_SELECTED_SITE_MIGRATION_REQUIRED",
+    stagingPilot: "NOT_RUN",
+    productionCutover: "NOT_RUN",
+    installerAndRelease: "LOCAL_NSIS_AND_MSI_ARTIFACTS_BUILT_NOT_PUBLISHED"
+  }
+};
+
+console.log(JSON.stringify(report, null, 2));
