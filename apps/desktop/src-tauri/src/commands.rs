@@ -15,6 +15,14 @@ use crate::github_broker::GitHubBroker;
 use crate::notifications;
 use crate::secure_store;
 
+fn configure_hidden_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[allow(
@@ -1047,7 +1055,9 @@ pub fn start_local_dev(
         *process = None;
     }
     let executable = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    configure_hidden_command(&mut command);
+    let child = command
         .args(["run", "dev"])
         .current_dir(&root)
         .env_clear()
@@ -1084,7 +1094,9 @@ fn configured_site_origin(connectors: &Value) -> Option<String> {
 
 fn codex_executable() -> Option<&'static str> {
     ["codex.cmd", "codex.exe", "codex"].into_iter().find(|candidate| {
-        Command::new(candidate)
+        let mut command = Command::new(candidate);
+        configure_hidden_command(&mut command);
+        command
             .arg("--version")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1096,6 +1108,7 @@ fn codex_executable() -> Option<&'static str> {
 
 fn codex_authenticated(executable: &str, codex_home: Option<&Path>) -> bool {
     let mut command = Command::new(executable);
+    configure_hidden_command(&mut command);
     if let Some(home) = codex_home {
         command.env("CODEX_HOME", home);
     }
@@ -1119,7 +1132,9 @@ pub fn test_codex_runtime(
             "detail": "Yazı üretimi aracı bu bilgisayarda bulunamadı. Kurulum paketindeki bağlantı adımını veya Codex kurulumunu kontrol edin."
         }));
     };
-    let version = Command::new(executable)
+    let mut version_command = Command::new(executable);
+    configure_hidden_command(&mut version_command);
+    let version = version_command
         .arg("--version")
         .stdin(Stdio::null())
         .output()
@@ -1155,6 +1170,7 @@ pub fn start_codex_login(
     let executable = codex_executable()
         .ok_or_else(|| CommandError::EngineUnavailable("CODEX_NOT_INSTALLED".into()))?;
     let mut command = Command::new(executable);
+    configure_hidden_command(&mut command);
     if let Some(home) = bridge.codex_home() {
         command.env("CODEX_HOME", home);
     }
@@ -3553,17 +3569,18 @@ pub fn get_editorial_workspace(
     let codex_configured = connectors.pointer("/codex/accountLabel")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
-    let codex_available = codex_executable().is_some();
-    let codex_authenticated_now = codex_executable().is_some_and(|executable| {
-        codex_authenticated(executable, bridge.codex_home().as_deref())
-    });
     let codex_runner_ready = bridge.doctor().ok()
         .and_then(|value| value.get("capabilities").cloned())
         .and_then(|value| value.as_array().cloned())
         .is_some_and(|capabilities| capabilities.iter().any(|item| item.as_str() == Some("CODEX.RUNNER")));
+    // Workspace reads must remain local and bounded. Running codex.cmd --version
+    // and `login status` here blocks the Tauri command thread and opens a
+    // console window on Windows. The explicit Codex test command owns those
+    // checks; the engine capability is the truthful signal for this snapshot.
+    let codex_available = codex_runner_ready || codex_configured;
     let codex_role_state = if codex_depth > 0 {
         "BUSY"
-    } else if codex_configured && codex_available && codex_authenticated_now && codex_runner_ready {
+    } else if codex_configured && codex_available && codex_runner_ready {
         "READY"
     } else {
         "UNAVAILABLE"
