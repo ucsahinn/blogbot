@@ -26,7 +26,11 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
-      - run: npm run security:verify
+      - run: npm run security:scan
+      - run: npm audit --audit-level=high --offline
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   native:
     runs-on: windows-latest
