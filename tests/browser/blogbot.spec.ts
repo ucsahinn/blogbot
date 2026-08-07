@@ -1119,7 +1119,10 @@ test("instant-create happy path queues a review-only job", async ({ page }) => {
   await expect(page.getByText("İş kimliği")).toBeVisible();
   await page.getByRole("button", { name: "Editoryal Masada gör" }).click();
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Seçilen kanıtları karşılaştır ve özgün bir analiz hazırla/u })).toBeDisabled();
+  const queuedDraft = page.getByRole("button", { name: /Seçilen kanıtları karşılaştır ve özgün bir analiz hazırla/u });
+  await expect(queuedDraft).toBeEnabled();
+  await queuedDraft.click();
+  await expect(page.getByText(/henüz incelemeye hazır değil/u)).toBeVisible();
 });
 
 test("instant create carries an accepted delayed draft to the editorial desk", async ({ page }) => {

@@ -879,7 +879,11 @@ export function SetupCenter({
                 disabled={index > guidedStep}
                 onClick={() => setGuidedStep(index)}
               >
-                {index < guidedStep ? "✓" : index + 1}
+                <span className="guided-step-index" aria-hidden="true">{index < guidedStep ? "✓" : index + 1}</span>
+                <span className="guided-step-label">{step.title}</span>
+                <span className="guided-step-state">
+                  {index < guidedStep ? "Tamamlandı" : index === guidedStep ? "Şimdi" : "Bekliyor"}
+                </span>
               </button>
             ))}
           </div>

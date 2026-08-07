@@ -27,23 +27,18 @@ test("application startup keeps the setup path available when connector state ca
 test("application bootstrap loads the editorial workspace only after Doctor can set the runtime mode", async () => {
   const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
 
+  assert.match(appSource, /const coalescingBridge = createCoalescingBridge\(runtimeBridge\);/u);
+  assert.match(appSource, /const initialSnapshot = await coalescingBridge\.getBootstrapSnapshot\(\);/u);
   assert.match(
     appSource,
-    /const initialSnapshot = await runtimeBridge\.getBootstrapSnapshot\(\);\s*const initialWorkspace = await runtimeBridge\.getEditorialWorkspace\(\);/u
+    /const \[initialWorkspace, initialConnectorState\] = await Promise\.all\(\[[\s\S]*?coalescingBridge\.getEditorialWorkspace\(\),[\s\S]*?coalescingBridge\.getConnectorState\(\)/u
   );
   assert.match(
     appSource,
     /setTimeout\(\(\) => \{[\s\S]*?\}, 750\)/u,
     "a bounded post-Doctor refresh prevents the first visible workspace from retaining a pre-recovery projection"
   );
-  assert.match(
-    appSource,
-    /const initialSnapshot = await runtimeBridge\.getBootstrapSnapshot\(\);\s*const initialWorkspace = await runtimeBridge\.getEditorialWorkspace\(\);/u
-  );
-  assert.doesNotMatch(
-    appSource,
-    /Promise\.all\(\[\s*bridge\.getBootstrapSnapshot\(\),\s*bridge\.getEditorialWorkspace\(\)/u
-  );
+  assert.match(appSource, /coalescingBridge\.getEditorialWorkspace\(\)/u);
 });
 
 test("operations refresh also waits for Doctor before reading runtime-dependent workspaces", async () => {

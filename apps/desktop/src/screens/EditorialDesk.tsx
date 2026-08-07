@@ -159,7 +159,19 @@ export function EditorialDesk({
               </article>
             ) : null}
             {workspace.drafts.map((draft) => (
-              <button className="draft-row" type="button" key={draft.id} disabled={!draft.reviewable} aria-describedby={[`draft-detail-${draft.id}`, !draft.reviewable ? "queued-draft-guidance" : ""].filter(Boolean).join(" ")} onClick={() => { setSelectedRevisionId(draft.id); setTab("review"); }}>
+              <button
+                className="draft-row"
+                type="button"
+                key={draft.id}
+                aria-describedby={[`draft-detail-${draft.id}`, !draft.reviewable ? "queued-draft-guidance" : ""].filter(Boolean).join(" ")}
+                onClick={() => {
+                  setSelectedRevisionId(draft.id);
+                  setTab("review");
+                  if (!draft.reviewable) {
+                    setMessage("Bu taslak henüz incelemeye hazır değil. Durumu açılan inceleme alanında görebilirsiniz.");
+                  }
+                }}
+              >
                 {draft.completion === null ? (
                   <span className="progress-ring progress-indeterminate" aria-label="İlerleme yüzdesi henüz ölçülmedi">
                     …

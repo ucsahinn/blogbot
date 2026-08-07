@@ -238,6 +238,17 @@ export function userFacingBridgeError(
   return reason instanceof BridgeError ? raw : fallback;
 }
 
+export function userFacingUpdateError(reason: unknown): string {
+  const raw = reason instanceof Error ? reason.message.trim().toLowerCase() : "";
+  if (/(?:signature|signature verification|public key|verification)/u.test(raw)) {
+    return "Güncelleme kaynağına ulaşıldı, fakat yayımlanan paket imzası bu kurulumdaki doğrulama anahtarıyla eşleşmedi. Güvenlik nedeniyle kurulum başlatılmadı; yeni imzalı paket yayımlandığında yeniden deneyin.";
+  }
+  if (/(?:timeout|timed out|connect|network|dns|http|endpoint)/u.test(raw)) {
+    return "Güncelleme kaynağına ulaşılamadı. İnternet bağlantınızı kontrol edip yeniden deneyin.";
+  }
+  return "Güncelleme denetimi tamamlanamadı. Güvenlik nedeniyle hiçbir kurulum başlatılmadı; Operasyonlar ekranından tanılama paketi oluşturabilirsiniz.";
+}
+
 export function userFacingPublicationQueueError(reason: unknown): string {
   const raw = reason instanceof Error ? reason.message.toUpperCase() : "";
   if (raw.includes("GITHUB_CREDENTIAL_BROKER_UNAVAILABLE")) {
@@ -343,4 +354,58 @@ export function createInvokeBridge(
     ,restoreBackup: (input) => mutate("backup_restore_apply", input)
     ,createBackup: (input) => mutate("backup_create", input)
   };
+}
+
+/**
+ * The desktop mounts and unmounts several workspaces while navigation changes.
+ * Those screens often request the same local snapshot at the same time. Share
+ * only short-lived reads, and clear them before every mutation so a successful
+ * command can never be hidden behind stale UI data.
+ */
+export function createCoalescingBridge(bridge: BlogbotBridge): BlogbotBridge {
+  const reads = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
+  const share = <T>(key: string, read: () => Promise<T>): Promise<T> => {
+    const existing = reads.get(key);
+    if (existing && existing.expiresAt > Date.now()) {
+      return existing.promise as Promise<T>;
+    }
+    const promise = read().finally(() => {
+      globalThis.setTimeout(() => {
+        const current = reads.get(key);
+        if (current?.promise === promise) reads.delete(key);
+      }, 350);
+    });
+    reads.set(key, { expiresAt: Date.now() + 350, promise });
+    return promise;
+  };
+  const clearReads = () => reads.clear();
+  const coalesced: BlogbotBridge = {
+    ...bridge,
+    getBootstrapSnapshot: () => share("bootstrap", () => bridge.getBootstrapSnapshot()),
+    getPrerequisiteStatus: () => share("prerequisites", () => bridge.getPrerequisiteStatus()),
+    getConnectorState: () => share("connectors", () => bridge.getConnectorState()),
+    getEditorialWorkspace: () => share("workspace", () => bridge.getEditorialWorkspace()),
+    getOperations: () => share("operations", () => bridge.getOperations()),
+    getEngineDiagnostics: () => share("diagnostics", () => bridge.getEngineDiagnostics())
+  };
+  const invalidatingMutations = new Set([
+    "promoteCandidate", "dismissCandidate", "retryJob", "requestRevisionEdit",
+    "updateScheduleSlot", "saveDesktopPreferences", "saveSetupConnector",
+    "scanSource", "scanAllSources", "saveSources", "reviewSource",
+    "createInstantDraft", "approveRevision", "approveHighRiskRevision",
+    "enqueuePublication", "materializeLocalPreview", "completeOnboarding",
+    "setRuntimePause", "restoreBackup", "createBackup", "setAutostart"
+  ]);
+  return new Proxy(coalesced, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function" || typeof property !== "string" || !invalidatingMutations.has(property)) {
+        return value;
+      }
+      return (...args: unknown[]) => {
+        clearReads();
+        return value(...args);
+      };
+    }
+  });
 }

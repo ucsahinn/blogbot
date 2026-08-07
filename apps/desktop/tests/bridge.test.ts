@@ -4,7 +4,9 @@ import test from "node:test";
 
 import {
   BridgeError,
+  createCoalescingBridge,
   createInvokeBridge,
+  userFacingUpdateError,
   userFacingBridgeError,
   type InvokeTransport
 } from "../src/bridge.ts";
@@ -53,6 +55,25 @@ test("invoke bridge forwards only the named command and its typed payload", asyn
     }
   ]);
   assert.deepEqual(result, { id: "draft-7", state: "RESEARCHING", queueState: "QUEUED" });
+});
+
+test("coalescing bridge shares an in-flight workspace read across mounted screens", async () => {
+  let calls = 0;
+  const bridge = createCoalescingBridge(createInvokeBridge(async (command) => {
+    assert.equal(command, "get_editorial_workspace");
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return { drafts: [] };
+  }));
+
+  const [first, second] = await Promise.all([
+    bridge.getEditorialWorkspace(),
+    bridge.getEditorialWorkspace()
+  ]);
+
+  assert.deepEqual(first, { drafts: [] });
+  assert.deepEqual(second, { drafts: [] });
+  assert.equal(calls, 1);
 });
 
 test("editorial workspace actions use explicit commands instead of a generic action channel", async () => {
@@ -188,6 +209,17 @@ test("bridge protocol failures become actionable Turkish user messages", () => {
   assert.equal(
     userFacingBridgeError(new Error("CANDIDATE_SOURCE_MISSING")),
     "Bu adayın bağlı kaynağı artık bulunamadı. Kaynak envanterini yenileyip adayı yeniden tarayın."
+  );
+});
+
+test("updater errors distinguish a bad release signature from a network outage", () => {
+  assert.match(
+    userFacingUpdateError(new Error("signature verification failed")),
+    /yayımlanan paket imzası.*doğrulama anahtarı/u
+  );
+  assert.match(
+    userFacingUpdateError(new Error("failed to connect to endpoint")),
+    /Güncelleme kaynağına ulaşılamadı/u
   );
 });
 

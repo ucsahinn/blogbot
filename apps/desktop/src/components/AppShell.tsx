@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 
+import { userFacingUpdateError } from "../bridge.ts";
 import type { BootstrapSnapshot } from "../types.ts";
 
 export type PageId =
@@ -41,6 +42,7 @@ interface AppShellProps {
   onNavigate: (page: PageId) => void;
   onOpenSetup: () => void;
   onOpenSettings: () => void;
+  onExportDiagnostics: () => Promise<{ path: string; bytes: number }>;
   syncError?: string;
 }
 
@@ -51,12 +53,28 @@ export function AppShell({
   onNavigate,
   onOpenSetup,
   onOpenSettings,
+  onExportDiagnostics,
   syncError = ""
 }: AppShellProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<PendingDesktopUpdate | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMessage, setUpdateMessage] = useState("");
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+  const [diagnosticMessage, setDiagnosticMessage] = useState("");
+
+  const exportDiagnostics = async () => {
+    setDiagnosticBusy(true);
+    setDiagnosticMessage("");
+    try {
+      const result = await onExportDiagnostics();
+      setDiagnosticMessage(`Tanı paketi hazır: ${result.bytes} bayt`);
+    } catch {
+      setDiagnosticMessage("Tanı paketi oluşturulamadı. Operasyonlar ekranından yeniden deneyin.");
+    } finally {
+      setDiagnosticBusy(false);
+    }
+  };
 
   const checkForUpdate = async () => {
     if (!window.__TAURI_INTERNALS__) {
@@ -75,8 +93,8 @@ export function AppShell({
       }
       setPendingUpdate(update as PendingDesktopUpdate);
       setUpdateMessage(`Blogbot ${update.version} hazır. İndirmeyi ve kurulumu siz başlatın.`);
-    } catch {
-      setUpdateMessage("Güncelleme güvenli olarak denetlenemedi. Bağlantınızı kontrol edip yeniden deneyin.");
+    } catch (reason) {
+      setUpdateMessage(userFacingUpdateError(reason));
     } finally {
       setUpdateBusy(false);
     }
@@ -197,6 +215,11 @@ export function AppShell({
           </span>
           Önkoşulları test et
         </button>
+        <button className="setup-button diagnostic-button" type="button" onClick={() => void exportDiagnostics()} disabled={diagnosticBusy}>
+          <span className="nav-icon" aria-hidden="true">+</span>
+          {diagnosticBusy ? "Tanı paketi hazırlanıyor…" : "Tanı paketi oluştur"}
+        </button>
+        {diagnosticMessage ? <small className="sidebar-feedback" role="status" aria-live="polite">{diagnosticMessage}</small> : null}
         <section className="about-control" aria-label="Blogbot bilgileri">
           <button
             className="about-toggle"

@@ -138,7 +138,7 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
   return (
     <div className="page settings-page">
       <header className="page-header"><div><p className="section-kicker">AYARLAR</p><h1>Editoryal varsayılanlar ve bildirimler.</h1><p>Parola, erişim anahtarı ve benzeri gizli bilgiler bu ekranda tutulmaz. Buradaki tercihler yalnızca masaüstü deneyimini ve yeni içeriklerin başlangıç ayarlarını yönetir.</p></div></header>
-      <section className="settings-panel">
+      <section className="settings-panel settings-panel-modern">
         <div className="form-grid">
           <label className="field"><span>Varsayılan yazar</span><input name="author" value={form.author} disabled={readOnly || busy} onChange={(event) => setForm({ ...form, author: event.target.value })} /></label>
           <label className="field"><span>İnceleyen</span><input name="reviewer" value={form.reviewer} disabled={readOnly || busy} onChange={(event) => setForm({ ...form, reviewer: event.target.value })} /></label>

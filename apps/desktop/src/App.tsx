@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { AppShell, type PageId } from "./components/AppShell.tsx";
 import { canMutateLocally, hasRuntimeCapability } from "./app-model.ts";
-import { userFacingBridgeError, type BlogbotBridge } from "./bridge.ts";
+import { createCoalescingBridge, userFacingBridgeError, type BlogbotBridge } from "./bridge.ts";
 import { createRuntimeBridge } from "./runtime-bridge.ts";
 import { Dashboard } from "./screens/Dashboard.tsx";
 import { ContentFlow } from "./screens/ContentFlow.tsx";
@@ -72,9 +72,11 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         // runtime from fail-closed to online. Reading the desk in parallel can
         // therefore capture the temporary offline projection and leave an
         // otherwise ready desk empty on first launch.
-        const initialSnapshot = await runtimeBridge.getBootstrapSnapshot();
-        const initialWorkspace = await runtimeBridge.getEditorialWorkspace();
-        const initialConnectorState = await runtimeBridge.getConnectorState().catch((reason) => {
+        const coalescingBridge = createCoalescingBridge(runtimeBridge);
+        const initialSnapshot = await coalescingBridge.getBootstrapSnapshot();
+        const [initialWorkspace, initialConnectorState] = await Promise.all([
+          coalescingBridge.getEditorialWorkspace(),
+          coalescingBridge.getConnectorState().catch((reason) => {
           if (alive) {
             setSyncError(
               userFacingBridgeError(
@@ -84,9 +86,10 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             );
           }
           return fallbackConnectorState;
-        });
+          })
+        ]);
         if (alive) {
-          setBridge(runtimeBridge);
+          setBridge(coalescingBridge);
           setSnapshot(initialSnapshot);
           setWorkspace(initialWorkspace);
           setConnectorState(initialConnectorState);
@@ -98,8 +101,8 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         setTimeout(() => {
           if (!alive) return;
           void Promise.all([
-            runtimeBridge.getBootstrapSnapshot(),
-            runtimeBridge.getEditorialWorkspace()
+            coalescingBridge.getBootstrapSnapshot(),
+            coalescingBridge.getEditorialWorkspace()
           ]).then(([settledSnapshot, settledWorkspace]) => {
             if (!alive) return;
             setSnapshot(settledSnapshot);
@@ -215,6 +218,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         onNavigate={navigate}
         onOpenSetup={() => navigate("setup")}
         onOpenSettings={() => navigate("settings")}
+        onExportDiagnostics={() => bridge.exportDiagnostics()}
         syncError={syncError}
       >
         {activePage === "dashboard" ? (
