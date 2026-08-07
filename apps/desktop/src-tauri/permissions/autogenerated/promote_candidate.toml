@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-promote-candidate"
+description = "Enables the promote_candidate command without any pre-configured scope."
+commands.allow = ["promote_candidate"]
+
+[[permission]]
+identifier = "deny-promote-candidate"
+description = "Denies the promote_candidate command without any pre-configured scope."
+commands.deny = ["promote_candidate"]

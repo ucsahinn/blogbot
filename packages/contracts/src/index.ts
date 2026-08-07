@@ -1,10 +1,18 @@
-export type SiteSection = "haberler" | "analiz" | "dosyalar" | "rehberler";
+export type SiteSection =
+  | "haberler"
+  | "analiz"
+  | "dosyalar"
+  | "rehberler"
+  | "teknoloji"
+  | "ekonomi"
+  | "kultur"
+  | "yasam";
 export type ArticleType = "news" | "analysis" | "deep_dive" | "guide";
 export type SchemaType = "NewsArticle" | "Article" | "BlogPosting";
 
 export interface SiteSectionContract {
   trPath: SiteSection;
-  enPath: "news" | "analysis" | "deep-dives" | "guides";
+  enPath: "news" | "analysis" | "deep-dives" | "guides" | "technology" | "business" | "culture" | "life";
   articleType: ArticleType;
   schemaType: SchemaType;
 }
@@ -33,8 +41,36 @@ export const SITE_SECTIONS: Readonly<Record<SiteSection, SiteSectionContract>> =
     enPath: "guides",
     articleType: "guide",
     schemaType: "BlogPosting"
+  },
+  teknoloji: {
+    trPath: "teknoloji",
+    enPath: "technology",
+    articleType: "news",
+    schemaType: "NewsArticle"
+  },
+  ekonomi: {
+    trPath: "ekonomi",
+    enPath: "business",
+    articleType: "news",
+    schemaType: "NewsArticle"
+  },
+  kultur: {
+    trPath: "kultur",
+    enPath: "culture",
+    articleType: "analysis",
+    schemaType: "Article"
+  },
+  yasam: {
+    trPath: "yasam",
+    enPath: "life",
+    articleType: "guide",
+    schemaType: "BlogPosting"
   }
 };
+
+export function isSiteSection(value: unknown): value is SiteSection {
+  return typeof value === "string" && Object.hasOwn(SITE_SECTIONS, value);
+}
 
 export interface SourceBatchResult {
   urls: string[];
@@ -161,12 +197,20 @@ export interface SourceScanTargetV1 {
   expectedVersion: number;
 }
 
+export interface SourceReviewInputV1 {
+  sourceId: string;
+  trustStatus: "APPROVED" | "REJECTED";
+  rightsStatus: "APPROVED" | "REJECTED";
+  rationale: string;
+}
+
 export type EngineCommandV1 =
   | EngineCommandBaseV1<
       "AUTOMATION.SET",
       { settings: EngineAutomationSettingsV1 }
     >
   | EngineCommandBaseV1<"SOURCE.SAVE", { source: SourceSaveInputV1 }>
+  | EngineCommandBaseV1<"SOURCE.REVIEW", SourceReviewInputV1>
   | EngineCommandBaseV1<
       "SOURCE.SCAN",
       { targets: SourceScanTargetV1[] }
@@ -180,6 +224,7 @@ export type EngineCommandV1 =
         revisionId: string;
         revisionHash: string;
         deviceId: string;
+        warningSetHash: string;
       }
     >
   | EngineCommandBaseV1<
@@ -189,6 +234,7 @@ export type EngineCommandV1 =
         revisionHash: string;
         deviceId: string;
         riskChecklistHash: string;
+        warningSetHash: string;
         windowsReauthenticatedAt: string;
       }
     >;
@@ -199,6 +245,12 @@ export type EngineCommandErrorCodeV1 =
   | "VERSION_CONFLICT"
   | "APPROVAL_HASH_MISMATCH"
   | "REVISION_NOT_REVIEWABLE"
+  | "TRANSLATION_PARITY_NOT_READY"
+  | "CLAIM_EVIDENCE_NOT_READY"
+  | "QUALITY_GATES_NOT_READY"
+  | "WARNING_NOT_ALLOWLISTED"
+  | "WARNING_ACCEPTANCE_MISMATCH"
+  | "EDITORIAL_APPROVAL_REQUIRED"
   | "ENGINE_OPERATION_FAILED";
 
 export interface EngineCommandErrorV1 {
@@ -304,11 +356,8 @@ function isSourceSaveInputV1(value: unknown): value is SourceSaveInputV1 {
     typeof value.url === "string" &&
     value.url.length > 0 &&
     value.url.length <= 4_096 &&
-    (value.section === "haberler" ||
-      value.section === "analiz" ||
-      value.section === "dosyalar" ||
-      value.section === "rehberler") &&
-    SITE_SECTIONS[value.section as SiteSection]?.articleType ===
+    isSiteSection(value.section) &&
+    SITE_SECTIONS[value.section].articleType ===
       value.articleType &&
     (value.kind === "RSS" ||
       value.kind === "ATOM" ||
@@ -346,6 +395,19 @@ function isSourceScanTargetsV1(
     sourceIds.add(target.sourceId);
   }
   return true;
+}
+
+function isSourceReviewInputV1(value: unknown): value is SourceReviewInputV1 {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["sourceId", "trustStatus", "rightsStatus", "rationale"]) &&
+    isIdentifier(value.sourceId, 128) &&
+    (value.trustStatus === "APPROVED" || value.trustStatus === "REJECTED") &&
+    (value.rightsStatus === "APPROVED" || value.rightsStatus === "REJECTED") &&
+    typeof value.rationale === "string" &&
+    value.rationale.trim().length >= 10 &&
+    value.rationale.length <= 1_000
+  );
 }
 
 function isLocalizedArticle(value: unknown): boolean {
@@ -395,7 +457,8 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
       "targetRepository",
       "targetBaseBranch",
       "targetBaseSha",
-      "generatedFiles"
+      "generatedFiles",
+      "qualityGates"
     ]) ||
     !isIdentifier(value.id, 128) ||
     !isIdentifier(value.translationKey, 128) ||
@@ -415,12 +478,7 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
     ].includes(value.state as string) ||
     !isLocalizedArticle(value.tr) ||
     !isLocalizedArticle(value.en) ||
-    !(
-      value.section === "haberler" ||
-      value.section === "analiz" ||
-      value.section === "dosyalar" ||
-      value.section === "rehberler"
-    ) ||
+    !isSiteSection(value.section) ||
     SITE_SECTIONS[value.section].articleType !== value.articleType ||
     typeof value.author !== "string" ||
     value.author.trim().length === 0 ||
@@ -633,6 +691,22 @@ export function validateEngineCommandV1(
       }
     };
   }
+  if (value.kind === "SOURCE.REVIEW") {
+    if (!isSourceReviewInputV1(value.payload)) {
+      return invalid("SOURCE.REVIEW payload is invalid");
+    }
+    return {
+      valid: true,
+      command: {
+        version: 1,
+        requestId: value.requestId,
+        idempotencyKey: value.idempotencyKey,
+        expectedVersion: value.expectedVersion,
+        kind: "SOURCE.REVIEW",
+        payload: { ...value.payload, rationale: value.payload.rationale.trim() }
+      }
+    };
+  }
   if (value.kind === "SOURCE.SCAN") {
     if (
       value.expectedVersion !== 0 ||
@@ -718,12 +792,15 @@ export function validateEngineCommandV1(
       !hasExactKeys(value.payload, [
         "revisionId",
         "revisionHash",
-        "deviceId"
+        "deviceId",
+        "warningSetHash"
       ]) ||
       !isIdentifier(value.payload.revisionId, 128) ||
       typeof value.payload.revisionHash !== "string" ||
       !/^[a-f0-9]{64}$/iu.test(value.payload.revisionHash) ||
-      !isIdentifier(value.payload.deviceId, 128)
+      !isIdentifier(value.payload.deviceId, 128) ||
+      typeof value.payload.warningSetHash !== "string" ||
+      !/^[a-f0-9]{64}$/iu.test(value.payload.warningSetHash)
     ) {
       return invalid("APPROVAL.GRANT payload is invalid");
     }
@@ -738,7 +815,8 @@ export function validateEngineCommandV1(
         payload: {
           revisionId: value.payload.revisionId,
           revisionHash: value.payload.revisionHash.toLowerCase(),
-          deviceId: value.payload.deviceId
+          deviceId: value.payload.deviceId,
+          warningSetHash: value.payload.warningSetHash.toLowerCase()
         }
       }
     };
@@ -751,6 +829,7 @@ export function validateEngineCommandV1(
         "revisionHash",
         "deviceId",
         "riskChecklistHash",
+        "warningSetHash",
         "windowsReauthenticatedAt"
       ]) ||
       !isIdentifier(value.payload.revisionId, 128) ||
@@ -759,6 +838,8 @@ export function validateEngineCommandV1(
       !isIdentifier(value.payload.deviceId, 128) ||
       typeof value.payload.riskChecklistHash !== "string" ||
       !/^[a-f0-9]{64}$/iu.test(value.payload.riskChecklistHash) ||
+      typeof value.payload.warningSetHash !== "string" ||
+      !/^[a-f0-9]{64}$/iu.test(value.payload.warningSetHash) ||
       !isExactIsoDate(value.payload.windowsReauthenticatedAt)
     ) {
       return invalid("APPROVAL.GRANT_HIGH_RISK payload is invalid");
@@ -776,6 +857,7 @@ export function validateEngineCommandV1(
           revisionHash: value.payload.revisionHash.toLowerCase(),
           deviceId: value.payload.deviceId,
           riskChecklistHash: value.payload.riskChecklistHash.toLowerCase(),
+          warningSetHash: value.payload.warningSetHash.toLowerCase(),
           windowsReauthenticatedAt: value.payload.windowsReauthenticatedAt
         }
       }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-engine-doctor"
+description = "Enables the engine_doctor command without any pre-configured scope."
+commands.allow = ["engine_doctor"]
+
+[[permission]]
+identifier = "deny-engine-doctor"
+description = "Denies the engine_doctor command without any pre-configured scope."
+commands.deny = ["engine_doctor"]

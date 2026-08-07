@@ -59,6 +59,13 @@ export function createConnectorAwarePublicationProcessor(options: PublicationRun
       if (command.revisionId !== effect.aggregateId) {
         return unavailable("outbox revision does not match the approved command");
       }
+      if (
+        typeof effect.revisionHash !== "string" ||
+        effect.revisionHash.length !== 64 ||
+        effect.revisionHash.toLowerCase() !== command.approvedRevisionHash.toLowerCase()
+      ) {
+        return unavailable("outbox revision hash does not match the immutable approved command");
+      }
       const result = await reconcileApprovedPublication(command, options.effects);
       return resultToProcessorResult(result);
     }

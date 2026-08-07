@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { BlogbotBridge } from "../bridge.ts";
-import { astroGenericAdapter } from "../../../../packages/site-adapter/src/astro-generic.ts";
+import { userFacingBridgeError, userFacingPublicationQueueError, type BlogbotBridge } from "../bridge.ts";
+import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
+import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
+import { contentCategoryLabel, sectionLabel } from "../app-model.ts";
+import { buildPublicationFiles } from "../publication-files.ts";
 import type {
   BootstrapSnapshot,
+  ConnectorStateSnapshot,
   GateView,
   QueueItem,
   ReviewRevision
@@ -13,6 +17,10 @@ interface ReviewWorkspaceProps {
   bridge: BlogbotBridge;
   snapshot: BootstrapSnapshot;
   readOnly: boolean;
+  connectorState: ConnectorStateSnapshot;
+  onDraftQueued?: (message: string, expectedDraftId?: string) => Promise<void>;
+  onPublicationQueued?: () => Promise<void>;
+  onRevisionApproved?: () => Promise<void>;
   embedded?: boolean;
   initialRevisionId?: string;
 }
@@ -20,7 +28,6 @@ interface ReviewWorkspaceProps {
 type ReviewTab = "content" | "claims" | "media" | "gates" | "diff";
 type Locale = "tr" | "en";
 
-type PublicationFile = { path: string; content: string | Uint8Array };
 type PublicationPreviewRequest = {
   revisionId: string;
   revisionHash: string;
@@ -40,6 +47,8 @@ const tabLabels: Array<{ id: ReviewTab; label: string }> = [
   { id: "diff", label: "Değişiklikler" }
 ];
 
+const acceptableWarningIds = new Set(["SINGLE_OFFICIAL_SOURCE_EXCEPTION"]);
+
 function gateSummary(gates: GateView[]) {
   return {
     passed: gates.filter((gate) => gate.state === "PASS").length,
@@ -53,82 +62,18 @@ async function sha256(content: string): Promise<string> {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-type SiteWorkMode = "LOCAL_ONLY" | "LOCAL_DEV" | "PUBLISH";
-
-function selectedSiteMode(): SiteWorkMode {
-  try {
-    const value = JSON.parse(localStorage.getItem("blogbot.setup.connector-draft.v1") ?? "null") as { site?: { mode?: string } } | null;
-    return value?.site?.mode === "PUBLISH" || value?.site?.mode === "LOCAL_DEV" ? value.site.mode : "LOCAL_ONLY";
-  } catch {
-    return "LOCAL_ONLY";
-  }
-}
-
-function selectedSiteAdapter(): string {
-  try {
-    const value = JSON.parse(localStorage.getItem("blogbot.setup.site-adapter.v1") ?? "null") as { ok?: boolean; adapterId?: string } | null;
-    return value?.ok === true && value.adapterId ? value.adapterId : "local-folder-v1";
-  } catch {
-    return "local-folder-v1";
-  }
-}
-
-async function buildPublicationFiles(revision: ReviewRevision, mode: SiteWorkMode): Promise<PublicationFile[]> {
-  const mediaPath = (filename: string) => mode === "LOCAL_ONLY" ? `.blogbot/generated/media/${filename}` : `public/images/${filename}`;
-  const mediaFiles: PublicationFile[] = (revision.media ?? []).flatMap((media) => {
-    if (!media.contentBase64) return [];
-    const binary = Uint8Array.from(atob(media.contentBase64), (character) => character.charCodeAt(0));
-    return [{ path: mediaPath(media.filename), content: binary }];
-  });
-  const hero = revision.media?.find((media) => media.role === "hero");
-  const generated = astroGenericAdapter.buildRevisionFiles({
-    id: revision.id,
-    revisionHash: revision.revisionHash,
-    translationKey: revision.articleId,
-    tr: {
-      ...revision.tr,
-      section: revision.section,
-      articleType: revision.articleType,
-      authorId: revision.author,
-      publishedAt: revision.scheduledAt,
-      tags: revision.tags,
-      sources: revision.sources,
-      ...(hero ? { heroImage: mediaPath(hero.filename), heroImageAlt: hero.altTr } : {})
-    },
-    en: {
-      ...revision.en,
-      section: ({ haberler: "news", analiz: "analysis", dosyalar: "deep-dives", rehberler: "guides" } as Record<string, string>)[revision.section] ?? revision.section,
-      articleType: revision.articleType,
-      authorId: revision.author,
-      publishedAt: revision.scheduledAt,
-      tags: revision.tags,
-      sources: revision.sources,
-      ...(hero ? { heroImage: mediaPath(hero.filename), heroImageAlt: hero.altEn } : {})
-    }
-  }, { siteOrigin: "", repositoryPath: "", adapterId: astroGenericAdapter.id });
-  const contentEntries = Object.entries(generated).map(([path, content]) => {
-    if (mode === "PUBLISH" || (mode === "LOCAL_DEV" && selectedSiteAdapter() === "astro-generic")) return [path, content] as const;
-    const localPath = path.startsWith("src/content/articles/")
-      ? path.replace(/^src\/content\/articles\//u, ".blogbot/generated/")
-      : path;
-    return [localPath, content] as const;
-  });
-  const entries = await Promise.all(contentEntries.map(async ([path, content]) => ({ path, sha256: await sha256(content), bytes: new TextEncoder().encode(content).byteLength })));
-  const manifestPath = `.blogbot/manifests/${revision.id}.json`;
-  const manifest = JSON.stringify({
-    version: 1,
-    revisionId: revision.id,
-    revisionHash: revision.revisionHash,
-    translationKey: revision.articleId,
-    adapterVersion: astroGenericAdapter.version,
-    generatedAt: "1970-01-01T00:00:00.000Z",
-    entries
-  });
-  return [
-    ...mediaFiles,
-    ...contentEntries.map(([path, content]) => ({ path, content })),
-    { path: manifestPath, content: manifest }
-  ];
+async function warningSetHash(gates: GateView[]): Promise<string> {
+  const warnings = gates
+    .filter((gate) => gate.state === "WARN")
+    .map((gate) => ({
+      detail: gate.detail,
+      group: gate.group,
+      id: gate.id,
+      policyVersion: gate.policyVersion,
+      state: gate.state
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return sha256(JSON.stringify(warnings));
 }
 
 function QueueCard({
@@ -144,6 +89,7 @@ function QueueCard({
     <button
       type="button"
       className={`review-queue-item ${selected ? "is-selected" : ""}`}
+      aria-pressed={selected}
       onClick={onSelect}
     >
       <span className={`queue-state queue-${item.state.toLowerCase()}`} />
@@ -166,9 +112,13 @@ export function ReviewWorkspace({
   bridge,
   snapshot,
   readOnly,
+  connectorState,
+  onDraftQueued,
+  onPublicationQueued,
+  onRevisionApproved,
   initialRevisionId
 }: ReviewWorkspaceProps) {
-  const siteMode = selectedSiteMode();
+  const siteMode = connectorState.mode;
   const localMaterializeLabel = siteMode === "LOCAL_DEV"
     ? "Onaylı paketi yerel projeye yaz"
     : "Onaylı paketi seçili klasöre yaz";
@@ -187,11 +137,13 @@ export function ReviewWorkspace({
   const [requestingEdit, setRequestingEdit] = useState(false);
   const [enqueueingPublication, setEnqueueingPublication] = useState(false);
   const [previewingPublication, setPreviewingPublication] = useState(false);
-  const [lastPreviewHash, setLastPreviewHash] = useState("");
+  const [lastPreview, setLastPreview] = useState<{ revisionId: string; hash: string } | null>(null);
   const [materializingLocal, setMaterializingLocal] = useState(false);
+  const [materializeConfirmationOpen, setMaterializeConfirmationOpen] = useState(false);
   const [editRequestOpen, setEditRequestOpen] = useState(false);
   const [editInstruction, setEditInstruction] = useState("");
   const [notice, setNotice] = useState("");
+  const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
 
   useEffect(() => {
     if (!selectedId) {
@@ -207,8 +159,9 @@ export function ReviewWorkspace({
       })
       .catch((reason) => {
         if (alive) {
+          setRevision(null);
           setNotice(
-            reason instanceof Error ? reason.message : "Revizyon açılamadı."
+            userFacingBridgeError(reason, "Revizyon açılamadı.")
           );
         }
       })
@@ -226,8 +179,11 @@ export function ReviewWorkspace({
     () => gateSummary(revision?.gates ?? []),
     [revision]
   );
+  const acceptedWarnings = revision?.gates.filter((gate) => gate.state === "WARN") ?? [];
+  const hasUnacceptableWarning = acceptedWarnings.some((gate) => !acceptableWarningIds.has(gate.id));
   const activeContent = revision?.[locale];
   const previousContent = revision?.previous[locale];
+  const heroMedia = revision?.media.find((media) => media.role === "hero");
   const visibleQueue = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("tr-TR");
     return snapshot.queue.filter((item) => {
@@ -242,19 +198,37 @@ export function ReviewWorkspace({
       );
     });
   }, [query, queueFilter, snapshot.queue]);
+  const pendingRevisionCount = useMemo(
+    () => snapshot.queue.filter((item) => item.state !== "APPROVED").length,
+    [snapshot.queue]
+  );
+  const localOutputDescription = [
+    readOnly ? "review-approval-read-only" : "",
+    !connectorState.site.repositoryPath.trim() ? "local-output-prerequisite" : ""
+  ].filter(Boolean).join(" ") || undefined;
+  const publicationQueueDescription = readOnly
+    ? "review-approval-read-only"
+    : revision?.state !== "APPROVED"
+      ? "review-publication-prerequisite"
+      : undefined;
   const inspectionComplete = Boolean(
     revision &&
       revision.gates.length > 0 &&
       revision.claims.length > 0 &&
       revision.sources.length > 0 &&
-      revision.gates.every((gate) => gate.state !== "BLOCK") &&
+      revision.gates.every((gate) => gate.state !== "BLOCK" && gate.state !== "NOT_RUN") &&
+      revision.gates.every((gate) => gate.state !== "WARN" || acceptableWarningIds.has(gate.id)) &&
+      (revision.gates.every((gate) => gate.state !== "WARN") || warningsAcknowledged) &&
       revision.claims.every((claim) => claim.status === "VERIFIED")
   );
 
   const selectRevision = (revisionId: string) => {
     setLoading(true);
     setNotice("");
+    setRevision(null);
+    setLastPreview(null);
     setSelectedId(revisionId);
+    setWarningsAcknowledged(false);
   };
 
   const approve = async () => {
@@ -264,21 +238,29 @@ export function ReviewWorkspace({
     setApproving(true);
     setNotice("");
     try {
+      const acceptedWarningSetHash = await warningSetHash(revision.gates);
       const result = await bridge.approveRevision({
         revisionId: revision.id,
-        expectedHash: revision.revisionHash
+        expectedHash: revision.revisionHash,
+        warningSetHash: acceptedWarningSetHash
       });
       setRevision((current) =>
         current ? { ...current, state: result.state, editorialApproved: true } : current
       );
+      let refreshNotice = "";
+      try {
+        await onRevisionApproved?.();
+      } catch {
+        refreshNotice = " İnceleme kuyruğu görünümü henüz yenilenemedi; sayfayı yenileyin veya Editoryal Masa'dan yeniden deneyin.";
+      }
       setNotice(
         result.state === "APPROVED"
-          ? `Revizyon onaylandı · ${result.revisionHash.slice(0, 12)}…`
-          : `Editoryal onay kaydedildi; yüksek risk ikinci onayı bekleniyor · ${result.revisionHash.slice(0, 12)}…`
+          ? `Revizyon onaylandı · ${result.revisionHash.slice(0, 12)}…${refreshNotice}`
+          : `Editoryal onay kaydedildi; yüksek risk ikinci onayı bekleniyor · ${result.revisionHash.slice(0, 12)}…${refreshNotice}`
       );
     } catch (reason) {
       setNotice(
-        reason instanceof Error ? reason.message : "Onay kaydedilemedi."
+        userFacingBridgeError(reason, "Onay kaydedilemedi.")
       );
     } finally {
       setApproving(false);
@@ -290,6 +272,7 @@ export function ReviewWorkspace({
     setApprovingHighRisk(true);
     setNotice("");
     try {
+      const acceptedWarningSetHash = await warningSetHash(revision.gates);
       const checklist = revision.gates
         .filter((gate) => gate.group === "security")
         .map((gate) => ({ id: gate.id, state: gate.state, detail: gate.detail }))
@@ -303,12 +286,18 @@ export function ReviewWorkspace({
         revisionId: revision.id,
         expectedHash: revision.revisionHash,
         riskChecklistHash,
+        warningSetHash: acceptedWarningSetHash,
         confirmReauthenticated: true
       });
       setRevision((current) => current ? { ...current, highRiskApproved: true, state: "APPROVED" } : current);
-      setNotice(`Yüksek risk onayı kaydedildi · ${result.revisionHash.slice(0, 12)}…`);
+      try {
+        await onRevisionApproved?.();
+        setNotice(`Yüksek risk onayı kaydedildi · ${result.revisionHash.slice(0, 12)}…`);
+      } catch {
+        setNotice(`Yüksek risk onayı kaydedildi · ${result.revisionHash.slice(0, 12)}… İnceleme kuyruğu görünümü henüz yenilenemedi; sayfayı yenileyin veya Editoryal Masa'dan yeniden deneyin.`);
+      }
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : "Yüksek risk onayı kaydedilemedi.");
+      setNotice(userFacingBridgeError(reason, "Yüksek risk onayı kaydedilemedi."));
     } finally {
       setApprovingHighRisk(false);
     }
@@ -321,20 +310,25 @@ export function ReviewWorkspace({
     setRequestingEdit(true);
     setNotice("");
     try {
-      await bridge.requestRevisionEdit({
+      const queued = await bridge.requestRevisionEdit({
         revisionId: revision.id,
         instruction: editInstruction.trim()
       });
       setEditInstruction("");
       setEditRequestOpen(false);
-      setNotice(
-        "Düzenleme talebi araştırma kuyruğuna alındı. Yeni revizyon ayrı bir hash ile gelecek."
-      );
+      const queuedMessage = "Düzenleme talebi araştırma kuyruğuna alındı. Yeni revizyon ayrı bir hash ile gelecek.";
+      if (onDraftQueued) {
+        try {
+          await onDraftQueued(queuedMessage, queued.job?.id);
+        } catch {
+          setNotice(`${queuedMessage} Taslak envanteri şu an yenilenemedi; Taslaklar sekmesinden yeniden deneyin.`);
+        }
+      } else {
+        setNotice(queuedMessage);
+      }
     } catch (reason) {
       setNotice(
-        reason instanceof Error
-          ? reason.message
-          : "Düzenleme talebi kaydedilemedi."
+        userFacingBridgeError(reason, "Düzenleme talebi kaydedilemedi.")
       );
     } finally {
       setRequestingEdit(false);
@@ -356,13 +350,18 @@ export function ReviewWorkspace({
       if (!preview.previewHash) {
         throw new Error("Yayın önizlemesi geçerli bir hash döndürmedi.");
       }
-      setLastPreviewHash(preview.previewHash);
+      setLastPreview({ revisionId: revision.id, hash: preview.previewHash });
       setNotice(`Önizleme doğrulandı · ${preview.previewHash.slice(0, 12)}… Kuyruğa alınıyor…`);
       setEnqueueingPublication(true);
       await previewBridge.enqueuePublication({ revisionId: revision.id, revisionHash: revision.revisionHash, previewHash: preview.previewHash });
-      setNotice("Onaylı revizyon yerel yayın kuyruğuna alındı. GitHub bağlantısı hazır değilse güvenle beklemede kalır.");
+      try {
+        await onPublicationQueued?.();
+        setNotice("Onaylı revizyon yerel yayın kuyruğuna alındı. GitHub bağlantısı hazır değilse güvenle beklemede kalır.");
+      } catch {
+        setNotice("Onaylı revizyon yerel yayın kuyruğuna alındı. Yayın ve planlanan işler görünümü henüz yenilenemedi; Takvim ve Yayın ekranından yeniden deneyin.");
+      }
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : "Yayın kuyruğuna alınamadı.");
+      setNotice(userFacingPublicationQueueError(reason));
     } finally {
       setPreviewingPublication(false);
       setEnqueueingPublication(false);
@@ -371,15 +370,17 @@ export function ReviewWorkspace({
 
   const createPublicationPreview = async (currentRevision: ReviewRevision, previewBridge: PreviewCapableBridge) => {
     if (typeof previewBridge.previewPublication !== "function") throw new Error("Yerel köprü yayın önizlemesini desteklemiyor.");
-    const mode = selectedSiteMode();
-    const astroOutput = mode === "PUBLISH" || (mode === "LOCAL_DEV" && selectedSiteAdapter() === "astro-generic");
-    const files = await buildPublicationFiles(currentRevision, mode);
+    const mode = connectorState.mode;
+    const adapterId = connectorState.site.adapterId ?? "local-folder-v1";
+    const astroOutput = mode === "PUBLISH" || (mode === "LOCAL_DEV" && adapterId === "astro-generic");
+    const files = await buildPublicationFiles(currentRevision, mode, adapterId);
     const manifestPath = `.blogbot/manifests/${currentRevision.id}.json`;
     return previewBridge.previewPublication({
       revisionId: currentRevision.id,
       revisionHash: currentRevision.revisionHash,
       payload: {
         files,
+        adapterVersion: currentRevision.adapterVersion,
         bundlePolicy: {
           adapterId: astroOutput ? "astro-generic" : "local-folder-v1",
           manifestPath,
@@ -393,38 +394,33 @@ export function ReviewWorkspace({
 
   const materializeLocal = async () => {
     if (!revision || readOnly) return;
-    let targetDirectory = "";
-    try {
-      const saved = JSON.parse(localStorage.getItem("blogbot.setup.connector-draft.v1") ?? "null") as { site?: { repositoryPath?: string } } | null;
-      targetDirectory = saved?.site?.repositoryPath?.trim() ?? "";
-    } catch { /* best effort */ }
+    const targetDirectory = connectorState.site.repositoryPath.trim();
     if (!targetDirectory) {
       setNotice("Önce Kurulum Merkezi'nden site klasörünü seçin.");
       return;
     }
-    if (!window.confirm("Onaylı paketin dosyaları seçtiğiniz proje klasörüne yazılacak. Mevcut dosyalar güvenli yedeğe alınacak. Devam edilsin mi?")) return;
     setMaterializingLocal(true);
     try {
-      let previewHash = lastPreviewHash;
+      let previewHash = lastPreview?.revisionId === revision.id ? lastPreview.hash : "";
       if (!previewHash) {
         const preview = await createPublicationPreview(revision, bridge as PreviewCapableBridge);
         previewHash = preview.previewHash;
-        setLastPreviewHash(previewHash);
+        setLastPreview({ revisionId: revision.id, hash: previewHash });
       }
       const result = await bridge.materializeLocalPreview({ revisionId: revision.id, revisionHash: revision.revisionHash, previewHash, targetDirectory });
       setNotice(`${result.written} dosya yerel proje klasörüne yazıldı. ${result.backupDirectory ? "Eski dosyalar Blogbot yedeğine alındı." : ""}`);
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : "Yerel proje klasörüne yazılamadı.");
+      setNotice(userFacingBridgeError(reason, "Yerel proje klasörüne yazılamadı."));
     } finally { setMaterializingLocal(false); }
   };
 
   return (
     <div className="review-page">
-      <aside className="review-queue">
+      <aside className="review-queue" aria-label="İnceleme kuyruğu">
         <header>
           <p className="section-kicker">İNCELEME</p>
           <h1>Yayın kuyruğu</h1>
-          <span>{snapshot.queue.length} açık revizyon</span>
+          <span>{pendingRevisionCount} açık revizyon</span>
         </header>
         <label className="search-field review-search">
           <span aria-hidden="true">⌕</span>
@@ -437,10 +433,10 @@ export function ReviewWorkspace({
           />
         </label>
         <div className="queue-filter-row">
-          <button type="button" className={queueFilter === "pending" ? "is-selected" : ""} onClick={() => setQueueFilter("pending")}>
+          <button type="button" aria-pressed={queueFilter === "pending"} className={queueFilter === "pending" ? "is-selected" : ""} onClick={() => setQueueFilter("pending")}>
             Bekleyenler
           </button>
-          <button type="button" className={queueFilter === "approved" ? "is-selected" : ""} onClick={() => setQueueFilter("approved")}>Onaylı</button>
+          <button type="button" aria-pressed={queueFilter === "approved"} className={queueFilter === "approved" ? "is-selected" : ""} onClick={() => setQueueFilter("approved")}>Onaylı</button>
         </div>
         <div className="review-queue-list">
           {visibleQueue.map((item) => (
@@ -459,11 +455,16 @@ export function ReviewWorkspace({
         </footer>
       </aside>
 
-      <main className="review-workspace">
+      <section className="review-workspace" aria-label="Revizyon inceleme çalışma alanı">
         {loading ? (
-          <div className="review-loading">Değişmez revizyon yükleniyor…</div>
+          <div className="review-loading" role="status" aria-live="polite" aria-busy="true">Değişmez revizyon yükleniyor…</div>
+        ) : !selectedId ? (
+          <div className="review-loading review-empty" role="status" aria-live="polite">
+            <strong>İncelenecek revizyon yok.</strong>
+            <span>İçerik Akışı'ndan bir işi araştırmaya alın.</span>
+          </div>
         ) : !revision || !activeContent || !previousContent ? (
-          <div className="review-loading">
+          <div className="review-loading" role="alert">
             <strong>Revizyon gösterilemiyor.</strong>
             {notice}
           </div>
@@ -472,9 +473,7 @@ export function ReviewWorkspace({
             <header className="review-topbar">
               <div className="review-title">
                 <div className="review-breadcrumb">
-                  <span>{revision.section}</span>
-                  <span aria-hidden="true">/</span>
-                  <span>{revision.articleType}</span>
+                  <span>{contentCategoryLabel(revision.section, revision.articleType)}</span>
                   <span className={`review-state state-${revision.state.toLowerCase()}`}>
                     {revision.state === "APPROVED"
                       ? "Onaylandı"
@@ -484,30 +483,38 @@ export function ReviewWorkspace({
                 <h2>{revision.tr.title}</h2>
               </div>
               <div className="review-actions">
-                <button
-                  className="button button-ghost"
-                  type="button"
-                  disabled={readOnly || revision.state === "APPROVED"}
-                  aria-expanded={editRequestOpen}
-                  onClick={() => setEditRequestOpen((current) => !current)}
-                >
-                  Düzenleme iste
-                </button>
-                {siteMode !== "PUBLISH" ? (
                   <button
                     className="button button-ghost"
                     type="button"
-                    disabled={readOnly || revision.state !== "APPROVED" || materializingLocal}
-                    onClick={() => void materializeLocal()}
+                    disabled={readOnly || requestingEdit}
+                    aria-describedby={readOnly ? "review-approval-read-only" : undefined}
+                    aria-expanded={editRequestOpen}
+                    onClick={() => setEditRequestOpen((current) => !current)}
                   >
-                    {materializingLocal ? "Klasöre yazılıyor…" : localMaterializeLabel}
-                  </button>
+                  Düzenleme iste
+                </button>
+                {siteMode !== "PUBLISH" ? (
+                  <div className="review-local-output-action">
+                    <button
+                      className="button button-ghost"
+                      type="button"
+                      disabled={readOnly || revision.state !== "APPROVED" || materializingLocal || !connectorState.site.repositoryPath.trim()}
+                      aria-describedby={localOutputDescription}
+                      onClick={() => setMaterializeConfirmationOpen(true)}
+                    >
+                      {materializingLocal ? "Klasöre yazılıyor…" : localMaterializeLabel}
+                    </button>
+                    {!connectorState.site.repositoryPath.trim() ? (
+                      <small id="local-output-prerequisite">Yerel hedef seçilmeden onaylı paket yazılamaz.</small>
+                    ) : null}
+                  </div>
                 ) : null}
                 {revision.riskLevel === "HIGH" && revision.editorialApproved && !revision.highRiskApproved ? (
                   <button
                     className="button button-danger"
                     type="button"
                     disabled={readOnly || approvingHighRisk || !reauthenticated}
+                    aria-describedby={readOnly ? "review-approval-read-only" : !reauthenticated ? "high-risk-reauthentication" : undefined}
                     onClick={() => void approveHighRisk()}
                   >
                     {approvingHighRisk ? "Risk onayı kaydediliyor…" : "Yüksek risk onayını ver"}
@@ -522,6 +529,7 @@ export function ReviewWorkspace({
                     !inspectionComplete ||
                     revision.state === "APPROVED"
                   }
+                  aria-describedby={readOnly ? "review-approval-read-only" : !inspectionComplete ? "review-approval-prerequisite" : undefined}
                   onClick={() => void approve()}
                 >
                   {approving
@@ -535,12 +543,14 @@ export function ReviewWorkspace({
                     className="button button-secondary"
                     type="button"
                     disabled={readOnly || revision.state !== "APPROVED" || enqueueingPublication || previewingPublication}
+                    aria-describedby={publicationQueueDescription}
                     onClick={() => void enqueuePublication()}
                   >
                     {previewingPublication ? "Yayın önizlemesi hazırlanıyor…" : enqueueingPublication ? "Kuyruğa alınıyor…" : "Yayın kuyruğuna al"}
                   </button>
                 ) : null}
               </div>
+              {readOnly ? <small id="review-approval-read-only" className="action-unavailable-reason">Yerel çalışma alanı yeniden bağlanana kadar bu revizyon onaylanamaz.</small> : null}
             </header>
 
             {editRequestOpen ? (
@@ -592,26 +602,46 @@ export function ReviewWorkspace({
             </div>
 
             {notice ? <div className="inline-notice review-notice" role="status" aria-live="polite">{notice}</div> : null}
+            {acceptedWarnings.length > 0 && !hasUnacceptableWarning && revision.state !== "APPROVED" ? (
+              <label className="acknowledgement warning-acknowledgement">
+                <input
+                  type="checkbox"
+                  checked={warningsAcknowledged}
+                  onChange={(event) => setWarningsAcknowledged(event.target.checked)}
+                />
+                <span>
+                  {acceptedWarnings.length} editoryal uyarıyı okudum. Onayım bu revizyonun değişmez uyarı kümesine bağlanacak.
+                </span>
+              </label>
+            ) : null}
             {!inspectionComplete ? (
-              <div className="inline-notice review-notice is-warning" role="status">
-                Onay kapalı: iddia, kaynak, medya ve kalite kontrollerinin tamamı çalışmış ve engelsiz olmalıdır.
+              <div id="review-approval-prerequisite" className="inline-notice review-notice is-warning" role="status">
+                Onay kapalı: iddia, kaynak, medya ve kalite kontrollerinin tamamı çalışmış olmalı; engeller kaldırılmalı ve izin verilen uyarılar açıkça kabul edilmelidir.
+              </div>
+            ) : null}
+            {siteMode === "PUBLISH" && revision.state !== "APPROVED" ? (
+              <div id="review-publication-prerequisite" className="inline-notice review-notice is-warning" role="status">
+                Yayın kuyruğu, bu tam revizyon için insan onayı gerektirir. Onaydan sonra değişmez yayın önizlemesi hazırlanır.
               </div>
             ) : null}
             {revision.riskLevel === "HIGH" && revision.editorialApproved && !revision.highRiskApproved ? (
-              <label className="acknowledgement high-risk-reauth">
+              <label id="high-risk-reauthentication" className="acknowledgement high-risk-reauth">
                 <input type="checkbox" checked={reauthenticated} onChange={(event) => setReauthenticated(event.target.checked)} />
                 <span>Güvenlik kontrol listesini yeniden okudum ve ikinci yüksek risk onayını bilinçli olarak veriyorum.</span>
               </label>
             ) : null}
 
             <div className="review-tabs-row">
-              <div className="review-tabs" role="tablist" aria-label="İnceleme bölümleri">
+              <div className="review-tabs" role="tablist" aria-label="İnceleme bölümleri" onKeyDown={handleTabListKeyDown}>
                 {tabLabels.map((item) => (
                   <button
                     key={item.id}
                     type="button"
                     role="tab"
+                    id={`review-tab-${item.id}`}
+                    aria-controls={`review-panel-${item.id}`}
                     aria-selected={tab === item.id}
+                    tabIndex={tab === item.id ? 0 : -1}
                     className={tab === item.id ? "is-selected" : ""}
                     onClick={() => setTab(item.id)}
                   >
@@ -645,7 +675,7 @@ export function ReviewWorkspace({
               )}
             </div>
 
-            <div className="review-content-scroll">
+            <div className="review-content-scroll" role="tabpanel" id={`review-panel-${tab}`} aria-labelledby={`review-tab-${tab}`} tabIndex={0}>
               {tab === "content" ? (
                 <div className="article-review-layout dual-review-layout">
                   <div className="dual-locale-grid">
@@ -654,12 +684,23 @@ export function ReviewWorkspace({
                       return (
                         <article className="article-preview" key={contentLocale} lang={contentLocale}>
                           <div className="locale-heading"><strong>{contentLocale.toUpperCase()}</strong><span>{contentLocale === "tr" ? "Özgün editoryal sürüm" : "Doğal yerelleştirme"}</span></div>
-                          <div className="article-meta"><span>{revision.section}</span><span>8 dk okuma</span><span>{revision.author}</span></div>
+                          <div className="article-meta"><span>{sectionLabel(revision.section)}</span><span>8 dk okuma</span><span>{revision.author}</span></div>
                           <h1>{content.title}</h1>
                           <p className="article-description">{content.description}</p>
-                          <div className="article-hero-placeholder" role="img" aria-label={`${contentLocale.toUpperCase()} hero medya önizlemesi`}>
-                            <span>1600 × 900</span><strong>Hero medya güvenli önizlemesi</strong><small>İçerik hash’i doğrulandı</small>
-                          </div>
+                          {heroMedia?.contentBase64 ? (
+                            <figure className="article-hero-media">
+                              <img
+                                src={`data:image/webp;base64,${heroMedia.contentBase64}`}
+                                alt={contentLocale === "tr" ? heroMedia.altTr : heroMedia.altEn}
+                              />
+                              <figcaption>{heroMedia.filename} · {heroMedia.width} × {heroMedia.height} · {heroMedia.sha256.slice(0, 16)}…</figcaption>
+                            </figure>
+                          ) : (
+                            <div className="article-no-media" role="note" aria-label="Hero medya durumu">
+                              <strong>Onaylı hero medya yok.</strong>
+                              <span>Medya paketi eklenmeden bu revizyon için görsel doğrulama yapılamaz.</span>
+                            </div>
+                          )}
                           <div className="markdown-preview">
                             {content.bodyMarkdown.split("\n\n").map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
                           </div>
@@ -925,7 +966,20 @@ export function ReviewWorkspace({
             </div>
           </>
         )}
-      </main>
+      </section>
+      {materializeConfirmationOpen ? (
+        <ConfirmationDialog
+          title="Yerel dosya yazımını onayla"
+          detail="Onaylı paketin dosyaları seçtiğiniz yerel hedefe yazılacak. Mevcut Blogbot çıktıları güvenli bir yedeğe alınır; bu işlem yayınlama veya dış sisteme gönderim yapmaz."
+          confirmLabel="Dosyaları yerel hedefe yaz"
+          busy={materializingLocal}
+          onCancel={() => setMaterializeConfirmationOpen(false)}
+          onConfirm={() => {
+            setMaterializeConfirmationOpen(false);
+            void materializeLocal();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

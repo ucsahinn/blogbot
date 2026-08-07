@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
+
+const desktopSource = fileURLToPath(new URL("../src", import.meta.url));
 
 async function sourceFiles(directory: string): Promise<string[]> {
   const output: string[] = [];
@@ -14,8 +17,7 @@ async function sourceFiles(directory: string): Promise<string[]> {
 }
 
 test("desktop user interface stays site and hosting neutral", async () => {
-  const root = join(process.cwd(), "apps", "desktop", "src");
-  const files = await sourceFiles(root);
+  const files = await sourceFiles(desktopSource);
   const forbiddenUserCopy = /(?:SiberDergi|Hetzner|WireGuard|\bSD\b)/u;
   const matches: string[] = [];
   for (const file of files) {
@@ -26,15 +28,16 @@ test("desktop user interface stays site and hosting neutral", async () => {
 });
 
 test("setup exposes the three generic project targets", async () => {
-  const setup = await readFile(join(process.cwd(), "apps", "desktop", "src", "screens", "SetupCenter.tsx"), "utf8");
+  const setup = await readFile(join(desktopSource, "screens", "SetupCenter.tsx"), "utf8");
   assert.match(setup, /Klasöre yaz/u);
   assert.match(setup, /Yerel projeye gönder/u);
   assert.match(setup, /Yayındaki siteye gönder/u);
-  assert.match(setup, /filter\(\(connector\) => connectorDraft\.site\.mode === "PUBLISH"/u);
+  assert.match(setup, /selectedTask === "publishing"/u);
+  assert.match(setup, /\["site", "github", "deploy"\]\.includes\(connector\.id\)/u);
 });
 
 test("review actions do not enqueue remote publication for local targets", async () => {
-  const review = await readFile(join(process.cwd(), "apps", "desktop", "src", "screens", "ReviewWorkspace.tsx"), "utf8");
+  const review = await readFile(join(desktopSource, "screens", "ReviewWorkspace.tsx"), "utf8");
   assert.match(review, /siteMode === "PUBLISH"/u);
   assert.match(review, /Onaylı paketi yerel projeye yaz/u);
 });

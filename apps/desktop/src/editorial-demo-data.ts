@@ -1,4 +1,18 @@
-import type { EditorialWorkspaceSnapshot } from "./types.ts";
+import type { EditorialWorkspaceSnapshot, WeeklySlotView } from "./types.ts";
+
+function expandWeeklySlots(primarySlots: WeeklySlotView[]): WeeklySlotView[] {
+  return primarySlots.flatMap((slot) => {
+    const [, day] = slot.id.split("-");
+    return Array.from({ length: 5 }, (_, index) => ({
+      ...slot,
+      id: `slot-${day}-${index + 1}`,
+      enabled: index === 0 ? slot.enabled : false,
+      articleId: index === 0 ? slot.articleId : null,
+      articleTitle: index === 0 ? slot.articleTitle : null,
+      state: index === 0 ? slot.state : "EMPTY"
+    }));
+  });
+}
 
 export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
   return {
@@ -91,7 +105,9 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
         blockers: 0,
         updatedAt: "2026-07-29T12:36:00.000Z",
         scheduledAt: "2026-07-29T16:30:00.000Z",
-        state: "REVIEW_REQUIRED"
+        state: "REVIEW_REQUIRED",
+        reviewable: true,
+        detail: "TR / EN incelemesine hazır."
       },
       {
         id: "draft-official-001",
@@ -102,21 +118,25 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
         blockers: 1,
         updatedAt: "2026-07-29T13:58:00.000Z",
         scheduledAt: null,
-        state: "NEEDS_SOURCE"
+        state: "NEEDS_SOURCE",
+        reviewable: true,
+        detail: "İnceleme öncesinde ikinci bağımsız kaynak gerekli."
       },
       {
         id: "draft-cloud-privilege",
         titleTr: "Bir hizmetin sınırlarını daraltmak için uygulamalı rehber",
         titleEn: "A practical guide to narrowing service boundaries",
         section: "rehberler",
-        completion: 43,
+        completion: null,
         blockers: 0,
         updatedAt: "2026-07-29T11:20:00.000Z",
         scheduledAt: null,
-        state: "DRAFTING"
+        state: "DRAFTING",
+        reviewable: false,
+        detail: "Kaynaklar araştırılıyor ve TR / EN taslak hazırlanıyor."
       }
     ],
-    weeklySlots: [
+    weeklySlots: expandWeeklySlots([
       {
         id: "slot-mon",
         dayLabel: "Pazartesi",
@@ -180,7 +200,7 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
         articleTitle: null,
         state: "EMPTY"
       }
-    ],
+    ]),
     scheduled: [
       {
         id: "scheduled-incident",

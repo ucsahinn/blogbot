@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -13,21 +16,25 @@ import {
   runStructuredCodexTask
 } from "../../apps/codex-runner/src/structured-runner.ts";
 import {
+  CodexCliPortError,
   createCodexCliPort,
   type CodexCliSpawnObservation
 } from "../../apps/codex-runner/src/cli-port.ts";
 import { createMockStructuredCodexPort } from "../../apps/codex-runner/src/mock-port.ts";
+import { createDraftCodexTaskResolver } from "../../apps/engine/src/codex-draft.ts";
+
+const isolatedCodexHome = join(tmpdir(), "blogbot-isolated-codex-home");
 
 const expectedRoles: ReadonlyArray<
   readonly [CodexTaskKind, "FAST" | "DEFAULT" | "DEEP_REVIEW", string]
 > = [
-  ["CLASSIFY", "FAST", "gpt-5.6-luna"],
-  ["DEDUPE", "FAST", "gpt-5.6-luna"],
-  ["RESEARCH", "DEFAULT", "gpt-5.6-terra"],
-  ["WRITE_TR", "DEFAULT", "gpt-5.6-terra"],
-  ["LOCALIZE_EN", "DEFAULT", "gpt-5.6-terra"],
-  ["CHECK_CONTRADICTIONS", "DEEP_REVIEW", "gpt-5.6-sol"],
-  ["FINAL_QUALITY", "DEEP_REVIEW", "gpt-5.6-sol"]
+  ["CLASSIFY", "FAST", "default"],
+  ["DEDUPE", "FAST", "default"],
+  ["RESEARCH", "DEFAULT", "default"],
+  ["WRITE_TR", "DEFAULT", "default"],
+  ["LOCALIZE_EN", "DEFAULT", "default"],
+  ["CHECK_CONTRADICTIONS", "DEEP_REVIEW", "default"],
+  ["FINAL_QUALITY", "DEEP_REVIEW", "default"]
 ];
 
 for (const [taskKind, expectedRole, expectedModel] of expectedRoles) {
@@ -52,9 +59,9 @@ test("builds a private-runner command that ignores personal config and allows no
       "--skip-git-repo-check",
       "--json",
       "--output-schema",
-      "C:\\job\\output.schema.json",
-      "--model",
-      "gpt-5.6-terra",
+    "C:\\job\\output.schema.json",
+    "--model",
+    "gpt-5.6-terra",
       "-"
     ]
   );
@@ -86,7 +93,7 @@ test("returns only validator-approved structured output from the selected role",
   assert.deepEqual(result, {
     status: "COMPLETED",
     role: "DEFAULT",
-    model: "gpt-5.6-terra",
+    model: "default",
     output: { title: "Özgün güvenlik analizi" }
   });
 });
@@ -122,7 +129,7 @@ test("accepts schema-bound JSON from the real Codex agent_message event shape", 
   assert.deepEqual(result, {
     status: "COMPLETED",
     role: "FAST",
-    model: "gpt-5.6-luna",
+    model: "default",
     output: { kind: "news" }
   });
 });
@@ -134,7 +141,7 @@ test("Codex CLI port uses an isolated cwd, allowlisted environment, and final ou
     commandPrefixArgs: [
       fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url))
     ],
-    codexHome: "C:\\isolated-codex-home",
+    codexHome: isolatedCodexHome,
     timeoutMs: 5_000,
     onSpawn: (observation) => seen.push(observation)
   });
@@ -159,7 +166,9 @@ test("Codex CLI port uses an isolated cwd, allowlisted environment, and final ou
   assert.deepEqual(seen[0]?.environmentKeys, [
     "CODEX_HOME",
     "PATH",
-    "SystemRoot"
+    "SystemRoot",
+    "TEMP",
+    "TMP"
   ]);
   assert.ok(
     events.some(
@@ -167,6 +176,127 @@ test("Codex CLI port uses an isolated cwd, allowlisted environment, and final ou
         event.type === "output.completed" &&
         (event.output as { kind?: unknown }).kind === "news"
     )
+  );
+});
+
+test("optional live Codex probe completes the production draft contract with synthetic evidence", {
+  skip: process.env.BLOGBOT_LIVE_CODEX_PROBE !== "1"
+}, async () => {
+  const appData = process.env.APPDATA;
+  assert.ok(appData, "APPDATA is required for the application-owned Codex home");
+  const task = await createDraftCodexTaskResolver().resolve({
+    jobId: "synthetic-contract-probe",
+    idempotencyKey: "synthetic-contract-probe",
+    definitionId: "DRAFT.CREATE",
+    state: "RUNNING",
+    version: 1,
+    payload: {
+      instruction: "Write a short original report about a synthetic local event.",
+      candidateTitle: "Synthetic contract probe",
+      section: "haberler",
+      articleType: "news",
+      sources: [{
+        id: "synthetic-source-1",
+        title: "Synthetic evidence",
+        url: "https://example.invalid/synthetic",
+        excerpt: "This is deliberately synthetic evidence used only to validate the local output contract.",
+        quoteHash: "0".repeat(64)
+      }]
+    }
+  });
+  const port = createCodexCliPort({
+    command: process.env.BLOGBOT_LIVE_CODEX_COMMAND ?? "codex.cmd",
+    codexHome: join(appData, "app.blogbot.desktop", "codex-home"),
+    timeoutMs: 120_000
+  });
+  const result = await runStructuredCodexTask(task, port);
+  // Do not log generated article content. The result proves only that the
+  // production schema, isolated runner and parser interoperate.
+  assert.equal(result.status, "COMPLETED");
+});
+
+test("production draft schema keeps every closed claim property required", async () => {
+  const task = await createDraftCodexTaskResolver().resolve({
+    jobId: "schema-contract",
+    idempotencyKey: "schema-contract",
+    definitionId: "DRAFT.CREATE",
+    state: "RUNNING",
+    version: 1,
+    payload: {}
+  });
+  const schema = task.outputSchema as { properties?: { claims?: { items?: { required?: unknown } } } };
+  assert.deepEqual(schema.properties?.claims?.items?.required, [
+    "claimKey", "trText", "enText", "sourceIds", "status", "quoteHash"
+  ]);
+});
+
+test("Windows command wrappers cannot keep a timed-out Codex task running", { skip: process.platform !== "win32" }, async () => {
+  const port = createCodexCliPort({
+    command: fileURLToPath(new URL("../fixtures/fake-codex-wrapper.cmd", import.meta.url)),
+    commandPrefixArgs: ["--hang"],
+    codexHome: isolatedCodexHome,
+    timeoutMs: 1_000
+  });
+  const consume = async () => {
+    for await (const _event of port.run({
+      model: "gpt-5.6-luna",
+      input: {},
+      outputSchema: { type: "object" }
+    })) {
+      // The timeout must interrupt iteration before a final event exists.
+    }
+  };
+
+  await assert.rejects(
+    Promise.race([
+      consume(),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("timeout did not terminate the wrapped process tree")), 4_000))
+    ]),
+    (error: unknown) =>
+      error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
+  );
+
+  const childPid = Number(
+    (await readFile(join(isolatedCodexHome, "fake-codex-child.pid"), "utf8")).trim()
+  );
+  assert.ok(Number.isSafeInteger(childPid) && childPid > 0, "fixture must report its exact child PID");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  try {
+    process.kill(childPid, 0);
+  } catch (error) {
+    assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+    return;
+  }
+  try {
+    process.kill(childPid, "SIGKILL");
+  } finally {
+    assert.fail("the timed-out Windows wrapper left its fixture child running");
+  }
+});
+
+test("a chatty Codex stream cannot postpone the execution deadline", async () => {
+  const port = createCodexCliPort({
+    command: process.execPath,
+    commandPrefixArgs: [
+      fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
+      "--heartbeat"
+    ],
+    codexHome: isolatedCodexHome,
+    timeoutMs: 1_000
+  });
+
+  await assert.rejects(
+    async () => {
+      for await (const _event of port.run({
+        model: "gpt-5.6-luna",
+        input: {},
+        outputSchema: { type: "object" }
+      })) {
+        // The stream is intentionally alive but never produces final output.
+      }
+    },
+    (error: unknown) =>
+      error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
   );
 });
 
@@ -256,7 +386,7 @@ test("rejects oversized final output files before parsing them", async () => {
       fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
       "--oversized-output"
     ],
-    codexHome: "C:\\isolated-codex-home",
+    codexHome: isolatedCodexHome,
     timeoutMs: 5_000
   });
 
@@ -274,6 +404,22 @@ test("rejects oversized final output files before parsing them", async () => {
       error instanceof Error &&
       error.message.includes("exceeded the bounded size")
   );
+});
+
+test("uses a valid streamed agent message when the optional final output file is not JSON", async () => {
+  const port = createCodexCliPort({
+    command: process.execPath,
+    commandPrefixArgs: [fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)), "--invalid-final-output"],
+    codexHome: isolatedCodexHome,
+    timeoutMs: 5_000
+  });
+  const result = await runStructuredCodexTask({
+    taskKind: "CLASSIFY",
+    input: {},
+    outputSchema: { type: "object" },
+    validateOutput: (value): value is { kind: string } => typeof value === "object" && value !== null && (value as { kind?: unknown }).kind === "news"
+  }, port);
+  assert.equal(result.status, "COMPLETED");
 });
 
 test("moves authentication and usage limits to WAITING_CODEX without a fallback call", async () => {
@@ -296,7 +442,7 @@ test("moves authentication and usage limits to WAITING_CODEX without a fallback 
       status: "WAITING_CODEX",
       reason: expectedReason,
       role: "FAST",
-      model: "gpt-5.6-luna"
+      model: "default"
     });
   }
 });

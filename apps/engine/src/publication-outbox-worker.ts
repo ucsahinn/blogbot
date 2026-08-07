@@ -12,6 +12,18 @@ export interface PublicationOutboxWorker {
   stop(): void;
 }
 
+export interface PublicationOutboxWorkerOptions {
+  /**
+   * Receives a redacted diagnostic error when storage bookkeeping itself
+   * fails. This must never receive a connector response or raw database
+   * detail because it can reach local support diagnostics.
+   */
+  onFault?(error: Error): void;
+}
+
+const MAX_TRANSIENT_PUBLICATION_ATTEMPTS = 3;
+const SAFE_OUTBOX_FAULT = "OUTBOX_STORAGE_UNAVAILABLE";
+
 /**
  * Reconciles durable publication intents without ever creating a second
  * effect for the same idempotency key. The real GitHub/hosting connector is
@@ -21,10 +33,25 @@ export interface PublicationOutboxWorker {
 export function startPublicationOutboxWorker(
   repository: BackendRepository,
   processor: PublicationEffectProcessor,
-  intervalMs = 1_000
+  intervalMs = 1_000,
+  options: PublicationOutboxWorkerOptions = {}
 ): PublicationOutboxWorker {
   let running = true;
   let active = false;
+  const reportFault = () => {
+    const safeError = new Error(SAFE_OUTBOX_FAULT);
+    try {
+      if (options.onFault) {
+        options.onFault(safeError);
+      } else {
+        // The engine bridge captures stderr in its redacted local diagnostics.
+        // Keep stdout exclusively for the versioned NDJSON protocol.
+        process.stderr.write(`[Blogbot] ${SAFE_OUTBOX_FAULT}\n`);
+      }
+    } catch {
+      // A diagnostic sink must never take down the durable worker.
+    }
+  };
   const tick = async () => {
     if (!running || active) return;
     active = true;
@@ -47,7 +74,12 @@ export function startPublicationOutboxWorker(
         } catch (error) {
           await repository.updateOutbox({
             ...claimed,
-            state: "FAILED",
+            // A process crash or transient connector outage must be visible
+            // and reclaimable after restart. The idempotency key prevents the
+            // retry from creating a duplicate external effect. Bound retries
+            // so a persistent programming or configuration error becomes an
+            // explicit terminal failure instead of an endless tight loop.
+            state: claimed.attempts >= MAX_TRANSIENT_PUBLICATION_ATTEMPTS ? "FAILED" : "UNKNOWN",
             lastError: error instanceof Error ? error.message.slice(0, 512) : "Publication processor failed"
           });
         }
@@ -56,9 +88,10 @@ export function startPublicationOutboxWorker(
       active = false;
     }
   };
-  const timer = setInterval(() => { void tick(); }, intervalMs);
+  const runTick = () => { void tick().catch(reportFault); };
+  const timer = setInterval(runTick, intervalMs);
   timer.unref?.();
-  void tick();
+  runTick();
   return {
     stop() {
       running = false;

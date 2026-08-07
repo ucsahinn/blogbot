@@ -248,6 +248,18 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
     );
   }
 
+  async getApproval(revisionId: string): Promise<Approval | null> {
+    const result = await this.client.query<JsonRow>(
+      "SELECT value FROM blogbot_approvals WHERE revision_id = $1",
+      [revisionId]
+    );
+    if (!result.rows[0]) return null;
+    return this.protector.open<Approval>(
+      result.rows[0].value,
+      backendContext("blogbot_approvals", revisionId)
+    );
+  }
+
   async saveApproval(approval: Approval): Promise<Approval> {
     const existing = await this.client.query<JsonRow>(
       "SELECT value FROM blogbot_approvals WHERE revision_id = $1",

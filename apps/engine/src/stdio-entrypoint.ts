@@ -22,7 +22,9 @@ import {
 import {
   canonicalJson,
   computeRevisionHash,
+  validateApprovalGates,
   validateClaimEvidence,
+  validateRevisionPackageV2,
   type Approval,
   type ArticleRevision,
   type HighRiskApproval
@@ -42,16 +44,21 @@ import {
 } from "./source-scan.ts";
 import { SourceScanScheduler } from "./source-scheduler.ts";
 import { createCodexCliPort } from "../../codex-runner/src/cli-port.ts";
+import type { StructuredCodexPort } from "../../codex-runner/src/structured-runner.ts";
 import { createCodexWorkerCoordinator, type CodexWorkerCoordinator } from "./codex-worker.ts";
-import { createDraftCodexTaskResolver, materializeDraftRevision, isDraftCodexOutput } from "./codex-draft.ts";
+import {
+  createDraftCodexTaskResolver,
+  finalizeReviewedRevision,
+  isDraftCodexOutput,
+  isFinalReviewCodexOutput,
+  materializeDraftRevision
+} from "./codex-draft.ts";
 import { buildPublicationPreview } from "./publication-preview.ts";
 import { PGliteCodexJobStore, PGliteCodexQueueAdapter, registerCodexQueueWorker } from "./pglite-codex-job-store.ts";
 import { startPublicationOutboxWorker, type PublicationEffectProcessor, type PublicationOutboxWorker } from "./publication-outbox-worker.ts";
 import { PublicationScheduler } from "./publication-scheduler.ts";
-import { GitHubAuthRuntime, isGitHubAuthRequest } from "./github-auth-runtime.ts";
-import { GitHubPublicationEffects } from "../../publisher/src/github-effects.ts";
-import { createConnectorAwarePublicationProcessor, type ApprovedPublicationCommand } from "../../publisher/src/publication.ts";
 import { renderCoverVariants, type ArtDirection } from "../../../packages/visuals/src/index.ts";
+import type { PublicationBundlePolicy } from "../../publisher/src/publication.ts";
 
 const MAX_LINE_BYTES = 1_000_000;
 // Keep restore verification bounded even when a compromised/local renderer
@@ -60,6 +67,112 @@ const MAX_LINE_BYTES = 1_000_000;
 const MAX_BACKUP_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MAX_AUTOMATIC_BACKUP_FILES = 256;
 const MAX_AUTOMATIC_BACKUP_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Background maintenance has no request/response caller to surface failures
+ * to. Keep stdout reserved for NDJSON and emit only stable, secret-safe codes
+ * to the engine diagnostics channel.
+ */
+export function reportBackgroundTaskFault(
+  code: "SOURCE_RETENTION_UNAVAILABLE" | "AUTOMATIC_BACKUP_UNAVAILABLE",
+  write: (line: string) => void = (line) => process.stderr.write(line)
+): void {
+  try {
+    write(`[Blogbot] ${code}\n`);
+  } catch {
+    // Diagnostics are best-effort and must not crash the local engine.
+  }
+}
+
+/**
+ * Durable runner lifecycle telemetry intentionally contains no title, URL,
+ * account identity, prompt, output, or error detail. It makes a stuck local
+ * queue diagnosable without turning the diagnostic bundle into user data.
+ */
+export function reportCodexLifecycle(
+  code: "CODEX_JOB_STARTED" | "CODEX_JOB_WAITING" | "CODEX_JOB_RETRYING" | "CODEX_JOB_COMPLETED" | "CODEX_PROTOCOL_REJECTED" | "CODEX_OUTPUT_INVALID" | "CODEX_OUTPUT_MISSING" | "CODEX_CLI_INVALID_EVENT" | "CODEX_CLI_INVALID_FINAL_OUTPUT" | "CODEX_PROCESS_FAILED" | "CODEX_UNKNOWN_FAILURE",
+  write: (line: string) => void = (line) => process.stderr.write(line)
+): void {
+  try {
+    write(`[Blogbot] ${code}\n`);
+  } catch {
+    // Diagnostics must never alter the durable job outcome.
+  }
+}
+
+function publicationContentBytes(content: unknown): Buffer {
+  if (typeof content === "string") return Buffer.from(content, "utf8");
+  if (content instanceof Uint8Array) return Buffer.from(content);
+  if (Array.isArray(content) && content.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)) {
+    return Buffer.from(content);
+  }
+  throw new Error("APPROVAL_BOUND_FILE_CONTENT_INVALID");
+}
+
+export function assertRevisionGeneratedFilesMatch(
+  revision: Pick<ArticleRevision, "id" | "adapterVersion" | "generatedFiles">,
+  payload: unknown
+): void {
+  if (!Array.isArray(revision.generatedFiles) || revision.generatedFiles.length === 0 || !isRecord(payload)) {
+    throw new Error("APPROVAL_BOUND_FILE_SET_MISSING");
+  }
+  const { manifestPath } = revisionBundlePolicy(revision);
+  if (!Array.isArray(payload.files)) {
+    throw new Error("APPROVAL_BOUND_FILE_SET_MISSING");
+  }
+  const actual = new Map<string, { sha256: string; size: number }>();
+  let manifestCount = 0;
+  for (const candidate of payload.files) {
+    if (!isRecord(candidate) || typeof candidate.path !== "string") {
+      throw new Error("APPROVAL_BOUND_FILE_CONTENT_INVALID");
+    }
+    if (candidate.path === manifestPath) {
+      manifestCount += 1;
+      continue;
+    }
+    if (actual.has(candidate.path)) throw new Error("APPROVAL_BOUND_FILE_SET_MISMATCH");
+    const bytes = publicationContentBytes(candidate.content);
+    actual.set(candidate.path, {
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      size: bytes.byteLength
+    });
+  }
+  if (manifestCount !== 1 || actual.size !== revision.generatedFiles.length) {
+    throw new Error("APPROVAL_BOUND_FILE_SET_MISMATCH");
+  }
+  for (const expected of revision.generatedFiles) {
+    const observed = actual.get(expected.path);
+    if (!observed) throw new Error("APPROVAL_BOUND_FILE_SET_MISMATCH");
+    if (observed.sha256 !== expected.sha256 || observed.size !== expected.size) {
+      throw new Error("APPROVAL_BOUND_FILE_MISMATCH");
+    }
+  }
+}
+
+export function revisionBundlePolicy(
+  revision: Pick<ArticleRevision, "id" | "adapterVersion" | "generatedFiles">
+): PublicationBundlePolicy {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/iu.test(revision.id)) {
+    throw new Error("APPROVAL_BOUND_MANIFEST_PATH_INVALID");
+  }
+  const generatedFiles = revision.generatedFiles ?? [];
+  const identity = revision.adapterVersion?.trim() ?? "";
+  const separator = identity.indexOf("@");
+  const adapterId = separator > 0
+    ? identity.slice(0, separator)
+    : generatedFiles.some((file) => file.path.startsWith("src/content/articles/"))
+      ? "astro-generic"
+      : "local-folder-v1";
+  const manifestPath = `.blogbot/manifests/${revision.id}.json`;
+  return {
+    adapterId,
+    manifestPath,
+    // Every non-manifest path is already immutable and hash-bound on the
+    // approved revision. Exact paths avoid granting a renderer-selected
+    // directory prefix while retaining adapter-neutral publication.
+    allowedPathPrefixes: [...generatedFiles.map((file) => file.path), manifestPath]
+  };
+}
 
 async function collectAutomaticBackupPaths(root: string): Promise<string[]> {
   const output: string[] = [];
@@ -283,7 +396,8 @@ export interface EngineProtocolOptions {
   sourceTransport?: FetchTransport;
   sourceScanCoordinator?: SourceScanCoordinator;
   codexCoordinator?: CodexWorkerCoordinator;
-  githubAuthRuntime?: GitHubAuthRuntime;
+  /** True only when the host injected a processor that can reconcile the durable outbox. */
+  publicationReady?: boolean;
 }
 
 export interface PersistentEngineProtocolOptions {
@@ -293,6 +407,8 @@ export interface PersistentEngineProtocolOptions {
   startSourceScheduler?: boolean;
   codexCommand?: string;
   codexHome?: string;
+  /** Test-only host seam; production always supplies the isolated CLI port. */
+  codexPort?: StructuredCodexPort;
   publicationProcessor?: PublicationEffectProcessor;
   /** Enabled by default so due approved work is recovered after restart. */
   startPublicationScheduler?: boolean;
@@ -318,24 +434,15 @@ export function createEngineProtocol(
       };
     }
 
-    if (isGitHubAuthRequest(input) && options.githubAuthRuntime) {
-      try {
-        const value = input.kind === "github.auth.begin"
-          ? await options.githubAuthRuntime.begin()
-          : input.kind === "github.auth.poll"
-            ? await options.githubAuthRuntime.poll()
-            : await options.githubAuthRuntime.status();
-        return { version: 1, id: input.id, ok: true, kind: "value", value };
-      } catch (error) {
-        return {
-          version: 1,
-          id: input.id,
-          ok: false,
-          kind: "error",
-          code: "GITHUB_AUTH_UNAVAILABLE",
-          message: error instanceof Error ? error.message.slice(0, 256) : "GitHub authentication unavailable"
-        };
-      }
+    if (typeof input.kind === "string" && input.kind.startsWith("github.auth.")) {
+      return {
+        version: 1,
+        id: input.id,
+        ok: false,
+        kind: "error",
+        code: "GITHUB_AUTH_NATIVE_ONLY",
+        message: "GitHub credentials are handled only by the native credential broker."
+      };
     }
 
     if (input.kind === "doctor") {
@@ -354,16 +461,16 @@ export function createEngineProtocol(
           ...(options.sourceRepository ? ["SOURCE.LIST"] : []),
           ...(options.sourceTransport ? ["SOURCE.TEST"] : []),
           ...(options.sourceRepository ? ["SOURCE.SAVE"] : []),
+          ...(options.sourceRepository ? ["SOURCE.REVIEW"] : []),
           ...(options.sourceScanCoordinator ? ["SOURCE.SCAN"] : []),
           ...(options.sourceRepository ? ["CANDIDATE.LIST"] : []),
-          ...(options.githubAuthRuntime ? ["GITHUB.AUTH"] : []),
           "REVISION.SAVE",
           "REVISION.LIST",
           "REVISION.GET",
           "APPROVAL.GRANT",
           "APPROVAL.GRANT_HIGH_RISK",
           "PUBLICATION.PREVIEW",
-          "PUBLICATION.ENQUEUE",
+          ...(options.publicationReady ? ["PUBLICATION.ENQUEUE"] : []),
           "BACKUP.CREATE",
           "BACKUP.VERIFY",
           "DRAFT.CREATE",
@@ -492,6 +599,20 @@ export function createEngineProtocol(
         return sourceProtocolError(input.id, "command", "INVALID_PUBLICATION_PREVIEW_REQUEST", "Publication preview metadata is invalid");
       }
       try {
+        // Approval and revision records are immutable. Read the approval
+        // snapshot before entering the PGlite idempotent transaction; opening
+        // repository.sync() from inside that transaction deadlocks on the
+        // same database lock.
+        const approvalSnapshot = await repository.sync(0);
+        // Connector state is configuration for the immutable preview. Read it
+        // before the idempotent transaction for the same reason: PGlite does
+        // not permit a second repository transaction while this one is open.
+        const desktopConnectorState = await repository.getLocalState("desktop.connectors");
+        const desktopConnectorChecks = await repository.getLocalState("desktop.connectorChecks");
+        const githubState = (await repository.getLocalState("connector.github")) ??
+          (isRecord(desktopConnectorState) ? desktopConnectorState.github : undefined);
+        const siteState = (await repository.getLocalState("connector.site")) ??
+          (isRecord(desktopConnectorState) ? desktopConnectorState.site : undefined);
         const result = await repository.runIdempotent(
           `publication-preview:${idempotencyKey}`,
           canonicalJson({ revisionId, revisionHash, expectedVersion, payload }),
@@ -500,52 +621,66 @@ export function createEngineProtocol(
             if (currentVersion !== expectedVersion) throw new Error(`VERSION_CONFLICT:${expectedVersion}:${currentVersion}`);
             const revision = await transaction.getRevision(revisionId);
             if (computeRevisionHash(revision) !== revisionHash) throw new Error("APPROVAL_HASH_MISMATCH");
-            const snapshot = await repository.sync(0);
-            const approval = snapshot.snapshot.approvals.find((item) => item.revisionId === revisionId);
+            const approval = approvalSnapshot.snapshot.approvals.find((item) => item.revisionId === revisionId);
             if (!approval || approval.revisionHash !== revisionHash) throw new Error("NO_VALID_APPROVAL");
-            const githubState = (await repository.getLocalState("connector.github")) ?? ((await repository.getLocalState("desktop.connectors")) as Record<string, unknown> | undefined)?.github;
-            const githubTokenState = await repository.getLocalState("connector.github.token");
-            const deployState = (await repository.getLocalState("connector.deploy")) ?? ((await repository.getLocalState("desktop.connectors")) as Record<string, unknown> | undefined)?.deploy;
+            if (!validateRevisionPackageV2(revision)) throw new Error("REVISION_PACKAGE_INCOMPLETE");
+            const gateStatus = validateApprovalGates(revision, approval.warningSetHash);
+            if (gateStatus !== "READY") throw new Error(gateStatus);
+            if (revision.riskLevel === "HIGH") {
+              const highRisk = approvalSnapshot.snapshot.highRiskApprovals.find((item) =>
+                item.revisionId === revisionId && item.revisionHash === revisionHash
+              );
+              if (!highRisk) throw new Error("HIGH_RISK_APPROVAL_REQUIRED");
+            }
+            assertRevisionGeneratedFilesMatch(revision, payload);
             // Setup stores the generic site connector in the encrypted
             // desktop catalog. Keep the old standalone key as a migration
             // fallback, but never require it for the local-only/local-dev
             // targets. Those modes still need the selected folder as the
             // content root for preview validation and materialization.
-            const desktopConnectorState = await repository.getLocalState("desktop.connectors");
-            const siteState = (await repository.getLocalState("connector.site")) ??
-              (isRecord(desktopConnectorState) ? desktopConnectorState.site : undefined);
             const githubObject = isRecord(githubState) ? githubState : {};
-            const tokenObject = isRecord(githubTokenState) ? githubTokenState : {};
             const siteObject = isRecord(siteState) ? siteState : {};
-            const configuredTargetRepository = String(payload.targetRepository ?? "") || (
+            const checkObject = isRecord(desktopConnectorChecks) ? desktopConnectorChecks : {};
+            const siteCheck = isRecord(checkObject.site) ? checkObject.site : {};
+            const adapterDryRun = isRecord(siteCheck.adapterDryRun) ? siteCheck.adapterDryRun : {};
+            const publishMode = siteObject.mode === "PUBLISH";
+            const configuredTargetRepository = publishMode &&
               typeof githubObject.owner === "string" && typeof githubObject.repository === "string"
                 ? `${githubObject.owner.trim()}/${githubObject.repository.trim()}`
-                : ""
-            );
-            // A local-only preview still uses the shared dry-run validator,
-            // which expects a repository-shaped identifier. This sentinel is
-            // never sent to GitHub and publication resolver rejects it unless
-            // a real connector is configured.
-            const targetRepository = configuredTargetRepository || "local/local";
-            const baseBranch = String(payload.baseBranch ?? "") || "main";
+                : "";
+            const approvedTargetRepository = String(revision.targetRepository ?? "");
+            const approvedBaseBranch = String(revision.targetBaseBranch ?? "");
+            const approvedTargetBaseSha = String(revision.targetBaseSha ?? "");
+            const approvedAdapterIdentity = String(revision.adapterVersion ?? "");
+            const bundlePolicy = revisionBundlePolicy(revision);
+            const targetRepository = String(payload.targetRepository ?? "") || configuredTargetRepository || approvedTargetRepository;
+            const baseBranch = String(payload.baseBranch ?? "") || (publishMode && typeof githubObject.branch === "string" ? githubObject.branch.trim() : "") || approvedBaseBranch;
+            const configuredBaseSha = publishMode && typeof githubObject.baseSha === "string" ? githubObject.baseSha.trim() : "";
+            const approvedBaseSha = String(payload.approvedBaseSha ?? "") || configuredBaseSha || approvedTargetBaseSha;
+            const configuredAdapterId = typeof adapterDryRun.adapterId === "string" ? adapterDryRun.adapterId.trim() : "";
+            const configuredAdapterVersion = typeof adapterDryRun.adapterVersion === "string" ? adapterDryRun.adapterVersion.trim() : "";
+            const configuredAdapterIdentity = configuredAdapterId && configuredAdapterVersion ? `${configuredAdapterId}@${configuredAdapterVersion}` : "";
+            const requestedAdapterIdentity = String(payload.adapterVersion ?? "") || configuredAdapterIdentity || approvedAdapterIdentity;
+            const approvedAdapterSeparator = approvedAdapterIdentity.indexOf("@");
+            const approvedAdapterId = approvedAdapterSeparator > 0 ? approvedAdapterIdentity.slice(0, approvedAdapterSeparator) : "";
+            if (
+              targetRepository !== approvedTargetRepository ||
+              baseBranch !== approvedBaseBranch ||
+              approvedBaseSha !== approvedTargetBaseSha ||
+              requestedAdapterIdentity !== approvedAdapterIdentity ||
+              (approvedAdapterId && bundlePolicy.adapterId !== approvedAdapterId)
+            ) {
+              throw new Error("APPROVAL_TARGET_MISMATCH");
+            }
             const siteOrigin = String(payload.siteOrigin ?? "") || (typeof siteObject.publicSiteUrl === "string" ? siteObject.publicSiteUrl.trim() : "");
             const contentRoot = String(payload.contentRoot ?? "") || (typeof siteObject.repositoryPath === "string" ? siteObject.repositoryPath.trim() : "");
-            let approvedBaseSha = typeof payload.approvedBaseSha === "string" ? payload.approvedBaseSha : "";
-            if (!approvedBaseSha && typeof tokenObject.token === "string" && targetRepository) {
-              const effects = new GitHubPublicationEffects({
-                token: tokenObject.token,
-                repository: targetRepository,
-                baseBranch,
-                ...(typeof deployState === "object" && deployState !== null && typeof (deployState as Record<string, unknown>).workflowName === "string"
-                  ? { deployWorkflow: (deployState as Record<string, unknown>).workflowName as string }
-                  : {})
-              });
-              approvedBaseSha = await effects.getBaseBranchSha();
-            }
             const previewPayload = {
               ...payload,
               targetRepository,
               baseBranch,
+              adapterVersion: approvedAdapterIdentity,
+              adapterId: bundlePolicy.adapterId,
+              bundlePolicy,
               siteOrigin,
               contentRoot,
               ...(approvedBaseSha ? { approvedBaseSha, currentBaseSha: approvedBaseSha } : {})
@@ -558,12 +693,12 @@ export function createEngineProtocol(
               baseBranch,
               ...(approvedBaseSha ? { approvedBaseSha, currentBaseSha: approvedBaseSha } : {}),
               files: Array.isArray(payload.files) ? payload.files as never : [],
-              bundlePolicy: payload.bundlePolicy as never,
+              bundlePolicy,
               siteOrigin,
               contentRoot,
               now: String(payload.now ?? new Date().toISOString())
             } as Parameters<typeof buildPublicationPreview>[0];
-            if (typeof payload.adapterId === "string") previewInput.adapterId = payload.adapterId;
+            previewInput.adapterId = bundlePolicy.adapterId;
             const preview = buildPublicationPreview(previewInput);
             await transaction.setLocalState(`publication.preview:${revisionId}`, {
               previewHash: preview.previewHash,
@@ -595,6 +730,11 @@ export function createEngineProtocol(
         return sourceProtocolError(input.id, "command", "INVALID_PUBLICATION_REQUEST", "Publication request metadata is invalid");
       }
       try {
+        // Like publication.preview, read immutable approval records before
+        // entering the PGlite idempotent transaction. Calling repository.sync
+        // from inside that transaction opens a second PGlite transaction and
+        // blocks the durable enqueue path.
+        const approvalSnapshot = await repository.sync(0);
         const result = await repository.runIdempotent(
           `publication:${idempotencyKey}`,
           canonicalJson({ revisionId, revisionHash, previewHash, expectedVersion }),
@@ -603,8 +743,7 @@ export function createEngineProtocol(
             if (currentVersion !== expectedVersion) throw new Error(`VERSION_CONFLICT:${expectedVersion}:${currentVersion}`);
             const revision = await transaction.getRevision(revisionId);
             if (computeRevisionHash(revision) !== revisionHash) throw new Error("APPROVAL_HASH_MISMATCH");
-            const snapshot = await repository.sync(0);
-            const approval = snapshot.snapshot.approvals.find((item) => item.revisionId === revisionId);
+            const approval = approvalSnapshot.snapshot.approvals.find((item) => item.revisionId === revisionId);
             if (!approval || approval.revisionHash !== revisionHash) throw new Error("NO_VALID_APPROVAL");
             if (revision.translationParity?.status === "MISMATCHED" || revision.translationParity?.status === "PENDING") {
               throw new Error("TRANSLATION_PARITY_NOT_READY");
@@ -612,8 +751,12 @@ export function createEngineProtocol(
             if (!validateClaimEvidence(revision) || revision.claims.some((claim) => claim.status !== "VERIFIED")) {
               throw new Error("CLAIM_EVIDENCE_NOT_READY");
             }
+            const gateStatus = validateApprovalGates(revision, approval.warningSetHash);
+            if (gateStatus !== "READY") throw new Error(gateStatus);
             if (revision.riskLevel === "HIGH") {
-              const highRisk = snapshot.snapshot.highRiskApprovals.find((item) => item.revisionId === revisionId);
+              const highRisk = approvalSnapshot.snapshot.highRiskApprovals.find((item) =>
+                item.revisionId === revisionId && item.revisionHash === revisionHash
+              );
               if (!highRisk) throw new Error("HIGH_RISK_APPROVAL_REQUIRED");
             }
             const preview = await transaction.getLocalState(`publication.preview:${revisionId}`);
@@ -810,15 +953,28 @@ export function createEngineProtocol(
             if (!validateClaimEvidence(revision) || revision.claims.some((claim) => claim.status !== "VERIFIED")) {
               throw new Error("CLAIM_EVIDENCE_NOT_READY");
             }
+            const gateStatus = validateApprovalGates(revision, command.payload.warningSetHash);
+            if (gateStatus !== "READY") {
+              throw new Error(gateStatus);
+            }
             if (command.kind === "APPROVAL.GRANT_HIGH_RISK") {
               if (revision.riskLevel !== "HIGH") {
                 throw new Error("HIGH_RISK_APPROVAL_NOT_REQUIRED");
+              }
+              const editorialApproval = await transaction.getApproval(revision.id);
+              if (
+                !editorialApproval ||
+                editorialApproval.revisionHash !== actualHash ||
+                editorialApproval.warningSetHash !== command.payload.warningSetHash
+              ) {
+                throw new Error("EDITORIAL_APPROVAL_REQUIRED");
               }
               return transaction.saveHighRiskApproval({
                 revisionId: revision.id,
                 revisionHash: actualHash,
                 deviceId: command.payload.deviceId,
                 approvedAt: new Date().toISOString(),
+                warningSetHash: command.payload.warningSetHash,
                 approvalType: "HIGH_RISK",
                 riskChecklistHash: command.payload.riskChecklistHash,
                 windowsReauthenticatedAt: command.payload.windowsReauthenticatedAt
@@ -829,6 +985,7 @@ export function createEngineProtocol(
               revisionHash: actualHash,
               deviceId: command.payload.deviceId,
               approvedAt: new Date().toISOString(),
+              warningSetHash: command.payload.warningSetHash,
               approvalType: "EDITORIAL"
             });
           }
@@ -850,9 +1007,18 @@ export function createEngineProtocol(
               ? "APPROVAL_HASH_MISMATCH"
               : message === "REVISION_NOT_REVIEWABLE"
                 ? "REVISION_NOT_REVIEWABLE"
-              : message === "HIGH_RISK_APPROVAL_NOT_REQUIRED"
-                ? "REVISION_NOT_REVIEWABLE"
-              : "ENGINE_OPERATION_FAILED";
+                : message === "HIGH_RISK_APPROVAL_NOT_REQUIRED"
+                  ? "REVISION_NOT_REVIEWABLE"
+                  : [
+                      "TRANSLATION_PARITY_NOT_READY",
+                      "CLAIM_EVIDENCE_NOT_READY",
+                      "QUALITY_GATES_NOT_READY",
+                      "WARNING_NOT_ALLOWLISTED",
+                      "WARNING_ACCEPTANCE_MISMATCH",
+                      "EDITORIAL_APPROVAL_REQUIRED"
+                    ].includes(message)
+                    ? message
+                    : "ENGINE_OPERATION_FAILED";
         return revisionCommandFailure(
           input.id,
           code,
@@ -996,6 +1162,79 @@ export function createEngineProtocol(
     }
     if (
       validation.valid &&
+      validation.command.kind === "SOURCE.REVIEW"
+    ) {
+      if (!options.sourceRepository) {
+        return sourceProtocolError(
+          input.id,
+          "command",
+          "SOURCE_CATALOG_UNAVAILABLE",
+          "Local source catalog is not configured"
+        );
+      }
+      const command = validation.command;
+      try {
+        const current = await options.sourceRepository.getSource(command.payload.sourceId);
+        const reviewedAt = new Date().toISOString();
+        const review = { reviewedAt, rationale: command.payload.rationale };
+        const saved = await options.sourceRepository.saveSourceIdempotent(
+          {
+            ...current,
+            trustStatus: command.payload.trustStatus,
+            rightsStatus: command.payload.rightsStatus,
+            trustReview: review,
+            rightsReview: review,
+            updatedAt: reviewedAt,
+            version: current.version + 1
+          },
+          command.expectedVersion,
+          `engine:${command.idempotencyKey}`,
+          canonicalJson({
+            kind: command.kind,
+            payload: command.payload,
+            expectedVersion: command.expectedVersion
+          })
+        );
+        return {
+          version: 1,
+          id: input.id,
+          ok: true,
+          kind: "command",
+          result: {
+            ok: true,
+            version: 1,
+            requestId: command.requestId,
+            idempotencyKey: command.idempotencyKey,
+            kind: command.kind,
+            sequence: saved.version,
+            value: saved
+          }
+        };
+      } catch (error) {
+        const code = error instanceof SourceRepositoryError
+          ? error.code
+          : error instanceof Error && error.message.startsWith("IDEMPOTENCY_KEY_REUSED")
+            ? "IDEMPOTENCY_KEY_REUSED"
+            : "ENGINE_OPERATION_FAILED";
+        return {
+          version: 1,
+          id: input.id,
+          ok: false,
+          kind: "command",
+          result: {
+            ok: false,
+            version: 1,
+            error: {
+              code,
+              message: error instanceof Error ? error.message : "Source review failed",
+              retryable: code === "ENGINE_OPERATION_FAILED"
+            }
+          }
+        };
+      }
+    }
+    if (
+      validation.valid &&
       validation.command.kind === "SOURCE.SAVE"
     ) {
       if (!options.sourceRepository) {
@@ -1026,6 +1265,8 @@ export function createEngineProtocol(
             status: existing?.status ?? "ACTIVE",
             trustStatus: existing?.trustStatus ?? "PENDING",
             rightsStatus: existing?.rightsStatus ?? "PENDING",
+            ...(existing?.trustReview ? { trustReview: existing.trustReview } : {}),
+            ...(existing?.rightsReview ? { rightsReview: existing.rightsReview } : {}),
             language: command.payload.source.language,
             discoveredFeeds: existing?.discoveredFeeds ?? [],
             createdAt: existing?.createdAt ?? now,
@@ -1146,11 +1387,23 @@ async function handleLocalWorkflowCommand(
             ...(options.codexCoordinator ? {} : { lastError: "CODEX_RUNNER_UNAVAILABLE" }),
             metadata: {
               createdAtUnixMs: Date.now(),
+              ...(typeof payload.candidateId === "string" ? { candidateId: payload.candidateId } : {}),
+              ...(typeof payload.candidateTitle === "string" ? { candidateTitle: payload.candidateTitle.slice(0, 240) } : {}),
               instruction: typeof payload.instruction === "string" ? payload.instruction : "",
               sourceIds,
               urls,
+              ...(validCandidateUrl(payload.candidateUrl) ? { candidateUrl: payload.candidateUrl.trim() } : {}),
               section: typeof payload.section === "string" ? payload.section : "haberler",
-              articleType: typeof payload.articleType === "string" ? payload.articleType : "news"
+              articleType: typeof payload.articleType === "string" ? payload.articleType : "news",
+              urgency: typeof payload.urgency === "string" ? payload.urgency : "normal",
+              tone: typeof payload.tone === "string" ? payload.tone : "neutral",
+              length: typeof payload.length === "string" ? payload.length : "standard",
+              visualPolicy: typeof payload.visualPolicy === "string" ? payload.visualPolicy : "GENERATE",
+              scheduleIntent: typeof payload.scheduleIntent === "string" ? payload.scheduleIntent : "UNSCHEDULED",
+              ...(typeof payload.revisionId === "string" ? { revisionId: payload.revisionId } : {}),
+              ...(payload.baseRevision !== undefined ? { baseRevision: payload.baseRevision } : {})
+              ,...(typeof payload.preferredAuthor === "string" ? { preferredAuthor: payload.preferredAuthor } : {})
+              ,...(typeof payload.preferredReviewer === "string" ? { preferredReviewer: payload.preferredReviewer } : {})
               ,...(resolvedSchedule ? { scheduledAt: resolvedSchedule } : {})
             }
           });
@@ -1166,7 +1419,7 @@ async function handleLocalWorkflowCommand(
         const jobId = typeof payload.jobId === "string" ? payload.jobId : "";
         if (!jobId) throw new Error("INVALID_JOB_ID");
         const job = await transaction.getJob(jobId);
-        if (job.state !== "FAILED" && job.state !== "DEAD_LETTER" && job.state !== "RETRY_SCHEDULED") {
+        if (job.state !== "FAILED" && job.state !== "DEAD_LETTER" && job.state !== "RETRY_SCHEDULED" && job.state !== "WAITING_CODEX") {
           throw new Error("JOB_NOT_RETRYABLE");
         }
         const { lastError: _lastError, ...retryableJob } = job;
@@ -1182,8 +1435,9 @@ async function handleLocalWorkflowCommand(
       const urls = Array.isArray(payload.urls)
         ? payload.urls.filter((url): url is string => typeof url === "string")
         : [];
+      const candidateUrl = validCandidateUrl(payload.candidateUrl) ? payload.candidateUrl.trim() : undefined;
       const sourceEvidence = options.sourceRepository
-        ? await collectDraftSourceEvidence(options.sourceRepository, sourceIds, urls, options.sourceTransport)
+        ? await collectDraftSourceEvidence(options.sourceRepository, sourceIds, urls, options.sourceTransport, candidateUrl)
         : options.sourceTransport
           ? await collectDraftSourceEvidence(undefined, [], urls, options.sourceTransport)
           : [];
@@ -1193,6 +1447,13 @@ async function handleLocalWorkflowCommand(
         definitionId: "DRAFT.CREATE",
         payload: { ...effectivePayload, sources: sourceEvidence }
       });
+    }
+    if (kind === "JOB.RETRY" && options.codexCoordinator) {
+      const jobId = typeof payload.jobId === "string" ? payload.jobId : "";
+      // The workflow row and the Codex coordinator record share the draft ID,
+      // but have separate durable state. Requeue both sides so the Operations
+      // button is a real recovery action rather than a misleading success.
+      codex = await options.codexCoordinator.recoverInterrupted(jobId);
     }
     return revisionCommandSuccess(envelopeId, { requestId, idempotencyKey, kind: kind as "LOCAL_STATE.SET" }, { backendJob: result, codex }, await repository.getVersion());
   } catch (error) {
@@ -1219,8 +1480,11 @@ async function resolveNextSlot(
   const candidates: Date[] = [];
   for (const [slotId, raw] of Object.entries(schedule)) {
     if (!isRecord(raw) || raw.enabled === false) continue;
-    const time = typeof raw.time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/u.exec(raw.time);
-    const weekday = dayBySlot[slotId];
+    const time = typeof raw.time === "string" && /^([01]\d|2[0-3]):([0-5]\d)$/u.exec(raw.time);
+    const weekday = dayBySlot[slotId] ?? (() => {
+      const match = /^slot-(mon|tue|wed|thu|fri|sat|sun)-[1-5]$/u.exec(slotId);
+      return match ? dayBySlot[`slot-${match[1]}`] : undefined;
+    })();
     if (!time || weekday === undefined) continue;
     const [, hours, minutes] = time;
     const localNow = new Date(now.getTime() + 3 * 60 * 60 * 1_000);
@@ -1281,10 +1545,24 @@ function revisionCommandFailure(
 }
 
 const MAX_EVIDENCE_TEXT = 4_096;
+// A desktop editor must never leave an apparent live task running for a
+// quarter-hour without a user-visible decision. Longer work can be retried
+// explicitly from Operations after the runner explains its stop condition.
+export const CODEX_RUNNER_TIMEOUT_MS = 5 * 60 * 1_000;
 
 function boundedEvidenceText(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.replaceAll("\u0000", "").slice(0, MAX_EVIDENCE_TEXT);
+}
+
+function validCandidateUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 2_048) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password;
+  } catch {
+    return false;
+  }
 }
 
 function candidateTokens(value: string): Set<string> {
@@ -1317,7 +1595,8 @@ export async function collectDraftSourceEvidence(
   repository: SourceRepository | undefined,
   sourceIds: string[],
   urls: string[],
-  transport?: FetchTransport
+  transport?: FetchTransport,
+  candidateUrl?: string
 ): Promise<Array<Record<string, unknown>>> {
   const evidence: Array<Record<string, unknown>> = [];
   for (const sourceId of [...new Set(sourceIds)].slice(0, 50)) {
@@ -1325,7 +1604,10 @@ export async function collectDraftSourceEvidence(
     try {
       const source = await repository.getSource(sourceId);
       const entries = await repository.listEntries(sourceId);
-      for (const entry of entries.slice(0, 20)) {
+      const selectedEntries = candidateUrl
+        ? entries.filter((entry) => entry.url === candidateUrl).slice(0, 1)
+        : entries.slice(0, 20);
+      for (const entry of selectedEntries) {
         evidence.push({
           id: `${sourceId}:${entry.externalId}`,
           sourceId,
@@ -1376,6 +1658,125 @@ export async function collectDraftSourceEvidence(
   return evidence;
 }
 
+/** Resolves legacy candidate jobs to the one feed entry the editor selected.
+ * Older queue records predate `candidateUrl`; keep their durable identity but
+ * never send an entire feed to the Codex runner when the selected entry can
+ * still be derived from the local source catalog. */
+export async function resolveCandidateSourceUrl(
+  repository: SourceRepository | undefined,
+  sourceIds: readonly string[],
+  candidateId: unknown
+): Promise<string | undefined> {
+  if (!repository || typeof candidateId !== "string" || !candidateId.startsWith("candidate-")) return undefined;
+  for (const sourceId of [...new Set(sourceIds)].slice(0, 50)) {
+    try {
+      const entries = await repository.listEntries(sourceId);
+      const selected = entries.find((entry) => `candidate-${createCandidateKey(sourceId, entry.externalId)}` === candidateId);
+      if (selected && validCandidateUrl(selected.url)) return selected.url;
+    } catch {
+      // A missing local catalog row leaves the existing evidence untouched.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A local process can stop after a Codex job is claimed but before it writes
+ * a result. On the next engine start, requeue the persisted Codex record with
+ * its original idempotency identity; do not ask the editor to recreate work.
+ */
+export async function recoverWaitingDraftJobs(
+  repository: BackendRepository,
+  coordinator: CodexWorkerCoordinator,
+  sourceRepository?: SourceRepository,
+  sourceTransport?: FetchTransport
+): Promise<number> {
+  let recovered = 0;
+  const jobs = await repository.listJobs();
+  for (const job of jobs) {
+    if (job.kind !== "DRAFT" || !["QUEUED", "RUNNING", "WAITING_CODEX"].includes(job.state)) continue;
+    const metadata = isRecord(job.metadata) ? job.metadata : {};
+    // A bounded runner timeout is a completed, user-visible stop condition,
+    // not an interrupted process. Replaying it on every application start
+    // would hide the failure and make the promised manual retry ineffective.
+    if (job.state === "WAITING_CODEX" && metadata.codexWaitReason === "RUNNER_TIMEOUT") continue;
+    const persisted = await coordinator.recoverInterrupted(job.id);
+    if (persisted.recovered) {
+      const { lastError: _lastError, ...queued } = job;
+      const recoveryCount = typeof metadata.recoveryCount === "number" && Number.isSafeInteger(metadata.recoveryCount)
+        ? Math.max(0, metadata.recoveryCount) + 1
+        : 1;
+      await repository.saveJob({
+        ...queued,
+        state: "QUEUED",
+        metadata: {
+          ...metadata,
+          recoveryCount,
+          lastQueuedAtUnixMs: Date.now(),
+          recoveryReason: "ENGINE_RESTART"
+        }
+      });
+      recovered += 1;
+      continue;
+    }
+    // Older local workspaces can contain a draft created before the Codex job
+    // store existed. Only those records need a new, deterministic reservation.
+    if (persisted.snapshot || job.state === "RUNNING") continue;
+    const sourceIds = Array.isArray(metadata.sourceIds)
+      ? metadata.sourceIds.filter((value): value is string => typeof value === "string")
+      : [];
+    const urls = Array.isArray(metadata.urls)
+      ? metadata.urls.filter((value): value is string => typeof value === "string")
+      : [];
+    if (sourceIds.length === 0 && urls.length === 0) continue;
+    const candidateUrl = validCandidateUrl(metadata.candidateUrl) ? metadata.candidateUrl.trim() : undefined;
+    const sources = await collectDraftSourceEvidence(sourceRepository, sourceIds, urls, sourceTransport, candidateUrl);
+    const payload = {
+      draftId: job.id,
+      instruction: typeof metadata.instruction === "string" ? metadata.instruction : "",
+      sourceIds,
+      urls,
+      ...(candidateUrl ? { candidateUrl } : {}),
+      section: typeof metadata.section === "string" ? metadata.section : "haberler",
+      articleType: typeof metadata.articleType === "string" ? metadata.articleType : "news",
+      urgency: typeof metadata.urgency === "string" ? metadata.urgency : "normal",
+      tone: typeof metadata.tone === "string" ? metadata.tone : "neutral",
+      length: typeof metadata.length === "string" ? metadata.length : "standard",
+      visualPolicy: typeof metadata.visualPolicy === "string" ? metadata.visualPolicy : "GENERATE",
+      scheduleIntent: typeof metadata.scheduleIntent === "string" ? metadata.scheduleIntent : "UNSCHEDULED",
+      ...(typeof metadata.revisionId === "string" ? { revisionId: metadata.revisionId } : {}),
+      ...(metadata.baseRevision !== undefined ? { baseRevision: metadata.baseRevision } : {}),
+      ...(typeof metadata.preferredAuthor === "string" ? { preferredAuthor: metadata.preferredAuthor } : {}),
+      ...(typeof metadata.preferredReviewer === "string" ? { preferredReviewer: metadata.preferredReviewer } : {}),
+      ...(typeof metadata.scheduledAt === "string" ? { scheduledAt: metadata.scheduledAt } : {}),
+      sources
+    };
+    await coordinator.submit({
+      jobId: job.id,
+      idempotencyKey: `recovered:${job.id}`,
+      definitionId: "DRAFT.CREATE",
+      payload
+    });
+    const { lastError: _lastError, ...queued } = job;
+    const recoveryMetadata = isRecord(job.metadata) ? job.metadata : {};
+    const recoveryCount = typeof recoveryMetadata.recoveryCount === "number" && Number.isSafeInteger(recoveryMetadata.recoveryCount)
+      ? Math.max(0, recoveryMetadata.recoveryCount) + 1
+      : 1;
+    await repository.saveJob({
+      ...queued,
+      state: "QUEUED",
+      metadata: {
+        ...recoveryMetadata,
+        recoveryCount,
+        lastQueuedAtUnixMs: Date.now(),
+        recoveryReason: "ENGINE_RESTART"
+      }
+    });
+    recovered += 1;
+  }
+  return recovered;
+}
+
 export async function createPersistentEngineProtocol(
   dataDir: string,
   options: PersistentEngineProtocolOptions = {}
@@ -1399,20 +1800,26 @@ export async function createPersistentEngineProtocol(
   let codexCoordinator: CodexWorkerCoordinator | undefined;
   let publicationOutboxWorker: PublicationOutboxWorker | undefined;
   let publicationScheduler: PublicationScheduler | undefined;
-  const githubAuthRuntime = new GitHubAuthRuntime(repository);
+  // Keep the advertised capability independent from worker startup scope so
+  // every later doctor request reports the same injected host capability.
+  const publicationReady = Boolean(options.publicationProcessor);
   const sourceRetentionTimer = setInterval(() => {
     const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString();
-    void sourceRepository.purgeExpiredEntries(cutoff).catch(() => undefined);
+    void sourceRepository.purgeExpiredEntries(cutoff).catch(() => reportBackgroundTaskFault("SOURCE_RETENTION_UNAVAILABLE"));
   }, 24 * 60 * 60 * 1_000);
   sourceRetentionTimer.unref?.();
-  void sourceRepository.purgeExpiredEntries(new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString()).catch(() => undefined);
+  void sourceRepository
+    .purgeExpiredEntries(new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString())
+    .catch(() => reportBackgroundTaskFault("SOURCE_RETENTION_UNAVAILABLE"));
   const automaticBackupTimer = setInterval(() => {
-    void handleBackupRequest({ version: 1, id: `automatic-backup-${Date.now()}`, kind: "backup.auto", payload: {} }, dataDir);
+    void handleBackupRequest({ version: 1, id: `automatic-backup-${Date.now()}`, kind: "backup.auto", payload: {} }, dataDir)
+      .catch(() => reportBackgroundTaskFault("AUTOMATIC_BACKUP_UNAVAILABLE"));
   }, 24 * 60 * 60 * 1_000);
   automaticBackupTimer.unref?.();
   // A restart is the first opportunity after an offline period; take one
   // snapshot immediately, then continue on the daily interval.
-  void handleBackupRequest({ version: 1, id: `automatic-backup-start-${Date.now()}`, kind: "backup.auto", payload: {} }, dataDir);
+  void handleBackupRequest({ version: 1, id: `automatic-backup-start-${Date.now()}`, kind: "backup.auto", payload: {} }, dataDir)
+    .catch(() => reportBackgroundTaskFault("AUTOMATIC_BACKUP_UNAVAILABLE"));
   try {
     await queue.start();
     await sourceScanCoordinator.recover();
@@ -1428,47 +1835,179 @@ export async function createPersistentEngineProtocol(
     }
     const codexCommand = options.codexCommand ?? process.env.BLOGBOT_CODEX_COMMAND;
     const codexHome = options.codexHome ?? process.env.BLOGBOT_CODEX_HOME ?? join(dataDir, "codex-home");
-    if (codexCommand) {
-      await mkdir(codexHome, { recursive: true });
+    const codexPort = options.codexPort ?? (codexCommand
+      ? (await mkdir(codexHome, { recursive: true }), createCodexCliPort({ command: codexCommand, codexHome, timeoutMs: CODEX_RUNNER_TIMEOUT_MS }))
+      : undefined);
+    if (codexPort) {
       const codexStore = new PGliteCodexJobStore(repository.getDatabase());
       codexCoordinator = createCodexWorkerCoordinator({
         persistence: codexStore,
         queue: new PGliteCodexQueueAdapter(queue),
-        codex: createCodexCliPort({ command: codexCommand, codexHome, timeoutMs: 15 * 60 * 1_000 }),
-        taskResolver: createDraftCodexTaskResolver(),
+        codex: codexPort,
+        taskResolver: {
+          async resolve(snapshot) {
+            if (snapshot.definitionId !== "DRAFT.CREATE" || !isRecord(snapshot.payload)) {
+              return createDraftCodexTaskResolver().resolve(snapshot);
+            }
+            const payload = snapshot.payload;
+            const sourceIds = Array.isArray(payload.sourceIds)
+              ? payload.sourceIds.filter((value): value is string => typeof value === "string")
+              : [];
+            const candidateUrl = validCandidateUrl(payload.candidateUrl)
+              ? payload.candidateUrl.trim()
+              : await resolveCandidateSourceUrl(sourceRepository, sourceIds, payload.candidateId);
+            if (!candidateUrl) return createDraftCodexTaskResolver().resolve(snapshot);
+            // Re-resolve from the enriched snapshot instead of replacing the
+            // resolver's contract with raw job metadata. The draft resolver
+            // deliberately bounds untrusted source evidence before it reaches
+            // Codex; bypassing it makes real candidate work behave differently
+            // from the verified structured task contract.
+            return createDraftCodexTaskResolver().resolve({
+              ...snapshot,
+              payload: {
+                ...payload,
+                candidateUrl,
+                sources: await collectDraftSourceEvidence(sourceRepository, sourceIds, [], sourceTransport, candidateUrl)
+              }
+            });
+          }
+        },
+        onStarted: async ({ submission }) => {
+          reportCodexLifecycle("CODEX_JOB_STARTED");
+          if (submission.definitionId === "REVISION.FINAL_REVIEW" && isRecord(submission.payload)) {
+            const originalJobId = typeof submission.payload.originalJobId === "string" ? submission.payload.originalJobId : "";
+            if (!originalJobId) return;
+            const job = await repository.getJob(originalJobId);
+            if (job.state !== "RUNNING") return;
+            await repository.saveJob({
+              ...job,
+              metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW", finalReviewStartedAtUnixMs: Date.now() }
+            });
+            return;
+          }
+          if (submission.definitionId !== "DRAFT.CREATE") return;
+          const job = await repository.getJob(submission.jobId);
+          if (job.state !== "QUEUED") return;
+          await repository.saveJob({
+            ...job,
+            state: "RUNNING",
+            metadata: {
+              ...(job.metadata ?? {}),
+              startedAtUnixMs: Date.now(),
+              progressStage: "PREPARING_SOURCES"
+            }
+          });
+        },
+        onTaskReady: async ({ submission }) => {
+          if (submission.definitionId !== "DRAFT.CREATE") return;
+          const job = await repository.getJob(submission.jobId);
+          if (job.state !== "RUNNING") return;
+          await repository.saveJob({
+            ...job,
+            metadata: { ...(job.metadata ?? {}), progressStage: "RUNNING_CODEX", codexStartedAtUnixMs: Date.now() }
+          });
+        },
+        onWaiting: async ({ submission, reason, diagnosticCode }) => {
+          reportCodexLifecycle("CODEX_JOB_WAITING");
+          if (diagnosticCode) reportCodexLifecycle(diagnosticCode);
+          if (submission.definitionId !== "DRAFT.CREATE") return;
+          const job = await repository.getJob(submission.jobId);
+          if (job.state !== "RUNNING" && job.state !== "QUEUED") return;
+          await repository.saveJob({
+            ...job,
+            state: "WAITING_CODEX",
+            metadata: {
+              ...(job.metadata ?? {}),
+              codexWaitReason: reason,
+              waitingAtUnixMs: Date.now()
+            }
+          });
+        },
+        onRetrying: async ({ submission, failure }) => {
+          reportCodexLifecycle("CODEX_JOB_RETRYING");
+          if (submission.definitionId !== "DRAFT.CREATE") return;
+          const job = await repository.getJob(submission.jobId);
+          if (job.state !== "RUNNING" && job.state !== "QUEUED") return;
+          await repository.saveJob({
+            ...job,
+            state: "QUEUED",
+            metadata: {
+              ...(job.metadata ?? {}),
+              progressStage: "RETRYING_CODEX",
+              codexRetryReason: failure,
+              codexRetryAtUnixMs: Date.now()
+            }
+          });
+        },
         onCompleted: async ({ submission, output }) => {
-          if (submission.definitionId !== "DRAFT.CREATE" || !isDraftCodexOutput(output)) {
-            throw new Error("CODEX_OUTPUT_NOT_A_DRAFT");
+          reportCodexLifecycle("CODEX_JOB_COMPLETED");
+          if (submission.definitionId === "DRAFT.CREATE" && isDraftCodexOutput(output)) {
+            const revision = materializeDraftRevision(submission.jobId, submission.payload, output);
+            const visualPolicy = isRecord(submission.payload) && typeof submission.payload.visualPolicy === "string"
+              ? submission.payload.visualPolicy
+              : "NONE";
+            if (visualPolicy !== "NONE") {
+              const direction: ArtDirection = {
+                title: output.tr.title,
+                palette: ["#08131f", "#32d3a6"],
+                motifs: ["network", "shield"],
+                externalAssets: [],
+                depictsRealPerson: false,
+                depictsBrandLogo: false
+              };
+              const artifacts = await renderCoverVariants(direction, join(dataDir, "media", revision.id), revision.tr.slug);
+              revision.media = await Promise.all(artifacts.map(async (artifact) => ({
+                role: "hero",
+                path: `media/${revision.id}/${artifact.path}`,
+                sha256: artifact.sha256,
+                width: artifact.width,
+                height: artifact.height,
+                contentBase64: (await readFile(artifact.absolutePath)).toString("base64")
+              })));
+            }
+            const job = await repository.getJob(submission.jobId);
+            await repository.saveJob({
+              ...job,
+              state: "RUNNING",
+              metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW_QUEUED", qualityReviewQueuedAtUnixMs: Date.now() }
+            });
+            await codexCoordinator!.submit({
+              jobId: `${submission.jobId}:final-review`,
+              idempotencyKey: `final-review:${submission.idempotencyKey}`,
+              definitionId: "REVISION.FINAL_REVIEW",
+              payload: { originalJobId: submission.jobId, revision }
+            });
+            return;
           }
-          const revision = materializeDraftRevision(submission.jobId, submission.payload, output);
-          const visualPolicy = isRecord(submission.payload) && typeof submission.payload.visualPolicy === "string"
-            ? submission.payload.visualPolicy
-            : "NONE";
-          if (visualPolicy !== "NONE") {
-            const direction: ArtDirection = {
-              title: output.tr.title,
-              palette: ["#08131f", "#32d3a6"],
-              motifs: ["network", "shield"],
-              externalAssets: [],
-              depictsRealPerson: false,
-              depictsBrandLogo: false
-            };
-            const artifacts = await renderCoverVariants(direction, join(dataDir, "media", revision.id), revision.tr.slug);
-            revision.media = await Promise.all(artifacts.map(async (artifact) => ({
-              role: "hero",
-              path: `media/${revision.id}/${artifact.path}`,
-              sha256: artifact.sha256,
-              width: artifact.width,
-              height: artifact.height,
-              contentBase64: (await readFile(artifact.absolutePath)).toString("base64")
-            })));
+          if (submission.definitionId !== "REVISION.FINAL_REVIEW" || !isFinalReviewCodexOutput(output) || !isRecord(submission.payload)) {
+            throw new Error("CODEX_OUTPUT_CONTRACT_MISMATCH");
           }
+          const originalJobId = typeof submission.payload.originalJobId === "string" ? submission.payload.originalJobId : "";
+          const rawRevision = submission.payload.revision;
+          if (!originalJobId || !isRecord(rawRevision)) throw new Error("FINAL_REVIEW_REVISION_MISSING");
+          const connectorState = await repository.getLocalState("desktop.connectors");
+          const connectorChecks = await repository.getLocalState("desktop.connectorChecks");
+          const connectors = isRecord(connectorState) ? connectorState : {};
+          const checks = isRecord(connectorChecks) ? connectorChecks : {};
+          const site = isRecord(connectors.site) ? connectors.site : {};
+          const github = isRecord(connectors.github) ? connectors.github : {};
+          const siteCheck = isRecord(checks.site) ? checks.site : {};
+          const adapterDryRun = isRecord(siteCheck.adapterDryRun) ? siteCheck.adapterDryRun : {};
+          const revision = finalizeReviewedRevision(rawRevision as unknown as ArticleRevision, output, {
+            mode: site.mode === "PUBLISH" || site.mode === "LOCAL_DEV" ? site.mode : "LOCAL_ONLY",
+            owner: typeof github.owner === "string" ? github.owner : undefined,
+            repository: typeof github.repository === "string" ? github.repository : undefined,
+            branch: typeof github.branch === "string" ? github.branch : undefined,
+            baseSha: typeof github.baseSha === "string" ? github.baseSha : undefined,
+            adapterId: typeof adapterDryRun.adapterId === "string" ? adapterDryRun.adapterId : undefined,
+            adapterVersion: typeof adapterDryRun.adapterVersion === "string" ? adapterDryRun.adapterVersion : undefined
+          });
           await repository.runIdempotent(
-            `codex-materialize:${submission.jobId}`,
+            `codex-materialize:${originalJobId}`,
             canonicalJson(revision),
             (transaction) => transaction.insertRevision(revision)
           );
-          const job = await repository.getJob(submission.jobId);
+          const job = await repository.getJob(originalJobId);
           const completedJob: BackendJob = {
             ...job,
             state: "SUCCEEDED",
@@ -1478,80 +2017,15 @@ export async function createPersistentEngineProtocol(
           await repository.saveJob(completedJob);
         }
       });
+      await recoverWaitingDraftJobs(
+        repository,
+        codexCoordinator,
+        sourceRepository,
+        sourceTransport
+      );
       await registerCodexQueueWorker(queue, codexCoordinator);
     }
-    let effectivePublicationProcessor = options.publicationProcessor;
-    if (!effectivePublicationProcessor) {
-      const desktopConnectors = await repository.getLocalState("desktop.connectors");
-      const github = (await repository.getLocalState("connector.github")) ?? (isRecord(desktopConnectors) ? desktopConnectors.github : undefined);
-      const deploy = (await repository.getLocalState("connector.deploy")) ?? (isRecord(desktopConnectors) ? desktopConnectors.deploy : undefined);
-      const tokenValue = await repository.getLocalState("connector.github.token");
-      const token = isRecord(tokenValue) && typeof tokenValue.token === "string" ? tokenValue.token.trim() : "";
-      const owner = isRecord(github) && typeof github.owner === "string" ? github.owner.trim() : "";
-      const repositoryName = isRecord(github) && typeof github.repository === "string" ? github.repository.trim() : "";
-      const workflowName = isRecord(deploy) && typeof deploy.workflowName === "string" ? deploy.workflowName.trim() : "";
-      if (token && owner && repositoryName && workflowName) {
-        const effects = new GitHubPublicationEffects({
-          token,
-          repository: `${owner}/${repositoryName}`,
-          baseBranch: "main",
-          deployWorkflow: workflowName
-        }, {
-          store: {
-            get: (key) => repository.getLocalState(key),
-            set: (key, value) => repository.setLocalState(key, value)
-          }
-        });
-        effectivePublicationProcessor = createConnectorAwarePublicationProcessor({
-          connector: { state: "READY" },
-          effects,
-          resolver: {
-            resolve: async (effect) => {
-              const snapshot = (await repository.sync(0)).snapshot;
-              const revision = snapshot.revisions.find((item) => item.id === effect.aggregateId);
-              const preview = await repository.getLocalState(`publication.preview:${effect.aggregateId}`);
-              if (!revision || !isRecord(preview) || !isRecord(preview.payload)) return null;
-              // The outbox row is the immutable publication intent. Never
-              // resolve a command from mutable preview state alone: an old
-              // preview must not be replayed for a newer (or different)
-              // revision hash after a crash/restart.
-              if (typeof effect.revisionHash !== "string" || !/^[a-f0-9]{64}$/iu.test(effect.revisionHash)) return null;
-              const currentRevisionHash = computeRevisionHash(revision);
-              if (currentRevisionHash !== effect.revisionHash) return null;
-              const approved = snapshot.approvals.find((item) => item.revisionId === effect.aggregateId);
-              if (!approved || approved.revisionHash !== effect.revisionHash || approved.revisionHash !== preview.revisionHash) return null;
-              const payload = preview.payload;
-              if (!Array.isArray(payload.files)) return null;
-              const approvedBaseSha = typeof payload.approvedBaseSha === "string" ? payload.approvedBaseSha : "";
-              const currentBaseSha = typeof payload.currentBaseSha === "string" ? payload.currentBaseSha : "";
-              // Local-only projects can be reviewed and drafted without a
-              // public URL. External publication stays blocked until the
-              // canonical public address is configured and the preview is
-              // regenerated against it.
-              if (typeof payload.siteOrigin !== "string" || !payload.siteOrigin.trim()) return null;
-              // A publication without a read-only base snapshot cannot prove
-              // that the reviewed repository is still the one being changed.
-              if (!/^[a-f0-9]{7,64}$/iu.test(approvedBaseSha) || approvedBaseSha !== currentBaseSha) return null;
-              const command: ApprovedPublicationCommand = {
-                articleId: revision.translationKey,
-                revisionId: revision.id,
-                approvedRevisionHash: effect.revisionHash,
-                currentRevisionHash,
-                targetRepository: typeof payload.targetRepository === "string" ? payload.targetRepository : "",
-                baseBranch: typeof payload.baseBranch === "string" ? payload.baseBranch : "main",
-                approvedBaseSha,
-                currentBaseSha,
-                approvedHeadSha: typeof payload.approvedHeadSha === "string" ? payload.approvedHeadSha : "",
-                currentHeadSha: typeof payload.currentHeadSha === "string" ? payload.currentHeadSha : "",
-                files: payload.files as never,
-                ...(isRecord(payload.bundlePolicy) ? { bundlePolicy: payload.bundlePolicy as never } : {})
-              };
-              return command;
-            }
-          }
-        });
-      }
-    }
+    const effectivePublicationProcessor = options.publicationProcessor;
     if (effectivePublicationProcessor) {
       publicationOutboxWorker = startPublicationOutboxWorker(repository, effectivePublicationProcessor);
     }
@@ -1580,10 +2054,10 @@ export async function createPersistentEngineProtocol(
       const protocolOptions: EngineProtocolOptions = {
         sourceRepository,
         sourceTransport,
-        sourceScanCoordinator
+        sourceScanCoordinator,
+        publicationReady
       };
       if (codexCoordinator) protocolOptions.codexCoordinator = codexCoordinator;
-      protocolOptions.githubAuthRuntime = githubAuthRuntime;
       return createEngineProtocol(repository, "ready", protocolOptions)(input);
     },
     close: async () => {

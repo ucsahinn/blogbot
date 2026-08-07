@@ -10,12 +10,25 @@ export interface SiteArtifactManifest {
 
 const safeId = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const safePath = /^[a-zA-Z0-9._/-]+$/u;
+const manifestKeys = new Set([
+  "version",
+  "revisionId",
+  "revisionHash",
+  "translationKey",
+  "adapterVersion",
+  "generatedAt",
+  "entries"
+]);
+const entryKeys = new Set(["path", "sha256", "bytes"]);
 
 /** Parse the adapter-neutral artifact contract used by the publisher. */
 export function parseSiteArtifactManifest(content: string): SiteArtifactManifest {
   let value: unknown;
   try { value = JSON.parse(content); } catch { throw new Error("artifact manifest is invalid JSON"); }
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("artifact manifest must be an object");
+  if (Object.keys(value).some((key) => !manifestKeys.has(key))) {
+    throw new Error("artifact manifest does not match the adapter-neutral schema");
+  }
   const manifest = value as Partial<SiteArtifactManifest>;
   if (
     manifest.version !== 1 ||
@@ -26,7 +39,8 @@ export function parseSiteArtifactManifest(content: string): SiteArtifactManifest
     new Date(Date.parse(manifest.generatedAt)).toISOString() !== manifest.generatedAt ||
     !Array.isArray(manifest.entries) ||
     !manifest.entries.every((entry) => {
-      if (typeof entry !== "object" || entry === null) return false;
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+      if (Object.keys(entry).some((key) => !entryKeys.has(key))) return false;
       const candidate = entry as { path?: unknown; sha256?: unknown; bytes?: unknown };
       return typeof candidate.path === "string" && safePath.test(candidate.path) &&
         !candidate.path.startsWith("/") && !candidate.path.split("/").some((part) => part === "." || part === "..") &&

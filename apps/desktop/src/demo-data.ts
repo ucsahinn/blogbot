@@ -3,13 +3,37 @@ import { BridgeError, type InvokeTransport } from "./bridge.ts";
 import { createEditorialWorkspaceDemo } from "./editorial-demo-data.ts";
 import type {
   BootstrapSnapshot,
+  ConnectorStateSnapshot,
   DesktopPreferences,
+  EditorialWorkspaceSnapshot,
   OperationsSnapshot,
   PrerequisiteSnapshot,
   ReviewRevision,
   SourceRecord,
   SourceTestResult
 } from "./types.ts";
+
+const connectorState: ConnectorStateSnapshot = {
+  sourceState: "AVAILABLE",
+  mode: "LOCAL_ONLY",
+  configured: false,
+  config: {
+    codex: { accountLabel: "" },
+    github: { owner: "", repository: "" },
+    site: { repositoryPath: "", publicSiteUrl: "", mode: "LOCAL_ONLY" },
+    deploy: { workflowName: "" },
+    backup: { folder: "" }
+  },
+  site: {
+    repositoryPath: "",
+    publicSiteUrl: "",
+    adapterId: "local-folder-v1",
+    adapterVersion: "1",
+  },
+  checks: {},
+  localReadiness: "LOCAL_VALIDATED",
+  externalReadiness: "NOT_CONFIGURED"
+};
 
 const prerequisites: PrerequisiteSnapshot = {
   checkedAtUnixMs: Date.now(),
@@ -213,6 +237,7 @@ const bootstrap: BootstrapSnapshot = {
     "SOURCE.LIST",
     "SOURCE.TEST",
     "SOURCE.SAVE",
+    "SOURCE.SCAN",
     "MUTATIONS.CORE"
   ],
   runtime: "ONLINE",
@@ -386,49 +411,56 @@ const review: ReviewRevision = {
       label: "İddia kaynak eşleşmesi",
       detail: "3/3 iddia doğrulanmış kaynak anlık görüntülerine bağlı.",
       state: "PASS",
-      group: "editorial"
+      group: "editorial",
+      policyVersion: "demo-v1"
     },
     {
       id: "gate-originality",
       label: "Özgünlük ve kaynak ayrımı",
       detail: "Kaynak cümleleri kopyalanmamış; sentez özgün.",
       state: "PASS",
-      group: "editorial"
+      group: "editorial",
+      policyVersion: "demo-v1"
     },
     {
       id: "gate-title",
       label: "Başlık ve arama niyeti",
       detail: "Başlık içeriği dürüstçe temsil ediyor.",
       state: "PASS",
-      group: "seo"
+      group: "seo",
+      policyVersion: "demo-v1"
     },
     {
       id: "gate-links",
       label: "İç bağlantılar",
       detail: "Bir ilişkili site rehberi eklendi.",
       state: "PASS",
-      group: "seo"
+      group: "seo",
+      policyVersion: "demo-v1"
     },
     {
       id: "gate-schema",
       label: "Article şeması",
       detail: "Yazar, tarih, görsel ve çeviri bağı tamam.",
       state: "PASS",
-      group: "seo"
+      group: "seo",
+      policyVersion: "demo-v1"
     },
     {
       id: "gate-urls",
       label: "Kaynak URL güvenliği",
       detail: "Özel ağ ve yönlendirme kontrolleri geçti.",
       state: "PASS",
-      group: "editorial"
+      group: "editorial",
+      policyVersion: "demo-v1"
     },
     {
       id: "gate-media",
       label: "Medya bütünlüğü",
       detail: "Dosya hash'leri ve boyut oranları doğrulandı.",
       state: "PASS",
-      group: "editorial"
+      group: "editorial",
+      policyVersion: "demo-v1"
     }
   ],
   media: [
@@ -554,11 +586,59 @@ export function createDemoTransport(): InvokeTransport {
   const demoReview = structuredClone(review);
   const demoOperations = structuredClone(operations);
   const editorialWorkspace = createEditorialWorkspaceDemo();
+  const demoScanStatuses = new Map<string, {
+    operationId: string;
+    complete: boolean;
+    queued: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    rejected: number;
+    detail: string;
+  }>();
+
+  const queueDemoScan = (sourceId?: string) => {
+    const operationId = `demo-scan-${sourceId ?? "all"}-${Date.now()}`;
+    const scannedSources = sourceId ? 1 : 2;
+    if (!editorialWorkspace.candidates.some((candidate) => candidate.id === "candidate-demo-scan-1")) {
+      editorialWorkspace.candidates.unshift({
+        id: "candidate-demo-scan-1",
+        sourceId: sourceId ?? "src-official",
+        title: "Yerel tarama sonucu: yeni haber",
+        summary: "Kaydedilmiş kaynakta yeni bir içerik bulundu; araştırma ve taslak akışına alınmaya hazır.",
+        primarySource: "Yerel taranan kaynak",
+        sourceCount: 1,
+        section: "haberler",
+        articleType: "news",
+        confidence: 85,
+        duplicateScore: 0,
+        discoveredAt: new Date().toISOString(),
+        state: "NEW"
+      });
+    }
+    demoScanStatuses.set(operationId, {
+      operationId,
+      complete: true,
+      queued: 0,
+      running: 0,
+      succeeded: scannedSources,
+      failed: 0,
+      rejected: 0,
+      detail: `${scannedSources} kaynak tarandı; 1 yeni haber adayı bulundu.`
+    });
+    return {
+      accepted: true,
+      operationId,
+      detail: `${scannedSources} kaynak yerel tarama kuyruğuna alındı.`
+    };
+  };
 
   return async (command, args) => {
     switch (command) {
       case "get_bootstrap_snapshot":
         return structuredClone(demoBootstrap);
+      case "get_connector_state":
+        return structuredClone(connectorState);
       case "get_prerequisite_status":
         demoPrerequisites.checkedAtUnixMs = Date.now();
         return structuredClone(demoPrerequisites);
@@ -568,27 +648,43 @@ export function createDemoTransport(): InvokeTransport {
           component: "local-engine",
           detail: "Yerel engine, PGlite ve iş kuyruğu çalışıyor."
         };
+      case "recover_local_workspace":
+        return { ready: true, detail: "Yeni yerel çalışma alanı hazır." };
       case "pick_local_folder":
-        return null;
+        return "C:\\Blogbot-Demo";
       case "local_dev_status":
-        return { running: false, logPath: "C:\\Blogbot-Demo\\logs\\local-dev.log" };
+        return { running: false, supported: true };
       case "start_local_dev":
-        return { running: true, directory: String(args?.path ?? "C:\\Blogbot-Demo"), logPath: "C:\\Blogbot-Demo\\logs\\local-dev.log" };
+        return { running: true, directory: String(args?.path ?? "C:\\Blogbot-Demo") };
       case "stop_local_dev":
         return { running: false };
-      case "get_local_dev_logs":
-        return { path: "C:\\Blogbot-Demo\\logs\\local-dev.log", lines: [] };
       case "get_engine_diagnostics":
         return { path: "C:\\Blogbot-Demo\\logs\\engine.stderr.log", lines: [] };
       case "export_diagnostics":
-        return { path: "C:\\Blogbot-Demo\\diagnostics\\blogbot-diagnostics-demo.json", bytes: 0, included: ["engine", "local-dev", "operations"] };
+        return { path: "C:\\Blogbot-Demo\\diagnostics\\blogbot-diagnostics-demo.json", bytes: 0, included: ["engine", "operations"] };
       case "test_codex_runtime":
         return { available: true, authenticated: true, runnerReady: true, version: "demo", detail: "Demo çalışma alanında Codex bağlantısı hazır görünüyor." };
       case "start_codex_login":
         return { started: true, detail: "Demo giriş akışı başlatıldı; gerçek uygulamada Codex giriş penceresi açılır." };
       case "test_setup_connector":
-      case "save_setup_connector":
-        return { ready: true, writes: command === "save_setup_connector", network: false, detail: "Kurulum alanları demo çalışma alanında doğrulandı." };
+        return { ready: true, writes: false, network: false, detail: "Kurulum alanları demo çalışma alanında doğrulandı." };
+      case "save_setup_connector": {
+        const input = args as { connector?: unknown; config?: unknown } | undefined;
+        const connector = input?.connector;
+        const config = input?.config;
+        if (connector === "site" && config && typeof config === "object") {
+          const site = config as Partial<ConnectorStateSnapshot["config"]["site"]>;
+          const repositoryPath = typeof site.repositoryPath === "string" ? site.repositoryPath : "";
+          const publicSiteUrl = typeof site.publicSiteUrl === "string" ? site.publicSiteUrl : "";
+          const mode = site.mode === "LOCAL_DEV" || site.mode === "PUBLISH" ? site.mode : "LOCAL_ONLY";
+          connectorState.config.site = { repositoryPath, publicSiteUrl, mode };
+          connectorState.mode = mode;
+          connectorState.configured = Boolean(repositoryPath || publicSiteUrl);
+          connectorState.site.repositoryPath = repositoryPath;
+          connectorState.site.publicSiteUrl = publicSiteUrl;
+        }
+        return { ready: true, writes: true, network: false, detail: "Kurulum alanları demo çalışma alanında doğrulandı." };
+      }
       case "github_device_flow_start":
         return { started: true, writes: false, network: false, userCode: "DEMO-CODE", verificationUri: "https://github.com/login/device", detail: "Demo GitHub cihaz akışı hazır." };
       case "github_device_flow_status":
@@ -609,6 +705,24 @@ export function createDemoTransport(): InvokeTransport {
         return { shown: true };
       case "list_sources":
         return { sources: structuredClone(demoSources) };
+      case "review_source": {
+        const sourceId = String(args?.sourceId ?? "");
+        const source = demoSources.find((item) => item.id === sourceId);
+        if (!source || source.version !== Number(args?.expectedVersion)) {
+          throw new Error("Kaynak güncellendi. Envanteri yenileyip incelemeyi tekrar deneyin.");
+        }
+        const reviewedAt = new Date().toISOString();
+        const rationale = String(args?.rationale ?? "").trim();
+        if (rationale.length < 10) throw new Error("İnceleme gerekçesi en az 10 karakter olmalıdır.");
+        source.trustStatus = args?.trustStatus === "REJECTED" ? "REJECTED" : "APPROVED";
+        source.rightsStatus = args?.rightsStatus === "REJECTED" ? "REJECTED" : "APPROVED";
+        source.trustReview = { reviewedAt, rationale };
+        source.rightsReview = { reviewedAt, rationale };
+        source.version += 1;
+        source.canPublish = source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED";
+        source.blockers = source.canPublish ? [] : ["TRUST_REJECTED", "RIGHTS_REJECTED"];
+        return { source: structuredClone(source) };
+      }
       case "test_source":
         return sourceTest(String(args?.url ?? ""));
       case "preview_opml": {
@@ -658,8 +772,38 @@ export function createDemoTransport(): InvokeTransport {
         demoBootstrap.sourceCount += added.length;
         return { sources: structuredClone(added) };
       }
-      case "create_instant_draft":
-        return { id: `draft-demo-${Date.now()}`, state: "RESEARCHING" };
+      case "scan_source":
+        return queueDemoScan(String(args?.sourceId ?? ""));
+      case "scan_all_sources":
+        return queueDemoScan();
+      case "get_source_scan_status": {
+        const operationId = String(args?.operationId ?? "");
+        const status = demoScanStatuses.get(operationId);
+        if (!status) throw new BridgeError("COMMAND_FAILED", "Tarama durumu bulunamadı.");
+        return structuredClone(status);
+      }
+      case "create_instant_draft": {
+        const request = args?.request as { instruction?: unknown; targetSection?: unknown } | undefined;
+        const id = `draft-demo-${Date.now()}`;
+        const instruction = typeof request?.instruction === "string" && request.instruction.trim()
+          ? request.instruction.trim()
+          : "Yeni içerik araştırması";
+        const section = typeof request?.targetSection === "string" ? request.targetSection : "haberler";
+        editorialWorkspace.drafts.unshift({
+          id,
+          titleTr: instruction,
+          titleEn: "English localization will be prepared after research",
+          section: section as EditorialWorkspaceSnapshot["drafts"][number]["section"],
+          completion: 8,
+          blockers: 0,
+          updatedAt: new Date().toISOString(),
+          scheduledAt: null,
+          state: "DRAFTING",
+          reviewable: false,
+          detail: "Yazı üretimi hesabı veya izole runner bekleniyor."
+        });
+        return { id, state: "RESEARCHING", queueState: "QUEUED" };
+      }
       case "get_review_revision":
         return structuredClone(demoReview);
       case "approve_revision": {
@@ -677,6 +821,54 @@ export function createDemoTransport(): InvokeTransport {
           state: demoReview.state
         };
       }
+      case "approve_high_risk_revision": {
+        const request = args?.request as Record<string, unknown> | undefined;
+        const expectedHash = String(request?.expectedHash ?? "");
+        if (expectedHash !== demoReview.revisionHash || request?.confirmReauthenticated !== true) {
+          throw new BridgeError("COMMAND_FAILED", "Yüksek risk onayı güncel revizyon ve yeniden kimlik doğrulaması gerektirir.");
+        }
+        demoReview.highRiskApproved = true;
+        demoReview.state = "APPROVED";
+        return { revisionHash: demoReview.revisionHash, state: demoReview.state };
+      }
+      case "preview_publication": {
+        const revisionId = String(args?.revisionId ?? "");
+        const revisionHash = String(args?.revisionHash ?? "");
+        if (revisionId !== demoReview.id || revisionHash !== demoReview.revisionHash) {
+          throw new BridgeError("COMMAND_FAILED", "Yayın önizlemesi güncel revizyona bağlı olmalıdır.");
+        }
+        return { previewHash: demoReview.revisionHash };
+      }
+      case "materialize_local_preview": {
+        const revisionId = String(args?.revisionId ?? "");
+        const revisionHash = String(args?.revisionHash ?? "");
+        const previewHash = String(args?.previewHash ?? "");
+        const targetDirectory = String(args?.targetDirectory ?? "").trim();
+        if (
+          demoReview.state !== "APPROVED" ||
+          revisionId !== demoReview.id ||
+          revisionHash !== demoReview.revisionHash ||
+          previewHash !== demoReview.revisionHash ||
+          !targetDirectory
+        ) {
+          throw new BridgeError("COMMAND_FAILED", "Yerel çıktı yalnız onaylı, değişmez yayın önizlemesinden hazırlanabilir.");
+        }
+        return { written: 0, backupDirectory: null };
+      }
+      case "enqueue_publication": {
+        const revisionId = String(args?.revisionId ?? "");
+        const revisionHash = String(args?.revisionHash ?? "");
+        const previewHash = String(args?.previewHash ?? "");
+        if (
+          demoReview.state !== "APPROVED" ||
+          revisionId !== demoReview.id ||
+          revisionHash !== demoReview.revisionHash ||
+          previewHash !== demoReview.revisionHash
+        ) {
+          throw new BridgeError("COMMAND_FAILED", "Yayın kuyruğu yalnız onaylı, değişmez önizlemeyi kabul eder.");
+        }
+        return { ok: true };
+      }
       case "get_operations":
         return structuredClone(demoOperations);
       case "get_editorial_workspace":
@@ -690,21 +882,34 @@ export function createDemoTransport(): InvokeTransport {
           throw new BridgeError("COMMAND_FAILED", "Haber adayı bulunamadı.");
         }
         const needsSource = candidate.state === "NEEDS_SOURCE";
-        candidate.state = "PROMOTED";
-        if (!editorialWorkspace.drafts.some((item) => item.id === `draft-${candidateId}`)) {
+        const wasDiscovered = candidate.state !== "DISMISSED" && candidate.state !== "PROMOTED" && candidate.state !== "RESEARCH_QUEUED";
+        candidate.state = "RESEARCH_QUEUED";
+        const draftId = `draft-candidate-${candidateId}`;
+        const alreadyQueued = editorialWorkspace.drafts.some((item) => item.id === draftId);
+        if (!alreadyQueued) {
           editorialWorkspace.drafts.unshift({
-            id: `draft-${candidateId}`,
+            id: draftId,
             titleTr: candidate.title,
             titleEn: "English localization will be prepared after research",
             section: candidate.section,
-            completion: 12,
+            completion: null,
             blockers: needsSource ? 1 : 0,
             updatedAt: new Date().toISOString(),
             scheduledAt: null,
-            state: needsSource ? "NEEDS_SOURCE" : "DRAFTING"
+            state: needsSource ? "NEEDS_SOURCE" : "DRAFTING",
+            reviewable: false,
+            detail: needsSource
+              ? "Araştırma başlatılmadan önce ikinci bağımsız kaynak gerekli."
+              : "Araştırma güvenli yerel kuyruğa alındı."
           });
         }
-        return { ok: true };
+        if (wasDiscovered) {
+          demoBootstrap.pipeline[0]!.count = Math.max(0, demoBootstrap.pipeline[0]!.count - 1);
+        }
+        if (!alreadyQueued) {
+          demoBootstrap.pipeline[1]!.count += 1;
+        }
+        return { ok: true, state: "RESEARCH_QUEUED", job: { id: draftId } };
       }
       case "dismiss_candidate": {
         const candidateId = String(args?.candidateId ?? "");
@@ -714,7 +919,11 @@ export function createDemoTransport(): InvokeTransport {
         if (!candidate) {
           throw new BridgeError("COMMAND_FAILED", "Haber adayı bulunamadı.");
         }
+        const wasDiscovered = candidate.state !== "DISMISSED" && candidate.state !== "PROMOTED" && candidate.state !== "RESEARCH_QUEUED";
         candidate.state = "DISMISSED";
+        if (wasDiscovered) {
+          demoBootstrap.pipeline[0]!.count = Math.max(0, demoBootstrap.pipeline[0]!.count - 1);
+        }
         return { ok: true };
       }
       case "retry_job": {
@@ -738,6 +947,20 @@ export function createDemoTransport(): InvokeTransport {
           );
         }
         demoReview.state = "REVIEW_REQUIRED";
+        const jobId = `draft-edit-${Date.now()}`;
+        editorialWorkspace.drafts.unshift({
+          id: jobId,
+          titleTr: "Düzenleme talebini işliyor",
+          titleEn: "Preparing the requested revision",
+          section: "analiz",
+          completion: 15,
+          blockers: 1,
+          updatedAt: "Yerel kuyruk",
+          scheduledAt: null,
+          state: "DRAFTING",
+          reviewable: false,
+          detail: "Düzenleme talebi güvenli yerel kuyruğa alındı; Codex hesabı veya izole runner bekleniyor."
+        });
         demoOperations.events.unshift({
           id: `edit-${Date.now()}`,
           at: new Intl.DateTimeFormat("tr-TR", {
@@ -749,7 +972,7 @@ export function createDemoTransport(): InvokeTransport {
           state: "WAITING",
           correlationId: `edit_${revisionId}`
         });
-        return { ok: true };
+        return { ok: true, state: "RESEARCH_QUEUED", job: { id: jobId } };
       }
       case "update_schedule_slot": {
         const slotId = String(args?.slotId ?? "");

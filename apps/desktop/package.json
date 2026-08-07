@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 1420 --strictPort",
+    "qa:dev": "vite --port 1422 --strictPort",
     "build": "npm run typecheck && vite build",
     "build:web": "vite build",
     "preview": "vite preview",
@@ -15,6 +16,7 @@
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-notification": "2.3.3",
+    "@tauri-apps/plugin-updater": "2.10.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

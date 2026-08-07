@@ -165,6 +165,7 @@ export async function renderCoverVariants(
   const root = resolve(outputDirectory);
   await mkdir(root, { recursive: true });
   const artifacts: RenderedCoverArtifact[] = [];
+  const sharp = loadSharp();
 
   for (const variant of planRasterVariants(baseName)) {
     const target = resolve(join(root, variant.path));
@@ -194,6 +195,18 @@ export async function renderCoverVariants(
 }
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
+import type sharp from "sharp";
 
-import sharp from "sharp";
+type Sharp = typeof sharp;
+
+function loadSharp(): Sharp {
+  const bundledModules = process.env.BLOGBOT_ENGINE_MODULES;
+  const requireFromBundledModules = createRequire(
+    bundledModules
+      ? join(bundledModules, "package.json")
+      : import.meta.url
+  );
+  return requireFromBundledModules("sharp") as Sharp;
+}

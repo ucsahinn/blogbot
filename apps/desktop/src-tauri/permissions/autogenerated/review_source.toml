@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-review-source"
+description = "Enables the review_source command without any pre-configured scope."
+commands.allow = ["review_source"]
+
+[[permission]]
+identifier = "deny-review-source"
+description = "Denies the review_source command without any pre-configured scope."
+commands.deny = ["review_source"]

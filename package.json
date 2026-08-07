@@ -20,7 +20,7 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run build --workspace @blogbot/desktop",
     "build:engine": "node scripts/build-engine-sidecar.mjs",
-    "build:desktop": "npm run build:engine && npm run build --workspace @blogbot/desktop",
+    "build:desktop": "node scripts/build-desktop.mjs",
     "smoke:engine": "node scripts/smoke-engine-sidecar.mjs",
     "desktop:preflight": "node scripts/desktop-preflight.mjs",
     "desktop:preflight:json": "node scripts/desktop-preflight.mjs --json",
@@ -32,10 +32,15 @@
     "icons:generate": "node --experimental-transform-types scripts/generate-desktop-icons.ts",
     "backup:verify": "node --test --experimental-transform-types --test-name-pattern=\"backup creates\" tests/integration/siberdergi-infra.test.ts",
     "restore:drill": "node --test --experimental-transform-types --test-name-pattern=\"backup creates\" tests/integration/siberdergi-infra.test.ts",
-    "pilot:report": "node --experimental-transform-types scripts/pilot-report.ts"
+    "pilot:report": "node --experimental-transform-types scripts/pilot-report.ts",
+    "token:audit": "node scripts/token-audit.mjs",
+    "test:browser": "playwright test",
+    "smoke:native-webview": "node scripts/native-webview-smoke.mjs"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
     "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
     "@types/node": "26.1.2",
     "esbuild": "^0.25.12",
     "eslint": "10.8.0",
@@ -45,5 +50,8 @@
     "postject": "^1.0.0-alpha.6",
     "typescript": "5.9.3",
     "typescript-eslint": "8.65.0"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9"
   }
 }

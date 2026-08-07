@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import test from "node:test";
 import { createPersistentEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
 import {
   computeRevisionHash,
+  computeWarningSetHash,
   type ArticleRevision,
   type RevisionPackageV2
 } from "../../packages/editorial/src/revision.ts";
@@ -98,6 +100,10 @@ function revision(
         sha256: "3".repeat(64),
         size: 960
       }
+    ],
+    qualityGates: [
+      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "1" },
+      { id: "parity", group: "editorial", state: "PASS", detail: "Dil eşitliği doğrulandı.", policyVersion: "1" }
     ],
     ...overrides
   };
@@ -204,6 +210,7 @@ test("normal approval is exact-hash bound, idempotent, and durable", async (t) =
   });
   const expectedRevision = revision();
   const expectedHash = computeRevisionHash(expectedRevision);
+  const warningSetHash = computeWarningSetHash(expectedRevision.qualityGates);
   await runtime.handle(
     command("REVISION.SAVE", { revision: expectedRevision }, 0, "approve-save")
   );
@@ -214,7 +221,8 @@ test("normal approval is exact-hash bound, idempotent, and durable", async (t) =
       {
         revisionId: expectedRevision.id,
         revisionHash: "0".repeat(64),
-        deviceId: "windows-local-device-v1"
+        deviceId: "windows-local-device-v1",
+        warningSetHash
       },
       1,
       "approve-wrong-hash"
@@ -228,7 +236,8 @@ test("normal approval is exact-hash bound, idempotent, and durable", async (t) =
       {
         revisionId: expectedRevision.id,
         revisionHash: expectedHash,
-        deviceId: "windows-local-device-v1"
+        deviceId: "windows-local-device-v1",
+        warningSetHash
       },
       1,
       "approve"
@@ -240,6 +249,7 @@ test("normal approval is exact-hash bound, idempotent, and durable", async (t) =
     deviceId: string;
     approvedAt: string;
     approvalType: "EDITORIAL";
+    warningSetHash: string;
   }>(approved);
   assert.deepEqual(
     {
@@ -251,7 +261,8 @@ test("normal approval is exact-hash bound, idempotent, and durable", async (t) =
       revisionHash: expectedHash,
       deviceId: "windows-local-device-v1",
       approvedAt: "<engine-time>",
-      approvalType: "EDITORIAL"
+      approvalType: "EDITORIAL",
+      warningSetHash
     }
   );
   assert.equal(
@@ -264,7 +275,8 @@ test("normal approval is exact-hash bound, idempotent, and durable", async (t) =
       {
         revisionId: expectedRevision.id,
         revisionHash: expectedHash,
-        deviceId: "windows-local-device-v1"
+        deviceId: "windows-local-device-v1",
+        warningSetHash
       },
       1,
       "approve"
@@ -287,6 +299,289 @@ test("normal approval is exact-hash bound, idempotent, and durable", async (t) =
   assert.equal(rows[0]?.editorialApproval?.revisionHash, expectedHash);
 });
 
+test("high-risk approval is accepted only after the matching editorial approval", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-high-risk-order-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = await createPersistentEngineProtocol(join(root, "pgdata"), {
+    startSourceWorker: false
+  });
+  t.after(() => runtime.close());
+  const expectedRevision = revision({ id: "revision-high-risk-order", riskLevel: "HIGH" });
+  const revisionHash = computeRevisionHash(expectedRevision);
+  const warningSetHash = computeWarningSetHash(expectedRevision.qualityGates);
+  const highRiskPayload = {
+    revisionId: expectedRevision.id,
+    revisionHash,
+    deviceId: "windows-local-device-v1",
+    warningSetHash,
+    riskChecklistHash: "9".repeat(64),
+    windowsReauthenticatedAt: "2026-07-30T12:00:00.000Z"
+  };
+  await runtime.handle(command("REVISION.SAVE", { revision: expectedRevision }, 0, "high-risk-save"));
+
+  const premature = await runtime.handle(command("APPROVAL.GRANT_HIGH_RISK", highRiskPayload, 1, "high-risk-premature"));
+  assert.equal(premature.ok, false);
+  assert.equal((premature.result as { error: { code: string } }).error.code, "EDITORIAL_APPROVAL_REQUIRED");
+
+  const editorial = await runtime.handle(command("APPROVAL.GRANT", {
+    revisionId: expectedRevision.id,
+    revisionHash,
+    deviceId: "windows-local-device-v1",
+    warningSetHash
+  }, 1, "high-risk-editorial"));
+  assert.equal(editorial.ok, true);
+
+  const secondApproval = await runtime.handle(command("APPROVAL.GRANT_HIGH_RISK", highRiskPayload, 2, "high-risk-second"));
+  assert.equal(secondApproval.ok, true);
+});
+
+test("approved revision rejects a self-consistent but substituted publication bundle", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-publication-binding-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = await createPersistentEngineProtocol(join(root, "pgdata"), {
+    startSourceWorker: false
+  });
+  t.after(() => runtime.close());
+  const approvedFiles = [
+    { path: "content/tr/story.md", content: "onaylanan Türkçe içerik\n" },
+    { path: "content/en/story.md", content: "approved English content\n" }
+  ];
+  const expectedRevision = revision({
+    id: "revision-publication-binding",
+    targetRepository: "owner/site",
+    generatedFiles: approvedFiles.map((file) => ({
+      path: file.path,
+      sha256: createHash("sha256").update(file.content, "utf8").digest("hex"),
+      size: Buffer.byteLength(file.content)
+    }))
+  });
+  const revisionHash = computeRevisionHash(expectedRevision);
+  await runtime.handle(command("REVISION.SAVE", { revision: expectedRevision }, 0, "binding-save"));
+  await runtime.handle(command("APPROVAL.GRANT", {
+    revisionId: expectedRevision.id,
+    revisionHash,
+    deviceId: "windows-local-device-v1",
+    warningSetHash: computeWarningSetHash(expectedRevision.qualityGates)
+  }, 1, "binding-approve"));
+
+  const substitutedFiles = [
+    { ...approvedFiles[0]!, content: "saldırgan tarafından seçilen içerik\n" },
+    approvedFiles[1]!
+  ];
+  const manifestPath = `.blogbot/manifests/${expectedRevision.id}.json`;
+  const response = await runtime.handle({
+    version: 1,
+    id: "binding-preview",
+    kind: "publication.preview",
+    revisionId: expectedRevision.id,
+    revisionHash,
+    expectedVersion: 2,
+    idempotencyKey: "binding-preview-key",
+    payload: {
+      targetRepository: "owner/site",
+      baseBranch: "main",
+      siteOrigin: "https://example.org",
+      contentRoot: "/site",
+      now: "2026-07-30T12:00:00.000Z",
+      files: [
+        ...substitutedFiles,
+        {
+          path: manifestPath,
+          content: JSON.stringify({
+            version: 1,
+            revisionId: expectedRevision.id,
+            revisionHash,
+            adapterVersion: "test@1",
+            generatedAt: "2026-07-30T12:00:00.000Z",
+            entries: substitutedFiles.map((file) => ({
+              path: file.path,
+              sha256: createHash("sha256").update(file.content, "utf8").digest("hex"),
+              bytes: Buffer.byteLength(file.content)
+            }))
+          })
+        }
+      ],
+      bundlePolicy: {
+        adapterId: "test",
+        manifestPath,
+        allowedPathPrefixes: ["content/", ".blogbot/manifests/"],
+        requiredLocalePrefixes: ["content/tr/", "content/en/"]
+      }
+    }
+  });
+
+  assert.equal(response.ok, false);
+  assert.match(String(response.message), /APPROVAL_BOUND_FILE_MISMATCH/u);
+});
+
+test("approved revision rejects publication target metadata changed after approval", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-publication-target-binding-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = await createPersistentEngineProtocol(join(root, "pgdata"), { startSourceWorker: false });
+  t.after(() => runtime.close());
+  const files = [
+    { path: "content/tr/target.md", content: "onaylanan Türkçe içerik\n" },
+    { path: "content/en/target.md", content: "approved English content\n" }
+  ];
+  const expectedRevision = revision({
+    id: "revision-target-binding",
+    targetRepository: "owner/site",
+    targetBaseBranch: "main",
+    targetBaseSha: "1".repeat(40),
+    adapterVersion: "test@1",
+    generatedFiles: files.map((file) => ({
+      path: file.path,
+      sha256: createHash("sha256").update(file.content, "utf8").digest("hex"),
+      size: Buffer.byteLength(file.content)
+    }))
+  });
+  const revisionHash = computeRevisionHash(expectedRevision);
+  await runtime.handle(command("REVISION.SAVE", { revision: expectedRevision }, 0, "target-binding-save"));
+  await runtime.handle(command("APPROVAL.GRANT", {
+    revisionId: expectedRevision.id,
+    revisionHash,
+    deviceId: "windows-local-device-v1",
+    warningSetHash: computeWarningSetHash(expectedRevision.qualityGates)
+  }, 1, "target-binding-approve"));
+  const manifestPath = `.blogbot/manifests/${expectedRevision.id}.json`;
+  const response = await runtime.handle({
+    version: 1,
+    id: "target-binding-preview",
+    kind: "publication.preview",
+    revisionId: expectedRevision.id,
+    revisionHash,
+    expectedVersion: 2,
+    idempotencyKey: "target-binding-preview-key",
+    payload: {
+      targetRepository: "owner/changed-site",
+      baseBranch: "release",
+      approvedBaseSha: "2".repeat(40),
+      adapterVersion: "other@9",
+      siteOrigin: "https://example.org",
+      contentRoot: "/site",
+      now: "2026-07-30T12:00:00.000Z",
+      files: [
+        ...files,
+        {
+          path: manifestPath,
+          content: JSON.stringify({
+            version: 1,
+            revisionId: expectedRevision.id,
+            revisionHash,
+            adapterVersion: "other@9",
+            generatedAt: "2026-07-30T12:00:00.000Z",
+            entries: files.map((file) => ({
+              path: file.path,
+              sha256: createHash("sha256").update(file.content, "utf8").digest("hex"),
+              bytes: Buffer.byteLength(file.content)
+            }))
+          })
+        }
+      ],
+      bundlePolicy: {
+        adapterId: "other",
+        manifestPath,
+        allowedPathPrefixes: ["content/", ".blogbot/manifests/"],
+        requiredLocalePrefixes: ["content/tr/", "content/en/"]
+      }
+    }
+  });
+
+  assert.equal(response.ok, false);
+  assert.match(String(response.message), /APPROVAL_TARGET_MISMATCH/u);
+});
+
+test("publication enqueue persists one approved preview without nesting the PGlite transaction", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-publication-enqueue-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const files = [
+    { path: "content/tr/enqueue.md", content: "onaylı Türkçe içerik\n" },
+    { path: "content/en/enqueue.md", content: "approved English content\n" }
+  ];
+  const expectedRevision = revision({
+    id: "revision-publication-enqueue",
+    targetRepository: "owner/site",
+    adapterVersion: "test@1",
+    generatedFiles: files.map((file) => ({
+      path: file.path,
+      sha256: createHash("sha256").update(file.content, "utf8").digest("hex"),
+      size: Buffer.byteLength(file.content)
+    }))
+  });
+  const revisionHash = computeRevisionHash(expectedRevision);
+  const manifestPath = `.blogbot/manifests/${expectedRevision.id}.json`;
+  const runtime = await createPersistentEngineProtocol(dataDir, { startSourceWorker: false });
+  t.after(() => runtime.close());
+
+  await runtime.handle(command("REVISION.SAVE", { revision: expectedRevision }, 0, "enqueue-save"));
+  await runtime.handle(command("APPROVAL.GRANT", {
+    revisionId: expectedRevision.id,
+    revisionHash,
+    deviceId: "windows-local-device-v1",
+    warningSetHash: computeWarningSetHash(expectedRevision.qualityGates)
+  }, 1, "enqueue-approve"));
+  const preview = await runtime.handle({
+    version: 1,
+    id: "enqueue-preview",
+    kind: "publication.preview",
+    revisionId: expectedRevision.id,
+    revisionHash,
+    expectedVersion: 2,
+    idempotencyKey: "enqueue-preview-key",
+    payload: {
+      targetRepository: "owner/site",
+      baseBranch: "main",
+      siteOrigin: "",
+      contentRoot: "C:\\Blogbot-Test",
+      now: "2026-07-30T12:00:00.000Z",
+      files: [
+        ...files,
+        {
+          path: manifestPath,
+          content: JSON.stringify({
+            version: 1,
+            revisionId: expectedRevision.id,
+            revisionHash,
+            adapterVersion: "test@1",
+            generatedAt: "2026-07-30T12:00:00.000Z",
+            entries: files.map((file) => ({
+              path: file.path,
+              sha256: createHash("sha256").update(file.content, "utf8").digest("hex"),
+              bytes: Buffer.byteLength(file.content)
+            }))
+          })
+        }
+      ],
+      bundlePolicy: {
+        adapterId: "test",
+        manifestPath,
+        allowedPathPrefixes: ["content/", ".blogbot/manifests/"],
+        requiredLocalePrefixes: ["content/tr/", "content/en/"]
+      }
+    }
+  });
+  assert.equal(preview.ok, true);
+  const previewHash = (preview.value as { previewHash: string }).previewHash;
+
+  const enqueued = await Promise.race([
+    runtime.handle({
+      version: 1,
+      id: "enqueue-publication",
+      kind: "publication.enqueue",
+      revisionId: expectedRevision.id,
+      revisionHash,
+      previewHash,
+      idempotencyKey: "enqueue-publication-key",
+      expectedVersion: 3
+    }),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("PUBLICATION_ENQUEUE_TIMEOUT")), 1_000))
+  ]);
+  assert.equal(enqueued.ok, true);
+  const persisted = (await runtime.handle({ version: 1, id: "enqueue-state", kind: "state", afterCursor: 0 })).snapshot as { outbox: Array<{ aggregateId: string }> };
+  assert.equal(persisted.outbox.filter((effect) => effect.aggregateId === expectedRevision.id).length, 1);
+});
+
 test("normal approval rejects a revision that is not awaiting review", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-editorial-state-gate-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -300,6 +595,7 @@ test("normal approval rejects a revision that is not awaiting review", async (t)
     state: "DRAFTING"
   });
   const revisionHash = computeRevisionHash(draftingRevision);
+  const warningSetHash = computeWarningSetHash(draftingRevision.qualityGates);
   await runtime.handle(
     command(
       "REVISION.SAVE",
@@ -315,7 +611,8 @@ test("normal approval rejects a revision that is not awaiting review", async (t)
       {
         revisionId: draftingRevision.id,
         revisionHash,
-        deviceId: "windows-local-device-v1"
+        deviceId: "windows-local-device-v1",
+        warningSetHash
       },
       1,
       "drafting-approve"

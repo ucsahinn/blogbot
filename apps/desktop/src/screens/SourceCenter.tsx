@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { parseOpmlSources, parseUrlSources } from "../app-model.ts";
-import type { BlogbotBridge } from "../bridge.ts";
+import { parseOpmlSources, parseUrlSources, sectionArticleType } from "../app-model.ts";
+import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
+import { describeSourcePublicationReadiness } from "../source-publication-readiness.ts";
 import type {
   ArticleType,
   Section,
   SourceInput,
   SourceRecord,
+  SourceScanStatus,
   SourceTestResult
 } from "../types.ts";
 
@@ -15,6 +17,7 @@ interface SourceCenterProps {
   canTest: boolean;
   canSave: boolean;
   canScan: boolean;
+  onSourceCatalogChange?: () => Promise<void>;
   embedded?: boolean;
 }
 
@@ -29,7 +32,11 @@ const sectionLabels: Record<Section, string> = {
   haberler: "Haberler",
   analiz: "Analiz",
   dosyalar: "Dosyalar",
-  rehberler: "Rehberler"
+  rehberler: "Rehberler",
+  teknoloji: "Teknoloji",
+  ekonomi: "Ekonomi ve iş",
+  kultur: "Kültür",
+  yasam: "Yaşam"
 };
 
 const typeLabels: Record<ArticleType, string> = {
@@ -50,8 +57,8 @@ const reviewStatusLabels: Record<
   SourceRecord["trustStatus"] | SourceRecord["rightsStatus"],
   string
 > = {
-  PENDING: "Bekliyor",
-  APPROVED: "Onaylı",
+  PENDING: "İnceleme yapılmadı",
+  APPROVED: "Değerlendirildi",
   REJECTED: "Reddedildi"
 };
 
@@ -61,22 +68,6 @@ const healthLabels: Record<SourceRecord["health"], string> = {
   TESTING: "Tarama test ediliyor",
   DISABLED: "Tarama kapalı"
 };
-
-const blockerLabels: Record<string, string> = {
-  TRUST_REVIEW_REQUIRED: "Kaynak güven incelemesi bekliyor.",
-  RIGHTS_REVIEW_REQUIRED: "Kullanım hakkı incelemesi bekliyor.",
-  SOURCE_DISABLED: "Kaynak devre dışı.",
-  SOURCE_UNREACHABLE: "Kaynağa erişilemiyor."
-};
-
-function sourceBlockerText(blockers: readonly string[]): string {
-  return blockers
-    .map(
-      (blocker) =>
-        blockerLabels[blocker] ?? "Yayın politikası incelemesi gerekiyor."
-    )
-    .join(" ");
-}
 
 function relativeCheck(value: string | null): string {
   if (!value) return "Henüz kontrol edilmedi";
@@ -93,6 +84,7 @@ export function SourceCenter({
   canTest,
   canSave,
   canScan,
+  onSourceCatalogChange,
   embedded = false
 }: SourceCenterProps) {
   const [sources, setSources] = useState<SourceRecord[]>([]);
@@ -101,36 +93,58 @@ export function SourceCenter({
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [rejected, setRejected] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [scanningId, setScanningId] = useState("");
+  const [scanStatus, setScanStatus] = useState<SourceScanStatus | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<SourceRecord | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewRationale, setReviewRationale] = useState("");
+  const [reviewTrust, setReviewTrust] = useState<"APPROVED" | "REJECTED">("APPROVED");
+  const [reviewRights, setReviewRights] = useState<"APPROVED" | "REJECTED">("APPROVED");
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
+  const reviewHeadingRef = useRef<HTMLHeadingElement>(null);
+  const latestRefreshId = useRef(0);
 
   useEffect(() => {
-    let alive = true;
-    void bridge
-      .listSources()
-      .then((result) => {
-        if (alive) {
-          setSources(result.sources);
-        }
-      })
-      .catch((reason) => {
-        if (alive) {
-          setNotice(
-            reason instanceof Error ? reason.message : "Kaynak envanteri yüklenemedi."
-          );
-        }
-      })
-      .finally(() => {
-        if (alive) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      alive = false;
-    };
+    if (!reviewTarget) return;
+    window.requestAnimationFrame(() => {
+      reviewHeadingRef.current?.scrollIntoView({ block: "center" });
+      reviewHeadingRef.current?.focus();
+    });
+  }, [reviewTarget]);
+
+  const refreshSources = useCallback(async (options: { silent?: boolean } = {}) => {
+    const refreshId = latestRefreshId.current + 1;
+    latestRefreshId.current = refreshId;
+    setRefreshing(true);
+    try {
+      const result = await bridge.listSources();
+      if (refreshId !== latestRefreshId.current) return;
+      setSources(result.sources);
+      setLastRefreshedAt(Date.now());
+      if (!options.silent) setNotice("Kaynak envanteri yenilendi.");
+    } catch (reason) {
+      if (refreshId !== latestRefreshId.current) return;
+      setNotice(userFacingBridgeError(reason, "Kaynak envanteri yenilenemedi."));
+    } finally {
+      if (refreshId === latestRefreshId.current) {
+        setRefreshing(false);
+        setLoading(false);
+      }
+    }
   }, [bridge]);
+
+  useEffect(() => {
+    const initialRefresh = window.setTimeout(() => void refreshSources({ silent: true }), 0);
+    const interval = window.setInterval(() => void refreshSources({ silent: true }), 30_000);
+    return () => {
+      window.clearTimeout(initialRefresh);
+      window.clearInterval(interval);
+    };
+  }, [refreshSources]);
 
   const filteredSources = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("tr");
@@ -144,10 +158,13 @@ export function SourceCenter({
     );
   }, [query, sources]);
 
-  const refreshSources = async () => {
-    const result = await bridge.listSources();
-    setSources(result.sources);
-  };
+  const addressCheckUnavailableReason = busy
+    ? "Adres kontrolü sürüyor; sonuç gelene kadar bekleyin."
+    : !canTest
+      ? "Yerel engine hazır olmadığı için adres kontrolü şu anda başlatılamaz."
+      : input.trim().length === 0
+        ? "Önce kontrol etmek istediğiniz herkese açık kaynak adresini girin."
+        : "";
 
   const scan = async (sourceId?: string) => {
     if (!canScan) {
@@ -157,6 +174,7 @@ export function SourceCenter({
       return;
     }
     setScanningId(sourceId ?? "all");
+    setScanStatus(null);
     setNotice("");
     try {
       const result = sourceId
@@ -167,21 +185,36 @@ export function SourceCenter({
         return;
       }
       setNotice(result.detail);
-      let lastStatus = await bridge.getSourceScanStatus(result.operationId);
-      for (let attempt = 0; attempt < 20 && !lastStatus.complete; attempt += 1) {
-        setNotice(lastStatus.detail);
-        await new Promise((resolve) => window.setTimeout(resolve, 750));
-        lastStatus = await bridge.getSourceScanStatus(result.operationId);
+      try {
+        let lastStatus = await bridge.getSourceScanStatus(result.operationId);
+        setScanStatus(lastStatus);
+        for (let attempt = 0; attempt < 20 && !lastStatus.complete; attempt += 1) {
+          setNotice(lastStatus.detail);
+          await new Promise((resolve) => window.setTimeout(resolve, 750));
+          lastStatus = await bridge.getSourceScanStatus(result.operationId);
+          setScanStatus(lastStatus);
+        }
+        setNotice(
+          lastStatus.complete
+            ? lastStatus.detail
+            : `${lastStatus.detail} Tarama arka planda devam ediyor; kaynak kartını daha sonra yenileyebilirsiniz.`
+        );
+        await refreshSources({ silent: true });
+        if (lastStatus.complete) {
+          try {
+            await onSourceCatalogChange?.();
+          } catch {
+            setNotice(`${lastStatus.detail} Genel Bakış sayaçları henüz yenilenemedi; Genel Bakış ekranından yeniden deneyin.`);
+          }
+        }
+      } catch (reason) {
+        setNotice(
+          `Tarama yerel kuyruğa alındı; ancak durumu henüz okunamadı. Sonraki adım: Kaynak envanterini veya Operasyonlar ekranını yenileyin. (${userFacingBridgeError(reason, "Ayrıntı alınamadı.")})`
+        );
       }
-      setNotice(
-        lastStatus.complete
-          ? lastStatus.detail
-          : `${lastStatus.detail} Tarama arka planda devam ediyor; kaynak kartını daha sonra yenileyebilirsiniz.`
-      );
-      await refreshSources();
     } catch (reason) {
       setNotice(
-        reason instanceof Error ? reason.message : "Kaynak taraması başlatılamadı."
+        userFacingBridgeError(reason, "Kaynak taraması başlatılamadı.")
       );
     } finally {
       setScanningId("");
@@ -201,20 +234,45 @@ export function SourceCenter({
         result = { accepted: preview.urls, rejected: [] };
       }
       setRejected(result.rejected);
-      setCandidates(
-        result.accepted.map((url) => ({
+      const nextCandidates: Candidate[] = result.accepted.map((url) => ({
           url,
           section: "haberler",
           articleType: "news",
           testing: false
-        }))
-      );
+        }));
+      setCandidates(nextCandidates);
+
+      // The singular action is deliberately named "Adresi kontrol et". Do
+      // the real, bounded technical check here so its result matches the
+      // user's expectation before the source can be saved. Bulk and OPML
+      // inputs remain an explicit preview to avoid an unexpected fan-out of
+      // external source requests.
+      if (inputMode === "single" && nextCandidates.length === 1 && canTest) {
+        const [candidate] = nextCandidates;
+        if (candidate) {
+          setCandidates([{ ...candidate, testing: true }]);
+          try {
+            const test = await bridge.testSource(candidate.url);
+            setCandidates([{
+              ...candidate,
+              testing: false,
+              test,
+              kind: test.kind,
+              language: "unknown",
+              title: test.title
+            }]);
+          } catch (reason) {
+            setCandidates([{ ...candidate, testing: false }]);
+            setNotice(userFacingBridgeError(reason, "Kaynak teknik olarak doğrulanamadı. Yeniden deneyin veya kaydetmeden önce aday satırındaki ‘Test et’ düğmesini kullanın."));
+          }
+        }
+      }
       if (result.accepted.length === 0) {
         setNotice("Eklenebilir bir kaynak bulunamadı.");
       }
     } catch (reason) {
       setNotice(
-        reason instanceof Error ? reason.message : "Kaynaklar çözümlenemedi."
+        userFacingBridgeError(reason, "Kaynaklar çözümlenemedi.")
       );
     } finally {
       setBusy(false);
@@ -249,7 +307,7 @@ export function SourceCenter({
       );
     } catch (reason) {
       setNotice(
-        reason instanceof Error ? reason.message : "Kaynak testi tamamlanamadı."
+        userFacingBridgeError(reason, "Kaynak testi tamamlanamadı.")
       );
       setCandidates((current) =>
         current.map((item, itemIndex) =>
@@ -275,8 +333,18 @@ export function SourceCenter({
           ...(version !== undefined ? { version } : {})
         }))
       );
-      setSources((current) => [...result.sources, ...current]);
-      setNotice(`${result.sources.length} kaynak izlemeye alındı.`);
+      setSources((current) => {
+        const savedById = new Map(result.sources.map((source) => [source.id, source]));
+        const saved = Array.from(savedById.values());
+        return [...saved, ...current.filter((source) => !savedById.has(source.id))];
+      });
+      let summaryRefreshNotice = "";
+      try {
+        await onSourceCatalogChange?.();
+      } catch {
+        summaryRefreshNotice = " Genel Bakış sayaçları henüz yenilenemedi; Genel Bakış ekranından yeniden deneyin.";
+      }
+      setNotice(`${result.sources.length} kaynak izlemeye alındı.${summaryRefreshNotice}`);
       setCandidates([]);
       setInput("");
       setRejected([]);
@@ -289,7 +357,7 @@ export function SourceCenter({
       }
       setNotice(
         `${
-          reason instanceof Error ? reason.message : "Kaynaklar kaydedilemedi."
+          userFacingBridgeError(reason, "Kaynaklar kaydedilemedi.")
         } Katalog olası kısmi kayıtları göstermek için yenilendi.`
       );
     } finally {
@@ -305,13 +373,55 @@ export function SourceCenter({
     setCandidates((current) =>
       current.map((candidate, itemIndex) =>
         itemIndex === index
-          ? {
-              ...candidate,
-              [field]: value
-            }
+          ? field === "section"
+            ? {
+                ...candidate,
+                section: value as Section,
+                articleType: sectionArticleType(value as Section)
+              }
+            : {
+                ...candidate,
+                articleType: value as ArticleType
+              }
           : candidate
       )
     );
+  };
+
+  const openReview = (source: SourceRecord) => {
+    setReviewTarget(source);
+    setReviewTrust(source.trustStatus === "REJECTED" ? "REJECTED" : "APPROVED");
+    setReviewRights(source.rightsStatus === "REJECTED" ? "REJECTED" : "APPROVED");
+    setReviewRationale(source.trustReview?.rationale ?? source.rightsReview?.rationale ?? "");
+    setNotice("");
+  };
+
+  const saveReview = async () => {
+    if (!reviewTarget) return;
+    setReviewBusy(true);
+    setNotice("");
+    try {
+      await bridge.reviewSource({
+        sourceId: reviewTarget.id,
+        expectedVersion: reviewTarget.version,
+        trustStatus: reviewTrust,
+        rightsStatus: reviewRights,
+        rationale: reviewRationale
+      });
+      setReviewTarget(null);
+      try {
+        const current = await bridge.listSources();
+        setSources(current.sources);
+        setLastRefreshedAt(Date.now());
+        setNotice("Kaynak incelemesi yerel kayda işlendi. Bu işlem revizyon veya yayın onayı vermez.");
+      } catch {
+        setNotice("Kaynak incelemesi yerel kayda işlendi; envanter henüz yenilenemedi. Bu işlem revizyon veya yayın onayı vermez.");
+      }
+    } catch (reason) {
+      setNotice(userFacingBridgeError(reason, "Kaynak incelemesi kaydedilemedi."));
+    } finally {
+      setReviewBusy(false);
+    }
   };
 
   return (
@@ -321,9 +431,9 @@ export function SourceCenter({
           <p className="section-kicker">AKILLI KAYNAK MERKEZİ</p>
           <h1>Kanıt akışını tek yerden yönetin.</h1>
           <p>
-            RSS, Atom, sitemap, site ve tekil makaleleri aynı girişten
-            tanımlar. Ön yüz hiçbir adresi doğrudan çağırmaz; test ve keşif
-            güvenli yerel çalışma bileşeni sınırında yapılır.
+            Genel bloglar, haber siteleri, RSS/Atom akışları, sitemap'ler ve tekil
+            makaleler için tek giriş noktası. Önce adresin çalışıp çalışmadığını
+            kontrol eder, sonra içerik alanına yönlendirirsiniz.
           </p>
         </div>
         <span className="header-stat">
@@ -335,10 +445,10 @@ export function SourceCenter({
       <section className="source-composer content-panel">
         <div className="composer-sidebar">
           <p className="section-kicker">YENİ KAYNAK</p>
-          <h2>Adresleri bırakın, türünü Blogbot bulsun.</h2>
+          <h2>Önce adresi ekleyin, sonra nereye ait olduğunu seçin.</h2>
           <p>
-            Uygulama düzeyinde kaynak sınırı yoktur. Yerel çalışma kapasitesi ve yayın
-            politikası ayrı olarak izlenir.
+            “Adresi kontrol et” yalnız sitenin güvenli biçimde erişilebilir olup
+            olmadığını sınar. Bu işlem yayın izni vermez ve hiçbir şey yayınlamaz.
           </p>
           <div className="detection-legend">
             {["RSS", "ATOM", "SITEMAP", "SITE", "ARTICLE"].map((kind) => (
@@ -394,22 +504,77 @@ export function SourceCenter({
           </label>
           <div className="composer-actions">
             <span>
-              Site adresleri RSS/Atom ipuçları için otomatik taranır. Özel ağ
-              adresleri reddedilir.
+              Blogbot ev/ofis ağınızdaki cihazlara bağlanmamak için yalnız herkese açık
+              web adreslerini kabul eder.
             </span>
             <button
               className="button button-secondary"
               type="button"
               disabled={busy || !canTest || input.trim().length === 0}
+              aria-describedby={addressCheckUnavailableReason ? "source-address-action-reason" : undefined}
               onClick={() => void analyzeInput()}
             >
-              {busy ? "Çözümleniyor…" : "Kaynakları çözümle"}
+              {busy ? "Adres kontrol ediliyor…" : "Adresi kontrol et"}
             </button>
           </div>
+          {addressCheckUnavailableReason ? (
+            <small id="source-address-action-reason" className="action-unavailable-reason">
+              {addressCheckUnavailableReason}
+            </small>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="source-workflow-guide" role="region" aria-label="Kaynak ekleme adımları">
+        <div>
+          <span aria-hidden="true">1</span>
+          <strong>Kaynak ekle</strong>
+          <p>Site, RSS, Atom, sitemap veya OPML adresini ekleyin.</p>
+        </div>
+        <div>
+          <span aria-hidden="true">2</span>
+          <strong>Tara</strong>
+          <p>Blogbot erişimi kontrol eder ve bulunan başlıkları listeler.</p>
+        </div>
+        <div>
+          <span aria-hidden="true">3</span>
+          <strong>Taslak hazırla</strong>
+          <p>Beğendiğiniz başlık için yerel araştırma ve taslak işi başlatın.</p>
+        </div>
+        <div>
+          <span aria-hidden="true">4</span>
+          <strong>İncele ve onayla</strong>
+          <p>Yayın yalnızca hazır taslağı inceledikten sonra başlar.</p>
         </div>
       </section>
 
       {notice ? <div className="inline-notice" role="status">{notice}</div> : null}
+      {scanStatus ? (() => {
+        const total = Math.max(
+          1,
+          scanStatus.queued + scanStatus.running + scanStatus.succeeded + scanStatus.failed + scanStatus.rejected
+        );
+        const completed = scanStatus.succeeded + scanStatus.failed + scanStatus.rejected;
+        return (
+          <section className="source-scan-progress" aria-label="Kaynak tarama durumu">
+            <div>
+              <strong>{scanStatus.complete ? "Tarama tamamlandı" : "Tarama sürüyor"}</strong>
+              <span>{scanStatus.succeeded} başarılı · {scanStatus.failed} hata · {scanStatus.rejected} reddedildi · {scanStatus.queued + scanStatus.running} bekliyor</span>
+            </div>
+            <div
+              className="source-scan-progress-track"
+              role="progressbar"
+              aria-label="Kaynak tarama ilerlemesi"
+              aria-valuemin={0}
+              aria-valuemax={total}
+              aria-valuenow={completed}
+              aria-valuetext={`${completed} / ${total} kaynak işlendi`}
+            >
+              <span style={{ width: `${(completed / total) * 100}%` }} />
+            </div>
+          </section>
+        );
+      })() : null}
       {rejected.length > 0 ? (
         <div className="inline-notice is-warning" role="alert">
           <strong>{rejected.length} adres güvenlik veya biçim kontrolünden geçmedi.</strong>
@@ -505,6 +670,9 @@ export function SourceCenter({
             <h2>Kaynak envanteri</h2>
           </div>
           <div className="source-list-actions">
+            <span className="source-refresh-state" role="status" aria-live="polite">
+              {refreshing ? "Envanter yenileniyor…" : lastRefreshedAt ? `Son yenileme ${relativeCheck(new Date(lastRefreshedAt).toISOString())}` : "İlk yenileme bekleniyor"}
+            </span>
             <label className="search-field">
               <span aria-hidden="true">⌕</span>
               <input
@@ -517,7 +685,15 @@ export function SourceCenter({
             <button
               className="button button-secondary"
               type="button"
-              disabled={!canScan || scanningId.length > 0 || sources.length === 0}
+              disabled={refreshing}
+              onClick={() => void refreshSources()}
+            >
+              {refreshing ? "Yenileniyor…" : "Yenile"}
+            </button>
+            <button
+              className="button button-secondary"
+              type="button"
+              disabled={!canScan || refreshing || scanningId.length > 0 || sources.length === 0}
               aria-describedby={!canScan ? "source-scan-unavailable" : undefined}
               title={
                 canScan
@@ -543,23 +719,58 @@ export function SourceCenter({
           </p>
         ) : null}
         <details className="optional-controls source-policy-details">
-          <summary>Kaynak güvenliği ve yayın izni <span>Teknik erişim, güven ve kullanım hakkı ayrı değerlendirilir</span></summary>
+          <summary>Kaynak güveni ve kullanım hakkı <span>Tarama, güven ve kullanım hakkı ayrı değerlendirilir</span></summary>
           <p className="source-policy-explainer" role="note">
-            <strong>Tarama sağlığı yayın izni değildir.</strong> “Sağlıklı”,
-            kaynağa teknik olarak erişilebildiğini gösterir. İçerik ancak kaynak
-            güveni ve kullanım hakkı ayrı ayrı onaylandığında yayında kullanılabilir.
+            <strong>Tarama sağlığı makale onayı değildir.</strong> “Sağlıklı”,
+            kaynağa teknik olarak erişilebildiğini gösterir. Güven ve kullanım hakkı
+            değerlendirmesi yalnız kaynağın makalede kanıt olarak kullanılabilirliğini belirler.
+            Makale onayı yalnız Editoryal Masa &gt; TR / EN inceleme ekranında tam revizyon için verilir.
           </p>
         </details>
+        {reviewTarget ? (
+          <section className="source-review-panel" role="region" aria-label={`${reviewTarget.name} kaynak incelemesi`}>
+            <div>
+              <p className="section-kicker">ARAŞTIRMA KULLANIM KARARI</p>
+              <h3 ref={reviewHeadingRef} tabIndex={-1}>{reviewTarget.name}</h3>
+              <p>Bu tek karar, kaynağın araştırmada kanıt olarak kullanılıp kullanılamayacağını belirler: güvenilir mi ve kullanım hakkı yeterli mi? Makale onayı değildir; yayın için daha sonra Editoryal Masa&apos;nda tam revizyonu onaylarsınız.</p>
+            </div>
+            <div className="source-review-fields">
+              <label className="field">
+                <span>Güven değerlendirmesi</span>
+                <select value={reviewTrust} disabled={reviewBusy} onChange={(event) => setReviewTrust(event.target.value as "APPROVED" | "REJECTED")}>
+                  <option value="APPROVED">Kanıt güveni yeterli</option>
+                  <option value="REJECTED">Kanıt güveni reddedildi</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Kullanım hakkı değerlendirmesi</span>
+                <select value={reviewRights} disabled={reviewBusy} onChange={(event) => setReviewRights(event.target.value as "APPROVED" | "REJECTED")}>
+                  <option value="APPROVED">Kullanım hakkı yeterli</option>
+                  <option value="REJECTED">Kullanım hakkı reddedildi</option>
+                </select>
+              </label>
+              <label className="field field-wide">
+                <span>İnceleme gerekçesi</span>
+                <textarea aria-label="İnceleme gerekçesi" rows={3} value={reviewRationale} disabled={reviewBusy} onChange={(event) => setReviewRationale(event.target.value)} placeholder="Örneğin: Yayıncının koşulları ve kaynak sahipliği kontrol edildi." />
+              </label>
+            </div>
+            <div className="source-review-actions">
+              <button className="button button-secondary" type="button" disabled={reviewBusy} onClick={() => setReviewTarget(null)}>İptal</button>
+              <button className="button button-primary" type="button" disabled={reviewBusy || reviewRationale.trim().length < 10} onClick={() => void saveReview()}>{reviewBusy ? "Kaydediliyor…" : "Araştırma kullanım kararını kaydet"}</button>
+              <small>Bu karar hem güveni hem kullanım hakkını kaydeder. Gerekçe 10-1000 karakter olmalıdır; kaynak değişirse yeniden doğrulayın.</small>
+            </div>
+          </section>
+        ) : null}
         <div className="source-list content-panel">
           <div className="source-list-labels" aria-hidden="true">
             <span>Kaynak</span>
             <span>Tür</span>
             <span>Site eşlemesi</span>
             <span>Son kontrol</span>
-            <span>Teknik ve yayın durumu</span>
+            <span>Teknik ve kanıt durumu</span>
           </div>
           {loading ? (
-            <div className="empty-state">Kaynak envanteri yükleniyor…</div>
+            <div className="empty-state" role="status" aria-live="polite" aria-busy="true">Kaynak envanteri yükleniyor…</div>
           ) : filteredSources.length === 0 ? (
             <div className="empty-state">
               <strong>Eşleşen kaynak yok.</strong>
@@ -567,7 +778,7 @@ export function SourceCenter({
             </div>
           ) : (
             filteredSources.map((source) => (
-              <div className="source-row" key={source.id}>
+              <article className="source-row" aria-label={`${source.name} kaynak durumu`} key={source.id}>
                 <span className="source-name">
                   <span className="source-favicon" aria-hidden="true">
                     {source.name.slice(0, 1)}
@@ -594,11 +805,7 @@ export function SourceCenter({
                         Kullanım hakkı: {reviewStatusLabels[source.rightsStatus]}
                       </span>
                     </span>
-                    {!source.canPublish && source.blockers.length > 0 ? (
-                      <em className="source-blockers">
-                        {sourceBlockerText(source.blockers)}
-                      </em>
-                    ) : null}
+                    <em className="source-blockers">{describeSourcePublicationReadiness(source).detail}</em>
                   </span>
                 </span>
                 <span>
@@ -629,17 +836,15 @@ export function SourceCenter({
                       />
                       {healthLabels[source.health]}
                     </span>
-                    <strong className={source.canPublish ? "can-publish" : "cannot-publish"}>
-                      {source.canPublish
-                        ? "Yayında kullanılabilir"
-                        : "Yayın onayı bekliyor"}
+                    <strong className={`source-readiness source-readiness-${describeSourcePublicationReadiness(source).tone}`}>
+                      {describeSourcePublicationReadiness(source).label}
                     </strong>
                   </span>
                   <span className="source-row-actions">
                     <button
                       className="button button-quiet"
                       type="button"
-                      disabled={!canScan || scanningId.length > 0}
+                      disabled={!canScan || refreshing || scanningId.length > 0}
                       aria-describedby={!canScan ? "source-scan-unavailable" : undefined}
                       title={
                         canScan
@@ -650,13 +855,16 @@ export function SourceCenter({
                     >
                       {scanningId === source.id ? "Taranıyor…" : "Şimdi tara"}
                     </button>
+                    <button className="button button-quiet" type="button" disabled={reviewBusy || refreshing} onClick={() => openReview(source)}>
+                      {source.trustStatus === "PENDING" || source.rightsStatus === "PENDING" ? "Araştırma kullanımını değerlendir" : "Kullanım kararını güncelle"}
+                    </button>
                     <button
                       className="row-menu"
                       type="button"
                       aria-label={`${source.name} kaynak ayrıntılarını göster`}
                       onClick={() =>
                         setNotice(
-                          `${source.name}: ${source.url} · ${sectionLabels[source.section]} / ${typeLabels[source.articleType]} · ${source.canPublish ? "yayında kullanılabilir" : sourceBlockerText(source.blockers)}`
+                          `${source.name}: ${source.url} · ${sectionLabels[source.section]} / ${typeLabels[source.articleType]} · ${describeSourcePublicationReadiness(source).detail}`
                         )
                       }
                     >
@@ -664,7 +872,7 @@ export function SourceCenter({
                     </button>
                   </span>
                 </span>
-              </div>
+              </article>
             ))
           )}
         </div>

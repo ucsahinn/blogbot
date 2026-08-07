@@ -4,12 +4,38 @@ import type {
   DraftView,
   FailureView,
   InstantCreateCommand,
+  InstantDraftSubmission,
   PrerequisiteCheck,
   ScheduledPublicationView,
+  ConnectorStateSnapshot,
+  SetupConnectorDraft,
   TodayWorkItem,
   Section,
-  SetupConnectorId
+  SetupConnectorId,
+  WeeklySlotView
 } from "./types.ts";
+
+export function describeInstantDraftSubmission(submission: InstantDraftSubmission): {
+  waitingForCodex: boolean;
+  kicker: string;
+  title: string;
+  detail: string;
+} {
+  if (submission.state === "WAITING_CODEX" || submission.queueState === "WAITING_CODEX") {
+    return {
+      waitingForCodex: true,
+      kicker: "YAZI ÜRETİMİ BEKLİYOR",
+      title: "İş kaydedildi; Codex bağlantısı bekleniyor.",
+      detail: "Kaynak seçiminiz kaybolmadı. Yazı üretimi hesabını Kurulum Merkezi'nden doğruladıktan sonra bu işi yeniden deneyin."
+    };
+  }
+  return {
+    waitingForCodex: false,
+    kicker: "ARAŞTIRMA KUYRUKTA",
+    title: "İş güvenli kuyruğa alındı.",
+    detail: "Blogbot araştırmayı yerel ve dayanıklı kuyruğunda sürdürecek."
+  };
+}
 
 /** Connector ids are internal; setup copy must remain site-neutral. */
 export function setupConnectorLabel(connector: SetupConnectorId): string {
@@ -41,6 +67,122 @@ export function hasRuntimeCapability(
   capability: string
 ): boolean {
   return capabilities.includes(capability);
+}
+
+export function canMutateLocally(input: {
+  engineRunning: boolean;
+  bridgeReady: boolean;
+}): boolean {
+  return input.engineRunning && input.bridgeReady;
+}
+
+export function codexRuntimeLabel(state: string): string {
+  if (state === "READY") return "Hazır";
+  if (state === "BUSY") return "İşleniyor";
+  if (state === "UNAVAILABLE") return "Kullanılamıyor";
+  return "Bağlantı bekliyor";
+}
+
+const sectionLabels: Record<Section, string> = {
+  haberler: "Haberler",
+  analiz: "Analiz",
+  dosyalar: "Dosyalar",
+  rehberler: "Rehberler",
+  teknoloji: "Teknoloji",
+  ekonomi: "Ekonomi ve iş",
+  kultur: "Kültür",
+  yasam: "Yaşam"
+};
+
+const articleTypeLabels: Record<ArticleType, string> = {
+  news: "Haber",
+  analysis: "Analiz",
+  deep_dive: "Derin dosya",
+  guide: "Rehber"
+};
+
+const sectionArticleTypes: Record<Section, ArticleType> = {
+  haberler: "news",
+  analiz: "analysis",
+  dosyalar: "deep_dive",
+  rehberler: "guide",
+  teknoloji: "news",
+  ekonomi: "news",
+  kultur: "analysis",
+  yasam: "guide"
+};
+
+const candidateStateLabels: Record<CandidateView["state"], string> = {
+  NEW: "Yeni",
+  NEEDS_SOURCE: "Kaynak gerekiyor",
+  ROUTING_REQUIRED: "Rota seçimi bekliyor",
+  DISMISSED: "Kapatıldı",
+  PROMOTED: "Taslağa alındı",
+  RESEARCH_QUEUED: "Araştırma kuyruğunda",
+  RESEARCH_FAILED: "Araştırma başarısız"
+};
+
+const draftStateLabels: Record<DraftView["state"], string> = {
+  DRAFTING: "Hazırlanıyor",
+  NEEDS_SOURCE: "Kaynak gerekiyor",
+  REVIEW_REQUIRED: "İnceleme bekliyor",
+  APPROVED: "Onaylandı"
+};
+
+const slotStateLabels: Record<WeeklySlotView["state"], string> = {
+  EMPTY: "Boş",
+  DRAFTING: "Taslak hazırlanıyor",
+  REVIEW_REQUIRED: "İnceleme bekliyor",
+  READY: "Hazır"
+};
+
+const failureStateLabels: Record<FailureView["state"], string> = {
+  ACTION_REQUIRED: "Müdahale gerekli",
+  RETRYING: "Yeniden deneniyor",
+  RESOLVED: "Çözüldü"
+};
+
+const retryModeLabels: Record<FailureView["retryMode"], string> = {
+  SAFE: "Güvenli tekrar",
+  RECONCILE_FIRST: "Önce uzlaştır",
+  MANUAL: "Elle inceleme"
+};
+
+export const sectionLabel = (value: Section): string => sectionLabels[value];
+export const sectionArticleType = (value: Section): ArticleType => sectionArticleTypes[value];
+export const articleTypeLabel = (value: ArticleType): string => articleTypeLabels[value];
+export const contentCategoryLabel = (section: Section, articleType: ArticleType): string => {
+  const sectionText = sectionLabel(section);
+  const articleTypeText = articleTypeLabel(articleType);
+  return sectionText === articleTypeText ? sectionText : `${sectionText} · ${articleTypeText}`;
+};
+export const candidateStateLabel = (value: CandidateView["state"]): string => candidateStateLabels[value];
+export const draftStateLabel = (value: DraftView["state"]): string => draftStateLabels[value];
+export const slotStateLabel = (value: WeeklySlotView["state"]): string => slotStateLabels[value];
+export const failureStateLabel = (value: FailureView["state"]): string => failureStateLabels[value];
+export const retryModeLabel = (value: FailureView["retryMode"]): string => retryModeLabels[value];
+
+export function jobTypeLabel(value: string): string {
+  const labels: Record<string, string> = {
+    SOURCE_SCAN: "Kaynak taraması",
+    DRAFT: "Taslak üretimi",
+    CODEX: "Yazı üretimi",
+    PUBLISH: "Yayın işlemi",
+    INGEST: "Kaynak alımı"
+  };
+  return labels[value] ?? "Yerel iş";
+}
+
+export function connectorDraftFromState(
+  state: ConnectorStateSnapshot
+): SetupConnectorDraft {
+  return {
+    codex: { ...state.config.codex },
+    github: { ...state.config.github },
+    site: { ...state.config.site },
+    deploy: { ...state.config.deploy },
+    backup: { ...state.config.backup }
+  };
 }
 
 const forbiddenHostnames = new Set([

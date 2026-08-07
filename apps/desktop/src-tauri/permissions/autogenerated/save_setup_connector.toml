@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-setup-connector"
+description = "Enables the save_setup_connector command without any pre-configured scope."
+commands.allow = ["save_setup_connector"]
+
+[[permission]]
+identifier = "deny-save-setup-connector"
+description = "Denies the save_setup_connector command without any pre-configured scope."
+commands.deny = ["save_setup_connector"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-schedule-slot"
+description = "Enables the update_schedule_slot command without any pre-configured scope."
+commands.allow = ["update_schedule_slot"]
+
+[[permission]]
+identifier = "deny-update-schedule-slot"
+description = "Denies the update_schedule_slot command without any pre-configured scope."
+commands.deny = ["update_schedule_slot"]

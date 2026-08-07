@@ -19,6 +19,23 @@ test("site routing contract keeps reciprocal TR and EN sections and schema types
   assert.equal(SITE_SECTIONS.dosyalar.enPath, "deep-dives");
 });
 
+test("general blog and news targets have clear, publishable section contracts", () => {
+  assert.deepEqual(SITE_SECTIONS.teknoloji, {
+    trPath: "teknoloji",
+    enPath: "technology",
+    articleType: "news",
+    schemaType: "NewsArticle"
+  });
+  assert.deepEqual(SITE_SECTIONS.ekonomi, {
+    trPath: "ekonomi",
+    enPath: "business",
+    articleType: "news",
+    schemaType: "NewsArticle"
+  });
+  assert.equal(SITE_SECTIONS.kultur.articleType, "analysis");
+  assert.equal(SITE_SECTIONS.yasam.articleType, "guide");
+});
+
 test("bulk source input has no artificial product cap and removes exact duplicates", () => {
   const urls = Array.from(
     { length: 500 },
@@ -95,6 +112,39 @@ test("SOURCE.SCAN requires unique versioned targets and a batch expectedVersion 
   assert.equal(nonZeroBatchVersion.valid, false);
 });
 
+test("SOURCE.REVIEW records separate trust and usage-rights decisions with a version lock", () => {
+  const valid = validateEngineCommandV1({
+    version: 1,
+    requestId: "source-review-request",
+    idempotencyKey: "source-review-key",
+    expectedVersion: 3,
+    kind: "SOURCE.REVIEW",
+    payload: {
+      sourceId: "source-a",
+      trustStatus: "APPROVED",
+      rightsStatus: "REJECTED",
+      rationale: "Yayıncının açık kullanım izni doğrulanamadı; kaynak yalnızca tarama için tutuluyor."
+    }
+  });
+  assert.equal(valid.valid, true);
+
+  for (const payload of [
+    { sourceId: "source-a", trustStatus: "PENDING", rightsStatus: "APPROVED", rationale: "Yeterli gerekçe metni" },
+    { sourceId: "source-a", trustStatus: "APPROVED", rightsStatus: "APPROVED", rationale: "kısa" },
+    { sourceId: "", trustStatus: "APPROVED", rightsStatus: "APPROVED", rationale: "Kaynak sahipliği ve kullanım koşulları doğrulandı." }
+  ]) {
+    const result = validateEngineCommandV1({
+      version: 1,
+      requestId: "source-review-invalid",
+      idempotencyKey: "source-review-invalid-key",
+      expectedVersion: 3,
+      kind: "SOURCE.REVIEW",
+      payload
+    });
+    assert.equal(result.valid, false);
+  }
+});
+
 test("APPROVAL.GRANT_HIGH_RISK requires exact hashes and a UTC reauthentication timestamp", () => {
   const valid = validateEngineCommandV1({
     version: 1,
@@ -107,6 +157,7 @@ test("APPROVAL.GRANT_HIGH_RISK requires exact hashes and a UTC reauthentication 
       revisionHash: "a".repeat(64),
       deviceId: "windows-local-device-v1",
       riskChecklistHash: "b".repeat(64),
+      warningSetHash: "c".repeat(64),
       windowsReauthenticatedAt: "2026-07-30T12:00:00.000Z"
     }
   });
@@ -123,6 +174,7 @@ test("APPROVAL.GRANT_HIGH_RISK requires exact hashes and a UTC reauthentication 
       revisionHash: "a".repeat(64),
       deviceId: "windows-local-device-v1",
       riskChecklistHash: "b".repeat(64),
+      warningSetHash: "c".repeat(64),
       windowsReauthenticatedAt: "2026-07-30T12:00:00Z"
     }
   });

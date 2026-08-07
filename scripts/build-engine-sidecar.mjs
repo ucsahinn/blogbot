@@ -1,4 +1,4 @@
-import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import process from "node:process";
@@ -17,6 +17,15 @@ const resourceDirectory = join(
   "resources",
   "pglite"
 );
+const engineModulesDirectory = join(
+  root,
+  "apps",
+  "desktop",
+  "src-tauri",
+  "resources",
+  "engine-node_modules",
+  "node_modules"
+);
 const executable = join(
   binaryDirectory,
   "blogbot-engine-x86_64-pc-windows-msvc.exe"
@@ -29,6 +38,8 @@ await rm(work, { recursive: true, force: true });
 await mkdir(work, { recursive: true });
 await mkdir(binaryDirectory, { recursive: true });
 await mkdir(resourceDirectory, { recursive: true });
+await rm(join(resourceDirectory, "..", "engine-node_modules"), { recursive: true, force: true });
+await mkdir(engineModulesDirectory, { recursive: true });
 
 await build({
   entryPoints: [join(root, "apps", "engine", "src", "sea-entrypoint.ts")],
@@ -40,6 +51,7 @@ await build({
   sourcemap: false,
   minify: false,
   legalComments: "none",
+  external: ["sharp"],
   banner: {
     js: `globalThis.__BLOGBOT_IMPORT_META_URL__ = require("node:url").pathToFileURL(require("node:path").join(process.env.BLOGBOT_PGLITE_ASSETS || require("node:path").dirname(process.execPath), "index.js")).href;`
   },
@@ -78,6 +90,19 @@ for (const asset of ["pglite.wasm", "initdb.wasm", "pglite.data"]) {
   await copyFile(
     join(root, "node_modules", "@electric-sql", "pglite", "dist", asset),
     join(resourceDirectory, asset)
+  );
+}
+
+for (const modulePath of [
+  ["sharp"],
+  ["detect-libc"],
+  ["@img", "colour"],
+  ["@img", "sharp-win32-x64"]
+]) {
+  await cp(
+    join(root, "node_modules", ...modulePath),
+    join(engineModulesDirectory, ...modulePath),
+    { recursive: true, force: true }
   );
 }
 

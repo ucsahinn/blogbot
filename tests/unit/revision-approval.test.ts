@@ -5,6 +5,7 @@ import test from "node:test";
 import * as revisionDomain from "../../packages/editorial/src/revision.ts";
 import {
   canonicalJson,
+  computeWarningSetHash,
   computeRevisionHash,
   evaluatePublishEligibility,
   validateClaimEvidence,
@@ -102,8 +103,22 @@ function v2Revision(
         size: 2048
       }
     ],
+    qualityGates: [
+      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "1" },
+      { id: "parity", group: "editorial", state: "PASS", detail: "Dil eşitliği doğrulandı.", policyVersion: "1" }
+    ],
     ...overrides
   });
+}
+
+function approvalFor(value: ArticleRevision): Approval {
+  return {
+    revisionId: value.id,
+    revisionHash: computeRevisionHash(value),
+    deviceId: "device-1",
+    approvedAt: "2026-07-29T10:00:00.000Z",
+    warningSetHash: computeWarningSetHash(value.qualityGates ?? [])
+  };
 }
 
 test("canonical JSON ignores object key order but preserves semantic values", () => {
@@ -187,21 +202,17 @@ test("legacy claims without bilingual anchored evidence fail closed", () => {
 });
 
 test("invalid enriched claim evidence blocks publication", () => {
-  const original = revision({
+  const base = v2Revision();
+  const original = v2Revision({
     claims: [{
-      ...revision().claims[0]!,
+      ...base.claims[0]!,
       claimKey: "claim.identity.event",
       trText: "Olay doğrulandı.",
       enText: "The event was verified.",
       evidenceAnchors: [{ sourceId: "source-1", quoteHash: "bad" }]
     }]
   });
-  const approval: Approval = {
-    revisionId: original.id,
-    revisionHash: computeRevisionHash(original),
-    deviceId: "device-1",
-    approvedAt: "2026-07-29T10:00:00.000Z"
-  };
+  const approval = approvalFor(original);
   assert.deepEqual(
     evaluatePublishEligibility(original, approval, {
       now: new Date("2026-07-30T09:05:00.000Z"),
@@ -232,13 +243,8 @@ test("any approved package field change invalidates approval", () => {
 });
 
 test("approved revision is eligible inside six-hour compensation window", () => {
-  const original = revision();
-  const approval: Approval = {
-    revisionId: original.id,
-    revisionHash: computeRevisionHash(original),
-    deviceId: "device-1",
-    approvedAt: "2026-07-29T10:00:00.000Z"
-  };
+  const original = v2Revision();
+  const approval = approvalFor(original);
 
   assert.deepEqual(
     evaluatePublishEligibility(original, approval, {
@@ -250,13 +256,8 @@ test("approved revision is eligible inside six-hour compensation window", () => 
 });
 
 test("publication past six hours requires a new time and approval", () => {
-  const original = revision();
-  const approval: Approval = {
-    revisionId: original.id,
-    revisionHash: computeRevisionHash(original),
-    deviceId: "device-1",
-    approvedAt: "2026-07-29T10:00:00.000Z"
-  };
+  const original = v2Revision();
+  const approval = approvalFor(original);
 
   assert.deepEqual(
     evaluatePublishEligibility(original, approval, {
@@ -274,12 +275,7 @@ test("TR/EN parity mismatch blocks an otherwise approved revision", () => {
       reportHash: "b".repeat(64)
     }
   });
-  const approval: Approval = {
-    revisionId: original.id,
-    revisionHash: computeRevisionHash(original),
-    deviceId: "device-1",
-    approvedAt: "2026-07-29T10:00:00.000Z"
-  };
+  const approval = approvalFor(original);
 
   assert.deepEqual(
     evaluatePublishEligibility(original, approval, {
@@ -292,12 +288,7 @@ test("TR/EN parity mismatch blocks an otherwise approved revision", () => {
 
 test("high-risk revision requires a separate high-risk approval", () => {
   const original = v2Revision({ riskLevel: "HIGH" });
-  const editorialApproval: Approval = {
-    revisionId: original.id,
-    revisionHash: computeRevisionHash(original),
-    deviceId: "device-1",
-    approvedAt: "2026-07-29T10:00:00.000Z"
-  };
+  const editorialApproval = approvalFor(original);
 
   assert.deepEqual(
     evaluatePublishEligibility(
@@ -318,12 +309,7 @@ test("high-risk revision requires a separate high-risk approval", () => {
 test("separate exact-hash approvals make a high-risk revision eligible", () => {
   const original = v2Revision({ riskLevel: "HIGH" });
   const revisionHash = computeRevisionHash(original);
-  const editorialApproval: Approval = {
-    revisionId: original.id,
-    revisionHash,
-    deviceId: "device-1",
-    approvedAt: "2026-07-29T10:00:00.000Z"
-  };
+  const editorialApproval = approvalFor(original);
   const highRiskApproval: HighRiskApproval = {
     revisionId: original.id,
     revisionHash,
@@ -358,6 +344,80 @@ test("complete V2 revision package passes runtime validation", () => {
   ).validateRevisionPackageV2;
 
   assert.equal(validateRevisionPackageV2(v2Revision()), true);
+});
+
+test("immutable review revision becomes eligible through its external exact-hash approval", () => {
+  const original = v2Revision({ state: "REVIEW_REQUIRED" });
+  assert.deepEqual(
+    evaluatePublishEligibility(original, approvalFor(original), {
+      now: new Date("2026-07-30T09:05:00.000Z"),
+      publishingPaused: false
+    }),
+    { eligible: true }
+  );
+  const drafting = v2Revision({ state: "DRAFTING" });
+  assert.deepEqual(
+    evaluatePublishEligibility(drafting, approvalFor(drafting), {
+      now: new Date("2026-07-30T09:05:00.000Z"),
+      publishingPaused: false
+    }),
+    { eligible: false, reason: "REVISION_NOT_APPROVED" }
+  );
+});
+
+test("allowlisted warnings require an exact warning-set acceptance hash", () => {
+  const original = v2Revision({
+    qualityGates: [
+      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "1" },
+      { id: "SINGLE_OFFICIAL_SOURCE_EXCEPTION", group: "editorial", state: "WARN", detail: "Tek resmi kaynak istisnası.", policyVersion: "1" }
+    ]
+  });
+
+  assert.deepEqual(
+    evaluatePublishEligibility(original, approvalFor(original), {
+      now: new Date("2026-07-30T09:05:00.000Z"),
+      publishingPaused: false
+    }),
+    { eligible: true }
+  );
+  assert.deepEqual(
+    evaluatePublishEligibility(original, { ...approvalFor(original), warningSetHash: "0".repeat(64) }, {
+      now: new Date("2026-07-30T09:05:00.000Z"),
+      publishingPaused: false
+    }),
+    { eligible: false, reason: "WARNING_ACCEPTANCE_MISMATCH" }
+  );
+});
+
+test("warning hash is order-independent but changes with warning evidence", () => {
+  const first = [
+    { id: "SINGLE_OFFICIAL_SOURCE_EXCEPTION", group: "editorial" as const, state: "WARN" as const, detail: "A", policyVersion: "1" },
+    { id: "claims", group: "editorial" as const, state: "PASS" as const, detail: "B", policyVersion: "1" }
+  ];
+  assert.equal(computeWarningSetHash(first), computeWarningSetHash([...first].reverse()));
+  assert.notEqual(
+    computeWarningSetHash(first),
+    computeWarningSetHash([{ ...first[0]!, detail: "Değişti" }, first[1]!])
+  );
+});
+
+test("unallowlisted warnings and unrun gates fail closed", () => {
+  for (const [state, id, expected] of [
+    ["WARN", "UNREVIEWED_SECURITY_WARNING", "WARNING_NOT_ALLOWLISTED"],
+    ["NOT_RUN", "seo", "QUALITY_GATES_NOT_READY"],
+    ["BLOCK", "claims", "QUALITY_GATES_NOT_READY"]
+  ] as const) {
+    const original = v2Revision({
+      qualityGates: [{ id, group: "editorial", state, detail: "Kontrol sonucu.", policyVersion: "1" }]
+    });
+    assert.deepEqual(
+      evaluatePublishEligibility(original, approvalFor(original), {
+        now: new Date("2026-07-30T09:05:00.000Z"),
+        publishingPaused: false
+      }),
+      { eligible: false, reason: expected }
+    );
+  }
 });
 
 test("V2 revision package rejects missing hashes and unsafe generated paths", () => {
@@ -440,13 +500,7 @@ test("every V2 package field participates in exact-hash approval", () => {
 
 test("stale high-risk approval is rejected independently", () => {
   const original = v2Revision({ riskLevel: "HIGH" });
-  const revisionHash = computeRevisionHash(original);
-  const editorialApproval: Approval = {
-    revisionId: original.id,
-    revisionHash,
-    deviceId: "device-1",
-    approvedAt: "2026-07-29T10:00:00.000Z"
-  };
+  const editorialApproval = approvalFor(original);
 
   assert.deepEqual(
     evaluatePublishEligibility(

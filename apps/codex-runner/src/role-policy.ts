@@ -20,9 +20,12 @@ export interface CodexRoleSelection {
 export type CodexRoleModels = Readonly<Record<CodexLogicalRole, string>>;
 
 export const defaultCodexRoleModels: CodexRoleModels = {
-  FAST: "gpt-5.6-luna",
-  DEFAULT: "gpt-5.6-terra",
-  DEEP_REVIEW: "gpt-5.6-sol"
+  // Codex CLI account entitlements decide the available model. Do not invent
+  // role-specific model identifiers: an unavailable name makes a healthy
+  // local runner fail before it can emit structured output.
+  FAST: "default",
+  DEFAULT: "default",
+  DEEP_REVIEW: "default"
 };
 
 const taskRoles = {

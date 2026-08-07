@@ -1,4 +1,5 @@
 import type { PGlite } from "@electric-sql/pglite";
+import { deterministicQueueJobId, type LocalQueueName } from "./local-queue.ts";
 
 import {
   canonicalJson
@@ -28,6 +29,7 @@ interface CodexQueueRuntimePort {
     data: object,
     idempotencyKey: string
   ): Promise<string>;
+  recoverInterrupted?(name: LocalQueueName, id: string): Promise<boolean>;
 }
 
 interface CodexQueueWorkerRuntimePort extends CodexQueueRuntimePort {
@@ -47,6 +49,13 @@ export class PGliteCodexQueueAdapter implements CodexJobQueuePort {
       "blogbot.codex",
       message,
       `codex:${message.idempotencyKey}:${message.generation}`
+    );
+  }
+
+  async recoverInterrupted(message: CodexQueueMessage): Promise<void> {
+    await this.queue.recoverInterrupted?.(
+      "blogbot.codex",
+      deterministicQueueJobId(`codex:${message.idempotencyKey}:${message.generation}`)
     );
   }
 }
@@ -223,6 +232,41 @@ export class PGliteCodexJobStore implements CodexJobPersistencePort {
       };
       await this.compareAndSwap(transaction, current, next);
       return { requeued: true, snapshot: next };
+    });
+  }
+
+  async recoverInterrupted(jobId: string): Promise<{
+    recovered: boolean;
+    snapshot: CodexJobSnapshot | null;
+    interruptedQueueGeneration?: number;
+  }> {
+    return this.database.transaction(async (transaction) => {
+      const result = await transaction.query<CodexJobRow>(
+        `SELECT id, idempotency_key, state, version, value
+           FROM ${TABLE}
+          WHERE id = $1`,
+        [jobId]
+      );
+      const row = result.rows[0];
+      if (!row) return { recovered: false, snapshot: null };
+      const current = this.open(row);
+      if (current.state === "COMPLETED") return { recovered: false, snapshot: current };
+      if (current.state === "QUEUED") return { recovered: true, snapshot: current };
+      const next: CodexJobSnapshot = {
+        jobId: current.jobId,
+        idempotencyKey: current.idempotencyKey,
+        definitionId: current.definitionId,
+        payload: current.payload,
+        state: "QUEUED",
+        version: current.version + 1,
+        ...(current.state === "RUNNING" ? { lastFailure: "EXECUTION_FAILED" as const } : {})
+      };
+      await this.compareAndSwap(transaction, current, next);
+      return {
+        recovered: true,
+        snapshot: next,
+        ...(current.state === "RUNNING" ? { interruptedQueueGeneration: current.version - 1 } : {})
+      };
     });
   }
 

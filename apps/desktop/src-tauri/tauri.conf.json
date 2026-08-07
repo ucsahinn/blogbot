@@ -47,14 +47,24 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/blogbot-engine"],
-    "resources": ["resources/pglite/*"],
+    "resources": ["resources/pglite/*", "resources/engine-node_modules/**/*"],
     "targets": ["msi", "nsis"],
     "category": "Productivity",
     "shortDescription": "Seçtiğiniz site için yerel editoryal otomasyon",
     "longDescription": "Kaynak tarama, taslak, inceleme, onay ve GitHub yayın akışını kullanıcının Windows bilgisayarında çalıştıran yerel Blogbot uygulaması.",
+    "createUpdaterArtifacts": true,
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdBOUM2NDMyODYwOTExRDcKUldUWEVRbUdNbVNjZXZ1akZVcFNCOWl3M0crbFQwL1dmampzOWl6MDFOazlwUUo5N1Y1cy84U0IK",
+      "endpoints": ["https://github.com/ucsahinn/blogbot/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

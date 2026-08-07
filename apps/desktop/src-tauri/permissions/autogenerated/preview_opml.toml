@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-opml"
+description = "Enables the preview_opml command without any pre-configured scope."
+commands.allow = ["preview_opml"]
+
+[[permission]]
+identifier = "deny-preview-opml"
+description = "Denies the preview_opml command without any pre-configured scope."
+commands.deny = ["preview_opml"]

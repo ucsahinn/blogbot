@@ -1,5 +1,7 @@
-export type Section = "haberler" | "analiz" | "dosyalar" | "rehberler";
-export type ArticleType = "news" | "analysis" | "deep_dive" | "guide";
+import type { ArticleType as ContractArticleType, SiteSection } from "../../../packages/contracts/src/index.ts";
+
+export type Section = SiteSection;
+export type ArticleType = ContractArticleType;
 export type SourceKind = "RSS" | "ATOM" | "SITEMAP" | "SITE" | "ARTICLE";
 export type SourceHealth = "HEALTHY" | "WARNING" | "TESTING" | "DISABLED";
 export type RuntimeState = "ONLINE" | "DEGRADED" | "OFFLINE_READ_ONLY";
@@ -31,6 +33,8 @@ export interface SourceRecord {
   language: "tr" | "en" | "other" | "unknown";
   trustStatus: "PENDING" | "APPROVED" | "REJECTED";
   rightsStatus: "PENDING" | "APPROVED" | "REJECTED";
+  trustReview?: { reviewedAt: string; rationale: string };
+  rightsReview?: { reviewedAt: string; rationale: string };
   canPublish: boolean;
   blockers: string[];
 }
@@ -84,6 +88,12 @@ export interface InstantCreateCommand {
   visualPolicy: "GENERATE" | "LOCAL_RENDERER" | "NONE";
   scheduleIntent: "NEXT_SLOT" | "UNSCHEDULED";
   requestedPublishMode: "REVIEW";
+}
+
+export interface InstantDraftSubmission {
+  id: string;
+  state: "RESEARCHING" | "WAITING_CODEX";
+  queueState: "QUEUED" | "RUNNING" | "WAITING_CODEX";
 }
 
 export interface QueueItem {
@@ -156,8 +166,9 @@ export interface GateView {
   id: string;
   label: string;
   detail: string;
-  state: "PASS" | "WARN" | "BLOCK";
-  group: "editorial" | "seo" | "security";
+  state: "PASS" | "WARN" | "BLOCK" | "NOT_RUN";
+  group: "editorial" | "seo" | "security" | "media";
+  policyVersion: string;
 }
 
 export interface MediaView {
@@ -309,6 +320,27 @@ export interface SetupConnectorTestResult {
   detail: string;
 }
 
+export type ConnectorReadiness =
+  | "NOT_CONFIGURED"
+  | "LOCAL_VALIDATED"
+  | "LIVE_ACCEPTED";
+
+export interface ConnectorStateSnapshot {
+  sourceState: "AVAILABLE" | "ABSENT";
+  mode: SiteWorkMode;
+  configured: boolean;
+  config: SetupConnectorDraft;
+  site: {
+    repositoryPath: string;
+    publicSiteUrl: string;
+    adapterId: string | null;
+    adapterVersion: string | null;
+  };
+  checks: Partial<Record<SetupConnectorId, SetupConnectorTestResult>>;
+  localReadiness: ConnectorReadiness;
+  externalReadiness: ConnectorReadiness;
+}
+
 const SETUP_REQUIREMENT_CATALOG: ReadonlyArray<Omit<SetupRequirement, "state" | "userAction">> = [
   {
     id: "local-install",
@@ -395,6 +427,7 @@ export interface TodayWorkItem {
 
 export interface CandidateView {
   id: string;
+  sourceId?: string | null;
   title: string;
   summary: string;
   primarySource: string;
@@ -404,7 +437,7 @@ export interface CandidateView {
   confidence: number;
   duplicateScore: number;
   discoveredAt: string;
-  state: "NEW" | "NEEDS_SOURCE" | "ROUTING_REQUIRED" | "DISMISSED" | "PROMOTED" | "RESEARCH_QUEUED";
+  state: "NEW" | "NEEDS_SOURCE" | "ROUTING_REQUIRED" | "DISMISSED" | "PROMOTED" | "RESEARCH_QUEUED" | "RESEARCH_FAILED";
 }
 
 export interface DraftView {
@@ -412,11 +445,14 @@ export interface DraftView {
   titleTr: string;
   titleEn: string;
   section: Section;
-  completion: number;
+  /** A percentage is shown only when the engine has measured it. */
+  completion: number | null;
   blockers: number;
   updatedAt: string;
   scheduledAt: string | null;
   state: "DRAFTING" | "NEEDS_SOURCE" | "REVIEW_REQUIRED" | "APPROVED";
+  reviewable: boolean;
+  detail: string;
 }
 
 export interface WeeklySlotView {
@@ -466,7 +502,7 @@ export interface CodexRoleUsageView {
   label: string;
   state: "READY" | "BUSY" | "LIMITED" | "UNAVAILABLE";
   queueDepth: number;
-  completedToday: number;
+  completedToday: number | null;
   lastSuccessAt: string | null;
 }
 

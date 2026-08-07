@@ -1,10 +1,11 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import type { BootstrapSnapshot } from "../types.ts";
 
 export type PageId =
   | "dashboard"
   | "content"
+  | "content-candidates"
   | "instant"
   | "editorial"
   | "editorial-review"
@@ -27,6 +28,12 @@ const navigation: Array<{
   { id: "operations", label: "Operasyonlar", icon: "⋮" }
 ];
 
+interface PendingDesktopUpdate {
+  version: string;
+  body?: string;
+  downloadAndInstall: (onEvent: (event: { event: "Started" | "Progress" | "Finished"; data: { contentLength?: number; chunkLength?: number } }) => void) => Promise<void>;
+}
+
 interface AppShellProps {
   activePage: PageId;
   snapshot: BootstrapSnapshot;
@@ -34,6 +41,7 @@ interface AppShellProps {
   onNavigate: (page: PageId) => void;
   onOpenSetup: () => void;
   onOpenSettings: () => void;
+  syncError?: string;
 }
 
 export function AppShell({
@@ -42,10 +50,70 @@ export function AppShell({
   children,
   onNavigate,
   onOpenSetup,
-  onOpenSettings
+  onOpenSettings,
+  syncError = ""
 }: AppShellProps) {
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<PendingDesktopUpdate | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
+
+  const checkForUpdate = async () => {
+    if (!window.__TAURI_INTERNALS__) {
+      setUpdateMessage("Güncelleme denetimi yalnız paketlenmiş Blogbot uygulamasında yapılır.");
+      return;
+    }
+    setUpdateBusy(true);
+    setPendingUpdate(null);
+    setUpdateMessage("Güncellemeler güvenli bağlantıyla denetleniyor…");
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check({ timeout: 30_000 });
+      if (!update) {
+        setUpdateMessage("Bu bilgisayardaki Blogbot güncel.");
+        return;
+      }
+      setPendingUpdate(update as PendingDesktopUpdate);
+      setUpdateMessage(`Blogbot ${update.version} hazır. İndirmeyi ve kurulumu siz başlatın.`);
+    } catch {
+      setUpdateMessage("Güncelleme güvenli olarak denetlenemedi. Bağlantınızı kontrol edip yeniden deneyin.");
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const installPendingUpdate = async () => {
+    if (!pendingUpdate) return;
+    setUpdateBusy(true);
+    let downloaded = 0;
+    try {
+      await pendingUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          setUpdateMessage("Doğrulanmış güncelleme indiriliyor…");
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength ?? 0;
+          const total = event.data.contentLength;
+          setUpdateMessage(total ? `Güncelleme indiriliyor: %${Math.min(100, Math.round((downloaded / total) * 100))}` : "Güncelleme indiriliyor…");
+        } else {
+          setUpdateMessage("Paket doğrulandı; Windows kurulumu başlatılıyor…");
+        }
+      });
+    } catch {
+      setUpdateMessage("Güncelleme indirilemedi veya imzası doğrulanamadı. Hiçbir kurulum başlatılmadı.");
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+      ) {
+        return;
+      }
       if (event.ctrlKey && event.key.toLowerCase() === "n") {
         event.preventDefault();
         onNavigate("instant");
@@ -68,12 +136,13 @@ export function AppShell({
   const isNavigationActive = (page: PageId) =>
     activePage === page ||
     (page === "content" && activePage === "instant") ||
+    (page === "content" && activePage === "content-candidates") ||
     (page === "editorial" && activePage === "editorial-review");
 
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-workspace">Ana içeriğe geç</a>
-      <aside className="sidebar">
+      <aside className="sidebar" aria-label="Uygulama araçları">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">
             B
@@ -92,6 +161,7 @@ export function AppShell({
               key={item.id}
               type="button"
               onClick={() => onNavigate(item.id)}
+              aria-label={item.label}
               aria-current={isNavigationActive(item.id) ? "page" : undefined}
             >
               <span className="nav-icon" aria-hidden="true">
@@ -106,6 +176,15 @@ export function AppShell({
           ))}
         </nav>
 
+        <nav className="mobile-utility-nav" aria-label="İkincil menü">
+          <button type="button" aria-label="Ayarlar" onClick={onOpenSettings}>
+            <span aria-hidden="true">⚙</span>
+          </button>
+          <button type="button" aria-label="Kurulum ve önkoşullar" onClick={onOpenSetup}>
+            <span aria-hidden="true">◇</span>
+          </button>
+        </nav>
+
         <div className="sidebar-spacer" />
         <button className="setup-button settings-button" type="button" onClick={onOpenSettings}>
           <span className="nav-icon" aria-hidden="true">⚙</span>
@@ -118,6 +197,39 @@ export function AppShell({
           </span>
           Önkoşulları test et
         </button>
+        <section className="about-control" aria-label="Blogbot bilgileri">
+          <button
+            className="about-toggle"
+            type="button"
+            aria-label="Blogbot hakkında"
+            aria-expanded={aboutOpen}
+            aria-controls="blogbot-about-card"
+            onClick={() => setAboutOpen((open) => !open)}
+          >
+            <span aria-hidden="true">i</span>
+            Hakkında
+          </button>
+          {aboutOpen ? (
+            <div className="about-card" id="blogbot-about-card">
+              <div className="about-update-actions">
+                <button type="button" onClick={() => void checkForUpdate()} disabled={updateBusy}>
+                  {updateBusy ? "Denetleniyor…" : "Güncellemeleri denetle"}
+                </button>
+                {pendingUpdate ? (
+                  <button type="button" onClick={() => void installPendingUpdate()} disabled={updateBusy}>
+                    {pendingUpdate.version} indir ve kur
+                  </button>
+                ) : null}
+              </div>
+              {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
+              <strong>Blogbot · yerel yayın uygulaması</strong>
+              <span>Sürüm 0.1.0 · İmza: @ucsahinn</span>
+              <a href="https://github.com/ucsahinn/blogbot" target="_blank" rel="noreferrer">
+                GitHub’da projeyi görüntüle
+              </a>
+            </div>
+          ) : null}
+        </section>
 
         <div className="connection-card">
           <div className="connection-heading">
@@ -133,7 +245,9 @@ export function AppShell({
               : "Yerel sistem çalışmıyor"}
           </span>
           <small>
-            {snapshot.connection.latencyMs
+            {snapshot.runtime === "OFFLINE_READ_ONLY"
+              ? "Salt okunur görünüm · bağlantı gelince yeniden deneyin"
+              : snapshot.connection.latencyMs
               ? `${snapshot.connection.latencyMs} ms · ${snapshot.connection.storageLabel}`
               : "Önkoşul testi bekleniyor"}
           </small>
@@ -151,6 +265,12 @@ export function AppShell({
       </aside>
 
       <main className="workspace" id="main-workspace" tabIndex={-1}>{children}</main>
+      {syncError ? (
+        <div className="sync-error-banner" role="status" aria-live="polite">
+          <strong>Yerel görünüm güncellenemedi.</strong>
+          <span>{syncError}</span>
+        </div>
+      ) : null}
     </div>
   );
 }

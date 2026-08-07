@@ -107,6 +107,254 @@ test("candidate.list materializes persisted feed entries with source policy cont
   assert.equal((response.candidates as Array<Record<string, unknown>>)[0]?.confidence, 85);
 });
 
+test("a persisted candidate can become a durable editorial draft without a Codex runner", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-candidate-to-draft-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const backend = await PGliteBackendRepository.open(dataDir);
+  const sources = await PGliteSourceRepository.fromDatabase(backend.getDatabase());
+  await sources.saveSource({
+    id: "source-candidate-draft-1",
+    url: "https://news.example/feed.xml",
+    kind: "RSS",
+    status: "ACTIVE",
+    trustStatus: "APPROVED",
+    rightsStatus: "APPROVED",
+    language: "en",
+    discoveredFeeds: [],
+    createdAt: "2026-07-29T10:00:00.000Z",
+    updatedAt: "2026-07-29T10:00:00.000Z",
+    version: 1
+  });
+  await sources.saveEntries("source-candidate-draft-1", [{
+    externalId: "candidate-draft-story-1",
+    title: "Kalıcı aday taslak testi",
+    summary: "Adayın taslak kuyruğuna geçtiğini doğrular.",
+    url: "https://news.example/stories/candidate-draft",
+    publishedAt: "2026-07-30T08:00:00.000Z"
+  }]);
+  await backend.close();
+
+  const runtime = await createPersistentEngineProtocol(dataDir, { startSourceWorker: false });
+  t.after(() => runtime.close());
+  const candidates = await runtime.handle({ version: 1, id: "candidate-list-draft", kind: "candidate.list" });
+  assert.equal(candidates.ok, true);
+  const candidate = (candidates.candidates as Array<Record<string, unknown>>)[0];
+  assert.equal(typeof candidate?.id, "string");
+  assert.equal(candidate?.sourceId, "source-candidate-draft-1");
+
+  const before = await runtime.handle({ version: 1, id: "state-before-draft", kind: "state", afterCursor: 0 });
+  assert.equal(before.ok, true);
+  const expectedVersion = (before.snapshot as { serverCursor: number }).serverCursor;
+  const draftId = `draft-candidate-${candidate?.id}`;
+  const created = await runtime.handle({
+    version: 1,
+    id: "candidate-draft-create",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "candidate-draft-create",
+      idempotencyKey: "candidate-draft-create",
+      expectedVersion,
+      kind: "DRAFT.CREATE",
+      payload: {
+        draftId,
+        candidateId: candidate?.id,
+        candidateTitle: candidate?.title,
+        sourceIds: [candidate?.sourceId],
+        urls: [],
+        instruction: "Bu adayı kaynak kanıtlarıyla araştır ve insan incelemesine hazırla.",
+        section: candidate?.section,
+        articleType: candidate?.articleType
+      }
+    }
+  });
+  assert.equal(created.ok, true);
+  const backendJob = (created.result as { value: { backendJob: { id: string } } }).value.backendJob;
+  assert.equal(backendJob.id, draftId);
+
+  const after = await runtime.handle({ version: 1, id: "state-after-draft", kind: "state", afterCursor: 0 });
+  assert.equal(after.ok, true);
+  const jobs = (after.snapshot as { jobs: Array<Record<string, unknown>> }).jobs;
+  assert.deepEqual(jobs.map((job) => ({
+    id: job.id,
+    kind: job.kind,
+    state: job.state,
+    candidateId: (job.metadata as { candidateId?: string }).candidateId
+  })), [{
+    id: draftId,
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    candidateId: candidate?.id
+  }]);
+});
+
+test("a persistent Codex draft reaches reviewed local completion through the durable queue", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-persistent-codex-terminal-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const observedTasks: unknown[] = [];
+  const runtime = await createPersistentEngineProtocol(dataDir, {
+    startSourceWorker: false,
+    codexPort: {
+      async *run(request) {
+        observedTasks.push(request.input);
+        const finalReview = Object.hasOwn((request.outputSchema.properties as Record<string, unknown> | undefined) ?? {}, "translationParity");
+        yield { type: "output.completed", output: finalReview
+          ? { translationParity: { status: "MATCHED", detail: "Test paritesi doğrulandı." }, riskLevel: "STANDARD", gates: [{ id: "claims", group: "editorial", state: "PASS", detail: "Kanıt bağlı." }, { id: "contradictions", group: "editorial", state: "PASS", detail: "Çelişki yok." }, { id: "bilingual-parity", group: "editorial", state: "PASS", detail: "Parite eşleşti." }, { id: "markdown-safety", group: "security", state: "PASS", detail: "Markdown güvenli." }, { id: "seo", group: "seo", state: "PASS", detail: "SEO tamam." }, { id: "media", group: "media", state: "PASS", detail: "Medya gerekmiyor." }] }
+          : { translationKey: "terminal-test", author: "Test Editörü", tags: ["test"], tr: { title: "Terminal test haberi", slug: "terminal-test-haberi", description: "Test açıklaması.", bodyMarkdown: "Özgün test metni.", heroImageAlt: "Test görseli" }, en: { title: "Terminal test story", slug: "terminal-test-story", description: "Test description.", bodyMarkdown: "Original test text.", heroImageAlt: "Test visual" }, claims: [{ claimKey: "claim-1", trText: "Doğrulanan test iddiası", enText: "Verified test claim", sourceIds: ["https://news.example/story"], status: "VERIFIED" }] }
+        };
+      }
+    },
+    sourceTransport: {
+      resolve: async () => ["93.184.216.34"],
+      request: async () => ({ status: 200, headers: { "content-type": "text/plain" }, body: encoder.encode("Güvenilir kanıt metni.") })
+    }
+  });
+  t.after(() => runtime.close());
+
+  const initial = await runtime.handle({ version: 1, id: "terminal-before", kind: "state", afterCursor: 0 });
+  const expectedVersion = (initial.snapshot as { serverCursor: number }).serverCursor;
+  const created = await runtime.handle({
+    version: 1,
+    id: "terminal-draft",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "terminal-draft",
+      idempotencyKey: "terminal-draft",
+      expectedVersion,
+      kind: "DRAFT.CREATE",
+      payload: { draftId: "draft-terminal", urls: ["https://news.example/story"], sourceIds: [], instruction: "Özgün test haberi hazırla.", section: "haberler", articleType: "news" }
+    }
+  });
+  assert.equal(created.ok, true);
+
+  let state = "QUEUED";
+  for (let attempt = 0; attempt < 160 && state !== "SUCCEEDED"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    const snapshot = await runtime.handle({ version: 1, id: `terminal-state-${attempt}`, kind: "state", afterCursor: 0 });
+    state = ((snapshot.snapshot as { jobs: Array<{ id: string; state: string }> }).jobs.find((job) => job.id === "draft-terminal")?.state ?? "MISSING");
+  }
+  assert.equal(state, "SUCCEEDED");
+  const draftTask = observedTasks.find((task) => typeof task === "object" && task !== null && "task" in task) as { task?: { sources?: Array<Record<string, unknown>> } } | undefined;
+  assert.ok(draftTask?.task);
+  assert.equal("evidenceText" in (draftTask.task.sources?.[0] ?? {}), false, "raw source evidence must not bypass the bounded draft contract");
+});
+
+test("a long-running Codex task does not block local workspace reads", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-codex-responsive-state-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let releaseRunner: (() => void) | undefined;
+  const runnerRelease = new Promise<void>((resolve) => { releaseRunner = resolve; });
+  let signalRunnerStarted: (() => void) | undefined;
+  const runnerStarted = new Promise<void>((resolve) => { signalRunnerStarted = resolve; });
+  const runtime = await createPersistentEngineProtocol(dataDir, {
+    startSourceWorker: false,
+    codexPort: {
+      async *run() {
+        signalRunnerStarted?.();
+        await runnerRelease;
+        yield { type: "auth.required" };
+      }
+    },
+    sourceTransport: {
+      resolve: async () => ["93.184.216.34"],
+      request: async () => ({ status: 200, headers: { "content-type": "text/plain" }, body: encoder.encode("Test evidence.") })
+    }
+  });
+  t.after(async () => {
+    releaseRunner?.();
+    await runtime.close();
+  });
+  const initial = await runtime.handle({ version: 1, id: "responsive-before", kind: "state", afterCursor: 0 });
+  const expectedVersion = (initial.snapshot as { serverCursor: number }).serverCursor;
+  const created = await runtime.handle({
+    version: 1,
+    id: "responsive-draft",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "responsive-draft",
+      idempotencyKey: "responsive-draft",
+      expectedVersion,
+      kind: "DRAFT.CREATE",
+      payload: { draftId: "draft-responsive", urls: ["https://news.example/story"], sourceIds: [], instruction: "Create a local test draft.", section: "haberler", articleType: "news" }
+    }
+  });
+  assert.equal(created.ok, true);
+  await runnerStarted;
+
+  const state = await Promise.race([
+    runtime.handle({ version: 1, id: "responsive-during-runner", kind: "state", afterCursor: 0 }),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("STATE_READ_BLOCKED_BY_CODEX")), 1_000))
+  ]);
+  assert.equal(state.ok, true);
+});
+
+test("a draft command can retry once after a stale version conflict without changing its idempotency key", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-draft-conflict-retry-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = await createPersistentEngineProtocol(dataDir, { startSourceWorker: false });
+  t.after(() => runtime.close());
+
+  const before = await runtime.handle({ version: 1, id: "retry-before", kind: "state", afterCursor: 0 });
+  assert.equal(before.ok, true);
+  const staleVersion = (before.snapshot as { serverCursor: number }).serverCursor;
+  const bumped = await runtime.handle({
+    version: 1,
+    id: "retry-bump",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "retry-bump",
+      idempotencyKey: "retry-bump",
+      expectedVersion: staleVersion,
+      kind: "LOCAL_STATE.SET",
+      payload: { key: "desktop.testRetry", value: { touched: true } }
+    }
+  });
+  assert.equal(bumped.ok, true);
+
+  const draft = {
+    version: 1 as const,
+    requestId: "retry-draft",
+    idempotencyKey: "retry-draft",
+    kind: "DRAFT.CREATE" as const,
+    payload: {
+      draftId: "draft-version-conflict-retry",
+      urls: ["https://news.example/story"],
+      sourceIds: [],
+      instruction: "Bu kanıtı insan incelemesine uygun özgün taslak için değerlendir.",
+      section: "haberler",
+      articleType: "news"
+    }
+  };
+  const conflicted = await runtime.handle({
+    version: 1,
+    id: "retry-draft-stale",
+    kind: "command",
+    command: { ...draft, expectedVersion: staleVersion }
+  });
+  assert.equal(conflicted.ok, false);
+  assert.equal((conflicted.result as { error?: { code?: string } }).error?.code, "VERSION_CONFLICT");
+
+  const afterBump = await runtime.handle({ version: 1, id: "retry-after-bump", kind: "state", afterCursor: 0 });
+  assert.equal(afterBump.ok, true);
+  const freshVersion = (afterBump.snapshot as { serverCursor: number }).serverCursor;
+  const retried = await runtime.handle({
+    version: 1,
+    id: "retry-draft-fresh",
+    kind: "command",
+    command: { ...draft, expectedVersion: freshVersion }
+  });
+  assert.equal(retried.ok, true);
+  assert.equal((retried.result as { value: { backendJob: { id: string } } }).value.backendJob.id, "draft-version-conflict-retry");
+});
+
 test("source.test uses guarded fetch and parsing without changing the source catalog", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-source-protocol-test-"));
   const dataDir = join(root, "pgdata");

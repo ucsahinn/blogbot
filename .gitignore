@@ -25,6 +25,7 @@ output/
 .debug-local/
 .debug-pg/
 .tmp-pg/
+.blogbot-smoke-state/
 .playwright-mcp/
 .serena/
 .impeccable/

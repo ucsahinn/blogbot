@@ -4,7 +4,6 @@ import {
   type BlogbotBridge,
   type InvokeTransport
 } from "./bridge.ts";
-import { createDemoTransport } from "./demo-data.ts";
 
 declare global {
   interface Window {
@@ -19,12 +18,8 @@ export async function createRuntimeBridge(): Promise<BlogbotBridge> {
     return createInvokeBridge(transport);
   }
 
-  if (import.meta.env.DEV) {
-    return createInvokeBridge(createDemoTransport());
-  }
-
   throw new BridgeError(
     "BRIDGE_UNAVAILABLE",
-    "Blogbot yalnızca imzalı masaüstü uygulaması içinde çalışır."
+    "Blogbot yalnızca Windows masaüstü uygulaması içinde çalışır. Yerel geliştirme için Tauri çalışma zamanını başlatın."
   );
 }

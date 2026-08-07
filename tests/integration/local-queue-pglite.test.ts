@@ -45,3 +45,115 @@ test("pg-boss on PGlite keeps one durable job for the same idempotency key", asy
   await secondRuntime.stop();
   await repository.close();
 });
+
+test("pg-boss on PGlite delivers a newly enqueued job to its local worker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-worker-"));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  const runtime = new LocalQueueRuntime(repository.getDatabase());
+  await runtime.start();
+
+  let resolveReceived: ((value: { id: string; data: object }) => void) | undefined;
+  const received = new Promise<{ id: string; data: object }>((resolve) => {
+    resolveReceived = resolve;
+  });
+  await runtime.work("blogbot.codex", async (job) => {
+    resolveReceived?.({ id: job.id, data: job.data });
+  });
+
+  const id = await runtime.enqueue(
+    "blogbot.codex",
+    { jobId: "draft-1", idempotencyKey: "draft-1", generation: 1 },
+    "codex:draft-1:1"
+  );
+  const result = await Promise.race([
+    received,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("queue worker did not receive its job")), 5_000))
+  ]);
+
+  assert.equal(result.id, id);
+  assert.deepEqual(result.data, { jobId: "draft-1", idempotencyKey: "draft-1", generation: 1 });
+  await runtime.stop();
+  await repository.close();
+});
+
+test("pg-boss on PGlite delivers a durable job queued before the worker registers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-recovery-"));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  const producer = new LocalQueueRuntime(repository.getDatabase());
+  await producer.start();
+  const id = await producer.enqueue(
+    "blogbot.codex",
+    { jobId: "draft-recovery", idempotencyKey: "draft-recovery", generation: 1 },
+    "codex:draft-recovery:1"
+  );
+  await producer.stop();
+
+  const consumer = new LocalQueueRuntime(repository.getDatabase());
+  await consumer.start();
+  let resolveReceived: ((value: { id: string; data: object }) => void) | undefined;
+  const received = new Promise<{ id: string; data: object }>((resolve) => {
+    resolveReceived = resolve;
+  });
+  await consumer.work("blogbot.codex", async (job) => {
+    resolveReceived?.({ id: job.id, data: job.data });
+  });
+
+  const result = await Promise.race([
+    received,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("queue worker did not receive its durable job")), 5_000))
+  ]);
+
+  assert.equal(result.id, id);
+  assert.deepEqual(result.data, {
+    jobId: "draft-recovery",
+    idempotencyKey: "draft-recovery",
+    generation: 1
+  });
+  await consumer.stop();
+  await repository.close();
+});
+
+test("pg-boss on PGlite recovers an active Codex job after an interrupted local engine", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-active-recovery-"));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  const producer = new LocalQueueRuntime(repository.getDatabase());
+  let consumer: LocalQueueRuntime | undefined;
+  try {
+  await producer.start();
+
+  const id = await producer.enqueue(
+    "blogbot.codex",
+    { jobId: "draft-active", idempotencyKey: "draft-active", generation: 1 },
+    "codex:draft-active:1"
+  );
+  const producerBoss = producer as unknown as {
+    boss: {
+      fetch(name: string): Promise<Array<{ id: string }>>;
+      stop(input: { graceful: boolean }): Promise<void>;
+    };
+  };
+  const claimed = await producerBoss.boss.fetch("blogbot.codex");
+  assert.equal(claimed[0]?.id, id);
+  await producerBoss.boss.stop({ graceful: false });
+
+  consumer = new LocalQueueRuntime(repository.getDatabase());
+  await consumer.start();
+  assert.equal(await consumer.recoverInterrupted("blogbot.codex", id), true);
+  const recoveredJob = await consumer.getJob("blogbot.codex", id);
+  assert.equal(recoveredJob?.state, "created");
+
+  let resolveReceived: ((value: { id: string; data: object }) => void) | undefined;
+  const received = new Promise<{ id: string; data: object }>((resolve) => { resolveReceived = resolve; });
+  await consumer.work("blogbot.codex", async (job) => { resolveReceived?.({ id: job.id, data: job.data }); });
+  const result = await Promise.race([
+    received,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("recovered worker did not receive its active job")), 5_000))
+  ]);
+
+  assert.equal(result.id, id);
+  assert.deepEqual(result.data, { jobId: "draft-active", idempotencyKey: "draft-active", generation: 1 });
+  } finally {
+    await consumer?.stop().catch(() => undefined);
+    await repository.close();
+  }
+});

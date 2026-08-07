@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SiteAdapterRegistry } from "../../packages/site-adapter/src/index.ts";
 import { astroGenericAdapter } from "../../packages/site-adapter/src/astro-generic.ts";
+import { parseSiteArtifactManifest } from "../../packages/site-adapter/src/artifact.ts";
 
 test("site adapter registry supports a user-selected adapter without SiberDergi coupling", async () => {
   const registry = new SiteAdapterRegistry();
@@ -59,6 +60,17 @@ test("generic Astro adapter builds bilingual section-aware files without a legac
   assert.doesNotMatch(Object.values(files).join("\n"), /SiberDergi/u);
 });
 
+test("generic Astro adapter advertises general-news and general-blog sections", () => {
+  assert.deepEqual(
+    astroGenericAdapter.sections.map((section) => section.id),
+    ["news", "analysis", "guide", "deep-dive", "technology", "business", "culture", "life"]
+  );
+  assert.deepEqual(
+    astroGenericAdapter.sections.find((section) => section.id === "technology")?.routes,
+    { tr: "teknoloji/{slug}", en: "technology/{slug}" }
+  );
+});
+
 test("generic Astro adapter rejects unsafe markdown before materialization", () => {
   assert.throws(() => astroGenericAdapter.buildRevisionFiles({
     id: "rev-unsafe",
@@ -67,4 +79,16 @@ test("generic Astro adapter rejects unsafe markdown before materialization", () 
     tr: { slug: "unsafe", title: "Unsafe", description: "desc", bodyMarkdown: "<script>alert(1)</script>", section: "news", articleType: "news" },
     en: { slug: "unsafe", title: "Unsafe", description: "desc", bodyMarkdown: "Safe", section: "news", articleType: "news" }
   }, { siteOrigin: "", repositoryPath: "C:\\site", adapterId: "astro-generic" }), /unsafe markdown/u);
+});
+
+test("artifact manifest rejects executable or unknown top-level fields", () => {
+  assert.throws(() => parseSiteArtifactManifest(JSON.stringify({
+    version: 1,
+    revisionId: "rev-safe",
+    revisionHash: "a".repeat(64),
+    adapterVersion: "astro-generic@1",
+    generatedAt: "2026-08-04T12:00:00.000Z",
+    entries: [],
+    scripts: { dev: "malicious-command" }
+  })), /adapter-neutral schema/u);
 });

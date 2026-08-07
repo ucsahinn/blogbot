@@ -1,17 +1,97 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import * as appModel from "../src/app-model.ts";
+
 import {
   buildInstantCreateRequest,
+  connectorDraftFromState,
   hasRuntimeCapability,
   parseOpmlSources,
   parseUrlSources,
   canEnableAutomationMode,
+  codexRuntimeLabel,
+  articleTypeLabel,
+  candidateStateLabel,
+  draftStateLabel,
+  failureStateLabel,
+  jobTypeLabel,
+  retryModeLabel,
+  sectionLabel,
+  sectionArticleType,
+  slotStateLabel,
   isRecoveryKeyUsable,
   setupConnectorLabel,
   summarizePrerequisites,
   summarizeWorkspace
 } from "../src/app-model.ts";
+
+test("instant draft feedback distinguishes queued research from missing Codex", () => {
+  const describe = (appModel as unknown as { describeInstantDraftSubmission?: (value: { id: string; state: string; queueState: string }) => unknown }).describeInstantDraftSubmission;
+  assert.equal(typeof describe, "function");
+  assert.deepEqual(describe?.({ id: "draft-1", state: "RESEARCHING", queueState: "QUEUED" }), {
+    waitingForCodex: false,
+    kicker: "ARAŞTIRMA KUYRUKTA",
+    title: "İş güvenli kuyruğa alındı.",
+    detail: "Blogbot araştırmayı yerel ve dayanıklı kuyruğunda sürdürecek."
+  });
+  assert.deepEqual(describe?.({ id: "draft-2", state: "WAITING_CODEX", queueState: "WAITING_CODEX" }), {
+    waitingForCodex: true,
+    kicker: "YAZI ÜRETİMİ BEKLİYOR",
+    title: "İş kaydedildi; Codex bağlantısı bekleniyor.",
+    detail: "Kaynak seçiminiz kaybolmadı. Yazı üretimi hesabını Kurulum Merkezi'nden doğruladıktan sonra bu işi yeniden deneyin."
+  });
+});
+
+test("Codex runtime states never leak protocol enums into Turkish UI", () => {
+  assert.equal(codexRuntimeLabel("READY"), "Hazır");
+  assert.equal(codexRuntimeLabel("BUSY"), "İşleniyor");
+  assert.equal(codexRuntimeLabel("UNCONFIGURED"), "Bağlantı bekliyor");
+  assert.equal(codexRuntimeLabel("UNAVAILABLE"), "Kullanılamıyor");
+});
+
+test("editorial and operations protocol enums have complete Turkish labels", () => {
+  assert.equal(sectionLabel("rehberler"), "Rehberler");
+  assert.equal(sectionLabel("teknoloji"), "Teknoloji");
+  assert.equal(sectionArticleType("ekonomi"), "news");
+  assert.equal(articleTypeLabel("deep_dive"), "Derin dosya");
+  assert.equal(candidateStateLabel("ROUTING_REQUIRED"), "Rota seçimi bekliyor");
+  assert.equal(draftStateLabel("REVIEW_REQUIRED"), "İnceleme bekliyor");
+  assert.equal(slotStateLabel("EMPTY"), "Boş");
+  assert.equal(failureStateLabel("ACTION_REQUIRED"), "Müdahale gerekli");
+  assert.equal(retryModeLabel("RECONCILE_FIRST"), "Önce uzlaştır");
+  assert.equal(jobTypeLabel("SOURCE_SCAN"), "Kaynak taraması");
+});
+
+test("setup draft is projected from the engine-owned connector snapshot", () => {
+  const state = {
+    sourceState: "AVAILABLE" as const,
+    mode: "LOCAL_DEV" as const,
+    configured: true,
+    config: {
+      codex: { accountLabel: "Yerel hesap" },
+      github: { owner: "editor", repository: "site", clientId: "public-client" },
+      site: { repositoryPath: "C:\\site", publicSiteUrl: "", mode: "LOCAL_DEV" as const },
+      deploy: { workflowName: "deploy.yml" },
+      backup: { folder: "D:\\backups" }
+    },
+    site: {
+      repositoryPath: "C:\\site",
+      publicSiteUrl: "",
+      adapterId: "astro-generic",
+      adapterVersion: "1"
+    },
+    checks: {},
+    localReadiness: "LOCAL_VALIDATED" as const,
+    externalReadiness: "NOT_CONFIGURED" as const
+  };
+
+  const draft = connectorDraftFromState(state);
+
+  assert.deepEqual(draft, state.config);
+  assert.notEqual(draft, state.config);
+  assert.notEqual(draft.site, state.config.site);
+});
 
 test("recovery key UX requires the same minimum length as the backup domain", () => {
   assert.equal(isRecoveryKeyUsable("short key"), false);
@@ -189,6 +269,20 @@ test("source scan availability follows the explicit runtime capability", () => {
     hasRuntimeCapability(["SOURCE.LIST", "SOURCE.SCAN"], "SOURCE.SCAN"),
     true
   );
+});
+
+test("local mutation access follows the real bridge state instead of a synthetic capability", () => {
+  const canMutateLocally = (appModel as unknown as {
+    canMutateLocally?: (input: {
+      engineRunning: boolean;
+      bridgeReady: boolean;
+    }) => boolean;
+  }).canMutateLocally;
+
+  assert.equal(typeof canMutateLocally, "function");
+  assert.equal(canMutateLocally?.({ engineRunning: true, bridgeReady: true }), true);
+  assert.equal(canMutateLocally?.({ engineRunning: false, bridgeReady: true }), false);
+  assert.equal(canMutateLocally?.({ engineRunning: true, bridgeReady: false }), false);
 });
 
 test("workspace summary separates daily editorial work from intervention failures", () => {

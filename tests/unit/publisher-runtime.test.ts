@@ -37,3 +37,29 @@ test("publisher runtime fails closed when remote effects are not injected", asyn
   assert.match(result.lastError ?? "", /remote effects/i);
   assert.equal(resolved, 0);
 });
+
+test("publisher runtime rejects an outbox effect whose revision hash no longer matches the immutable command", async () => {
+  let effectsCalled = 0;
+  const processor = createConnectorAwarePublicationProcessor({
+    connector: { state: "READY" },
+    resolver: {
+      async resolve() {
+        return {
+          revisionId: "revision-1",
+          approvedRevisionHash: "b".repeat(64)
+        } as never;
+      }
+    },
+    effects: {
+      findPullRequest: async () => { effectsCalled += 1; throw new Error("must not call remote effects"); },
+      createPullRequest: async () => { effectsCalled += 1; throw new Error("must not call remote effects"); },
+      mergePullRequest: async () => { effectsCalled += 1; throw new Error("must not call remote effects"); },
+      findDeployIntent: async () => { effectsCalled += 1; throw new Error("must not call remote effects"); },
+      createDeployIntent: async () => { effectsCalled += 1; throw new Error("must not call remote effects"); }
+    }
+  });
+  const result = await processor.process({ ...effect, revisionHash: "a".repeat(64) });
+  assert.equal(result.state, "UNKNOWN");
+  assert.match(result.lastError ?? "", /hash/i);
+  assert.equal(effectsCalled, 0);
+});

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-approve-high-risk-revision"
+description = "Enables the approve_high_risk_revision command without any pre-configured scope."
+commands.allow = ["approve_high_risk_revision"]
+
+[[permission]]
+identifier = "deny-approve-high-risk-revision"
+description = "Denies the approve_high_risk_revision command without any pre-configured scope."
+commands.deny = ["approve_high_risk_revision"]

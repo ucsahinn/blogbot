@@ -14,6 +14,13 @@ export interface PublicationSchedulerResult {
   skipped: Array<{ revisionId: string; reason: PublicationSchedulerSkipReason }>;
 }
 
+export interface PublicationSchedulerOptions {
+  /** Receives only a redacted scheduler diagnostic code. */
+  onFault?(error: Error): void;
+}
+
+const SAFE_PUBLICATION_SCHEDULER_FAULT = "PUBLICATION_SCHEDULER_UNAVAILABLE";
+
 /**
  * Claims due, already-approved revisions into the durable publication outbox.
  * Preview metadata is treated as a binding preflight: a missing or stale
@@ -27,15 +34,31 @@ export class PublicationScheduler {
   constructor(
     private readonly backend: BackendRepository,
     private readonly now: () => Date = () => new Date(),
-    private readonly pollMs = 60_000
+    private readonly pollMs = 60_000,
+    private readonly options: PublicationSchedulerOptions = {}
   ) {}
 
   start(): void {
     if (this.timer) return;
     // Do not race the startup migration/source-worker transaction. The first
     // durable scheduling pass runs on the normal poll boundary.
-    this.timer = setInterval(() => void this.tick(), this.pollMs);
+    this.timer = setInterval(() => this.runTick(), this.pollMs);
     this.timer.unref?.();
+  }
+
+  private runTick(): void {
+    void this.tick().catch(() => {
+      const error = new Error(SAFE_PUBLICATION_SCHEDULER_FAULT);
+      try {
+        if (this.options.onFault) {
+          this.options.onFault(error);
+        } else {
+          process.stderr.write(`[Blogbot] ${SAFE_PUBLICATION_SCHEDULER_FAULT}\n`);
+        }
+      } catch {
+        // Diagnostics must not stop the durable scheduler.
+      }
+    });
   }
 
   stop(): void {

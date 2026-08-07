@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -53,14 +52,23 @@ function resolveSpawn(command: string, args: string[]): { command: string; args:
   }
   const comspec = process.env.ComSpec ?? process.env.COMSPEC ?? "cmd.exe";
   const commandLine = [command, ...args].map(quoteCmdArgument).join(" ");
-  return { command: comspec, args: ["/d", "/s", "/c", commandLine] };
+  // `call` keeps a nested .cmd wrapper in the current command processor.
+  // Without it Windows can re-parse the final argument vector when the
+  // wrapper dispatches its Node child, corrupting an absolute output-schema
+  // path before Codex sees it.
+  return { command: comspec, args: ["/d", "/s", "/c", `call ${commandLine}`] };
 }
 
 function isolatedEnvironment(codexHome: string): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     CODEX_HOME: codexHome
   };
-  for (const key of ["PATH", "SystemRoot"] as const) {
+  // The Codex CLI validates its schema through the operating system's
+  // temporary-file facilities. Windows batch launchers can surface an invalid
+  // schema-path error if TEMP/TMP are absent, even when the supplied absolute
+  // path exists. These variables reveal no credentials and remain scoped to
+  // the isolated runner process.
+  for (const key of ["PATH", "SystemRoot", "TEMP", "TMP"] as const) {
     const value = process.env[key];
     if (value) {
       environment[key] = value;
@@ -91,6 +99,30 @@ function safeProcessDetail(stderr: string): string {
     .slice(0, 500);
 }
 
+/**
+ * A Windows .cmd launcher is only the parent of the actual Codex process.
+ * Killing the launcher alone can leave its child holding stdout/stderr open,
+ * which would otherwise keep the JSONL iterator and durable job RUNNING.
+ */
+async function terminateProcessTree(
+  child: ReturnType<typeof spawn>
+): Promise<void> {
+  if (child.pid === undefined) return;
+  if (process.platform !== "win32") {
+    child.kill("SIGKILL");
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
+      stdio: "ignore",
+      windowsHide: true,
+      shell: false
+    });
+    killer.once("error", () => resolve());
+    killer.once("close", () => resolve());
+  });
+}
+
 export function createCodexCliPort(
   options: CodexCliPortOptions
 ): StructuredCodexPort {
@@ -100,7 +132,12 @@ export function createCodexCliPort(
 
   return {
     async *run(request) {
-      const taskDirectory = await mkdtemp(join(tmpdir(), "blogbot-codex-"));
+      // Some Windows installations expose os.tmpdir() as an 8.3 short path
+      // (for example `USERNA~1`). Codex CLI rejects that path format when it
+      // opens --output-schema. Keep ephemeral task files beneath the app-owned
+      // isolated Codex home, which is already created with its canonical path.
+      await mkdir(options.codexHome, { recursive: true });
+      const taskDirectory = await mkdtemp(join(options.codexHome, "task-"));
       const schemaPath = join(taskDirectory, "output.schema.json");
       const outputPath = join(taskDirectory, "final-output.json");
       await writeFile(
@@ -148,9 +185,33 @@ export function createCodexCliPort(
       });
 
       let timedOut = false;
+      let termination: Promise<void> | undefined;
+      let lines: ReturnType<typeof createInterface> | undefined;
+      let stdoutFailure: Error | undefined;
+      let rejectTimeoutRead: (reason: Error) => void = () => undefined;
+      const timeoutRead = new Promise<never>((_resolve, reject) => {
+        rejectTimeoutRead = reject;
+      });
+      child.stdout.once("error", (error) => {
+        stdoutFailure = error instanceof Error ? error : new Error(String(error));
+      });
       const timeout = setTimeout(() => {
         timedOut = true;
-        child.kill();
+        rejectTimeoutRead(new Error("CODEX_PROCESS_TIMEOUT"));
+        // Closing the iterator provides a bounded escape even if a launcher
+        // child still owns the inherited pipe for a few milliseconds.  Some
+        // Windows .cmd launch chains keep stdout open after readline.close();
+        // destroy the exact child stream as well so the async iterator cannot
+        // leave a durable draft looking alive after its deadline.
+        lines?.close();
+        child.stdin.destroy();
+        // A plain stream close can leave readline's async iterator waiting for
+        // a descendant of a Windows .cmd wrapper to release its inherited
+        // handle. Surface an error on the exact stream so iteration exits
+        // immediately while taskkill finishes the owned process tree.
+        child.stdout.destroy(new Error("CODEX_PROCESS_TIMEOUT"));
+        child.stderr.destroy();
+        termination ??= terminateProcessTree(child);
       }, options.timeoutMs);
       const closed = new Promise<number | null>((resolve, reject) => {
         child.once("error", reject);
@@ -159,37 +220,55 @@ export function createCodexCliPort(
 
       try {
         child.stdout.setEncoding("utf8");
-        const lines = createInterface({
+        lines = createInterface({
           input: child.stdout,
           crlfDelay: Number.POSITIVE_INFINITY
         });
-        for await (const line of lines) {
-          if (!line.trim()) {
-            continue;
+        try {
+          const iterator = lines[Symbol.asyncIterator]();
+          while (true) {
+            const next = await Promise.race([iterator.next(), timeoutRead]);
+            if (next.done) break;
+            const line = next.value;
+            if (!line.trim()) {
+              continue;
+            }
+            if (Buffer.byteLength(line, "utf8") > MAX_EVENT_LINE_BYTES) {
+              throw new CodexCliPortError(
+                "INVALID_EVENT",
+                "Codex emitted an oversized JSONL event"
+              );
+            }
+            try {
+              yield JSON.parse(line) as CodexEvent;
+            } catch {
+              throw new CodexCliPortError(
+                "INVALID_EVENT",
+                "Codex emitted malformed JSONL"
+              );
+            }
           }
-          if (Buffer.byteLength(line, "utf8") > MAX_EVENT_LINE_BYTES) {
+        } catch (error) {
+          if (timedOut) {
             throw new CodexCliPortError(
-              "INVALID_EVENT",
-              "Codex emitted an oversized JSONL event"
+              "PROCESS_TIMEOUT",
+              "Codex execution exceeded its bounded timeout"
             );
           }
-          try {
-            yield JSON.parse(line) as CodexEvent;
-          } catch {
-            throw new CodexCliPortError(
-              "INVALID_EVENT",
-              "Codex emitted malformed JSONL"
-            );
-          }
+          throw error;
         }
 
-        const exitCode = await closed;
+        if (stdoutFailure && !timedOut) {
+          throw stdoutFailure;
+        }
+
         if (timedOut) {
           throw new CodexCliPortError(
             "PROCESS_TIMEOUT",
             "Codex execution exceeded its bounded timeout"
           );
         }
+        const exitCode = await closed;
         if (exitCode !== 0) {
           const waitingEvent = waitingEventFromFailure(stderr);
           if (waitingEvent) {
@@ -203,6 +282,7 @@ export function createCodexCliPort(
         }
 
         let output: unknown;
+        let finalOutputAvailable = false;
         try {
           const outputInfo = await stat(outputPath);
           if (outputInfo.size > MAX_FINAL_OUTPUT_BYTES) {
@@ -212,27 +292,38 @@ export function createCodexCliPort(
             );
           }
           output = JSON.parse(await readFile(outputPath, "utf8"));
+          finalOutputAvailable = true;
         } catch (error) {
           if (error instanceof CodexCliPortError) {
             throw error;
           }
-          throw new CodexCliPortError(
-            "INVALID_FINAL_OUTPUT",
-            "Codex final output file did not contain valid JSON"
-          );
+          // Codex may write a human-readable last message even when the JSONL
+          // stream already supplied a schema-bound agent_message. Leave final
+          // validation to the structured runner in that case; it still fails
+          // closed with MISSING_OUTPUT if no valid streamed output exists.
         }
-        yield { type: "output.completed", output };
+        if (finalOutputAvailable) {
+          yield { type: "output.completed", output };
+        }
       } finally {
         clearTimeout(timeout);
         if (child.exitCode === null) {
-          child.kill();
+          termination ??= terminateProcessTree(child);
         }
-        await rm(taskDirectory, {
+        if (termination) {
+          await termination;
+        }
+        const cleanup = rm(taskDirectory, {
           recursive: true,
           force: true,
           maxRetries: 3,
           retryDelay: 50
         });
+        if (timedOut) {
+          void cleanup.catch(() => undefined);
+        } else {
+          await cleanup;
+        }
       }
     }
   };

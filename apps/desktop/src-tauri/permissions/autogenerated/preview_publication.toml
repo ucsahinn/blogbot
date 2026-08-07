@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-publication"
+description = "Enables the preview_publication command without any pre-configured scope."
+commands.allow = ["preview_publication"]
+
+[[permission]]
+identifier = "deny-preview-publication"
+description = "Denies the preview_publication command without any pre-configured scope."
+commands.deny = ["preview_publication"]

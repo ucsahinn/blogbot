@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-github-validate-repository"
+description = "Enables the github_validate_repository command without any pre-configured scope."
+commands.allow = ["github_validate_repository"]
+
+[[permission]]
+identifier = "deny-github-validate-repository"
+description = "Denies the github_validate_repository command without any pre-configured scope."
+commands.deny = ["github_validate_repository"]

@@ -8,11 +8,32 @@ import { join } from "node:path";
 
 import {
   createEngineProtocol,
+  assertRevisionGeneratedFilesMatch,
   handleBackupRequest,
+  reportBackgroundTaskFault,
+  reportCodexLifecycle,
   readBoundedLines
 } from "../../apps/engine/src/stdio-entrypoint.ts";
 import { buildPublicationPreview } from "../../apps/engine/src/publication-preview.ts";
 import { createPortableBackup } from "../../packages/backup/src/portable-backup.ts";
+import { InMemoryBackendStore } from "../../packages/database/src/in-memory-backend-store.ts";
+
+test("engine rejects GitHub credential requests so credentials stay outside PGlite", async () => {
+  const repository = new InMemoryBackendStore();
+  // The cast preserves this regression test after the obsolete engine option
+  // is removed: a caller must never be able to reactivate token handling by
+  // passing an old-shaped options object.
+  const handle = createEngineProtocol(repository, "memory", {
+    githubAuthRuntime: {
+      status: async () => ({ status: "authorized" })
+    }
+  } as never);
+
+  const result = await handle({ version: 1, id: "github-auth-1", kind: "github.auth.status" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "GITHUB_AUTH_NATIVE_ONLY");
+});
 
 test("engine protocol exposes a truthful degraded doctor response", async () => {
   const handle = createEngineProtocol();
@@ -21,6 +42,32 @@ test("engine protocol exposes a truthful degraded doctor response", async () => 
   assert.equal(result.ok, true);
   assert.equal(result.status, "DEGRADED");
   assert.equal(result.persistence, "memory");
+  assert.equal(
+    (result.capabilities as string[]).includes("PUBLICATION.ENQUEUE"),
+    false,
+    "an engine without an injected publication processor must not advertise live publication"
+  );
+});
+
+test("background maintenance faults use a redacted stderr-only diagnostic code", () => {
+  const lines: string[] = [];
+
+  reportBackgroundTaskFault("AUTOMATIC_BACKUP_UNAVAILABLE", (line) => lines.push(line));
+  reportBackgroundTaskFault("SOURCE_RETENTION_UNAVAILABLE", () => { throw new Error("diagnostics unavailable"); });
+
+  assert.deepEqual(lines, ["[Blogbot] AUTOMATIC_BACKUP_UNAVAILABLE\n"]);
+});
+
+test("Codex lifecycle diagnostics identify a queue phase without recording job content", () => {
+  const lines: string[] = [];
+
+  reportCodexLifecycle("CODEX_JOB_STARTED", (line) => lines.push(line));
+  reportCodexLifecycle("CODEX_JOB_WAITING", (line) => lines.push(line));
+
+  assert.deepEqual(lines, [
+    "[Blogbot] CODEX_JOB_STARTED\n",
+    "[Blogbot] CODEX_JOB_WAITING\n"
+  ]);
 });
 
 test("publication preview validates a selected generic adapter bundle and returns a stable hash", () => {
@@ -92,6 +139,42 @@ test("local-only publication preview accepts an empty public origin", () => {
   });
   assert.equal(preview.plan.target.siteOrigin, "");
   assert.equal(preview.adapterId, "astro-generic");
+});
+
+test("publication preview file set must exactly match the approval-bound revision manifest", () => {
+  const expectedContent = "approved content\n";
+  const expected = {
+    path: "content/tr/story.md",
+    sha256: createHash("sha256").update(expectedContent, "utf8").digest("hex"),
+    size: Buffer.byteLength(expectedContent)
+  };
+  const revision = { id: "rev-1", adapterVersion: "local-folder-v1@1", generatedFiles: [expected] };
+  const payload = {
+    files: [
+      { path: expected.path, content: expectedContent },
+      { path: ".blogbot/manifests/rev-1.json", content: "{}" }
+    ],
+    bundlePolicy: { manifestPath: ".blogbot/manifests/rev-1.json" }
+  };
+
+  assert.doesNotThrow(() => assertRevisionGeneratedFilesMatch(revision, payload));
+  assert.throws(
+    () => assertRevisionGeneratedFilesMatch(revision, {
+      ...payload,
+      files: [
+        { path: expected.path, content: "attacker-selected content\n" },
+        payload.files[1]
+      ]
+    }),
+    /APPROVAL_BOUND_FILE_MISMATCH/u
+  );
+  assert.throws(
+    () => assertRevisionGeneratedFilesMatch(revision, {
+      ...payload,
+      files: [...payload.files, { path: "content/en/extra.md", content: "extra" }]
+    }),
+    /APPROVAL_BOUND_FILE_SET_MISMATCH/u
+  );
 });
 
 test("publication enqueue fails closed when preview hash is absent", async () => {

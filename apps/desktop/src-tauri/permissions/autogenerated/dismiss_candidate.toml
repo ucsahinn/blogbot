@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dismiss-candidate"
+description = "Enables the dismiss_candidate command without any pre-configured scope."
+commands.allow = ["dismiss_candidate"]
+
+[[permission]]
+identifier = "deny-dismiss-candidate"
+description = "Denies the dismiss_candidate command without any pre-configured scope."
+commands.deny = ["dismiss_candidate"]

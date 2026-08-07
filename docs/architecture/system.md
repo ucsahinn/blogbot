@@ -132,9 +132,18 @@ job waiting; paid API fallback is never selected automatically.
 | `/analiz/{slug}/` | `/en/analysis/{slug}/` | `analysis` | `Article` |
 | `/dosyalar/{slug}/` | `/en/deep-dives/{slug}/` | `deep_dive` | `Article` |
 | `/rehberler/{slug}/` | `/en/guides/{slug}/` | `guide` | `BlogPosting` |
+| `/teknoloji/{slug}/` | `/en/technology/{slug}/` | `news` | `NewsArticle` |
+| `/ekonomi/{slug}/` | `/en/business/{slug}/` | `news` | `NewsArticle` |
+| `/kultur/{slug}/` | `/en/culture/{slug}/` | `analysis` | `Article` |
+| `/yasam/{slug}/` | `/en/life/{slug}/` | `guide` | `BlogPosting` |
 
 Current Turkish URLs do not gain a `/tr` prefix. Any future URL migration
 requires a separate redirect, canonical and cutover approval.
+
+These are the bundled generic Astro sections for a general blog or news site.
+The legacy SiberDergi adapter intentionally accepts only its original four
+sections; choosing a generic-only section with that adapter fails closed before
+any publication artifact is created.
 
 ## Superseded runtime
 

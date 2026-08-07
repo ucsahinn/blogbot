@@ -1,4 +1,5 @@
 {
+  "identifier": "app.blogbot.verify",
   "build": {
     "beforeBuildCommand": null
   },

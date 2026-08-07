@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-test-setup-connector"
+description = "Enables the test_setup_connector command without any pre-configured scope."
+commands.allow = ["test_setup_connector"]
+
+[[permission]]
+identifier = "deny-test-setup-connector"
+description = "Denies the test_setup_connector command without any pre-configured scope."
+commands.deny = ["test_setup_connector"]

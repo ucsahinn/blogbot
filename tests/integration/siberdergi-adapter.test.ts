@@ -616,6 +616,18 @@ test("approved revision materializes deterministic TR, EN, media, and manifest b
   }
 });
 
+test("SiberDergi materialization fails closed for a general-site-only section", () => {
+  const revision = articleRevision({ section: "teknoloji", articleType: "news" });
+  assert.throws(
+    () => materializeApprovedSiberDergiBundle(revision, approvalFor(revision), approvedMedia, {
+      now: "2026-07-29T11:00:00.000Z"
+    }),
+    (error: unknown) =>
+      error instanceof SiberDergiContractError &&
+      error.code === "SECTION_TYPE_MISMATCH"
+  );
+});
+
 test("materialization recomputes approval hash and rejects changed approved content", () => {
   const approved = articleRevision();
   const approval = approvalFor(approved);
@@ -686,6 +698,9 @@ test("high-risk materialization requires the second exact-hash approval", () => 
         sha256: "5".repeat(64),
         size: 512
       }
+    ],
+    qualityGates: [
+      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "1" }
     ]
   };
 

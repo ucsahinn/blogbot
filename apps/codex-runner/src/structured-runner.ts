@@ -67,7 +67,7 @@ export function buildCodexExecArgs(
   model: string,
   outputSchemaPath: string
 ): string[] {
-  return [
+  const args = [
     "exec",
     "--ephemeral",
     "--sandbox",
@@ -78,10 +78,12 @@ export function buildCodexExecArgs(
     "--json",
     "--output-schema",
     outputSchemaPath,
-    "--model",
-    model,
     "-"
   ];
+  if (model !== "default") {
+    args.splice(args.length - 1, 0, "--model", model);
+  }
+  return args;
 }
 
 const waitingReasons = {

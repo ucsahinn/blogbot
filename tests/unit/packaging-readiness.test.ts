@@ -68,7 +68,279 @@ test("Windows bundle manifest includes the sidecar, local PGlite assets, and Web
   assert.deepEqual(new Set(bundle?.targets), new Set(["msi", "nsis"]));
   assert.ok(bundle?.externalBin?.includes("binaries/blogbot-engine"));
   assert.ok(bundle?.resources?.includes("resources/pglite/*"));
+  assert.ok(
+    bundle?.resources?.includes("resources/engine-node_modules/**/*"),
+    "the packaged engine must receive Sharp's Windows native runtime outside the SEA blob"
+  );
   assert.equal(bundle?.windows?.webviewInstallMode?.type, "embedBootstrapper");
+});
+
+test("engine sidecar packaging externalizes Sharp and gives only the bundled runtime module path to the sidecar", async () => {
+  const [buildScript, smokeScript, visualSource] = await Promise.all([
+    readFile(join(repositoryRoot, "scripts", "build-engine-sidecar.mjs"), "utf8"),
+    readFile(join(repositoryRoot, "scripts", "smoke-engine-sidecar.mjs"), "utf8"),
+    readFile(join(repositoryRoot, "packages", "visuals", "src", "index.ts"), "utf8")
+  ]);
+
+  assert.match(buildScript, /external:\s*\[\s*["']sharp["']\s*\]/u);
+  assert.match(buildScript, /engine-node_modules/u);
+  assert.match(buildScript, /sharp-win32-x64/u);
+  assert.match(smokeScript, /BLOGBOT_ENGINE_MODULES/u);
+  assert.match(visualSource, /createRequire/u);
+  assert.match(visualSource, /BLOGBOT_ENGINE_MODULES/u);
+});
+
+test("Windows bundle metadata is valid Turkish UTF-8 rather than mojibake", async () => {
+  const config = JSON.parse(
+    await readFile(
+      join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"),
+      "utf8"
+    )
+  ) as {
+    app?: { windows?: Array<{ title?: string }> };
+    bundle?: { shortDescription?: string; longDescription?: string };
+  };
+  const metadata = [
+    config.app?.windows?.[0]?.title,
+    config.bundle?.shortDescription,
+    config.bundle?.longDescription
+  ].join(" ");
+
+  assert.match(metadata, /Yerel yayın merkezi/u);
+  assert.match(metadata, /Seçtiğiniz site/u);
+  assert.doesNotMatch(metadata, /(?:Â|Ä|Ã|Å)/u, "installer metadata must not contain mojibake");
+});
+
+test("Windows auto-update uses a signed HTTPS GitHub Release feed without requiring Authenticode", async () => {
+  const [configText, cargoText, desktopSource, releaseWorkflow] = await Promise.all([
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "Cargo.toml"), "utf8"),
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "src", "lib.rs"), "utf8"),
+    readFile(join(repositoryRoot, ".github", "workflows", "release-desktop.yml"), "utf8")
+  ]);
+  const config = JSON.parse(configText) as {
+    bundle?: { createUpdaterArtifacts?: boolean };
+    plugins?: {
+      updater?: {
+        pubkey?: string;
+        endpoints?: string[];
+        dangerousInsecureTransportProtocol?: boolean;
+        windows?: { installMode?: string };
+      };
+    };
+  };
+  const updater = config.plugins?.updater;
+
+  assert.equal(config.bundle?.createUpdaterArtifacts, true);
+  assert.match(cargoText, /^tauri-plugin-updater\s*=\s*"2(?:\.\d+){0,2}"/mu);
+  assert.match(desktopSource, /tauri_plugin_updater::Builder::new\(\)\.build\(\)/u);
+  assert.ok(updater?.pubkey?.trim(), "the update verification public key must be embedded in the desktop bundle");
+  assert.deepEqual(
+    updater?.endpoints,
+    ["https://github.com/ucsahinn/blogbot/releases/latest/download/latest.json"]
+  );
+  assert.notEqual(updater?.dangerousInsecureTransportProtocol, true);
+  assert.equal(updater?.windows?.installMode, "passive");
+  assert.match(releaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY/u);
+  assert.match(releaseWorkflow, /latest\.json/u);
+  assert.match(releaseWorkflow, /-setup\.exe/u);
+  assert.match(releaseWorkflow, /UPDATER_SIGNATURE_MISSING/u);
+  assert.doesNotMatch(releaseWorkflow, /--no-sign/u);
+});
+
+test("secret scan excludes generated build artifacts but keeps source files in scope", async () => {
+  const config = await readFile(join(repositoryRoot, ".gitleaks.toml"), "utf8");
+
+  assert.match(config, /\(\^\|\/\)build\//u);
+  assert.doesNotMatch(config, /paths\s*=\s*\[\s*'''\.\*'''/u);
+});
+
+test("source trust and rights review is explicitly granted to the trusted desktop window", async () => {
+  const [buildManifest, defaultPermission] = await Promise.all([
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "build.rs"), "utf8"),
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "permissions", "default.toml"), "utf8")
+  ]);
+
+  assert.match(buildManifest, /"review_source"/u);
+  assert.match(defaultPermission, /"allow-review-source"/u);
+  assert.match(buildManifest, /"github_device_flow_status"/u);
+  assert.match(defaultPermission, /"allow-github-device-flow-status"/u);
+});
+
+test("desktop production build invokes Tauri after preparing the local engine", async () => {
+  const [manifestText, desktopBuildScript] = await Promise.all([
+    readFile(join(repositoryRoot, "package.json"), "utf8"),
+    readFile(join(repositoryRoot, "scripts", "build-desktop.mjs"), "utf8")
+  ]);
+  const manifest = JSON.parse(manifestText) as { scripts?: Record<string, string> };
+  const command = manifest.scripts?.["build:desktop"];
+
+  assert.ok(command, "build:desktop script must exist");
+  assert.equal(command, "node scripts/build-desktop.mjs");
+  assert.match(desktopBuildScript, /build:engine/u, "desktop build must prepare the bundled engine first");
+  assert.match(desktopBuildScript, /tauri/u, "desktop build must produce a Tauri executable, not only Vite assets");
+  assert.match(desktopBuildScript, /\bbuild\b/u, "desktop build must invoke the Tauri production build command");
+  assert.doesNotMatch(desktopBuildScript, /--no-bundle/u, "release packaging must generate the configured MSI and NSIS installers");
+  assert.match(desktopBuildScript, /WIX_TEMP/u, "Windows MSI packaging must use an app-owned writable WiX temporary directory");
+});
+
+test("native WebView smoke is an explicit, environment-gated evidence command", async () => {
+  const [manifestText, smokeScript] = await Promise.all([
+    readFile(join(repositoryRoot, "package.json"), "utf8"),
+    readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8")
+  ]);
+  const manifest = JSON.parse(manifestText) as { scripts?: Record<string, string> };
+
+  assert.equal(manifest.scripts?.["smoke:native-webview"], "node scripts/native-webview-smoke.mjs");
+  assert.match(smokeScript, /BLOGBOT_TAURI_DRIVER/u);
+  assert.match(smokeScript, /BLOGBOT_EDGE_DRIVER/u);
+  assert.match(smokeScript, /BLOGBOT_NATIVE_PROFILE === "actual"/u);
+  assert.match(
+    smokeScript,
+    /BLOGBOT_PROFILE_OBSERVE_MS/u,
+    "an explicitly requested existing-profile observation must be able to report progress over time without changing the default isolated smoke"
+  );
+  assert.match(
+    smokeScript,
+    /16 \* 60 \* 1_000/u,
+    "the existing-profile observation needs a margin beyond the 15-minute Codex deadline so it cannot sample exactly before timeout state is persisted"
+  );
+  assert.match(
+    smokeScript,
+    /initialProfile/u,
+    "existing-profile observation must preserve a redacted initial state for comparison"
+  );
+  assert.match(
+    smokeScript,
+    /finalProfile/u,
+    "existing-profile observation must preserve a redacted final state for comparison"
+  );
+  assert.match(
+    smokeScript,
+    /LOCALAPPDATA:\s*smokeDataRoot,\s*APPDATA:\s*smokeDataRoot/u,
+    "native smoke must isolate both the engine data root and Tauri application-data root from the user's profile by default"
+  );
+  assert.match(smokeScript, /editorial-review/u);
+  assert.match(smokeScript, /expectedHeadings/u);
+  assert.match(smokeScript, /waitForVisibleHeading/u);
+  assert.match(smokeScript, /requiredNativeReadCommands/u);
+  assert.match(
+    smokeScript,
+    /verifyCandidateJourney/u,
+    "native smoke must exercise a real candidate-to-editorial state transition, not only read commands"
+  );
+  assert.match(
+    smokeScript,
+    /clickCandidateResearchAction/u,
+    "native smoke must click the visible Taslak hazırla action instead of promoting a candidate through the bridge alone"
+  );
+  assert.match(
+    smokeScript,
+    /verifySingleSourceAddressCheckJourney/u,
+    "native smoke must start its candidate journey from the visible source-address flow"
+  );
+  assert.match(
+    smokeScript,
+    /Tümünü izlemeye al/u,
+    "native smoke must save a technically checked source through the visible action"
+  );
+  assert.match(
+    smokeScript,
+    /Taslak hazırla/u,
+    "native smoke must locate the candidate action by its user-visible Turkish label"
+  );
+  assert.match(
+    smokeScript,
+    /verifyInitialEngineSurface/u,
+    "native smoke must verify that the first rendered system state is not falsely offline"
+  );
+  assert.match(
+    smokeScript,
+    /verifyVisibleInstantCreateJourney/u,
+    "native smoke must prove that the visible Instant Create form persists a pending editorial draft"
+  );
+  assert.match(smokeScript, /Araştırmayı başlat/u);
+  assert.match(smokeScript, /Editoryal Masada gör/u);
+  assert.match(
+    smokeScript,
+    /verifyPreferencesAndScheduleJourney/u,
+    "native smoke must prove that settings and weekly schedule changes persist in the local workspace"
+  );
+  assert.match(smokeScript, /update_schedule_slot/u);
+  assert.match(smokeScript, /save_desktop_preferences/u);
+  assert.match(
+    smokeScript,
+    /async function refreshEditorialInventory/u,
+    "native smoke must trigger Editorial Desk refresh through its user-visible action"
+  );
+  assert.match(
+    smokeScript,
+    /Taslak envanterini yenile/u,
+    "native smoke must locate the named Editorial Desk refresh action instead of a generic CSS button"
+  );
+  assert.match(
+    smokeScript,
+    /async function refreshEditorialInventory\(sessionId, expectedDraftTitle\)/u,
+    "native smoke refresh must wait for the expected rendered draft, not a stale success notice"
+  );
+  assert.match(
+    smokeScript,
+    /verifyOperationsJourney/u,
+    "native smoke must prove that Operations pause state persists and diagnostics remain redacted"
+  );
+  assert.match(
+    smokeScript,
+    /verifyVisibleCandidateJournalJourney/u,
+    "native smoke must prove that the visible Operations journal explains where a promoted candidate can be followed"
+  );
+  assert.match(smokeScript, /Araştırma işi kuyruğa alındı/u);
+  assert.match(smokeScript, /Taslağı Editoryal Masa’da takip edebilirsiniz\./u);
+  assert.match(smokeScript, /set_runtime_pause/u);
+  assert.match(smokeScript, /export_diagnostics/u);
+  assert.match(
+    smokeScript,
+    /verifyVisibleInstantCreateJourney/u,
+    "native smoke must prove that the visible Instant Create workflow uses the persisted weekly schedule"
+  );
+  assert.match(
+    smokeScript,
+    /verifyVisibleReviewEmptyJourney/u,
+    "native smoke must prove that an empty Review Workspace gives a truthful next action instead of a synthetic approval state"
+  );
+  assert.match(smokeScript, /İncelenecek revizyon yok\./u);
+  assert.match(smokeScript, /İçerik Akışı'ndan bir işi araştırmaya alın\./u);
+  assert.match(smokeScript, /scheduledAt/u);
+  assert.match(
+    smokeScript,
+    /await clickCandidateResearchAction\(sessionId, candidate\.title\)/u,
+    "candidate promotion evidence must flow through the rendered UI action"
+  );
+  assert.match(smokeScript, /get_editorial_workspace/u);
+  for (const command of [
+    "get_bootstrap_snapshot",
+    "get_prerequisite_status",
+    "get_connector_state",
+    "get_editorial_workspace",
+    "get_operations",
+    "get_engine_diagnostics",
+    "list_sources",
+    "local_dev_status",
+    "github_device_flow_status",
+    "autostart_status"
+  ]) {
+    assert.match(smokeScript, new RegExp(command, "u"));
+  }
+  assert.match(
+    smokeScript,
+    /async function waitForVisibleHeading[\s\S]*?attempt < 100/u,
+    "the visible-page wait must match the 15-second failure message"
+  );
+  assert.match(
+    smokeScript,
+    /fatal-state[\s\S]*?Safe error codes/u,
+    "fatal native startup states must expose only redacted diagnostic codes"
+  );
+  assert.match(smokeScript, /Haftalık ritim, hazır (?:yayınlar|çıktılar) ve geçmiş\./u);
 });
 
 test("sidecar doctor smoke contract checks durable local readiness", async () => {
@@ -81,6 +353,11 @@ test("sidecar doctor smoke contract checks durable local readiness", async () =>
   assert.match(smokeScript, /response\.status\s*!==\s*["']READY["']/u);
   assert.match(smokeScript, /response\.persistence\s*!==\s*["']pglite["']/u);
   assert.match(smokeScript, /response\.queue\s*!==\s*["']ready["']/u);
+  assert.match(
+    smokeScript,
+    /cwd:\s*localAppData/u,
+    "sidecar smoke must not resolve native modules from the development repository"
+  );
 });
 
 test("desktop preflight verifies clean-machine installer inputs without building an installer", async () => {

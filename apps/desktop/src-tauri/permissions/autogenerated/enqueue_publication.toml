@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-enqueue-publication"
+description = "Enables the enqueue_publication command without any pre-configured scope."
+commands.allow = ["enqueue_publication"]
+
+[[permission]]
+identifier = "deny-enqueue-publication"
+description = "Denies the enqueue_publication command without any pre-configured scope."
+commands.deny = ["enqueue_publication"]

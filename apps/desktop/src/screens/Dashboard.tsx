@@ -1,4 +1,7 @@
+import { useState } from "react";
+
 import { summarizeWorkspace } from "../app-model.ts";
+import { codexRuntimeLabel } from "../app-model.ts";
 import type { BootstrapSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import type { PageId } from "../components/AppShell.tsx";
 
@@ -6,9 +9,12 @@ interface DashboardProps {
   snapshot: BootstrapSnapshot;
   workspace: EditorialWorkspaceSnapshot;
   onNavigate: (page: PageId) => void;
+  onRefresh: () => Promise<void>;
 }
 
-export function Dashboard({ snapshot, workspace, onNavigate }: DashboardProps) {
+export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: DashboardProps) {
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState("");
   const summary = summarizeWorkspace(workspace);
   const formatTime = (value: string) => {
     const date = new Date(value);
@@ -23,7 +29,7 @@ export function Dashboard({ snapshot, workspace, onNavigate }: DashboardProps) {
   const navigateToWork = (target: EditorialWorkspaceSnapshot["today"][number]["target"]) => {
     onNavigate(
       target === "candidates"
-        ? "content"
+        ? "content-candidates"
         : target === "editorial"
           ? "editorial"
           : target
@@ -39,6 +45,18 @@ export function Dashboard({ snapshot, workspace, onNavigate }: DashboardProps) {
   }, {});
   const sectionPulse = Object.entries(scheduledBySection).sort(([a], [b]) => a.localeCompare(b, "tr"));
   const maxSectionCount = Math.max(1, ...sectionPulse.map(([, count]) => count));
+  const refresh = async () => {
+    setRefreshing(true);
+    setRefreshMessage("");
+    try {
+      await onRefresh();
+      setRefreshMessage("Çalışma alanı yerel veriden yenilendi.");
+    } catch {
+      setRefreshMessage("Çalışma alanı yenilenemedi. Yerel sistem durumunu Operasyonlar ekranından inceleyin.");
+    } finally {
+      setRefreshing(false);
+    }
+  };
   return (
     <div className="page">
       <header className="page-header dashboard-header">
@@ -50,15 +68,27 @@ export function Dashboard({ snapshot, workspace, onNavigate }: DashboardProps) {
             revizyon insan onayı olmadan yayın hattına geçmiyor.
           </p>
         </div>
-        <button
-          className="button button-primary"
-          type="button"
-          onClick={() => onNavigate("instant")}
-        >
-          <span aria-hidden="true">+</span>
-          Anlık içerik oluştur
-        </button>
+        <div className="header-actions">
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={refreshing}
+            onClick={() => void refresh()}
+          >
+            {refreshing ? "Yenileniyor…" : "Çalışma alanını yenile"}
+          </button>
+          <button
+            className="button button-primary"
+            type="button"
+            onClick={() => onNavigate("instant")}
+          >
+            <span aria-hidden="true">+</span>
+            Anlık içerik oluştur
+          </button>
+        </div>
       </header>
+
+      {refreshMessage ? <div className="inline-notice" role="status" aria-live="polite">{refreshMessage}</div> : null}
 
       {snapshot.runtime === "OFFLINE_READ_ONLY" ? (
         <div className="offline-banner" role="status">
@@ -116,7 +146,7 @@ export function Dashboard({ snapshot, workspace, onNavigate }: DashboardProps) {
           <div>
             <small>YAZI ÜRETİMİ</small>
             <strong>
-              {snapshot.codex.state === "READY" ? "Hazır" : snapshot.codex.state}
+              {codexRuntimeLabel(snapshot.codex.state)}
             </strong>
             <p>{snapshot.codex.queueDepth} iş sırada · güvenli çalışma alanı</p>
           </div>

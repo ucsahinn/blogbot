@@ -60,3 +60,39 @@ test("source scheduler remains idle while ingestion is paused or disabled", asyn
   assert.equal(await scheduler.tick(), false);
   assert.equal(calls, 0);
 });
+
+test("source scheduler reports a transient store fault and resumes the next interval", async () => {
+  let reads = 0;
+  let enqueued = 0;
+  const faults: string[] = [];
+  const backend = {
+    getAutomation: async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("database temporarily unavailable");
+      return { mode: "DRAFT_ONLY", ingestionPaused: false, publishingPaused: false, scanIntervalMinutes: 5 };
+    }
+  } as never;
+  const sources = {
+    listSources: async () => [{ id: "source-recovery", version: 1, status: "ACTIVE" }]
+  } as never;
+  const coordinator = {
+    enqueue: async () => { enqueued += 1; return { batchKey: "recovered", scans: [] }; }
+  } as never;
+  const scheduler = new SourceScanScheduler(
+    backend,
+    sources,
+    coordinator,
+    () => new Date("2026-07-30T10:00:00.000Z"),
+    5,
+    { onFault: (error) => faults.push(error.message) }
+  );
+
+  scheduler.start();
+  for (let attempt = 0; attempt < 40 && enqueued === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  scheduler.stop();
+
+  assert.deepEqual(faults, ["SOURCE_SCHEDULER_UNAVAILABLE"]);
+  assert.equal(enqueued, 1);
+});

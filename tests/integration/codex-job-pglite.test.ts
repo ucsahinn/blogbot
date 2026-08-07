@@ -70,20 +70,35 @@ test("PGlite Codex store preserves encrypted idempotent state across restart", a
   assert.equal(staleClaim.claimed, false);
   assert.deepEqual(staleClaim.snapshot, claimed.snapshot);
 
+  const recoveredRunning = await reopenedStore.recoverInterrupted(submission.jobId);
+  assert.equal(recoveredRunning.recovered, true);
+  assert.equal(recoveredRunning.snapshot?.state, "QUEUED");
+  assert.equal(recoveredRunning.snapshot?.version, 3);
+  assert.equal(recoveredRunning.snapshot?.idempotencyKey, submission.idempotencyKey);
+
+  const reClaimed = await reopenedStore.claimQueued({
+    jobId: submission.jobId,
+    idempotencyKey: submission.idempotencyKey,
+    generation: 3
+  });
+  assert.equal(reClaimed.claimed, true);
+  assert.equal(reClaimed.snapshot.state, "RUNNING");
+  assert.equal(reClaimed.snapshot.version, 4);
+
   const completed = await reopenedStore.markCompleted({
     jobId: submission.jobId,
-    expectedVersion: 2,
+    expectedVersion: 4,
     role: "DEFAULT",
     model: "gpt-5.6-terra",
     output: { title: "Özgün analiz" }
   });
   assert.equal(completed.state, "COMPLETED");
-  assert.equal(completed.version, 3);
+  assert.equal(completed.version, 5);
 
   await assert.rejects(
     reopenedStore.markCompleted({
       jobId: submission.jobId,
-      expectedVersion: 2,
+      expectedVersion: 4,
       role: "DEFAULT",
       model: "gpt-5.6-terra",
       output: { title: "duplicate" }
@@ -171,6 +186,9 @@ test("Codex queue worker delegates only the typed queue message", async () => {
         };
       },
       async retryWaiting() {
+        throw new Error("unused");
+      },
+      async recoverInterrupted() {
         throw new Error("unused");
       }
     }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-test-codex-runtime"
+description = "Enables the test_codex_runtime command without any pre-configured scope."
+commands.allow = ["test_codex_runtime"]
+
+[[permission]]
+identifier = "deny-test-codex-runtime"
+description = "Denies the test_codex_runtime command without any pre-configured scope."
+commands.deny = ["test_codex_runtime"]

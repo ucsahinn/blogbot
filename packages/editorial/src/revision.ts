@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ArticleType, SiteSection } from "../../contracts/src/index.ts";
 
 export type ArticleState =
   | "DISCOVERED"
@@ -77,14 +78,27 @@ export interface GeneratedFileManifestEntry {
   size: number;
 }
 
+export type EditorialGateState = "PASS" | "WARN" | "BLOCK" | "NOT_RUN";
+export interface EditorialGateResult {
+  id: string;
+  group: "editorial" | "seo" | "security" | "media";
+  state: EditorialGateState;
+  detail: string;
+  policyVersion: string;
+}
+
+export const ACCEPTABLE_EDITORIAL_WARNING_IDS = new Set([
+  "SINGLE_OFFICIAL_SOURCE_EXCEPTION"
+]);
+
 export interface ArticleRevision {
   id: string;
   translationKey: string;
   state: ArticleState;
   tr: LocalizedArticle;
   en: LocalizedArticle;
-  section: "haberler" | "analiz" | "dosyalar" | "rehberler";
-  articleType: "news" | "analysis" | "deep_dive" | "guide";
+  section: SiteSection;
+  articleType: ArticleType;
   author: string;
   tags: string[];
   claims: Claim[];
@@ -102,6 +116,7 @@ export interface ArticleRevision {
   targetBaseBranch?: string;
   targetBaseSha?: string;
   generatedFiles?: GeneratedFileManifestEntry[];
+  qualityGates?: EditorialGateResult[];
 }
 
 /** Complete immutable package required by the V2 approval workflow. */
@@ -115,6 +130,7 @@ export interface RevisionPackageV2 extends ArticleRevision {
   targetBaseBranch: string;
   targetBaseSha: string;
   generatedFiles: GeneratedFileManifestEntry[];
+  qualityGates: EditorialGateResult[];
 }
 
 interface ApprovalRecord {
@@ -122,6 +138,7 @@ interface ApprovalRecord {
   revisionHash: string;
   deviceId: string;
   approvedAt: string;
+  warningSetHash?: string;
 }
 
 export interface Approval extends ApprovalRecord {
@@ -150,6 +167,9 @@ export type PublishBlockReason =
   | "SCHEDULE_EXPIRED"
   | "INVALID_CLAIM_EVIDENCE"
   | "REVISION_PACKAGE_INCOMPLETE"
+  | "QUALITY_GATES_NOT_READY"
+  | "WARNING_NOT_ALLOWLISTED"
+  | "WARNING_ACCEPTANCE_MISMATCH"
   | "TRANSLATION_PARITY_MISMATCH"
   | "TRANSLATION_PARITY_PENDING"
   | "HIGH_RISK_APPROVAL_REQUIRED"
@@ -221,6 +241,34 @@ export function computeRevisionHash(revision: ArticleRevision): string {
     .digest("hex");
 }
 
+export function computeWarningSetHash(
+  gates: readonly EditorialGateResult[]
+): string {
+  const warnings = gates
+    .filter((gate) => gate.state === "WARN")
+    .map(({ id, group, state, detail, policyVersion }) => ({ id, group, state, detail, policyVersion }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return createHash("sha256").update(canonicalJson(warnings), "utf8").digest("hex");
+}
+
+export function validateApprovalGates(
+  revision: ArticleRevision,
+  warningSetHash: string | undefined
+): "READY" | "QUALITY_GATES_NOT_READY" | "WARNING_NOT_ALLOWLISTED" | "WARNING_ACCEPTANCE_MISMATCH" {
+  const gates = revision.qualityGates;
+  if (!Array.isArray(gates) || gates.length === 0 || gates.some((gate) => gate.state === "BLOCK" || gate.state === "NOT_RUN")) {
+    return "QUALITY_GATES_NOT_READY";
+  }
+  const warnings = gates.filter((gate) => gate.state === "WARN");
+  if (warnings.some((gate) => !ACCEPTABLE_EDITORIAL_WARNING_IDS.has(gate.id))) {
+    return "WARNING_NOT_ALLOWLISTED";
+  }
+  if (!warningSetHash || computeWarningSetHash(gates) !== warningSetHash) {
+    return "WARNING_ACCEPTANCE_MISMATCH";
+  }
+  return "READY";
+}
+
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const GIT_OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const REPOSITORY_PATTERN = /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i;
@@ -285,7 +333,9 @@ export function validateRevisionPackageV2(
     !hasText(revision.targetBaseSha) ||
     !GIT_OBJECT_ID_PATTERN.test(revision.targetBaseSha) ||
     !Array.isArray(revision.generatedFiles) ||
-    revision.generatedFiles.length === 0
+    revision.generatedFiles.length === 0 ||
+    !Array.isArray(revision.qualityGates) ||
+    revision.qualityGates.length === 0
   ) {
     return false;
   }
@@ -303,6 +353,18 @@ export function validateRevisionPackageV2(
     }
     paths.add(file.path);
   }
+  const gateIds = new Set<string>();
+  for (const gate of revision.qualityGates) {
+    if (
+      !hasText(gate.id) ||
+      !["editorial", "seo", "security", "media"].includes(gate.group) ||
+      !["PASS", "WARN", "BLOCK", "NOT_RUN"].includes(gate.state) ||
+      !hasText(gate.detail) ||
+      !hasText(gate.policyVersion) ||
+      gateIds.has(gate.id)
+    ) return false;
+    gateIds.add(gate.id);
+  }
   return true;
 }
 
@@ -316,7 +378,8 @@ export function hasRevisionPackageV2Fields(revision: ArticleRevision): boolean {
     revision.targetRepository,
     revision.targetBaseBranch,
     revision.targetBaseSha,
-    revision.generatedFiles
+    revision.generatedFiles,
+    revision.qualityGates
   ].some((value) => value !== undefined);
 }
 
@@ -367,7 +430,7 @@ export function evaluatePublishEligibility(
     approvalBundle = null;
     editorialApproval = approval;
   }
-  if (revision.state !== "APPROVED" && revision.state !== "PR_READY" && revision.state !== "SCHEDULED") {
+  if (revision.state !== "REVIEW_REQUIRED" && revision.state !== "APPROVED" && revision.state !== "PR_READY" && revision.state !== "SCHEDULED") {
     return { eligible: false, reason: "REVISION_NOT_APPROVED" };
   }
   if (editorialApproval.revisionId !== revision.id) {
@@ -377,12 +440,11 @@ export function evaluatePublishEligibility(
   if (editorialApproval.revisionHash !== revisionHash) {
     return { eligible: false, reason: "APPROVAL_HASH_MISMATCH" };
   }
-  if (
-    hasRevisionPackageV2Fields(revision) &&
-    !validateRevisionPackageV2(revision)
-  ) {
+  if (!validateRevisionPackageV2(revision)) {
     return { eligible: false, reason: "REVISION_PACKAGE_INCOMPLETE" };
   }
+  const gateStatus = validateApprovalGates(revision, editorialApproval.warningSetHash);
+  if (gateStatus !== "READY") return { eligible: false, reason: gateStatus };
   if (revision.translationParity?.status === "MISMATCHED") {
     return { eligible: false, reason: "TRANSLATION_PARITY_MISMATCH" };
   }

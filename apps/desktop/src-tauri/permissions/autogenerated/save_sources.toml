@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-sources"
+description = "Enables the save_sources command without any pre-configured scope."
+commands.allow = ["save_sources"]
+
+[[permission]]
+identifier = "deny-save-sources"
+description = "Denies the save_sources command without any pre-configured scope."
+commands.deny = ["save_sources"]

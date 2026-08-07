@@ -11,10 +11,16 @@ import type {
   SourceDocumentKind,
   SourceFeedEntry
 } from "../../security/src/source-document.ts";
+import type { ArticleType, SiteSection } from "../../contracts/src/index.ts";
 
 export type SourceReviewStatus = "PENDING" | "APPROVED" | "REJECTED";
 export type SourceStatus = "ACTIVE" | "DISABLED";
 export type SourceLanguage = "tr" | "en" | "other" | "unknown";
+
+export interface SourceReviewEvidence {
+  reviewedAt: string;
+  rationale: string;
+}
 
 export interface LocalSource {
   id: string;
@@ -23,14 +29,16 @@ export interface LocalSource {
   status: SourceStatus;
   trustStatus: SourceReviewStatus;
   rightsStatus: SourceReviewStatus;
+  trustReview?: SourceReviewEvidence;
+  rightsReview?: SourceReviewEvidence;
   language: SourceLanguage;
   discoveredFeeds: string[];
   createdAt: string;
   updatedAt: string;
   version: number;
   title?: string;
-  defaultSection?: "haberler" | "analiz" | "dosyalar" | "rehberler";
-  defaultArticleType?: "news" | "analysis" | "deep_dive" | "guide";
+  defaultSection?: SiteSection;
+  defaultArticleType?: ArticleType;
   lastTest?: {
     testedAt: string;
     finalUrl: string;

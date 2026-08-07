@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recover-local-workspace"
+description = "Enables the recover_local_workspace command without any pre-configured scope."
+commands.allow = ["recover_local_workspace"]
+
+[[permission]]
+identifier = "deny-recover-local-workspace"
+description = "Denies the recover_local_workspace command without any pre-configured scope."
+commands.deny = ["recover_local_workspace"]

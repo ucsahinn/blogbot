@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-github-preview-pull-request"
+description = "Enables the github_preview_pull_request command without any pre-configured scope."
+commands.allow = ["github_preview_pull_request"]
+
+[[permission]]
+identifier = "deny-github-preview-pull-request"
+description = "Denies the github_preview_pull_request command without any pre-configured scope."
+commands.deny = ["github_preview_pull_request"]

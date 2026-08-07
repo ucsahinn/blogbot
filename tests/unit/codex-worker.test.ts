@@ -147,6 +147,24 @@ class MemoryCodexJobStore implements CodexJobPersistencePort {
     return { requeued: true, snapshot };
   }
 
+  async recoverInterrupted(jobId: string) {
+    const current = this.byJobId.get(jobId);
+    if (!current) return { recovered: false, snapshot: null };
+    if (current.state === "COMPLETED") return { recovered: false, snapshot: current };
+    if (current.state === "QUEUED") return { recovered: true, snapshot: current };
+    const snapshot: CodexJobSnapshot = {
+      jobId: current.jobId,
+      idempotencyKey: current.idempotencyKey,
+      definitionId: current.definitionId,
+      payload: current.payload,
+      state: "QUEUED",
+      version: current.version + 1,
+      ...(current.state === "RUNNING" ? { lastFailure: "EXECUTION_FAILED" as const } : {})
+    };
+    this.byJobId.set(jobId, snapshot);
+    return { recovered: true, snapshot };
+  }
+
   private require(jobId: string): CodexJobSnapshot {
     const snapshot = this.byJobId.get(jobId);
     if (!snapshot) {
@@ -169,6 +187,7 @@ class MemoryCodexJobStore implements CodexJobPersistencePort {
 
 class MemoryCodexQueue implements CodexJobQueuePort {
   readonly messages: CodexQueueMessage[] = [];
+  readonly recovered: CodexQueueMessage[] = [];
 
   async enqueueOnce(message: CodexQueueMessage) {
     if (
@@ -180,6 +199,10 @@ class MemoryCodexQueue implements CodexJobQueuePort {
     ) {
       this.messages.push(message);
     }
+  }
+
+  async recoverInterrupted(message: CodexQueueMessage) {
+    this.recovered.push(message);
   }
 }
 
@@ -275,11 +298,37 @@ test("processing a queued job persists running then schema-validated completion"
     state: "COMPLETED",
     version: 3,
     role: "DEFAULT",
-    model: "gpt-5.6-terra",
+    model: "default",
     output: { title: "Özgün analiz" }
   });
   assert.deepEqual(duplicate, completed);
   assert.deepEqual(calls, ["run"]);
+});
+
+test("processing a claimed job tells the host when source preparation ends and Codex starts", async () => {
+  const store = new MemoryCodexJobStore();
+  const queue = new MemoryCodexQueue();
+  const lifecycle: string[] = [];
+  const coordinator = createCodexWorkerCoordinator({
+    persistence: store,
+    queue,
+    taskResolver: taskResolver(validTask),
+    codex: codexPort(
+      [{ type: "output.completed", output: { title: "Özgün analiz" } }],
+      lifecycle
+    ),
+    onStarted: async ({ submission }) => {
+      lifecycle.push(`started:${submission.jobId}`);
+    },
+    onTaskReady: async ({ submission }) => {
+      lifecycle.push(`codex:${submission.jobId}`);
+    }
+  });
+  await coordinator.submit(submission);
+
+  await coordinator.process(queue.messages[0]!);
+
+  assert.deepEqual(lifecycle, ["started:job-1", "codex:job-1", "run"]);
 });
 
 test("typed Codex limits enter WAITING_CODEX and retry requeues once", async () => {
@@ -337,9 +386,66 @@ test("paid fallback requests wait behind an explicit policy reason without invok
   assert.deepEqual(calls, []);
 });
 
+test("runner timeout becomes a visible waiting state instead of an endless queued retry", async () => {
+  const store = new MemoryCodexJobStore();
+  const queue = new MemoryCodexQueue();
+  const waits: string[] = [];
+  const coordinator = createCodexWorkerCoordinator({
+    persistence: store,
+    queue,
+    taskResolver: taskResolver(validTask),
+    codex: {
+      run() {
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next(): Promise<IteratorResult<CodexEvent>> {
+                throw Object.assign(new Error("bounded timeout"), { code: "PROCESS_TIMEOUT" });
+              }
+            };
+          }
+        };
+      }
+    },
+    onWaiting: async ({ reason }) => {
+      waits.push(reason);
+    }
+  });
+  await coordinator.submit(submission);
+
+  const waiting = await coordinator.process(queue.messages[0]!);
+
+  assert.equal(waiting.state, "WAITING_CODEX");
+  assert.equal(waiting.reason, "RUNNER_TIMEOUT");
+  assert.deepEqual(waits, ["RUNNER_TIMEOUT"]);
+  assert.equal(queue.messages.length, 1);
+});
+
+test("invalid Codex protocol enters a manual retry state instead of looping the queue", async () => {
+  const store = new MemoryCodexJobStore();
+  const queue = new MemoryCodexQueue();
+  const waits: string[] = [];
+  const coordinator = createCodexWorkerCoordinator({
+    persistence: store,
+    queue,
+    taskResolver: taskResolver(validTask),
+    codex: codexPort([{ type: "future.protocol.event" }], []),
+    onWaiting: async ({ reason }) => { waits.push(reason); }
+  });
+  await coordinator.submit(submission);
+
+  const waiting = await coordinator.process(queue.messages[0]!);
+
+  assert.equal(waiting.state, "WAITING_CODEX");
+  assert.equal(waiting.reason, "RUNNER_REQUIRES_RETRY");
+  assert.deepEqual(waits, ["RUNNER_REQUIRES_RETRY"]);
+  assert.equal(queue.messages.length, 1);
+});
+
 test("unexpected runner failure returns the claim to QUEUED for the durable retry", async () => {
   const store = new MemoryCodexJobStore();
   const queue = new MemoryCodexQueue();
+  const retries: string[] = [];
   const coordinator = createCodexWorkerCoordinator({
     persistence: store,
     queue,
@@ -356,6 +462,9 @@ test("unexpected runner failure returns the claim to QUEUED for the durable retr
           }
         };
       }
+    },
+    onRetrying: async ({ failure }) => {
+      retries.push(failure);
     }
   });
   await coordinator.submit(submission);
@@ -375,4 +484,26 @@ test("unexpected runner failure returns the claim to QUEUED for the durable retr
     idempotencyKey: "draft-42:write-tr:v1",
     generation: 3
   });
+  assert.deepEqual(retries, ["EXECUTION_FAILED"]);
+});
+
+test("startup recovery clears a stale active queue reservation even when the Codex record is already queued", async () => {
+  const store = new MemoryCodexJobStore();
+  const queue = new MemoryCodexQueue();
+  const coordinator = createCodexWorkerCoordinator({
+    persistence: store,
+    queue,
+    taskResolver: taskResolver(validTask),
+    codex: codexPort([], [])
+  });
+  await coordinator.submit(submission);
+
+  const recovered = await coordinator.recoverInterrupted(submission.jobId);
+
+  assert.equal(recovered.recovered, true);
+  assert.deepEqual(queue.recovered, [{
+    jobId: submission.jobId,
+    idempotencyKey: submission.idempotencyKey,
+    generation: 1
+  }]);
 });

@@ -5,6 +5,7 @@ useDefault = true
 description = "Generated and dependency artifacts are outside the source-secret surface."
 paths = [
   '''(^|/)node_modules/''',
+  '''(^|/)build/''',
   '''(^|/)target/''',
   '''(^|/)dist/''',
   '''(^|/)output/''',

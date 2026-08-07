@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { BlogbotBridge } from "../bridge.ts";
-import type { BootstrapSnapshot, OperationsSnapshot } from "../types.ts";
+import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
+import type { BootstrapSnapshot, ConnectorStateSnapshot, OperationsSnapshot } from "../types.ts";
 
 interface OperationsProps {
   bridge: BlogbotBridge;
   snapshot: BootstrapSnapshot;
   readOnly: boolean;
+  connectorState: ConnectorStateSnapshot;
   onSnapshotChange: (snapshot: BootstrapSnapshot) => void;
   embedded?: boolean;
+  diagnosticsRequested?: boolean;
+  onDiagnosticsRequestHandled?: () => void;
 }
 
 const eventStateLabel = {
@@ -33,27 +36,22 @@ function getOperationWeek(now = new Date()): ReadonlyArray<readonly [string, str
   });
 }
 
-function selectedSiteMode(): "LOCAL_ONLY" | "LOCAL_DEV" | "PUBLISH" {
-  try {
-    const value = JSON.parse(localStorage.getItem("blogbot.setup.connector-draft.v1") ?? "null") as { site?: { mode?: string } } | null;
-    return value?.site?.mode === "PUBLISH" || value?.site?.mode === "LOCAL_DEV" ? value.site.mode : "LOCAL_ONLY";
-  } catch {
-    return "LOCAL_ONLY";
-  }
-}
-
 export function Operations({
   bridge,
   snapshot,
   readOnly,
+  connectorState,
   onSnapshotChange,
-  embedded = false
+  embedded = false,
+  diagnosticsRequested = false,
+  onDiagnosticsRequestHandled
 }: OperationsProps) {
   const [operations, setOperations] = useState<OperationsSnapshot | null>(null);
+  const [operationsLoadFailed, setOperationsLoadFailed] = useState(false);
   const [busyTarget, setBusyTarget] = useState("");
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [engineDiagnostics, setEngineDiagnostics] = useState<{ path: string | null; lines: string[] }>({ path: null, lines: [] });
-  const [localDevDiagnostics, setLocalDevDiagnostics] = useState<{ path: string | null; lines: string[] }>({ path: null, lines: [] });
+  const [engineDiagnosticsError, setEngineDiagnosticsError] = useState("");
   const [diagnosticExportBusy, setDiagnosticExportBusy] = useState(false);
   const [diagnosticExportPath, setDiagnosticExportPath] = useState("");
   const [logFilter, setLogFilter] = useState<"all" | "errors" | "changes" | "debug">("all");
@@ -64,7 +62,13 @@ export function Operations({
   );
   const [notice, setNotice] = useState("");
   const operationWeek = useMemo(() => getOperationWeek(), []);
-  const siteMode = selectedSiteMode();
+  const siteMode = connectorState.mode;
+  const runtimeModeLabel = snapshot.runtime === "ONLINE"
+    ? "Yerel çalışma modu hazır"
+    : snapshot.runtime === "DEGRADED"
+      ? "Sınırlı yerel çalışma modu"
+      : "Salt okunur kurtarma modu";
+  const diagnosticsVisible = diagnosticsRequested || diagnosticsOpen;
   const scheduleDateKey = (value: string) => {
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? value.slice(0, 10) : localDateKey(parsed);
@@ -77,11 +81,13 @@ export function Operations({
       .then((value) => {
         if (alive) {
           setOperations(value);
+          setOperationsLoadFailed(false);
         }
       })
       .catch((reason) => {
         if (alive) {
-          setNotice(reason instanceof Error ? reason.message : "Operasyon günlüğü okunamadı.");
+          setOperationsLoadFailed(true);
+          setNotice(userFacingBridgeError(reason, "Operasyon günlüğü okunamadı."));
         }
       });
     return () => {
@@ -90,19 +96,28 @@ export function Operations({
   }, [bridge]);
 
   useEffect(() => {
-    if (!diagnosticsOpen) return;
-    void Promise.all([bridge.getEngineDiagnostics(), bridge.getLocalDevLogs()])
-      .then(([engine, localDev]) => { setEngineDiagnostics(engine); setLocalDevDiagnostics(localDev); })
-      .catch(() => { setEngineDiagnostics({ path: null, lines: [] }); setLocalDevDiagnostics({ path: null, lines: [] }); });
-  }, [bridge, diagnosticsOpen]);
+    if (!diagnosticsVisible) return;
+    void bridge.getEngineDiagnostics()
+      .then((value) => {
+        setEngineDiagnostics(value);
+        setEngineDiagnosticsError("");
+      })
+      .catch(() => {
+        setEngineDiagnostics({ path: null, lines: [] });
+        setEngineDiagnosticsError("Engine hata günlüğü şu anda okunamadı.");
+      });
+  }, [bridge, diagnosticsVisible]);
 
   const refreshOperations = async () => {
     setBusyTarget("logs");
+    setOperationsLoadFailed(false);
     try {
       setOperations(await bridge.getOperations());
+      setOperationsLoadFailed(false);
       setNotice("Günlük yenilendi.");
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : "Günlük okunamadı.");
+      setOperationsLoadFailed(true);
+      setNotice(userFacingBridgeError(reason, "Günlük okunamadı."));
     } finally {
       setBusyTarget("");
     }
@@ -117,7 +132,7 @@ export function Operations({
       setDiagnosticsOpen(true);
       setNotice(`Tanılama paketi hazırlandı (${result.bytes} bayt).`);
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : "Tanılama paketi oluşturulamadı.");
+      setNotice(userFacingBridgeError(reason, "Tanılama paketi oluşturulamadı."));
     } finally {
       setDiagnosticExportBusy(false);
     }
@@ -158,7 +173,7 @@ export function Operations({
       );
     } catch (reason) {
       setNotice(
-        reason instanceof Error ? reason.message : "Durum değiştirilemedi."
+        userFacingBridgeError(reason, "Durum değiştirilemedi.")
       );
     } finally {
       setBusyTarget("");
@@ -407,7 +422,11 @@ export function Operations({
               );
             })}
             {!operations ? (
-              <div className="empty-state">Takvim yükleniyor…</div>
+              <div className="empty-state" role="status">
+                {operationsLoadFailed
+                  ? "Operasyon verisi okunamadı. Günlüğü yenileyerek yeniden deneyin."
+                  : "Takvim yükleniyor…"}
+              </div>
             ) : operations.schedule.every(
                 (item) => scheduleDateKey(item.at) !== selectedDate
               ) ? (
@@ -425,10 +444,13 @@ export function Operations({
             <button
               className="text-button"
               type="button"
-              aria-expanded={diagnosticsOpen}
-              onClick={() => setDiagnosticsOpen((current) => !current)}
+              aria-expanded={diagnosticsVisible}
+              onClick={() => {
+                if (diagnosticsRequested) onDiagnosticsRequestHandled?.();
+                setDiagnosticsOpen((current) => diagnosticsRequested ? false : !current);
+              }}
             >
-              {diagnosticsOpen ? "Tanılamayı kapat" : "Tanılama özeti"}
+              {diagnosticsVisible ? "Tanılamayı kapat" : "Tanılama özeti"}
             </button>
             <button
               className="button button-secondary"
@@ -447,10 +469,10 @@ export function Operations({
               {busyTarget === "logs" ? "Yenileniyor…" : "Günlüğü yenile"}
             </button>
           </div>
-          {diagnosticsOpen ? (
+          {diagnosticsVisible ? (
             <div className="diagnostic-summary" role="region" aria-label="Tanılama özeti">
               <dl>
-                <div><dt>Çalışma modu</dt><dd>{snapshot.runtime}</dd></div>
+                <div><dt>Çalışma modu</dt><dd>{runtimeModeLabel}</dd></div>
                 <div>
                     <dt>Yerel sistem / bağlantı</dt>
                   <dd>
@@ -465,13 +487,12 @@ export function Operations({
               {diagnosticExportPath ? <small className="diagnostic-export-path">Son paket: {diagnosticExportPath}</small> : null}
               <details className="engine-diagnostics">
                 <summary>Engine hata günlüğü</summary>
-                <small>{engineDiagnostics.path ?? "Henüz günlük oluşmadı."}</small>
-                <pre>{engineDiagnostics.lines.join("\n") || "Kayıt yok."}</pre>
-              </details>
-              <details className="engine-diagnostics">
-                <summary>Yerel proje (npm run dev) günlüğü</summary>
-                <small>{localDevDiagnostics.path ?? "Yerel proje henüz başlatılmadı."}</small>
-                <pre>{localDevDiagnostics.lines.join("\n") || "Kayıt yok."}</pre>
+                {engineDiagnosticsError ? (
+                  <small role="alert">{engineDiagnosticsError}</small>
+                ) : (
+                  <small>{engineDiagnostics.path ?? "Henüz günlük oluşmadı."}</small>
+                )}
+                <pre>{engineDiagnosticsError ? "Günlük içeriği güvenli biçimde gösterilemiyor." : engineDiagnostics.lines.join("\n") || "Kayıt yok."}</pre>
               </details>
             </div>
           ) : null}
@@ -512,7 +533,11 @@ export function Operations({
               </div>
             ))}
             {!operations ? (
-              <div className="empty-state">Operasyon günlüğü yükleniyor…</div>
+              <div className="empty-state" role="status">
+                {operationsLoadFailed
+                  ? "Operasyon verisi okunamadı. Günlüğü yenileyerek yeniden deneyin."
+                  : "Operasyon günlüğü yükleniyor…"}
+              </div>
             ) : visibleEvents.length === 0 ? (
               <div className="empty-state">Bu filtrede henüz kayıt yok.</div>
             ) : null}

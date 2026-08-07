@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::fs::{OpenOptions, create_dir_all};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use tauri::{AppHandle, Manager};
 use crate::secure_store;
 
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
+const MAX_REQUEST_BYTES: usize = 1_000_000;
 // A ready engine may legitimately spend longer than a UI round-trip on a
 // guarded source fetch (the fetcher itself allows an 8s wall-clock hop), a
 // local backup verification, or a PGlite migration.  Five seconds caused the
@@ -24,9 +26,108 @@ const STARTUP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
 const MAX_DIAGNOSTIC_LOG_BYTES: u64 = 256 * 1024;
 
+// The engine starts with a deliberately scrubbed environment. On Windows a
+// resolved `codex.cmd` still needs these OS bootstrap values to invoke the
+// command interpreter safely. Keep this list explicit: user profile, auth,
+// proxy, and arbitrary application variables never cross the bridge.
+const SIDECAR_ENV_ALLOWLIST: &[&str] = &[
+    "SystemRoot",
+    "WINDIR",
+    "ComSpec",
+    "PATH",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "LOCALAPPDATA",
+];
+
+fn sidecar_environment_with<F>(mut lookup: F) -> Vec<(&'static str, OsString)>
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    SIDECAR_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|key| lookup(key).map(|value| (*key, value)))
+        .collect()
+}
+
+fn sidecar_environment() -> Vec<(&'static str, OsString)> {
+    sidecar_environment_with(|key| env::var_os(key))
+}
+
+pub fn redact_diagnostic_for_persistence(line: &str) -> String {
+    let bounded = line.chars().take(4_000).collect::<String>();
+    let lower = bounded.to_ascii_lowercase();
+    let sensitive_markers = [
+        "token", "password", "passwd", "secret", "api_key", "apikey",
+        "authorization", "bearer", "private_key", "cookie", "credential",
+        "github_pat_", "ghp_", "sk-", "-----begin", "eyj",
+    ];
+    let has_long_opaque_value = bounded
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-' && character != '_')
+        .any(|part| part.len() >= 40);
+    let may_contain_identity_or_path = bounded.contains('@')
+        || bounded.contains("http://")
+        || bounded.contains("https://")
+        || bounded.contains("\\Users\\")
+        || bounded.contains("/home/");
+    if sensitive_markers.iter().any(|marker| lower.contains(marker))
+        || has_long_opaque_value
+        || may_contain_identity_or_path
+    {
+        return "[redacted sensitive diagnostic line]".to_string();
+    }
+    bounded
+}
+
+fn serialize_bounded_request(request: &Value) -> Result<String, String> {
+    let serialized = serde_json::to_string(request)
+        .map_err(|error| format!("ENGINE_REQUEST_INVALID: {error}"))?;
+    if serialized.len() > MAX_REQUEST_BYTES {
+        return Err("ENGINE_REQUEST_TOO_LARGE".to_string());
+    }
+    Ok(serialized)
+}
+
+fn should_retry_after_transport_fault(error: &str) -> bool {
+    [
+        "ENGINE_WRITE_FAILED:",
+        "ENGINE_READ_FAILED:",
+        "ENGINE_RESPONSE_TIMEOUT:",
+        "ENGINE_CLOSED_PIPE",
+        "ENGINE_RESPONSE_TOO_LARGE",
+        "ENGINE_RESPONSE_INVALID:",
+        "ENGINE_RESPONSE_NOT_UTF8",
+        "ENGINE_RESPONSE_ID_MISMATCH",
+    ]
+    .iter()
+    .any(|prefix| error.starts_with(prefix))
+}
+
+fn owned_process_tree_kill_args(pid: u32) -> [String; 4] {
+    ["/pid".into(), pid.to_string(), "/t".into(), "/f".into()]
+}
+
+fn terminate_owned_process_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill.exe")
+            .args(owned_process_tree_kill_args(child.id()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.is_ok_and(|result| result.success()) {
+            return;
+        }
+    }
+    let _ = child.kill();
+}
+
 pub struct EngineBridge {
     executable: Option<PathBuf>,
     assets: Option<PathBuf>,
+    node_modules: Option<PathBuf>,
     codex_command: Option<String>,
     codex_home: Option<PathBuf>,
     data_key_hex: Option<String>,
@@ -55,7 +156,7 @@ impl Drop for EngineProcess {
                     thread::sleep(Duration::from_millis(25));
                 }
                 _ => {
-                    let _ = self.child.kill();
+                    terminate_owned_process_tree(&mut self.child);
                     let _ = self.child.wait();
                     break;
                 }
@@ -74,6 +175,7 @@ impl EngineBridge {
     pub fn discover(app: &AppHandle) -> Self {
         let executable = discover_engine_executable();
         let assets = discover_pglite_assets(app);
+        let node_modules = discover_engine_node_modules(app);
         let codex_command = discover_codex_command();
         // Never inherit the user's global Codex session/config. The runner and
         // the explicit login command share only this app-owned directory.
@@ -86,6 +188,7 @@ impl EngineBridge {
         let bridge = Self {
             executable,
             assets,
+            node_modules,
             codex_command,
             codex_home,
             data_key_hex: data_key.as_ref().ok().cloned(),
@@ -116,7 +219,19 @@ impl EngineBridge {
     }
 
     pub fn request(&self, request: Value) -> Result<Value, String> {
-        let result = self.request_with_restart(request, true);
+        let mut result = self.request_with_restart(request.clone(), true);
+        // A write/read/response fault invalidates the owned sidecar process
+        // and request_with_restart drops it. The next request can therefore
+        // start a clean process. Retry exactly once here: all mutation
+        // envelopes carry durable idempotency keys, while reads are safe to
+        // repeat. Never retry domain or validation failures.
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| should_retry_after_transport_fault(error))
+        {
+            result = self.request_with_restart(request, false);
+        }
         if let Err(error) = &result {
             // Keep the most recent bridge-level failure available to the
             // diagnostics surface.  Sidecar stderr is often empty for
@@ -137,6 +252,14 @@ impl EngineBridge {
             .ok()
             .and_then(|mut process| process.as_mut().map(|value| value.child.try_wait().ok().flatten().is_none()))
             .unwrap_or(false)
+    }
+
+    /// Stops this desktop process' owned sidecar before deliberate local
+    /// workspace recovery. Dropping the process performs bounded shutdown.
+    pub fn stop(&self) {
+        if let Ok(mut process) = self.process.lock() {
+            *process = None;
+        }
     }
 
     fn request_with_restart(
@@ -168,8 +291,7 @@ impl EngineBridge {
             return self.request_with_restart(request, false);
         }
 
-        let serialized = serde_json::to_string(&request)
-            .map_err(|error| format!("ENGINE_REQUEST_INVALID: {error}"))?;
+        let serialized = serialize_bounded_request(&request)?;
         let expected_id = request
             .get("id")
             .and_then(Value::as_str)
@@ -254,19 +376,20 @@ impl EngineBridge {
             .assets
             .as_ref()
             .ok_or_else(|| "PGLITE_ASSETS_MISSING".to_string())?;
+        let node_modules = self
+            .node_modules
+            .as_ref()
+            .ok_or_else(|| "ENGINE_NATIVE_MODULES_MISSING".to_string())?;
         let data_key_hex = self
             .data_key_hex
             .as_ref()
             .ok_or_else(|| "LOCAL_DATA_KEY_UNAVAILABLE".to_string())?;
         let mut command = Command::new(executable);
         command.env_clear();
-        for key in ["SystemRoot", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA"] {
-            if let Some(value) = env::var_os(key) {
-                command.env(key, value);
-            }
-        }
         command
+            .envs(sidecar_environment())
             .env("BLOGBOT_PGLITE_ASSETS", assets)
+            .env("BLOGBOT_ENGINE_MODULES", node_modules)
             .env("BLOGBOT_DATA_KEY_HEX", data_key_hex)
             .envs(self.codex_environment())
             .stdin(Stdio::piped())
@@ -301,7 +424,7 @@ impl EngineBridge {
                     let mut log = OpenOptions::new().create(true).append(true).open(&path).ok();
                     let reader = BufReader::new(stderr);
                     for line in reader.lines().map_while(Result::ok) {
-                        let redacted = line.replace("Bearer ", "Bearer [REDACTED] ").replace("token=", "token=[REDACTED]");
+                        let redacted = redact_diagnostic_for_persistence(&line);
                         if let Some(file) = log.as_mut() {
                             if file.metadata().map(|meta| meta.len()).unwrap_or(0) > MAX_DIAGNOSTIC_LOG_BYTES {
                                 drop(log.take());
@@ -310,7 +433,7 @@ impl EngineBridge {
                             }
                         }
                         if let Some(file) = log.as_mut() {
-                            let _ = writeln!(file, "{}", redacted.chars().take(4_000).collect::<String>());
+                            let _ = writeln!(file, "{redacted}");
                         }
                     }
                 }
@@ -374,7 +497,10 @@ impl EngineBridge {
                 let _ = create_dir_all(parent);
             }
             if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                let _ = writeln!(file, "BRIDGE_ERROR {}", self.last_error().unwrap_or_else(|| "unknown".to_string()));
+                let detail = redact_diagnostic_for_persistence(
+                    &self.last_error().unwrap_or_else(|| "unknown".to_string())
+                );
+                let _ = writeln!(file, "BRIDGE_ERROR {detail}");
             }
         }
     }
@@ -460,9 +586,30 @@ fn has_pglite_assets(path: &Path) -> bool {
         .all(|asset| path.join(asset).is_file())
 }
 
+fn discover_engine_node_modules(app: &AppHandle) -> Option<PathBuf> {
+    let mut candidates = vec![Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("engine-node_modules")
+        .join("node_modules")];
+    if let Ok(resource_directory) = app.path().resource_dir() {
+        candidates.push(
+            resource_directory
+                .join("resources")
+                .join("engine-node_modules")
+                .join("node_modules"),
+        );
+        candidates.push(resource_directory.join("engine-node_modules").join("node_modules"));
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.join("sharp").join("package.json").is_file()
+            && path.join("@img").join("sharp-win32-x64").join("lib").join("sharp-win32-x64-0.35.3.node").is_file())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{discover_engine_executable, has_pglite_assets, RESPONSE_TIMEOUT};
+    use super::{discover_engine_executable, has_pglite_assets, redact_diagnostic_for_persistence, serialize_bounded_request, sidecar_environment_with, should_retry_after_transport_fault, RESPONSE_TIMEOUT};
+    use serde_json::json;
     use std::path::Path;
     use std::time::Duration;
 
@@ -485,5 +632,78 @@ mod tests {
         // The fetch boundary allows an 8-second hop. The bridge must not
         // expire sooner than that or valid source tests become false errors.
         assert!(RESPONSE_TIMEOUT >= Duration::from_secs(8));
+    }
+
+    #[test]
+    fn owned_sidecar_shutdown_targets_only_the_owned_process_tree() {
+        assert_eq!(super::owned_process_tree_kill_args(4242), ["/pid", "4242", "/t", "/f"].map(String::from));
+    }
+
+    #[test]
+    fn transient_sidecar_transport_faults_get_one_safe_restart_retry() {
+        for error in [
+            "ENGINE_WRITE_FAILED: broken pipe",
+            "ENGINE_READ_FAILED: connection reset",
+            "ENGINE_RESPONSE_TIMEOUT: timed out waiting on channel",
+            "ENGINE_CLOSED_PIPE",
+            "ENGINE_RESPONSE_INVALID: malformed line",
+            "ENGINE_RESPONSE_ID_MISMATCH",
+        ] {
+            assert!(should_retry_after_transport_fault(error), "{error}");
+        }
+        assert!(!should_retry_after_transport_fault("ENGINE_REQUEST_TOO_LARGE"));
+        assert!(!should_retry_after_transport_fault("ENGINE_REQUEST_ID_MISSING"));
+    }
+
+    #[test]
+    fn scrubbed_sidecar_keeps_only_windows_process_bootstrap_variables() {
+        let environment = sidecar_environment_with(|key| match key {
+            "SystemRoot" => Some("C:\\Windows".into()),
+            "ComSpec" => Some("C:\\Windows\\System32\\cmd.exe".into()),
+            "PATH" => Some("C:\\Windows\\System32".into()),
+            "PATHEXT" => Some(".COM;.EXE;.BAT;.CMD".into()),
+            "TEMP" => Some("C:\\Temp".into()),
+            _ => None,
+        });
+        assert_eq!(environment.len(), 5);
+        assert!(environment.iter().any(|(key, _)| *key == "ComSpec"));
+        assert!(environment.iter().any(|(key, _)| *key == "PATH"));
+        assert!(environment.iter().any(|(key, _)| *key == "PATHEXT"));
+        assert!(!environment.iter().any(|(key, _)| *key == "USERPROFILE"));
+    }
+
+    #[test]
+    fn oversized_requests_are_rejected_before_sidecar_io() {
+        let oversized = json!({
+            "version": 1,
+            "id": "oversized",
+            "kind": "command",
+            "payload": "x".repeat(1_000_001)
+        });
+        assert_eq!(
+            serialize_bounded_request(&oversized).unwrap_err(),
+            "ENGINE_REQUEST_TOO_LARGE"
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_redacted_before_they_reach_disk() {
+        for canary in [
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+            "token=top-secret-value",
+            concat!("github_", "pat_123456789012345678901234567890"),
+            "user@example.com failed",
+            r"C:\Users\Person\AppData\Local\auth.json",
+            "eyJhbGciOiJIUzI1NiJ9.payload.signature",
+        ] {
+            assert_eq!(
+                redact_diagnostic_for_persistence(canary),
+                "[redacted sensitive diagnostic line]"
+            );
+        }
+        assert_eq!(
+            redact_diagnostic_for_persistence("ENGINE_RESPONSE_TIMEOUT"),
+            "ENGINE_RESPONSE_TIMEOUT"
+        );
     }
 }

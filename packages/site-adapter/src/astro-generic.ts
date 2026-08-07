@@ -35,7 +35,11 @@ const sections: readonly SiteSectionCapability[] = [
   { id: "news", articleType: "news", schemaType: "NewsArticle", routes: { tr: "haberler/{slug}", en: "news/{slug}" } },
   { id: "analysis", articleType: "analysis", schemaType: "Article", routes: { tr: "analiz/{slug}", en: "analysis/{slug}" } },
   { id: "guide", articleType: "guide", schemaType: "BlogPosting", routes: { tr: "rehberler/{slug}", en: "guides/{slug}" } },
-  { id: "deep-dive", articleType: "deep_dive", schemaType: "Article", routes: { tr: "dosyalar/{slug}", en: "deep-dives/{slug}" } }
+  { id: "deep-dive", articleType: "deep_dive", schemaType: "Article", routes: { tr: "dosyalar/{slug}", en: "deep-dives/{slug}" } },
+  { id: "technology", articleType: "news", schemaType: "NewsArticle", routes: { tr: "teknoloji/{slug}", en: "technology/{slug}" } },
+  { id: "business", articleType: "news", schemaType: "NewsArticle", routes: { tr: "ekonomi/{slug}", en: "business/{slug}" } },
+  { id: "culture", articleType: "analysis", schemaType: "Article", routes: { tr: "kultur/{slug}", en: "culture/{slug}" } },
+  { id: "life", articleType: "guide", schemaType: "BlogPosting", routes: { tr: "yasam/{slug}", en: "life/{slug}" } }
 ];
 
 function safeSlug(value: string): string {

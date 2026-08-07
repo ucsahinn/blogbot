@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { InMemoryBackendStore } from "../../packages/database/src/in-memory-backend-store.ts";
-import { createEngineProtocol, collectDraftSourceEvidence } from "../../apps/engine/src/stdio-entrypoint.ts";
+import { CODEX_RUNNER_TIMEOUT_MS, createEngineProtocol, collectDraftSourceEvidence, recoverWaitingDraftJobs, resolveCandidateSourceUrl } from "../../apps/engine/src/stdio-entrypoint.ts";
 import type { CodexWorkerCoordinator } from "../../apps/engine/src/codex-worker.ts";
+import type { SourceRepository } from "../../packages/database/src/source-repository.ts";
 
 const envelope = (command: Record<string, unknown>) => ({
   version: 1,
@@ -20,7 +21,12 @@ test("draft.create persists a WAITING_CODEX local job when no runner is configur
     idempotencyKey: "draft-1",
     expectedVersion: 0,
     kind: "DRAFT.CREATE",
-    payload: { draftId: "draft-1", titleTr: "Başlık", sourceIds: ["source-1"] }
+    payload: {
+      draftId: "draft-1",
+      candidateId: "candidate-1",
+      candidateTitle: "Tedarik zinciri açığını araştır",
+      sourceIds: ["source-1"]
+    }
   }));
   assert.equal(response.ok, true);
   const state = await repository.sync(0);
@@ -35,11 +41,18 @@ test("draft.create persists a WAITING_CODEX local job when no runner is configur
     attempts: 0,
     lastError: "CODEX_RUNNER_UNAVAILABLE",
     metadata: {
+      candidateId: "candidate-1",
+      candidateTitle: "Tedarik zinciri açığını araştır",
       instruction: "",
       sourceIds: ["source-1"],
       urls: [],
       section: "haberler",
-      articleType: "news"
+      articleType: "news",
+      urgency: "normal",
+      tone: "neutral",
+      length: "standard",
+      visualPolicy: "GENERATE",
+      scheduleIntent: "UNSCHEDULED"
     }
   });
   assert.equal(typeof job?.metadata?.createdAtUnixMs, "number");
@@ -67,6 +80,250 @@ test("draft.create preserves URL evidence for instant creation", async () => {
   assert.deepEqual((await repository.getJob("draft-url-1")).metadata?.urls, ["https://example.com/report"]);
 });
 
+test("interactive Codex work has a bounded visible timeout", () => {
+  assert.equal(CODEX_RUNNER_TIMEOUT_MS, 5 * 60 * 1_000);
+});
+
+test("a durable draft waiting for Codex is re-dispatched when the local runner becomes available", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-recover-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 0,
+    lastError: "CODEX_RUNNER_UNAVAILABLE",
+    metadata: {
+      instruction: "Kaynakları karşılaştırarak özgün haber hazırla",
+      sourceIds: ["source-1"],
+      urls: [],
+      section: "haberler",
+      articleType: "news",
+      urgency: "normal",
+      tone: "neutral",
+      length: "standard",
+      visualPolicy: "NONE",
+      scheduleIntent: "UNSCHEDULED"
+    }
+  });
+  const submitted: unknown[] = [];
+  const coordinator: CodexWorkerCoordinator = {
+    async submit(input) {
+      submitted.push(input);
+      return { ...input, state: "QUEUED", version: 1 };
+    },
+    async recoverInterrupted() { return { recovered: false, snapshot: null }; },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  };
+
+  const recovered = await recoverWaitingDraftJobs(repository, coordinator);
+
+  assert.equal(recovered, 1);
+  assert.deepEqual(submitted, [{
+    jobId: "draft-recover-1",
+    idempotencyKey: "recovered:draft-recover-1",
+    definitionId: "DRAFT.CREATE",
+    payload: {
+      draftId: "draft-recover-1",
+      instruction: "Kaynakları karşılaştırarak özgün haber hazırla",
+      sourceIds: ["source-1"],
+      urls: [],
+      section: "haberler",
+      articleType: "news",
+      urgency: "normal",
+      tone: "neutral",
+      length: "standard",
+      visualPolicy: "NONE",
+      scheduleIntent: "UNSCHEDULED",
+      sources: []
+    }
+  }]);
+  const job = await repository.getJob("draft-recover-1");
+  assert.equal(job.state, "QUEUED");
+  assert.equal(job.lastError, undefined);
+});
+
+test("a timed-out Codex draft remains waiting after restart until the editor explicitly retries it", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-timeout-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 1,
+    lastError: "CODEX_RUNNER_TIMEOUT",
+    metadata: {
+      codexWaitReason: "RUNNER_TIMEOUT",
+      instruction: "Zaman aşımına uğrayan taslağı tekrar çalıştır",
+      sourceIds: ["source-1"],
+      urls: []
+    }
+  });
+  const submitted: unknown[] = [];
+  const recoveredIds: string[] = [];
+  const coordinator = {
+    async submit(input: unknown) {
+      submitted.push(input);
+      return { state: "QUEUED", version: 1 };
+    },
+    async recoverInterrupted(jobId: string) {
+      recoveredIds.push(jobId);
+      return { recovered: false, snapshot: null };
+    },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  } as unknown as CodexWorkerCoordinator;
+
+  const recovered = await recoverWaitingDraftJobs(repository, coordinator);
+
+  assert.equal(recovered, 0);
+  assert.deepEqual(recoveredIds, []);
+  assert.deepEqual(submitted, []);
+  const job = await repository.getJob("draft-timeout-1");
+  assert.equal(job.state, "WAITING_CODEX");
+  assert.equal(job.metadata?.codexWaitReason, "RUNNER_TIMEOUT");
+});
+
+test("a draft interrupted while Codex was running is re-queued on the next local engine start", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-interrupted-1",
+    kind: "DRAFT",
+    state: "RUNNING",
+    attempts: 1,
+    metadata: {
+      instruction: "Yerel engine kapandığında yarım kalan taslağı sürdür",
+      sourceIds: ["source-1"],
+      urls: []
+    }
+  });
+  const recoveredIds: string[] = [];
+  const submitted: unknown[] = [];
+  const coordinator = {
+    async submit(input: unknown) {
+      submitted.push(input);
+      return { state: "QUEUED", version: 1 };
+    },
+    async recoverInterrupted(jobId: string) {
+      recoveredIds.push(jobId);
+      return { recovered: true, snapshot: { state: "QUEUED", version: 3 } };
+    },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  } as unknown as CodexWorkerCoordinator;
+
+  const recovered = await recoverWaitingDraftJobs(repository, coordinator);
+
+  assert.equal(recovered, 1);
+  assert.deepEqual(recoveredIds, ["draft-interrupted-1"]);
+  assert.deepEqual(submitted, []);
+  const recoveredJob = await repository.getJob("draft-interrupted-1");
+  assert.equal(recoveredJob.state, "QUEUED");
+  assert.equal(recoveredJob.metadata?.recoveryCount, 1);
+  assert.equal(typeof recoveredJob.metadata?.lastQueuedAtUnixMs, "number");
+});
+
+test("draft.create preserves every user-selected generation and scheduling option", async () => {
+  const repository = new InMemoryBackendStore();
+  const handle = createEngineProtocol(repository);
+  const response = await handle(envelope({
+    version: 1,
+    requestId: "draft-options-1",
+    idempotencyKey: "draft-options-1",
+    expectedVersion: 0,
+    kind: "DRAFT.CREATE",
+    payload: {
+      draftId: "draft-options-1",
+      instruction: "Kaynakları karşılaştırarak ayrıntılı bir analiz hazırla",
+      sourceIds: ["source-1"],
+      urls: [],
+      section: "analiz",
+      articleType: "analysis",
+      urgency: "urgent",
+      tone: "technical",
+      length: "deep",
+      visualPolicy: "LOCAL_RENDERER",
+      scheduleIntent: "UNSCHEDULED"
+    }
+  }));
+  assert.equal(response.ok, true);
+  const metadata = (await repository.getJob("draft-options-1")).metadata;
+  assert.equal(metadata?.urgency, "urgent");
+  assert.equal(metadata?.tone, "technical");
+  assert.equal(metadata?.length, "deep");
+  assert.equal(metadata?.visualPolicy, "LOCAL_RENDERER");
+  assert.equal(metadata?.scheduleIntent, "UNSCHEDULED");
+});
+
+test("draft.create with NEXT_SLOT binds the durable job to an enabled custom weekly slot", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.setLocalState("desktop.editorial", {
+    schedule: {
+      slots: {
+        "slot-sun": { slotId: "slot-sun", enabled: true, time: "18:45" },
+        "slot-mon": { slotId: "slot-mon", enabled: false, time: "10:00" }
+      }
+    }
+  });
+  const handle = createEngineProtocol(repository);
+  const response = await handle(envelope({
+    version: 1,
+    requestId: "draft-next-slot-1",
+    idempotencyKey: "draft-next-slot-1",
+    expectedVersion: await repository.getVersion(),
+    kind: "DRAFT.CREATE",
+    payload: {
+      draftId: "draft-next-slot-1",
+      instruction: "Haftalık yayın ritmine göre özgün analiz hazırla",
+      sourceIds: ["source-1"],
+      urls: [],
+      section: "analiz",
+      articleType: "analysis",
+      scheduleIntent: "NEXT_SLOT"
+    }
+  }));
+
+  assert.equal(response.ok, true);
+  const job = await repository.getJob("draft-next-slot-1");
+  assert.equal(job.metadata?.scheduleIntent, "NEXT_SLOT");
+  assert.equal(typeof job.metadata?.scheduledAt, "string");
+  assert.ok(Date.parse(String(job.metadata?.scheduledAt)) > Date.now());
+});
+
+test("draft.create with NEXT_SLOT considers every enabled slot of the same weekday", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.setLocalState("desktop.editorial", {
+    schedule: {
+      slots: {
+        "slot-mon-1": { slotId: "slot-mon-1", enabled: true, time: "09:00" },
+        "slot-mon-2": { slotId: "slot-mon-2", enabled: true, time: "18:00" }
+      }
+    }
+  });
+  const handle = createEngineProtocol(repository);
+
+  const response = await handle(envelope({
+    version: 1,
+    requestId: "draft-next-slot-multiple-1",
+    idempotencyKey: "draft-next-slot-multiple-1",
+    expectedVersion: await repository.getVersion(),
+    kind: "DRAFT.CREATE",
+    payload: {
+      draftId: "draft-next-slot-multiple-1",
+      instruction: "Çoklu yayın zamanı",
+      sourceIds: ["source-1"],
+      urls: [],
+      section: "haberler",
+      articleType: "news",
+      scheduleIntent: "NEXT_SLOT"
+    }
+  }));
+
+  assert.equal(response.ok, true);
+  const job = await repository.getJob("draft-next-slot-multiple-1");
+  assert.equal(typeof job.metadata?.scheduledAt, "string");
+  assert.ok(Date.parse(String(job.metadata?.scheduledAt)) > Date.now());
+});
+
 test("draft source evidence is bounded, anchored, and marked untrusted", async () => {
   const body = `<rss><channel><title>Feed</title><item><title>Patch</title><link>https://example.com/patch</link><description>${"A".repeat(5000)}</description></item></channel></rss>`;
   const evidence = await collectDraftSourceEvidence(undefined, [], ["https://example.com/feed"], {
@@ -87,6 +344,47 @@ test("draft source evidence is bounded, anchored, and marked untrusted", async (
   assert.match(anchor.quoteHash, /^[a-f0-9]{64}$/u);
 });
 
+test("candidate research uses only the selected feed entry instead of the whole feed", async () => {
+  const repository = {
+    async getSource() {
+      return { id: "source-1", url: "https://news.example/feed.xml", updatedAt: "2026-08-07T00:00:00.000Z" };
+    },
+    async listEntries() {
+      return [
+        { externalId: "other", url: "https://news.example/stories/other", title: "Other story", summary: "Other summary" },
+        { externalId: "selected", url: "https://news.example/stories/selected", title: "Selected story", summary: "Selected summary" }
+      ];
+    }
+  } as unknown as SourceRepository;
+
+  const evidence = await collectDraftSourceEvidence(
+    repository,
+    ["source-1"],
+    [],
+    undefined,
+    "https://news.example/stories/selected"
+  );
+
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0]?.url, "https://news.example/stories/selected");
+  assert.equal(evidence[0]?.title, "Selected story");
+});
+
+test("legacy candidate jobs recover the original selected feed entry", async () => {
+  const repository = {
+    async listEntries() {
+      return [
+        { externalId: "other", url: "https://news.example/stories/other" },
+        { externalId: "selected", url: "https://news.example/stories/selected" }
+      ];
+    }
+  } as unknown as SourceRepository;
+  // This is the deterministic candidate identity used by the source catalog.
+  const candidateId = "candidate-c3bc469203aba48cdfc06abe";
+  const resolved = await resolveCandidateSourceUrl(repository, ["source-1"], candidateId);
+  assert.equal(resolved, "https://news.example/stories/selected");
+});
+
 test("draft.create dispatches to the isolated Codex coordinator when configured", async () => {
   const repository = new InMemoryBackendStore();
   const submissions: unknown[] = [];
@@ -99,6 +397,7 @@ test("draft.create dispatches to the isolated Codex coordinator when configured"
         version: 1
       };
     },
+    async recoverInterrupted() { return { recovered: false, snapshot: null }; },
     async process() { throw new Error("not used"); },
     async retryWaiting() { throw new Error("not used"); }
   };
@@ -141,4 +440,38 @@ test("job.retry moves a failed job back to QUEUED and increments attempts", asyn
   assert.equal(response.ok, true);
   assert.equal((await repository.getJob("job-1")).state, "QUEUED");
   assert.equal((await repository.getJob("job-1")).attempts, 2);
+});
+
+test("job.retry recovers a waiting Codex draft through its durable coordinator", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "job-waiting-codex-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 1,
+    lastError: "CODEX_OUTPUT_MISSING"
+  });
+  const recovered: string[] = [];
+  const codexCoordinator = {
+    async submit() { throw new Error("not used"); },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); },
+    async recoverInterrupted(jobId: string) {
+      recovered.push(jobId);
+      return { recovered: true, snapshot: null };
+    }
+  } satisfies CodexWorkerCoordinator;
+  const handle = createEngineProtocol(repository, "memory", { codexCoordinator });
+  const response = await handle(envelope({
+    version: 1,
+    requestId: "retry-waiting-codex-1",
+    idempotencyKey: "retry-waiting-codex-1",
+    expectedVersion: 1,
+    kind: "JOB.RETRY",
+    payload: { jobId: "job-waiting-codex-1" }
+  }));
+  assert.equal(response.ok, true);
+  assert.deepEqual(recovered, ["job-waiting-codex-1"]);
+  assert.equal((await repository.getJob("job-waiting-codex-1")).state, "QUEUED");
+  assert.equal((await repository.getJob("job-waiting-codex-1")).attempts, 2);
 });

@@ -21,15 +21,25 @@ const assets = join(
   "resources",
   "pglite"
 );
+const engineModules = join(
+  root,
+  "apps",
+  "desktop",
+  "src-tauri",
+  "resources",
+  "engine-node_modules",
+  "node_modules"
+);
 const localAppData = await mkdtemp(join(tmpdir(), "blogbot-sea-smoke-"));
 
 const child = spawn(executable, [], {
-  cwd: root,
+  cwd: localAppData,
   windowsHide: true,
   env: {
     ...process.env,
     LOCALAPPDATA: localAppData,
     BLOGBOT_PGLITE_ASSETS: assets,
+    BLOGBOT_ENGINE_MODULES: engineModules,
     BLOGBOT_DATA_KEY_HEX:
       "8e51c4f05c864820531146e549d2c2e1f865d5e639ccf0cff8d496c214b2387c"
   },

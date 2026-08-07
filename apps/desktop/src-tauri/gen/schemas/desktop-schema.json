@@ -177,6 +177,660 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-get-review-revision`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`",
+          "type": "string",
+          "const": "default",
+          "markdownDescription": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-get-review-revision`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`"
+        },
+        {
+          "description": "Enables the approve_high_risk_revision command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-approve-high-risk-revision",
+          "markdownDescription": "Enables the approve_high_risk_revision command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the approve_revision command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-approve-revision",
+          "markdownDescription": "Enables the approve_revision command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the autostart_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-autostart-status",
+          "markdownDescription": "Enables the autostart_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the backup_create command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-backup-create",
+          "markdownDescription": "Enables the backup_create command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the backup_restore_apply command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-backup-restore-apply",
+          "markdownDescription": "Enables the backup_restore_apply command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the backup_restore_preview command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-backup-restore-preview",
+          "markdownDescription": "Enables the backup_restore_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the backup_verify command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-backup-verify",
+          "markdownDescription": "Enables the backup_verify command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the complete_onboarding command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-complete-onboarding",
+          "markdownDescription": "Enables the complete_onboarding command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the create_instant_draft command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-create-instant-draft",
+          "markdownDescription": "Enables the create_instant_draft command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the dismiss_candidate command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-dismiss-candidate",
+          "markdownDescription": "Enables the dismiss_candidate command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the engine_doctor command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-engine-doctor",
+          "markdownDescription": "Enables the engine_doctor command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the enqueue_publication command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-enqueue-publication",
+          "markdownDescription": "Enables the enqueue_publication command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the export_diagnostics command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-export-diagnostics",
+          "markdownDescription": "Enables the export_diagnostics command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_bootstrap_snapshot command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-bootstrap-snapshot",
+          "markdownDescription": "Enables the get_bootstrap_snapshot command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_connector_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-connector-state",
+          "markdownDescription": "Enables the get_connector_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_editorial_workspace command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-editorial-workspace",
+          "markdownDescription": "Enables the get_editorial_workspace command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_engine_diagnostics command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-engine-diagnostics",
+          "markdownDescription": "Enables the get_engine_diagnostics command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_local_dev_logs command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-local-dev-logs",
+          "markdownDescription": "Enables the get_local_dev_logs command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_operations command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-operations",
+          "markdownDescription": "Enables the get_operations command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_prerequisite_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-prerequisite-status",
+          "markdownDescription": "Enables the get_prerequisite_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_review_revision command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-review-revision",
+          "markdownDescription": "Enables the get_review_revision command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_source_scan_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-source-scan-status",
+          "markdownDescription": "Enables the get_source_scan_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the github_device_flow_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-github-device-flow-start",
+          "markdownDescription": "Enables the github_device_flow_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the github_device_flow_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-github-device-flow-status",
+          "markdownDescription": "Enables the github_device_flow_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the github_preview_pull_request command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-github-preview-pull-request",
+          "markdownDescription": "Enables the github_preview_pull_request command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the github_validate_repository command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-github-validate-repository",
+          "markdownDescription": "Enables the github_validate_repository command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_sources command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-sources",
+          "markdownDescription": "Enables the list_sources command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the local_dev_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-local-dev-status",
+          "markdownDescription": "Enables the local_dev_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the materialize_local_preview command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-materialize-local-preview",
+          "markdownDescription": "Enables the materialize_local_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pick_local_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pick-local-folder",
+          "markdownDescription": "Enables the pick_local_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the preview_opml command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-preview-opml",
+          "markdownDescription": "Enables the preview_opml command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the preview_publication command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-preview-publication",
+          "markdownDescription": "Enables the preview_publication command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the promote_candidate command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-promote-candidate",
+          "markdownDescription": "Enables the promote_candidate command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the recover_local_workspace command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-recover-local-workspace",
+          "markdownDescription": "Enables the recover_local_workspace command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the request_revision_edit command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-revision-edit",
+          "markdownDescription": "Enables the request_revision_edit command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the retry_job command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-retry-job",
+          "markdownDescription": "Enables the retry_job command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the review_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-review-source",
+          "markdownDescription": "Enables the review_source command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_desktop_preferences command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-desktop-preferences",
+          "markdownDescription": "Enables the save_desktop_preferences command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_setup_connector command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-setup-connector",
+          "markdownDescription": "Enables the save_setup_connector command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_sources command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-sources",
+          "markdownDescription": "Enables the save_sources command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the scan_all_sources command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-scan-all-sources",
+          "markdownDescription": "Enables the scan_all_sources command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the scan_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-scan-source",
+          "markdownDescription": "Enables the scan_source command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the secure_store_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-secure-store-status",
+          "markdownDescription": "Enables the secure_store_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the send_test_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-send-test-notification",
+          "markdownDescription": "Enables the send_test_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_autostart command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-autostart",
+          "markdownDescription": "Enables the set_autostart command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_runtime_pause command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-runtime-pause",
+          "markdownDescription": "Enables the set_runtime_pause command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_codex_login command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-codex-login",
+          "markdownDescription": "Enables the start_codex_login command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_local_dev command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-local-dev",
+          "markdownDescription": "Enables the start_local_dev command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stop_local_dev command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-stop-local-dev",
+          "markdownDescription": "Enables the stop_local_dev command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the test_codex_runtime command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-test-codex-runtime",
+          "markdownDescription": "Enables the test_codex_runtime command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the test_local_engine command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-test-local-engine",
+          "markdownDescription": "Enables the test_local_engine command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the test_setup_connector command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-test-setup-connector",
+          "markdownDescription": "Enables the test_setup_connector command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the test_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-test-source",
+          "markdownDescription": "Enables the test_source command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_schedule_slot command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-schedule-slot",
+          "markdownDescription": "Enables the update_schedule_slot command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the approve_high_risk_revision command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-approve-high-risk-revision",
+          "markdownDescription": "Denies the approve_high_risk_revision command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the approve_revision command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-approve-revision",
+          "markdownDescription": "Denies the approve_revision command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the autostart_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-autostart-status",
+          "markdownDescription": "Denies the autostart_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the backup_create command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-backup-create",
+          "markdownDescription": "Denies the backup_create command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the backup_restore_apply command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-backup-restore-apply",
+          "markdownDescription": "Denies the backup_restore_apply command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the backup_restore_preview command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-backup-restore-preview",
+          "markdownDescription": "Denies the backup_restore_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the backup_verify command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-backup-verify",
+          "markdownDescription": "Denies the backup_verify command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the complete_onboarding command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-complete-onboarding",
+          "markdownDescription": "Denies the complete_onboarding command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the create_instant_draft command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-create-instant-draft",
+          "markdownDescription": "Denies the create_instant_draft command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the dismiss_candidate command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-dismiss-candidate",
+          "markdownDescription": "Denies the dismiss_candidate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the engine_doctor command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-engine-doctor",
+          "markdownDescription": "Denies the engine_doctor command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the enqueue_publication command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-enqueue-publication",
+          "markdownDescription": "Denies the enqueue_publication command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the export_diagnostics command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-export-diagnostics",
+          "markdownDescription": "Denies the export_diagnostics command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_bootstrap_snapshot command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-bootstrap-snapshot",
+          "markdownDescription": "Denies the get_bootstrap_snapshot command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_connector_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-connector-state",
+          "markdownDescription": "Denies the get_connector_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_editorial_workspace command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-editorial-workspace",
+          "markdownDescription": "Denies the get_editorial_workspace command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_engine_diagnostics command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-engine-diagnostics",
+          "markdownDescription": "Denies the get_engine_diagnostics command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_local_dev_logs command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-local-dev-logs",
+          "markdownDescription": "Denies the get_local_dev_logs command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_operations command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-operations",
+          "markdownDescription": "Denies the get_operations command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_prerequisite_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-prerequisite-status",
+          "markdownDescription": "Denies the get_prerequisite_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_review_revision command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-review-revision",
+          "markdownDescription": "Denies the get_review_revision command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_source_scan_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-source-scan-status",
+          "markdownDescription": "Denies the get_source_scan_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the github_device_flow_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-github-device-flow-start",
+          "markdownDescription": "Denies the github_device_flow_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the github_device_flow_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-github-device-flow-status",
+          "markdownDescription": "Denies the github_device_flow_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the github_preview_pull_request command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-github-preview-pull-request",
+          "markdownDescription": "Denies the github_preview_pull_request command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the github_validate_repository command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-github-validate-repository",
+          "markdownDescription": "Denies the github_validate_repository command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_sources command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-sources",
+          "markdownDescription": "Denies the list_sources command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the local_dev_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-local-dev-status",
+          "markdownDescription": "Denies the local_dev_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the materialize_local_preview command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-materialize-local-preview",
+          "markdownDescription": "Denies the materialize_local_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pick_local_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pick-local-folder",
+          "markdownDescription": "Denies the pick_local_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the preview_opml command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-preview-opml",
+          "markdownDescription": "Denies the preview_opml command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the preview_publication command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-preview-publication",
+          "markdownDescription": "Denies the preview_publication command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the promote_candidate command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-promote-candidate",
+          "markdownDescription": "Denies the promote_candidate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the recover_local_workspace command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-recover-local-workspace",
+          "markdownDescription": "Denies the recover_local_workspace command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_revision_edit command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-revision-edit",
+          "markdownDescription": "Denies the request_revision_edit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the retry_job command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-retry-job",
+          "markdownDescription": "Denies the retry_job command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the review_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-review-source",
+          "markdownDescription": "Denies the review_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_desktop_preferences command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-desktop-preferences",
+          "markdownDescription": "Denies the save_desktop_preferences command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_setup_connector command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-setup-connector",
+          "markdownDescription": "Denies the save_setup_connector command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_sources command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-sources",
+          "markdownDescription": "Denies the save_sources command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the scan_all_sources command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-scan-all-sources",
+          "markdownDescription": "Denies the scan_all_sources command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the scan_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-scan-source",
+          "markdownDescription": "Denies the scan_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the secure_store_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-secure-store-status",
+          "markdownDescription": "Denies the secure_store_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the send_test_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-send-test-notification",
+          "markdownDescription": "Denies the send_test_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_autostart command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-autostart",
+          "markdownDescription": "Denies the set_autostart command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_runtime_pause command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-runtime-pause",
+          "markdownDescription": "Denies the set_runtime_pause command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_codex_login command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-codex-login",
+          "markdownDescription": "Denies the start_codex_login command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_local_dev command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-local-dev",
+          "markdownDescription": "Denies the start_local_dev command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop_local_dev command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-stop-local-dev",
+          "markdownDescription": "Denies the stop_local_dev command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the test_codex_runtime command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-test-codex-runtime",
+          "markdownDescription": "Denies the test_codex_runtime command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the test_local_engine command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-test-local-engine",
+          "markdownDescription": "Denies the test_local_engine command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the test_setup_connector command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-test-setup-connector",
+          "markdownDescription": "Denies the test_setup_connector command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the test_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-test-source",
+          "markdownDescription": "Denies the test_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_schedule_slot command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-schedule-slot",
+          "markdownDescription": "Denies the update_schedule_slot command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
           "type": "string",
           "const": "autostart:default",
@@ -2431,6 +3085,60 @@
           "type": "string",
           "const": "notification:deny-show",
           "markdownDescription": "Denies the show command without any pre-configured scope."
+        },
+        {
+          "description": "This permission set configures which kind of\nupdater functions are exposed to the frontend.\n\n#### Granted Permissions\n\nThe full workflow from checking for updates to installing them\nis enabled.\n\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-install`\n- `allow-download-and-install`",
+          "type": "string",
+          "const": "updater:default",
+          "markdownDescription": "This permission set configures which kind of\nupdater functions are exposed to the frontend.\n\n#### Granted Permissions\n\nThe full workflow from checking for updates to installing them\nis enabled.\n\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-install`\n- `allow-download-and-install`"
+        },
+        {
+          "description": "Enables the check command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-check",
+          "markdownDescription": "Enables the check command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the download command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-download",
+          "markdownDescription": "Enables the download command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the download_and_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-download-and-install",
+          "markdownDescription": "Enables the download_and_install command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the install command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-install",
+          "markdownDescription": "Enables the install command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-check",
+          "markdownDescription": "Denies the check command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the download command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-download",
+          "markdownDescription": "Denies the download command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the download_and_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-download-and-install",
+          "markdownDescription": "Denies the download_and_install command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the install command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-install",
+          "markdownDescription": "Denies the install command without any pre-configured scope."
         }
       ]
     },

@@ -190,6 +190,17 @@ export function materializeApprovedSiberDergiBundle(
       "every claim must include bilingual text and anchored source evidence"
     );
   }
+  if (
+    revision.section !== "haberler" &&
+    revision.section !== "analiz" &&
+    revision.section !== "dosyalar" &&
+    revision.section !== "rehberler"
+  ) {
+    throw new SiberDergiContractError(
+      "SECTION_TYPE_MISMATCH",
+      "the selected section is not supported by the SiberDergi adapter"
+    );
+  }
   const publication: SiberDergiPublicationInput = {
     revisionId: revision.id,
     revisionHash: editorialApproval.revisionHash,

@@ -96,6 +96,7 @@ export interface BackendRepositoryTransaction {
   getAutomation(): Promise<AutomationSettings>;
   insertRevision(revision: ArticleRevision): Promise<ArticleRevision>;
   getRevision(revisionId: string): Promise<ArticleRevision>;
+  getApproval(revisionId: string): Promise<Approval | null>;
   saveApproval(approval: Approval): Promise<Approval>;
   saveHighRiskApproval(approval: HighRiskApproval): Promise<HighRiskApproval>;
   enqueuePublication(

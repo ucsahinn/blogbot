@@ -1,7 +1,9 @@
 import { useState } from "react";
 
-import type { BlogbotBridge } from "../bridge.ts";
-import type { BootstrapSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
+import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
+import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
+import { failureStateLabel, jobTypeLabel, retryModeLabel } from "../app-model.ts";
+import type { BootstrapSnapshot, ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import { Operations } from "./Operations.tsx";
 
 interface OperationsHubProps {
@@ -9,14 +11,18 @@ interface OperationsHubProps {
   snapshot: BootstrapSnapshot;
   workspace: EditorialWorkspaceSnapshot;
   readOnly: boolean;
+  connectorState: ConnectorStateSnapshot;
   onSnapshotChange: (snapshot: BootstrapSnapshot) => void;
   onWorkspaceChange: (snapshot: EditorialWorkspaceSnapshot) => void;
+  onConnectorStateChange: (snapshot: ConnectorStateSnapshot) => void;
+  onOpenSetup: () => void;
+  onOpenEditorial: () => void;
 }
 
 const codexRoleLabels = {
-  FAST: "FAST · Hızlı işler",
-  DEFAULT: "DEFAULT · Ana üretim",
-  DEEP_REVIEW: "DEEP_REVIEW · Derin inceleme"
+  FAST: "Hızlı işler",
+  DEFAULT: "Ana üretim",
+  DEEP_REVIEW: "Derin inceleme"
 } as const;
 
 const codexStateLabels = {
@@ -26,29 +32,119 @@ const codexStateLabels = {
   UNAVAILABLE: "Kullanılamıyor"
 } as const;
 
+function formatObservedTime(value: string): string {
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? "Ölçülmedi" : new Date(timestamp).toLocaleString("tr-TR");
+}
+
+function retryUnavailableReason(
+  failure: EditorialWorkspaceSnapshot["failures"][number],
+  readOnly: boolean,
+  busyId: string
+): string | undefined {
+  if (readOnly) return "Yerel çalışma alanı yeniden bağlanana kadar işler yeniden başlatılamaz.";
+  if (busyId === failure.id || failure.state === "RETRYING") return "İş zaten tekrar deneme kuyruğunda.";
+  if (failure.retryMode === "MANUAL") return "Bu iş otomatik tekrar için güvenli değil; önce hata ayrıntısını inceleyin.";
+  return undefined;
+}
+
 function userFacingRetryError(reason: unknown): string {
   const raw = reason instanceof Error ? reason.message : "";
   if (raw.includes("JOB_NOT_RETRYABLE")) return "Bu iş şu anda yeniden denenemez; önce hata ayrıntısını inceleyin.";
-  if (raw.includes("ENGINE") || raw.includes("engine")) return "Yerel çalışma bileşeni hazır değil; Kurulum Merkezi'nden Önkoşul testi çalıştırın.";
-  return "İş yeniden başlatılamadı. Teknik ayrıntılar işlem günlüğüne kaydedildi.";
+  return userFacingBridgeError(
+    reason,
+    "İş yeniden başlatılamadı. Teknik ayrıntılar işlem günlüğüne kaydedildi."
+  );
 }
 
 export function OperationsHub(props: OperationsHubProps) {
   const [tab, setTab] = useState<"jobs" | "codex" | "health" | "activity">("jobs");
   const [busyId, setBusyId] = useState("");
   const [message, setMessage] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [diagnosticsRequested, setDiagnosticsRequested] = useState(false);
+  const engineOffline = props.workspace.systemHealth.some(
+    (item) => item.id === "engine" && item.state === "OFFLINE"
+  );
+  const activeDrafts = props.workspace.drafts.filter((draft) => !draft.reviewable && draft.state === "DRAFTING");
+  const codexAccountLabel = props.connectorState.config.codex.accountLabel.trim() || "Henüz seçilmedi";
+  const activeCodexRole = props.workspace.codexRoles.find((role) => role.state === "BUSY");
+  const automationUnavailableReason = props.readOnly
+    ? "Yerel çalışma alanı yeniden bağlanana kadar otomasyon değiştirilemez."
+    : automationBusy
+      ? "Devam eden otomasyon işlemi tamamlanana kadar bu kontrol kullanılamaz."
+      : undefined;
+  const refreshUnavailableReason = refreshing
+    ? "Yerel durum yenileniyor; işlem tamamlanana kadar yeniden yenileme yapılamaz."
+    : automationBusy
+      ? "Devam eden otomasyon işlemi tamamlanana kadar durum yenilenemez."
+      : undefined;
+
+  const refresh = async () => {
+    setRefreshing(true);
+    setMessage("");
+    try {
+      const snapshot = await props.bridge.getBootstrapSnapshot();
+      const [workspace, connectorState] = await Promise.all([
+        props.bridge.getEditorialWorkspace(),
+        props.bridge.getConnectorState()
+      ]);
+      props.onSnapshotChange(snapshot);
+      props.onWorkspaceChange(workspace);
+      props.onConnectorStateChange(connectorState);
+      setMessage("Operasyon durumu yerel veriden yenilendi.");
+    } catch {
+      setMessage("Operasyon durumu yenilenemedi. Yerel engine ve bağlantıları Kurulum Merkezi'nden denetleyin.");
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const retry = async (jobId: string) => {
     setBusyId(jobId);
     setMessage("");
     try {
       await props.bridge.retryJob(jobId);
-      props.onWorkspaceChange(await props.bridge.getEditorialWorkspace());
-      setMessage("İş güvenli tekrar deneme kuyruğuna alındı.");
+      try {
+        props.onWorkspaceChange(await props.bridge.getEditorialWorkspace());
+        setMessage("İş güvenli tekrar deneme kuyruğuna alındı.");
+      } catch {
+        setMessage("İş güvenli tekrar deneme kuyruğuna alındı; ancak envanter henüz yenilenemedi. Operasyon durumunu yenileyin.");
+      }
     } catch (reason) {
       setMessage(userFacingRetryError(reason));
     } finally {
       setBusyId("");
+    }
+  };
+
+  const togglePause = async (target: "ingestion" | "publishing") => {
+    const current = target === "ingestion"
+      ? props.snapshot.automation.ingestionPaused
+      : props.snapshot.automation.publishingPaused;
+    const label = target === "ingestion" ? "Kaynak taraması" : "Yayın";
+    setAutomationBusy(true);
+    setMessage("");
+    try {
+      const result = await props.bridge.setRuntimePause({
+        target,
+        paused: !current
+      });
+      props.onSnapshotChange({
+        ...props.snapshot,
+        automation: {
+          ...props.snapshot.automation,
+          ...(target === "ingestion"
+            ? { ingestionPaused: result.paused }
+            : { publishingPaused: result.paused })
+        }
+      });
+      setMessage(result.paused ? `${label} duraklatıldı.` : `${label} devam ettirildi.`);
+    } catch (reason) {
+      setMessage(userFacingBridgeError(reason, `${label} durumu değiştirilemedi.`));
+    } finally {
+      setAutomationBusy(false);
     }
   };
 
@@ -60,46 +156,127 @@ export function OperationsHub(props: OperationsHubProps) {
           <h1>İşler, Codex kapasitesi ve sistem sağlığı.</h1>
           <p>Belirsiz yayın işlemleri önce kontrol edilir; ücretli ek hizmetler siz açıkça etkinleştirmedikçe kapalıdır.</p>
         </div>
+        <div className="header-actions">
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={Boolean(automationUnavailableReason)}
+            aria-describedby={automationUnavailableReason ? "operations-automation-unavailable" : undefined}
+            onClick={() => void togglePause("ingestion")}
+          >
+            {props.snapshot.automation.ingestionPaused ? "Taramayı sürdür" : "Taramayı duraklat"}
+          </button>
+          {props.connectorState.mode === "PUBLISH" ? (
+            <button
+              className={`button ${props.snapshot.automation.publishingPaused ? "button-primary" : "button-danger"}`}
+              type="button"
+              disabled={Boolean(automationUnavailableReason)}
+              aria-describedby={automationUnavailableReason ? "operations-automation-unavailable" : undefined}
+              onClick={() => void togglePause("publishing")}
+            >
+              {props.snapshot.automation.publishingPaused ? "Yayını sürdür" : "Yayını duraklat"}
+            </button>
+          ) : null}
+          <button className="button button-secondary" type="button" disabled={Boolean(refreshUnavailableReason)} aria-describedby={refreshUnavailableReason ? "operations-refresh-unavailable" : undefined} onClick={() => void refresh()}>
+            {refreshing ? "Yenileniyor…" : "Operasyon durumunu yenile"}
+          </button>
+          {automationUnavailableReason ? <small id="operations-automation-unavailable" className="action-unavailable-reason">{automationUnavailableReason}</small> : null}
+          {refreshUnavailableReason ? <small id="operations-refresh-unavailable" className="action-unavailable-reason">{refreshUnavailableReason}</small> : null}
+        </div>
       </header>
-      <div className="workspace-tabs" role="tablist" aria-label="Operasyon bölümleri">
+      {message ? <div className="inline-notice" role="status" aria-live="polite">{message}</div> : null}
+      <div className="workspace-tabs" role="tablist" aria-label="Operasyon bölümleri" onKeyDown={handleTabListKeyDown}>
         {([
           ["jobs", `Hatalar · ${props.workspace.failures.filter((item) => item.state === "ACTION_REQUIRED").length}`],
           ["codex", "Codex kullanım ve limit"],
           ["health", "Yerel sistem ve bağlantılar"],
           ["activity", "İş günlüğü"]
         ] as const).map(([id, label]) => (
-          <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{label}</button>
+          <button key={id} type="button" role="tab" id={`operations-tab-${id}`} aria-controls={`operations-panel-${id}`} aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{label}</button>
         ))}
       </div>
       {tab === "activity" ? (
-        <Operations
+        <div role="tabpanel" id="operations-panel-activity" aria-labelledby="operations-tab-activity"><Operations
           bridge={props.bridge}
           snapshot={props.snapshot}
           readOnly={props.readOnly}
+          connectorState={props.connectorState}
           onSnapshotChange={props.onSnapshotChange}
           embedded
-        />
+          diagnosticsRequested={diagnosticsRequested}
+          onDiagnosticsRequestHandled={() => setDiagnosticsRequested(false)}
+        /></div>
       ) : (
-        <section className="hub-panel" role="tabpanel">
+        <section className="hub-panel" role="tabpanel" id={`operations-panel-${tab}`} aria-labelledby={`operations-tab-${tab}`}>
           {tab === "jobs" ? (
             <div className="data-list">
-              {props.workspace.failures.map((failure) => (
-                <article className="failure-row" key={failure.id}>
+              {activeDrafts.map((draft) => (
+                <article className="failure-row active-job-row" key={draft.id} aria-label="Devam eden taslak işi">
                   <div>
-                    <span className={`state-pill state-${failure.state.toLowerCase()}`}>{failure.state}</span>
-                    <h2>{failure.title}</h2>
-                    <p>{failure.message}</p>
-                    <small>{failure.jobType} · {failure.attempts} deneme · {failure.retryMode}</small>
+                    <span className="state-pill state-drafting">Taslak hazırlanıyor</span>
+                    <h2>{draft.titleTr}</h2>
+                    <p>{draft.detail}</p>
+                    <small>İnceleme, taslak ve kanıt paketi hazır olduğunda açılır.</small>
                   </div>
-                  <button className="button button-secondary" type="button" disabled={props.readOnly || busyId === failure.id || failure.retryMode === "MANUAL" || failure.state === "RETRYING"} onClick={() => void retry(failure.id)}>
-                    {failure.retryMode === "RECONCILE_FIRST" ? "Uzlaştır ve tekrar dene" : failure.state === "RETRYING" ? "Kuyrukta" : "Tekrar dene"}
-                  </button>
+                  <div className="row-actions">
+                    <button className="button button-primary" type="button" onClick={props.onOpenEditorial}>
+                      Editoryal Masa’da aç
+                    </button>
+                    {draft.blockers > 0 ? (
+                      <button
+                        className="button button-secondary"
+                        type="button"
+                        disabled={props.readOnly || busyId === draft.id}
+                        aria-describedby={props.readOnly ? "active-draft-retry-unavailable" : undefined}
+                        onClick={() => void retry(draft.id)}
+                      >
+                        {busyId === draft.id ? "Kuyruğa alınıyor" : "Tekrar dene"}
+                      </button>
+                    ) : null}
+                    {draft.blockers > 0 && props.readOnly ? (
+                      <small id="active-draft-retry-unavailable" className="action-unavailable-reason">
+                        Yerel çalışma alanı yeniden bağlanana kadar iş yeniden başlatılamaz.
+                      </small>
+                    ) : null}
+                  </div>
                 </article>
               ))}
+              {props.workspace.failures.map((failure) => {
+                const unavailableReason = retryUnavailableReason(failure, props.readOnly, busyId);
+                const unavailableReasonId = `retry-unavailable-${failure.id}`;
+                return (
+                  <article className="failure-row" key={failure.id}>
+                    <div>
+                      <span className={`state-pill state-${failure.state.toLowerCase()}`}>{failureStateLabel(failure.state)}</span>
+                      <h2>{failure.title}</h2>
+                      <p>{failure.message}</p>
+                      <small>{jobTypeLabel(failure.jobType)} · {failure.attempts} deneme · {retryModeLabel(failure.retryMode)}</small>
+                      {unavailableReason ? <small id={unavailableReasonId} className="action-unavailable-reason">{unavailableReason}</small> : null}
+                    </div>
+                    <button className="button button-secondary" type="button" disabled={Boolean(unavailableReason)} title={unavailableReason} aria-describedby={unavailableReason ? unavailableReasonId : undefined} onClick={() => void retry(failure.id)}>
+                      {failure.retryMode === "RECONCILE_FIRST" ? "Uzlaştır ve tekrar dene" : failure.state === "RETRYING" ? "Kuyrukta" : "Tekrar dene"}
+                    </button>
+                  </article>
+                );
+              })}
+              {props.workspace.failures.length === 0 && activeDrafts.length === 0 ? (
+                <div className="empty-state"><strong>Müdahale bekleyen iş yok.</strong><span>Yeni bir hata oluşursa nedeni, deneme sayısı ve güvenli sonraki adım burada görünür.</span></div>
+              ) : null}
             </div>
           ) : null}
           {tab === "codex" ? (
             <>
+              <section className="codex-usage-summary" aria-label="Yerel Codex görev özeti">
+                <div>
+                  <p className="section-kicker">YEREL GÖREV GÖRÜNÜMÜ</p>
+                  <h2>{activeCodexRole ? `${codexRoleLabels[activeCodexRole.role]} çalışıyor` : "Codex işi beklemiyor"}</h2>
+                  <p>Hesap etiketi: <strong>{codexAccountLabel}</strong></p>
+                </div>
+                <dl>
+                  <div><dt>Aktif görev</dt><dd>{activeCodexRole?.queueDepth ?? 0}</dd></div>
+                  <div><dt>Son yenileme</dt><dd>{formatObservedTime(props.workspace.sync.generatedAt)}</dd></div>
+                </dl>
+              </section>
               <div className="role-grid">
                 {props.workspace.codexRoles.map((role) => (
                   <article className="role-card" key={role.role}>
@@ -110,21 +287,45 @@ export function OperationsHub(props: OperationsHubProps) {
                       </span>
                     </div>
                     <p>{role.label}</p>
-                    <dl><div><dt>Sırada</dt><dd>{role.queueDepth}</dd></div><div><dt>Bugün</dt><dd>{role.completedToday}</dd></div></dl>
+                    <dl><div><dt>Sırada</dt><dd>{role.queueDepth}</dd></div><div><dt>Bugün</dt><dd>{role.completedToday ?? "Ölçülmedi"}</dd></div><div><dt>Son başarı</dt><dd>{role.lastSuccessAt ? formatObservedTime(role.lastSuccessAt) : "Ölçülmedi"}</dd></div></dl>
                   </article>
                 ))}
+                {props.workspace.codexRoles.length === 0 ? (
+                  <div className="empty-state"><strong>Codex kapasite verisi alınamadı.</strong><span>Yerel engine bağlantısını ve Codex önkoşulunu Kurulum Merkezi'nden yeniden denetleyin.</span></div>
+                ) : null}
               </div>
-              <aside className="setup-note"><strong>Ücret koruması etkin</strong><p>Codex limiti dolarsa işler bekler ve bildirim oluşturur. Ücretli OpenAI API adaptörü kullanıcı onayı olmadan çalışmaz.</p></aside>
+              <aside className="setup-note"><strong>Token ve kota ölçümü yok</strong><p>Sadece kalıcı yerel iş kaydından türetilen veriler gösterilir. Yerel Codex çalışma zamanı token, abonelik limiti veya hesap bakiyesi vermediğinde tahmini sayaç gösterilmez. Ücretli OpenAI API adaptörü kullanıcı onayı olmadan çalışmaz.</p></aside>
             </>
           ) : null}
           {tab === "health" ? (
             <div className="health-list">
+              {engineOffline ? (
+                <aside className="engine-recovery-callout" role="alert">
+                  <div>
+                    <strong>Yerel engine yeniden bağlanmayı bekliyor.</strong>
+                    <p>İçerik ve yayın işlemleri güvenle durduruldu. Önce yerel durumu yeniden deneyin; sorun sürerse günlüklerden sır içermeyen tanılama paketi oluşturun.</p>
+                  </div>
+                  <div className="engine-recovery-actions">
+                    <button className="button button-secondary" type="button" disabled={refreshing} onClick={() => void refresh()}>
+                      {refreshing ? "Yerel durum yenileniyor…" : "Yerel durumu yeniden dene"}
+                    </button>
+                    <button className="button button-secondary" type="button" onClick={() => { setDiagnosticsRequested(true); setTab("activity"); }}>
+                      Tanılama ve günlükleri aç
+                    </button>
+                    <button className="text-button" type="button" onClick={props.onOpenSetup}>
+                      Kurulum Merkezi'nde engine'i test et
+                    </button>
+                  </div>
+                </aside>
+              ) : null}
               {props.workspace.systemHealth.map((item) => (
                 <article key={item.id}><span className={`status-dot status-${item.state.toLowerCase()}`} aria-hidden="true" /><div><strong>{item.label}</strong><p>{item.detail}</p><small>{new Date(item.checkedAt).toLocaleTimeString("tr-TR")}</small></div></article>
               ))}
+              {props.workspace.systemHealth.length === 0 ? (
+                <div className="empty-state"><strong>Sistem sağlık kontrolü çalıştırılmadı.</strong><span>Durumu yenileyin; çalıştırılmayan kontrol başarılı sayılmaz.</span></div>
+              ) : null}
             </div>
           ) : null}
-          {message ? <p className="form-message" role="status" aria-live="polite">{message}</p> : null}
         </section>
       )}
     </div>

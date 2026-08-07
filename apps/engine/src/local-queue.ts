@@ -71,7 +71,12 @@ export class LocalQueueRuntime {
       backend: "pglite",
       db: fromPglite(database),
       application_name: "blogbot-local-engine",
-      useListenNotify: true,
+      // PGlite is embedded in the local engine.  Relying on LISTEN/NOTIFY
+      // here leaves a recovery gap when a desktop process exits between a
+      // durable enqueue and a listener becoming available.  A short local
+      // poll makes queued work live again after restart without opening any
+      // network listener or changing the durable job identity.
+      useListenNotify: false,
       schedule: true,
       supervise: true
     });
@@ -123,7 +128,7 @@ export class LocalQueueRuntime {
     idempotencyKey: string
   ): Promise<string> {
     this.assertStarted();
-    const id = deterministicJobId(idempotencyKey);
+    const id = deterministicQueueJobId(idempotencyKey);
     const existing = await this.boss.getJobById<object>(name, id);
     if (existing) {
       assertSameJobPayload(existing.data, data);
@@ -147,12 +152,35 @@ export class LocalQueueRuntime {
     return this.boss.getJobById<T>(name, id);
   }
 
+  /**
+   * Used only during engine bootstrap after the owning desktop process has
+   * exited. A pg-boss job left ACTIVE by that dead process cannot be claimed
+   * again until its long execution deadline expires. Preserve the same job ID
+   * and payload, but move that stale reservation through pg-boss's supported
+   * fail/retry transition so the newly started local worker can claim it.
+   */
+  async recoverInterrupted(name: LocalQueueName, id: string): Promise<boolean> {
+    this.assertStarted();
+    const existing = await this.boss.getJobById<object>(name, id);
+    if (!existing || existing.state !== "active") return false;
+    // `retry()` preserves the queue's normal backoff (120 seconds for Codex),
+    // which is appropriate for a real execution failure but not for a process
+    // that is known to be gone at bootstrap. Replace only the stale queue
+    // reservation with the same deterministic ID and unchanged payload.
+    await this.boss.fail(name, id, { message: "local engine interrupted" });
+    await this.boss.deleteJob(name, id);
+    const recreated = await this.boss.send(name, existing.data, { id });
+    if (!recreated) throw new Error("QUEUE_INTERRUPTED_JOB_RECOVERY_FAILED");
+    const recovered = await this.boss.getJobById<object>(name, id);
+    return recovered?.state === "created";
+  }
+
   async work<T extends object>(
     name: LocalQueueName,
     handler: (job: Job<T>) => Promise<void>
   ): Promise<string> {
     this.assertStarted();
-    return this.boss.work<T>(name, async (jobs) => {
+    return this.boss.work<T>(name, { pollingIntervalSeconds: 1 }, async (jobs) => {
       const job = jobs[0];
       if (job) {
         await handler(job);
@@ -175,7 +203,7 @@ function assertSameJobPayload(existing: object, requested: object): void {
   }
 }
 
-function deterministicJobId(idempotencyKey: string): string {
+export function deterministicQueueJobId(idempotencyKey: string): string {
   const hex = createHash("sha256").update(idempotencyKey).digest("hex");
   const variant = (Number.parseInt(hex[16] ?? "0", 16) & 0x3) | 0x8;
   return [

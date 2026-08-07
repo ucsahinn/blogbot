@@ -192,6 +192,11 @@ export class InMemoryBackendStore implements BackendRepository {
     return structuredClone(revision);
   }
 
+  async getApproval(revisionId: string): Promise<Approval | null> {
+    const approval = this.state.approvals.get(revisionId);
+    return approval ? structuredClone(approval) : null;
+  }
+
   async saveApproval(approval: Approval): Promise<Approval> {
     const existing = this.state.approvals.get(approval.revisionId);
     if (existing) {

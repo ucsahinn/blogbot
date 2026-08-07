@@ -32,7 +32,7 @@ for (const [name, markdown, blocker] of [
   ["remote image", "![kopya](https://source.example/photo.jpg)", "REMOTE_IMAGE_FORBIDDEN"],
   [
     "reference-style javascript link",
-    "[tÄ±kla][zararli]\n\n[zararli]: javascript:alert(1)",
+    "[tıkla][zararli]\n\n[zararli]: javascript:alert(1)",
     "UNSAFE_LINK_TARGET"
   ],
   [

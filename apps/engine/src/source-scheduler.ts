@@ -8,6 +8,13 @@ import type {
 import { deriveAutomationCapabilities } from "../../../packages/editorial/src/automation.ts";
 import type { SourceScanCoordinator } from "./source-scan.ts";
 
+export interface SourceScanSchedulerOptions {
+  /** Receives only a redacted scheduler diagnostic code. */
+  onFault?(error: Error): void;
+}
+
+const SAFE_SOURCE_SCHEDULER_FAULT = "SOURCE_SCHEDULER_UNAVAILABLE";
+
 /**
  * Owns the local recurring source scan. It is deliberately a timer in the
  * engine process: when Windows is off no work is claimed, and on restart the
@@ -23,16 +30,32 @@ export class SourceScanScheduler {
     private readonly sources: SourceRepository,
     private readonly coordinator: SourceScanCoordinator,
     private readonly now: () => Date = () => new Date(),
-    private readonly pollMs = 60_000
+    private readonly pollMs = 60_000,
+    private readonly options: SourceScanSchedulerOptions = {}
   ) {}
 
   start(): void {
     if (this.timer) return;
-    void this.tick();
-    this.timer = setInterval(() => void this.tick(), this.pollMs);
+    this.runTick();
+    this.timer = setInterval(() => this.runTick(), this.pollMs);
     if (typeof this.timer === "object" && "unref" in this.timer) {
       this.timer.unref();
     }
+  }
+
+  private runTick(): void {
+    void this.tick().catch(() => {
+      const error = new Error(SAFE_SOURCE_SCHEDULER_FAULT);
+      try {
+        if (this.options.onFault) {
+          this.options.onFault(error);
+        } else {
+          process.stderr.write(`[Blogbot] ${SAFE_SOURCE_SCHEDULER_FAULT}\n`);
+        }
+      } catch {
+        // Diagnostics must not stop the durable scheduler.
+      }
+    });
   }
 
   stop(): void {

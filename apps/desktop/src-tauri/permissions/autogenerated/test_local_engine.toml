@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-test-local-engine"
+description = "Enables the test_local_engine command without any pre-configured scope."
+commands.allow = ["test_local_engine"]
+
+[[permission]]
+identifier = "deny-test-local-engine"
+description = "Denies the test_local_engine command without any pre-configured scope."
+commands.deny = ["test_local_engine"]

@@ -1,3 +1,5 @@
+import type { ArticleType, SiteSection } from "../../contracts/src/index.ts";
+
 export type SourceKind = "RSS" | "ATOM" | "SITEMAP" | "SITE" | "ARTICLE";
 
 export interface SourceDocumentProbe {
@@ -12,15 +14,15 @@ export interface SourceClassification {
 }
 
 export interface SourceRoutingPolicy {
-  allowedSections: Array<"haberler" | "analiz" | "dosyalar" | "rehberler">;
-  defaultArticleType: "news" | "analysis" | "deep_dive" | "guide";
+  allowedSections: SiteSection[];
+  defaultArticleType: ArticleType;
   minimumAutomaticConfidence: number;
 }
 
 export type RouteResolution =
   | {
       status: "ROUTED";
-      section: "haberler" | "analiz" | "dosyalar" | "rehberler";
+      section: SiteSection;
     }
   | {
       status: "ROUTING_REQUIRED";
@@ -31,7 +33,7 @@ export interface InstantCreateRequest {
   instruction: string;
   sourceIds: string[];
   urls: string[];
-  targetSection?: "haberler" | "analiz" | "dosyalar" | "rehberler";
+  targetSection?: SiteSection;
   requestedPublishMode: "REVIEW" | "DIRECT";
 }
 
@@ -91,7 +93,7 @@ export function classifySourceDocument(probe: SourceDocumentProbe): SourceClassi
 
 export function resolveEditorialRoute(
   policy: SourceRoutingPolicy,
-  proposedSection: "haberler" | "analiz" | "dosyalar" | "rehberler",
+  proposedSection: SiteSection,
   confidence: number
 ): RouteResolution {
   if (!policy.allowedSections.includes(proposedSection)) {

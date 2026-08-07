@@ -1,10 +1,18 @@
 mod commands;
 mod engine_bridge;
+mod github_broker;
 mod notifications;
 mod secure_store;
 mod tray;
 
 use tauri::Manager;
+
+fn startup_diagnostic_detail(startup_error: Option<&str>) -> String {
+    let startup_error = startup_error.unwrap_or("none");
+    format!(
+        "startup_handshake=deferred\nlast_error={startup_error}\n"
+    )
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,6 +30,10 @@ pub fn run() {
         ))
         .manage(commands::DesktopState::default())
         .plugin(tauri_plugin_notification::init())
+        // Authenticode is intentionally optional for this project, but the
+        // updater itself never accepts an unsigned artifact: Tauri verifies
+        // every release with the public updater key embedded in tauri.conf.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let bridge = engine_bridge::EngineBridge::discover(app.handle());
             // Never block the WebView startup on a sidecar handshake. A
@@ -29,7 +41,10 @@ pub fn run() {
             // a temporarily unavailable engine must leave the UI usable so
             // Doctor can explain and recover it instead of making the exe
             // appear frozen.
-            let runtime_ready = bridge.is_running();
+            // Process existence is not readiness. Bootstrap promotes the
+            // runtime only after a versioned Doctor handshake confirms both
+            // storage and the durable queue.
+            let runtime_ready = false;
             if let Ok(directory) = app.path().app_local_data_dir() {
                 let directory = directory
                     .parent()
@@ -38,11 +53,11 @@ pub fn run() {
                     .join("Blogbot")
                     .join("diagnostics");
                 let _ = std::fs::create_dir_all(&directory);
-                let detail = format!(
-                    "engine_running={}\nlast_error={}\n",
-                    runtime_ready,
-                    bridge.last_error().unwrap_or_else(|| "none".to_string())
-                );
+                let startup_error = bridge
+                    .last_error()
+                    .map(|value| engine_bridge::redact_diagnostic_for_persistence(&value))
+                    .unwrap_or_else(|| "none".to_string());
+                let detail = startup_diagnostic_detail(Some(&startup_error));
                 let _ = std::fs::write(directory.join("startup-state.log"), detail);
             }
             commands::set_engine_ready(&app.state::<commands::DesktopState>(), runtime_ready);
@@ -56,6 +71,7 @@ pub fn run() {
             commands::get_prerequisite_status,
             commands::test_setup_connector,
             commands::save_setup_connector,
+            commands::get_connector_state,
             commands::github_device_flow_start,
             commands::github_device_flow_status,
             commands::github_validate_repository,
@@ -63,12 +79,13 @@ pub fn run() {
             commands::test_codex_runtime,
             commands::start_codex_login,
             commands::test_local_engine,
+            commands::recover_local_workspace,
             commands::pick_local_folder,
             commands::local_dev_status,
             commands::start_local_dev,
             commands::stop_local_dev,
-            commands::get_local_dev_logs,
             commands::list_sources,
+            commands::review_source,
             commands::test_source,
             commands::scan_source,
             commands::scan_all_sources,
@@ -111,4 +128,17 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("Blogbot desktop runtime failed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_diagnostic_detail;
+
+    #[test]
+    fn startup_diagnostics_do_not_claim_the_engine_is_not_running_before_doctor() {
+        let detail = startup_diagnostic_detail(None);
+
+        assert!(detail.contains("startup_handshake=deferred"));
+        assert!(!detail.contains("engine_running=false"));
+    }
 }

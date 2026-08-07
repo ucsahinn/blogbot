@@ -373,7 +373,10 @@ export function assertAllowedContentPath(path: string, policy: PublicationBundle
   // normalized differently by Git, Node, and the local materializer (and can
   // turn a supposed file entry into a directory target).
   const genericPolicyPath = policy !== legacyBundlePolicy && policy.allowedPathPrefixes.some((prefix) =>
-    path.startsWith(prefix) && path.length > prefix.length
+    // The engine derives this list from the hash-bound generated file set.
+    // A single exact file is therefore a valid allow-list entry; a trailing
+    // slash remains the only form that grants a directory subtree.
+    path === prefix || (prefix.endsWith("/") && path.startsWith(prefix) && path.length > prefix.length)
   );
   if (
     path.length === 0 ||

@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { buildInstantCreateRequest, parseUrlSources } from "../app-model.ts";
-import type { BlogbotBridge } from "../bridge.ts";
-import type { ArticleType, Section, SourceRecord } from "../types.ts";
+import { buildInstantCreateRequest, describeInstantDraftSubmission, parseUrlSources, sectionArticleType, sectionLabel } from "../app-model.ts";
+import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
+import type { ArticleType, EditorialWorkspaceSnapshot, InstantDraftSubmission, Section, SourceRecord } from "../types.ts";
 
 interface InstantCreateProps {
   bridge: BlogbotBridge;
   readOnly: boolean;
+  onOpenEditorial: (notice?: string, pendingDraftId?: string, pendingDraftTitle?: string) => void;
   onOpenReview: () => void;
+  onWorkspaceChange: (snapshot: EditorialWorkspaceSnapshot) => void;
   embedded?: boolean;
+  defaultSection?: Section;
 }
 
 const errorLabels = {
@@ -31,8 +34,11 @@ const lengthLabels = {
 export function InstantCreate({
   bridge,
   readOnly,
+  onOpenEditorial,
   onOpenReview,
-  embedded = false
+  onWorkspaceChange,
+  embedded = false,
+  defaultSection = "haberler"
 }: InstantCreateProps) {
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [sourceQuery, setSourceQuery] = useState("");
@@ -40,7 +46,7 @@ export function InstantCreate({
   const [instruction, setInstruction] = useState("");
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [urlInput, setUrlInput] = useState("");
-  const [section, setSection] = useState<Section | "">("");
+  const [section, setSection] = useState<Section | "">(defaultSection);
   const [articleType, setArticleType] = useState<ArticleType>("news");
   const [urgency, setUrgency] = useState<"normal" | "urgent">("normal");
   const [tone, setTone] = useState<"neutral" | "technical" | "accessible">("neutral");
@@ -49,9 +55,13 @@ export function InstantCreate({
     useState<"GENERATE" | "LOCAL_RENDERER" | "NONE">("GENERATE");
   const [scheduleIntent, setScheduleIntent] =
     useState<"NEXT_SLOT" | "UNSCHEDULED">("NEXT_SLOT");
-  const [submittedId, setSubmittedId] = useState("");
+  const [submission, setSubmission] = useState<InstantDraftSubmission | null>(null);
+  const [workspaceSyncError, setWorkspaceSyncError] = useState("");
   const [errors, setErrors] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const instructionRef = useRef<HTMLTextAreaElement>(null);
+  const sourceUrlRef = useRef<HTMLTextAreaElement>(null);
+  const sectionRef = useRef<HTMLSelectElement>(null);
 
   useEffect(() => {
     let alive = true;
@@ -63,7 +73,7 @@ export function InstantCreate({
       .catch((reason) => {
         if (alive) {
           setSourceLoadError(
-            reason instanceof Error ? reason.message : "Kaynaklar yüklenemedi."
+            userFacingBridgeError(reason, "Kaynaklar yüklenemedi.")
           );
         }
       });
@@ -73,6 +83,10 @@ export function InstantCreate({
   }, [bridge]);
 
   const parsedUrls = useMemo(() => parseUrlSources(urlInput), [urlInput]);
+  const selectedSourcesNeedingReview = useMemo(
+    () => sources.filter((source) => selectedSourceIds.includes(source.id) && !source.canPublish),
+    [selectedSourceIds, sources]
+  );
 
   const toggleSource = (id: string) => {
     setSelectedSourceIds((current) =>
@@ -97,58 +111,90 @@ export function InstantCreate({
     });
     if (!result.valid) {
       setErrors(result.errors.map((error) => errorLabels[error]));
+      const firstInvalid = result.errors[0];
+      window.requestAnimationFrame(() => {
+        if (firstInvalid === "INSTRUCTION_TOO_SHORT") instructionRef.current?.focus();
+        else if (firstInvalid === "SOURCE_EVIDENCE_REQUIRED") sourceUrlRef.current?.focus();
+        else sectionRef.current?.focus();
+      });
       return;
     }
     setSubmitting(true);
     setErrors([]);
+    setWorkspaceSyncError("");
     try {
       const created = await bridge.createInstantDraft(result.request);
-      setSubmittedId(created.id);
+      setSubmission(created);
+      try {
+        let nextWorkspace = await bridge.getEditorialWorkspace();
+        for (let attempt = 0; attempt < 3 && !nextWorkspace.drafts.some((draft) => draft.id === created.id); attempt += 1) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
+          nextWorkspace = await bridge.getEditorialWorkspace();
+        }
+        if (nextWorkspace.drafts.some((draft) => draft.id === created.id)) {
+          onWorkspaceChange(nextWorkspace);
+        } else {
+          setWorkspaceSyncError("İş güvenli yerel kuyruğa alındı ancak Editoryal Masa envanterinde henüz doğrulanamadı. Masaya gitmeden önce Taslak envanterini yenileyin; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun.");
+        }
+      } catch {
+        setWorkspaceSyncError("İş güvenli yerel kuyruğa alındı ancak Editoryal Masa envanterinde henüz doğrulanamadı. Masaya gitmeden önce Taslak envanterini yenileyin; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun.");
+      }
     } catch (reason) {
       setErrors([
-        reason instanceof Error ? reason.message : "Taslak başlatılamadı."
+        userFacingBridgeError(reason, "Taslak başlatılamadı.")
       ]);
     } finally {
       setSubmitting(false);
     }
   };
 
-  if (submittedId) {
+  if (submission) {
+    const feedback = describeInstantDraftSubmission(submission);
     return (
       <div className={embedded ? "embedded-page instant-success-page" : "page instant-success-page"}>
-        <section className="instant-success content-panel">
+        <section className={`instant-success content-panel ${feedback.waitingForCodex ? "is-waiting" : ""}`}>
           <span className="success-emblem" aria-hidden="true">
-            ✓
+            {feedback.waitingForCodex ? "…" : "✓"}
           </span>
-          <p className="section-kicker">ARAŞTIRMA BAŞLADI</p>
-          <h1>İş güvenli kuyruğa alındı.</h1>
-          <p>
-            Blogbot kaynak anlık görüntülerini oluşturacak, iddiaları
-            eşleştirecek ve özgün Türkçe metinle İngilizce yerelleştirmeyi
-            inceleme alanına getirecek.
-          </p>
+          <p className="section-kicker">{feedback.kicker}</p>
+          <h1>{feedback.title}</h1>
+          <p>{feedback.detail}</p>
           <div className="created-job-id">
             <span>İş kimliği</span>
-            <code>{submittedId}</code>
+            <code>{submission.id}</code>
           </div>
+          {workspaceSyncError ? <p className="form-message" role="status" aria-live="polite">{workspaceSyncError}</p> : null}
           <div className="success-actions">
             <button
               className="button button-secondary"
               type="button"
               onClick={() => {
-                setSubmittedId("");
+                setSubmission(null);
                 setInstruction("");
               }}
             >
               Yeni iş oluştur
             </button>
             <button
-              className="button button-primary"
+              className="button button-secondary"
               type="button"
-              onClick={onOpenReview}
+              onClick={() => onOpenEditorial(
+                "Yerel kuyruk işi kabul edildi; masa envanteri güncelleniyor. Taslak görünür olduğunda burada takip edebilirsiniz.",
+                submission.id,
+                instruction.trim() || "Yeni içerik araştırması"
+              )}
             >
-              İnceleme kuyruğunu aç
+              Editoryal Masada gör
             </button>
+            {feedback.waitingForCodex ? (
+              <button className="button button-primary" type="button" onClick={() => { window.location.hash = "#setup"; }}>
+                Yazı üretimi hesabını aç
+              </button>
+            ) : (
+              <button className="button button-primary" type="button" onClick={onOpenReview}>
+                İnceleme kuyruğunu aç
+              </button>
+            )}
           </div>
         </section>
       </div>
@@ -181,6 +227,9 @@ export function InstantCreate({
               <label className="field field-wide prompt-field">
                 <span>Ne oluşturmak istiyorsunuz?</span>
                 <textarea
+                  ref={instructionRef}
+                  aria-invalid={errors.includes(errorLabels.INSTRUCTION_TOO_SHORT)}
+                  aria-describedby={errors.includes(errorLabels.INSTRUCTION_TOO_SHORT) ? "instant-error-instruction" : undefined}
                   rows={6}
                   value={instruction}
                   onChange={(event) => setInstruction(event.target.value)}
@@ -233,7 +282,7 @@ export function InstantCreate({
                   )
                   .map((source) => (
                   <label
-                    className={`source-option ${
+                    className={`source-option ${!source.canPublish ? "needs-review" : "is-ready"} ${
                       selectedSourceIds.includes(source.id) ? "is-selected" : ""
                     }`}
                     key={source.id}
@@ -241,6 +290,7 @@ export function InstantCreate({
                     <input
                       type="checkbox"
                       checked={selectedSourceIds.includes(source.id)}
+                      disabled={source.trustStatus === "REJECTED" || source.rightsStatus === "REJECTED"}
                       onChange={() => toggleSource(source.id)}
                     />
                     <span className="source-favicon" aria-hidden="true">
@@ -251,12 +301,24 @@ export function InstantCreate({
                       <small>
                         {source.kind} · {source.section}
                       </small>
+                      <small className={`source-evidence-state ${source.canPublish ? "is-ready" : "needs-review"}`}>
+                        {source.canPublish
+                          ? "Yayın kanıtına uygun"
+                          : source.trustStatus === "REJECTED" || source.rightsStatus === "REJECTED"
+                            ? "Yayın kanıtı olarak kullanılamaz"
+                            : "Değerlendirme bekliyor; araştırmada kullanılabilir"}
+                      </small>
                     </span>
                     <span className="option-check" aria-hidden="true">
                       ✓
                     </span>
                   </label>
                   ))}
+                {selectedSourcesNeedingReview.length > 0 ? (
+                  <p className="inline-notice source-selection-note" role="note">
+                    Seçtiğiniz {selectedSourcesNeedingReview.length} kaynak yayın kanıtı olmadan önce değerlendirilmelidir. Blogbot bu kaynakları araştırma ipucu olarak kullanabilir; kalite kapıları tamamlanmadan içerik onaylanamaz.
+                  </p>
+                ) : null}
                 {!sources.length && !sourceLoadError ? (
                   <div className="empty-state">
                     <strong>Henüz kayıtlı kaynak yok.</strong>
@@ -268,6 +330,9 @@ export function InstantCreate({
               <label className="field field-wide">
                 <span>Ek kaynak URL’leri</span>
                 <textarea
+                  ref={sourceUrlRef}
+                  aria-invalid={errors.includes(errorLabels.SOURCE_EVIDENCE_REQUIRED)}
+                  aria-describedby={errors.includes(errorLabels.SOURCE_EVIDENCE_REQUIRED) ? "instant-error-source" : undefined}
                   rows={3}
                   value={urlInput}
                   onChange={(event) => setUrlInput(event.target.value)}
@@ -289,31 +354,40 @@ export function InstantCreate({
                 <label className="field">
                   <span>Site bölümü</span>
                   <select
+                    ref={sectionRef}
+                    aria-invalid={errors.includes(errorLabels.TARGET_SECTION_REQUIRED)}
+                    aria-describedby={errors.includes(errorLabels.TARGET_SECTION_REQUIRED) ? "instant-error-section" : undefined}
                     value={section}
-                    onChange={(event) =>
-                      setSection(event.target.value as Section | "")
-                    }
+                    onChange={(event) => {
+                      const selected = event.target.value as Section | "";
+                      setSection(selected);
+                      if (selected) setArticleType(sectionArticleType(selected));
+                    }}
                   >
                     <option value="">Bölüm seçin</option>
                     <option value="haberler">Haberler</option>
+                    <option value="teknoloji">Teknoloji</option>
+                    <option value="ekonomi">Ekonomi ve iş</option>
                     <option value="analiz">Analiz</option>
                     <option value="dosyalar">Dosyalar</option>
                     <option value="rehberler">Rehberler</option>
+                    <option value="kultur">Kültür</option>
+                    <option value="yasam">Yaşam</option>
                   </select>
                 </label>
                 <label className="field">
                   <span>İçerik türü</span>
                   <select
                     value={articleType}
-                    onChange={(event) =>
-                      setArticleType(event.target.value as ArticleType)
-                    }
+                    disabled
+                    aria-describedby="instant-section-type-hint"
                   >
                     <option value="news">Haber</option>
                     <option value="analysis">Analiz</option>
                     <option value="deep_dive">Derin dosya</option>
                     <option value="guide">Rehber</option>
                   </select>
+                  <small id="instant-section-type-hint">{section ? `${sectionLabel(section)} bölümü için içerik türü otomatik seçilir.` : "Önce bölüm seçin; uygun içerik türü otomatik belirlenir."}</small>
                 </label>
                 <label className="field">
                   <span>Öncelik</span>
@@ -377,7 +451,18 @@ export function InstantCreate({
               <strong>Başlamadan önce tamamlayın:</strong>
               <ul>
                 {errors.map((error) => (
-                  <li key={error}>{error}</li>
+                  <li
+                    id={
+                      error === errorLabels.INSTRUCTION_TOO_SHORT
+                        ? "instant-error-instruction"
+                        : error === errorLabels.SOURCE_EVIDENCE_REQUIRED
+                          ? "instant-error-source"
+                          : error === errorLabels.TARGET_SECTION_REQUIRED
+                            ? "instant-error-section"
+                            : undefined
+                    }
+                    key={error}
+                  >{error}</li>
                 ))}
               </ul>
             </div>
