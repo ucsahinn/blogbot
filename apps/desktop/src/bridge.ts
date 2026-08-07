@@ -363,19 +363,14 @@ export function createInvokeBridge(
  * command can never be hidden behind stale UI data.
  */
 export function createCoalescingBridge(bridge: BlogbotBridge): BlogbotBridge {
-  const reads = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
+  const reads = new Map<string, Promise<unknown>>();
   const share = <T>(key: string, read: () => Promise<T>): Promise<T> => {
     const existing = reads.get(key);
-    if (existing && existing.expiresAt > Date.now()) {
-      return existing.promise as Promise<T>;
+    if (existing) {
+      return existing as Promise<T>;
     }
-    const promise = read().finally(() => {
-      globalThis.setTimeout(() => {
-        const current = reads.get(key);
-        if (current?.promise === promise) reads.delete(key);
-      }, 350);
-    });
-    reads.set(key, { expiresAt: Date.now() + 350, promise });
+    const promise = read().finally(() => reads.delete(key));
+    reads.set(key, promise);
     return promise;
   };
   const clearReads = () => reads.clear();

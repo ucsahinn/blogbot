@@ -6115,8 +6115,9 @@ strong {
 
 .sidebar .diagnostic-button {
   margin-top: 6px;
-  color: var(--blue);
-  background: color-mix(in srgb, var(--blue-soft) 72%, transparent);
+  color: var(--teal-soft);
+  background: var(--sidebar-soft);
+  border-color: var(--sidebar-line);
 }
 
 .sidebar .diagnostic-button:hover:not(:disabled) {
@@ -6196,7 +6197,7 @@ strong {
 
 @media (min-width: 1281px) {
   .week-grid {
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 8px;
   }
 

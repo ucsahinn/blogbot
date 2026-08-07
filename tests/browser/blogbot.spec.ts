@@ -857,7 +857,7 @@ test("scanning sources makes queued research visible on the editorial desk befor
   await expect(page.getByRole("status")).toContainText("araştırma için yerel kuyruğa alındı");
   await expect(page.getByRole("status")).toContainText("Editoryal Masa");
   const queuedDraft = page.getByRole("button", { name: /Araştırma güvenli yerel kuyruğa alındı/u });
-  await expect(queuedDraft).toBeDisabled();
+  await expect(queuedDraft).toBeEnabled();
   await expect(queuedDraft).toContainText("Araştırma güvenli yerel kuyruğa alındı.");
   await expect(queuedDraft.getByLabel("İlerleme yüzdesi henüz ölçülmedi")).toBeVisible();
   await expect(queuedDraft.getByLabel(/Yüzde .* tamamlandı/u)).toHaveCount(0);

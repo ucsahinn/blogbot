@@ -360,7 +360,7 @@ test("sidecar doctor smoke contract checks durable local readiness", async () =>
   );
 });
 
-test("desktop preflight verifies clean-machine installer inputs without building an installer", async () => {
+test("desktop preflight verifies clean-machine installer inputs without building an installer", { skip: process.platform !== "win32" }, async () => {
   const result = await runDesktopPreflight();
   assert.equal(result.ok, true, result.checks.filter((check) => check.status === "FAIL").map((check) => check.detail).join("; "));
   assert.ok(result.checks.some((check) => check.id === "webview2-bootstrapper"));

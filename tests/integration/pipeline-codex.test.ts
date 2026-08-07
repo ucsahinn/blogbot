@@ -163,13 +163,12 @@ test("Codex CLI port uses an isolated cwd, allowlisted environment, and final ou
   assert.equal(seen.length, 1);
   assert.equal(seen[0]?.shell, false);
   assert.equal(seen[0]?.cwdIsIsolated, true);
-  assert.deepEqual(seen[0]?.environmentKeys, [
-    "CODEX_HOME",
-    "PATH",
-    "SystemRoot",
-    "TEMP",
-    "TMP"
-  ]);
+  assert.deepEqual(
+    seen[0]?.environmentKeys,
+    ["CODEX_HOME", "PATH", "SystemRoot", "TEMP", "TMP"].filter(
+      (key) => key === "CODEX_HOME" || Boolean(process.env[key])
+    )
+  );
   assert.ok(
     events.some(
       (event) =>

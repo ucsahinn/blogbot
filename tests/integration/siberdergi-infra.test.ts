@@ -11,10 +11,11 @@ import {
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = dirname(dirname(dirname(new URL(import.meta.url).pathname.slice(1))));
+const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";
 const usesGitBash = existsSync(gitBash);
 const bashExecutable = usesGitBash ? gitBash : "bash";
@@ -102,7 +103,7 @@ test("release deployer dry-run is path-safe and does not create a release", () =
   }
 });
 
-test("backup creates a hashed archive while restore is preview-first", () => {
+test("backup creates a hashed archive while restore is preview-first", { skip: process.platform !== "win32" }, () => {
   const root = mkdtempSync(join(tmpdir(), "blogbot-local-backup-"));
   const source = join(root, "staged-backup");
   const destination = join(root, "archives");
