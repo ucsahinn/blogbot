@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 
-import { userFacingUpdateError } from "../bridge.ts";
+import { userFacingUpdateError, type BlogbotBridge, type UnsignedDesktopUpdate } from "../bridge.ts";
 import type { BootstrapSnapshot } from "../types.ts";
 
 export type PageId =
@@ -29,12 +29,6 @@ const navigation: Array<{
   { id: "operations", label: "Operasyonlar", icon: "⋮" }
 ];
 
-interface PendingDesktopUpdate {
-  version: string;
-  body?: string;
-  downloadAndInstall: (onEvent: (event: { event: "Started" | "Progress" | "Finished"; data: { contentLength?: number; chunkLength?: number } }) => void) => Promise<void>;
-}
-
 interface AppShellProps {
   activePage: PageId;
   snapshot: BootstrapSnapshot;
@@ -43,6 +37,7 @@ interface AppShellProps {
   onOpenSetup: () => void;
   onOpenSettings: () => void;
   onExportDiagnostics: () => Promise<{ path: string; bytes: number }>;
+  bridge: BlogbotBridge;
   syncError?: string;
 }
 
@@ -54,10 +49,11 @@ export function AppShell({
   onOpenSetup,
   onOpenSettings,
   onExportDiagnostics,
+  bridge,
   syncError = ""
 }: AppShellProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
-  const [pendingUpdate, setPendingUpdate] = useState<PendingDesktopUpdate | null>(null);
+  const [pendingUpdate, setPendingUpdate] = useState<UnsignedDesktopUpdate | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMessage, setUpdateMessage] = useState("");
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
@@ -85,13 +81,12 @@ export function AppShell({
     setPendingUpdate(null);
     setUpdateMessage("Güncellemeler güvenli bağlantıyla denetleniyor…");
     try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check({ timeout: 30_000 });
+      const update = await bridge.checkUnsignedUpdate();
       if (!update) {
         setUpdateMessage("Bu bilgisayardaki Blogbot güncel.");
         return;
       }
-      setPendingUpdate(update as PendingDesktopUpdate);
+      setPendingUpdate(update);
       setUpdateMessage(`Blogbot ${update.version} hazır. İndirmeyi ve kurulumu siz başlatın.`);
     } catch (reason) {
       setUpdateMessage(userFacingUpdateError(reason));
@@ -103,21 +98,12 @@ export function AppShell({
   const installPendingUpdate = async () => {
     if (!pendingUpdate) return;
     setUpdateBusy(true);
-    let downloaded = 0;
     try {
-      await pendingUpdate.downloadAndInstall((event) => {
-        if (event.event === "Started") {
-          setUpdateMessage("Doğrulanmış güncelleme indiriliyor…");
-        } else if (event.event === "Progress") {
-          downloaded += event.data.chunkLength ?? 0;
-          const total = event.data.contentLength;
-          setUpdateMessage(total ? `Güncelleme indiriliyor: %${Math.min(100, Math.round((downloaded / total) * 100))}` : "Güncelleme indiriliyor…");
-        } else {
-          setUpdateMessage("Paket doğrulandı; Windows kurulumu başlatılıyor…");
-        }
-      });
+      setUpdateMessage("Güncelleme indiriliyor ve SHA-256 ile doğrulanıyor…");
+      await bridge.installUnsignedUpdate(pendingUpdate);
+      setUpdateMessage("Güncelleme kurulumu başlatılıyor…");
     } catch {
-      setUpdateMessage("Güncelleme indirilemedi veya imzası doğrulanamadı. Hiçbir kurulum başlatılmadı.");
+      setUpdateMessage("Güncelleme indirilemedi veya SHA-256 doğrulaması başarısız oldu. Kurulum başlatılmadı.");
     } finally {
       setUpdateBusy(false);
     }
@@ -246,7 +232,7 @@ export function AppShell({
               </div>
               {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
               <strong>Blogbot · yerel yayın uygulaması</strong>
-              <span>Sürüm 0.1.6 · İmza: @ucsahinn</span>
+              <span>Sürüm 0.1.7 · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
               <a href="https://github.com/ucsahinn/blogbot" target="_blank" rel="noreferrer">
                 GitHub’da projeyi görüntüle
               </a>

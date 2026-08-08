@@ -41,12 +41,9 @@ jobs:
           if ($desktopManifest.version -ne $env:RELEASE_VERSION) {
             throw "RELEASE_VERSION_MISMATCH: apps/desktop/package.json must equal the requested release version"
           }
-      - name: Build signed updater artifacts
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Build unsigned desktop installer
         run: npm.cmd run build:desktop
-      - name: Create signed updater manifest
+      - name: Create unsigned updater manifest
         id: manifest
         shell: pwsh
         env:
@@ -56,10 +53,7 @@ jobs:
         run: |
           $bundle = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
           if ($null -eq $bundle) { throw "UPDATER_ARCHIVE_MISSING" }
-          $signaturePath = "$($bundle.FullName).sig"
-          if (-not (Test-Path -LiteralPath $signaturePath)) { throw "UPDATER_SIGNATURE_MISSING" }
-          $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
-          if ([string]::IsNullOrWhiteSpace($signature)) { throw "UPDATER_SIGNATURE_EMPTY" }
+          $sha256 = (Get-FileHash -LiteralPath $bundle.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $manifest = [ordered]@{
             version = $env:RELEASE_VERSION
             notes = $env:RELEASE_NOTES
@@ -67,17 +61,17 @@ jobs:
             platforms = @{
               'windows-x86_64' = @{
                 url = "https://github.com/$($env:REPOSITORY)/releases/download/v$($env:RELEASE_VERSION)/$($bundle.Name)"
-                signature = $signature
+                sha256 = $sha256
               }
             }
           }
           $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath latest.json -Encoding utf8NoBOM
           "archive=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
-      - name: Publish signed release
+      - name: Publish unsigned release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           UPDATER_ARCHIVE: ${{ steps.manifest.outputs.archive }}
         run: |
-          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE "$env:UPDATER_ARCHIVE.sig" latest.json --title "Blogbot $env:RELEASE_VERSION" --notes "${{ inputs.notes }}"
+          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE latest.json --title "Blogbot $env:RELEASE_VERSION" --notes "${{ inputs.notes }}"

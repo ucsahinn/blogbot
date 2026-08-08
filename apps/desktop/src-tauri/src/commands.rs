@@ -204,6 +204,8 @@ pub enum CommandError {
     InvalidInput(String),
     #[error("STATE_UNAVAILABLE")]
     StateUnavailable,
+    #[error("UPDATE_UNAVAILABLE: {0}")]
+    UpdateUnavailable(String),
 }
 
 impl Serialize for CommandError {
@@ -2146,6 +2148,20 @@ fn read_revision_list(bridge: &EngineBridge) -> Result<Vec<Value>, CommandError>
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
     read_revision_list_at_version(bridge, expected_version)
+}
+
+#[tauri::command]
+pub async fn check_unsigned_update(
+) -> Result<Option<crate::unsigned_updater::UnsignedUpdate>, CommandError> {
+    crate::unsigned_updater::check_unsigned_update().await
+}
+
+#[tauri::command]
+pub async fn install_unsigned_update(
+    app: tauri::AppHandle,
+    request: crate::unsigned_updater::InstallUnsignedUpdateRequest,
+) -> Result<(), CommandError> {
+    crate::unsigned_updater::install_unsigned_update(app, request).await
 }
 
 fn read_revision_list_at_version(

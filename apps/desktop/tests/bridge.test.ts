@@ -212,10 +212,10 @@ test("bridge protocol failures become actionable Turkish user messages", () => {
   );
 });
 
-test("updater errors distinguish a bad release signature from a network outage", () => {
+test("unsigned updater errors distinguish an invalid legacy response from a network outage", () => {
   assert.match(
     userFacingUpdateError(new Error("signature verification failed")),
-    /yayımlanan paket imzası.*doğrulama anahtarı/u
+    /eski imzalı güncelleme yolu.*SHA-256/u
   );
   assert.match(
     userFacingUpdateError(new Error("failed to connect to endpoint")),

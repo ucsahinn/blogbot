@@ -61,6 +61,8 @@ export class BridgeError extends Error {
 }
 
 export interface BlogbotBridge {
+  checkUnsignedUpdate(): Promise<UnsignedDesktopUpdate | null>;
+  installUnsignedUpdate(update: UnsignedDesktopUpdate): Promise<void>;
   getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
   getPrerequisiteStatus(): Promise<PrerequisiteSnapshot>;
   testLocalEngine(): Promise<LocalEngineTestResult>;
@@ -238,10 +240,17 @@ export function userFacingBridgeError(
   return reason instanceof BridgeError ? raw : fallback;
 }
 
+export interface UnsignedDesktopUpdate {
+  version: string;
+  notes: string;
+  url: string;
+  sha256: string;
+}
+
 export function userFacingUpdateError(reason: unknown): string {
   const raw = reason instanceof Error ? reason.message.trim().toLowerCase() : "";
   if (/(?:signature|signature verification|public key|verification)/u.test(raw)) {
-    return "Güncelleme kaynağına ulaşıldı, fakat yayımlanan paket imzası bu kurulumdaki doğrulama anahtarıyla eşleşmedi. Güvenlik nedeniyle kurulum başlatılmadı; yeni imzalı paket yayımlandığında yeniden deneyin.";
+    return "Güncelleme kaynağına ulaşıldı, fakat eski imzalı güncelleme yolu kullanıldı. Bu sürüm SHA-256 doğrulamalı imzasız release akışını kullanır.";
   }
   if (/(?:timeout|timed out|connect|network|dns|http|endpoint)/u.test(raw)) {
     return "Güncelleme kaynağına ulaşılamadı. İnternet bağlantınızı kontrol edip yeniden deneyin.";
@@ -285,6 +294,8 @@ export function createInvokeBridge(
   };
 
   return {
+    checkUnsignedUpdate: () => read("check_unsigned_update"),
+    installUnsignedUpdate: (update) => mutate("install_unsigned_update", { request: update }),
     getBootstrapSnapshot: () => read("get_bootstrap_snapshot"),
     getPrerequisiteStatus: () => read("get_prerequisite_status"),
     testLocalEngine: () => read("test_local_engine"),

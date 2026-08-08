@@ -15,6 +15,7 @@ fn main() {
         "complete_onboarding", "set_runtime_pause", "secure_store_status",
         "send_test_notification", "autostart_status", "set_autostart", "backup_verify",
         "backup_create", "backup_restore_preview", "backup_restore_apply",
+        "check_unsigned_update", "install_unsigned_update",
     ];
     tauri_build::try_build(
         tauri_build::Attributes::new()

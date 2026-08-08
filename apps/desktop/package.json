@@ -1,6 +1,6 @@
 {
   "name": "@blogbot/desktop",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,7 +16,6 @@
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-notification": "2.3.3",
-    "@tauri-apps/plugin-updater": "2.10.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

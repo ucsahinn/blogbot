@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-unsigned-update"
+description = "Enables the check_unsigned_update command without any pre-configured scope."
+commands.allow = ["check_unsigned_update"]
+
+[[permission]]
+identifier = "deny-check-unsigned-update"
+description = "Denies the check_unsigned_update command without any pre-configured scope."
+commands.deny = ["check_unsigned_update"]

@@ -111,7 +111,7 @@ test("Windows bundle metadata is valid Turkish UTF-8 rather than mojibake", asyn
   assert.doesNotMatch(metadata, /(?:Â|Ä|Ã|Å)/u, "installer metadata must not contain mojibake");
 });
 
-test("Windows auto-update uses a signed HTTPS GitHub Release feed without requiring Authenticode", async () => {
+test("Windows auto-update uses an unsigned HTTPS GitHub Release feed with SHA-256 integrity", async () => {
   const [configText, cargoText, desktopSource, releaseWorkflow] = await Promise.all([
     readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
     readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "Cargo.toml"), "utf8"),
@@ -120,32 +120,19 @@ test("Windows auto-update uses a signed HTTPS GitHub Release feed without requir
   ]);
   const config = JSON.parse(configText) as {
     bundle?: { createUpdaterArtifacts?: boolean };
-    plugins?: {
-      updater?: {
-        pubkey?: string;
-        endpoints?: string[];
-        dangerousInsecureTransportProtocol?: boolean;
-        windows?: { installMode?: string };
-      };
-    };
+    plugins?: { updater?: unknown };
   };
-  const updater = config.plugins?.updater;
 
-  assert.equal(config.bundle?.createUpdaterArtifacts, true);
-  assert.match(cargoText, /^tauri-plugin-updater\s*=\s*"2(?:\.\d+){0,2}"/mu);
-  assert.match(desktopSource, /tauri_plugin_updater::Builder::new\(\)\.build\(\)/u);
-  assert.ok(updater?.pubkey?.trim(), "the update verification public key must be embedded in the desktop bundle");
-  assert.deepEqual(
-    updater?.endpoints,
-    ["https://github.com/ucsahinn/blogbot/releases/latest/download/latest.json"]
-  );
-  assert.notEqual(updater?.dangerousInsecureTransportProtocol, true);
-  assert.equal(updater?.windows?.installMode, "passive");
-  assert.match(releaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY/u);
+  assert.equal(config.bundle?.createUpdaterArtifacts, false);
+  assert.doesNotMatch(cargoText, /tauri-plugin-updater/u);
+  assert.match(desktopSource, /check_unsigned_update/u);
+  assert.match(desktopSource, /install_unsigned_update/u);
+  assert.doesNotMatch(configText, /"pubkey"/u);
+  assert.match(releaseWorkflow, /sha256/u);
+  assert.doesNotMatch(releaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY/u);
   assert.match(releaseWorkflow, /latest\.json/u);
   assert.match(releaseWorkflow, /-setup\.exe/u);
-  assert.match(releaseWorkflow, /UPDATER_SIGNATURE_MISSING/u);
-  assert.doesNotMatch(releaseWorkflow, /--no-sign/u);
+  assert.doesNotMatch(releaseWorkflow, /UPDATER_SIGNATURE/u);
 });
 
 test("secret scan excludes generated build artifacts but keeps source files in scope", async () => {

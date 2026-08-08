@@ -4,6 +4,7 @@ mod github_broker;
 mod notifications;
 mod secure_store;
 mod tray;
+mod unsigned_updater;
 
 use tauri::Manager;
 
@@ -30,10 +31,6 @@ pub fn run() {
         ))
         .manage(commands::DesktopState::default())
         .plugin(tauri_plugin_notification::init())
-        // Authenticode is intentionally optional for this project, but the
-        // updater itself never accepts an unsigned artifact: Tauri verifies
-        // every release with the public updater key embedded in tauri.conf.
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let bridge = engine_bridge::EngineBridge::discover(app.handle());
             // Never block the WebView startup on a sidecar handshake. A
@@ -119,6 +116,8 @@ pub fn run() {
             ,commands::backup_create
             ,commands::backup_restore_preview
             ,commands::backup_restore_apply
+            ,commands::check_unsigned_update
+            ,commands::install_unsigned_update
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

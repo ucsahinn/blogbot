@@ -66,10 +66,11 @@ test("about control exposes the verified project identity and GitHub source", as
   assert.match(shell, /target="_blank"/u);
   assert.match(shell, /rel="noreferrer"/u);
   assert.match(shell, /@ucsahinn/u);
-  assert.match(shell, /@tauri-apps\/plugin-updater/u);
+  assert.match(shell, /checkUnsignedUpdate/u);
+  assert.match(shell, /installUnsignedUpdate/u);
   assert.match(shell, /Güncellemeleri denetle/u);
   assert.match(shell, /indir ve kur/u);
-  assert.match(shell, /downloadAndInstall/u);
+  assert.doesNotMatch(shell, /downloadAndInstall/u);
   assert.doesNotMatch(shell, /dangerousInsecureTransportProtocol/u);
 });
 

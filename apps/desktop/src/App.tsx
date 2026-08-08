@@ -215,6 +215,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
     <AppShell
         activePage={activePage}
         snapshot={snapshot}
+        bridge={bridge}
         onNavigate={navigate}
         onOpenSetup={() => navigate("setup")}
         onOpenSettings={() => navigate("settings")}

@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-get-review-revision`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`",
+          "description": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-get-review-revision`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`\n- `allow-check-unsigned-update`\n- `allow-install-unsigned-update`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-get-review-revision`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`"
+          "markdownDescription": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-get-review-revision`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`\n- `allow-check-unsigned-update`\n- `allow-install-unsigned-update`"
         },
         {
           "description": "Enables the approve_high_risk_revision command without any pre-configured scope.",
@@ -223,6 +223,12 @@
           "type": "string",
           "const": "allow-backup-verify",
           "markdownDescription": "Enables the backup_verify command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the check_unsigned_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-unsigned-update",
+          "markdownDescription": "Enables the check_unsigned_update command without any pre-configured scope."
         },
         {
           "description": "Enables the complete_onboarding command without any pre-configured scope.",
@@ -337,6 +343,12 @@
           "type": "string",
           "const": "allow-github-validate-repository",
           "markdownDescription": "Enables the github_validate_repository command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the install_unsigned_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-install-unsigned-update",
+          "markdownDescription": "Enables the install_unsigned_update command without any pre-configured scope."
         },
         {
           "description": "Enables the list_sources command without any pre-configured scope.",
@@ -549,6 +561,12 @@
           "markdownDescription": "Denies the backup_verify command without any pre-configured scope."
         },
         {
+          "description": "Denies the check_unsigned_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-unsigned-update",
+          "markdownDescription": "Denies the check_unsigned_update command without any pre-configured scope."
+        },
+        {
           "description": "Denies the complete_onboarding command without any pre-configured scope.",
           "type": "string",
           "const": "deny-complete-onboarding",
@@ -661,6 +679,12 @@
           "type": "string",
           "const": "deny-github-validate-repository",
           "markdownDescription": "Denies the github_validate_repository command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the install_unsigned_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-install-unsigned-update",
+          "markdownDescription": "Denies the install_unsigned_update command without any pre-configured scope."
         },
         {
           "description": "Denies the list_sources command without any pre-configured scope.",
@@ -3085,60 +3109,6 @@
           "type": "string",
           "const": "notification:deny-show",
           "markdownDescription": "Denies the show command without any pre-configured scope."
-        },
-        {
-          "description": "This permission set configures which kind of\nupdater functions are exposed to the frontend.\n\n#### Granted Permissions\n\nThe full workflow from checking for updates to installing them\nis enabled.\n\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-install`\n- `allow-download-and-install`",
-          "type": "string",
-          "const": "updater:default",
-          "markdownDescription": "This permission set configures which kind of\nupdater functions are exposed to the frontend.\n\n#### Granted Permissions\n\nThe full workflow from checking for updates to installing them\nis enabled.\n\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-install`\n- `allow-download-and-install`"
-        },
-        {
-          "description": "Enables the check command without any pre-configured scope.",
-          "type": "string",
-          "const": "updater:allow-check",
-          "markdownDescription": "Enables the check command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the download command without any pre-configured scope.",
-          "type": "string",
-          "const": "updater:allow-download",
-          "markdownDescription": "Enables the download command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the download_and_install command without any pre-configured scope.",
-          "type": "string",
-          "const": "updater:allow-download-and-install",
-          "markdownDescription": "Enables the download_and_install command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the install command without any pre-configured scope.",
-          "type": "string",
-          "const": "updater:allow-install",
-          "markdownDescription": "Enables the install command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the check command without any pre-configured scope.",
-          "type": "string",
-          "const": "updater:deny-check",
-          "markdownDescription": "Denies the check command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the download command without any pre-configured scope.",
-          "type": "string",
-          "const": "updater:deny-download",
-          "markdownDescription": "Denies the download command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the download_and_install command without any pre-configured scope.",
-          "type": "string",
-          "const": "updater:deny-download-and-install",
-          "markdownDescription": "Denies the download_and_install command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the install command without any pre-configured scope.",
-          "type": "string",
-          "const": "updater:deny-install",
-          "markdownDescription": "Denies the install command without any pre-configured scope."
         }
       ]
     },
