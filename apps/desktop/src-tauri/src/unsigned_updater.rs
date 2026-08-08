@@ -201,11 +201,11 @@ mod tests {
     #[test]
     fn accepts_only_new_https_github_installer_releases() {
         let manifest = ReleaseManifest {
-            version: "0.1.7".into(),
+            version: "0.1.8".into(),
             notes: String::new(),
             platforms: super::WindowsPlatform {
                 windows_x86_64: super::WindowsArtifact {
-                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.7/Blogbot_0.1.7_x64-setup.exe".into(),
+                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.8/Blogbot_0.1.8_x64-setup.exe".into(),
                     sha256: "a".repeat(64),
                 },
             },

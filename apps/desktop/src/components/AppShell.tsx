@@ -36,7 +36,7 @@ interface AppShellProps {
   onNavigate: (page: PageId) => void;
   onOpenSetup: () => void;
   onOpenSettings: () => void;
-  onExportDiagnostics: () => Promise<{ path: string; bytes: number }>;
+  onExportDiagnostics: () => Promise<{ path: string; directory: string; bytes: number; included: string[]; opened: boolean }>;
   bridge: BlogbotBridge;
   syncError?: string;
 }
@@ -64,7 +64,7 @@ export function AppShell({
     setDiagnosticMessage("");
     try {
       const result = await onExportDiagnostics();
-      setDiagnosticMessage(`Tanı paketi hazır: ${result.bytes} bayt`);
+      setDiagnosticMessage(`Tanı paketi hazırlandı ve klasör açıldı: ${result.directory}`);
     } catch {
       setDiagnosticMessage("Tanı paketi oluşturulamadı. Operasyonlar ekranından yeniden deneyin.");
     } finally {

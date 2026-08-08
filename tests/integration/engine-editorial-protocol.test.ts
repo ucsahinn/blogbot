@@ -197,6 +197,38 @@ test("revision save, list, and get are versioned, exact-hash bound, and durable"
   });
 });
 
+test("revision summary list omits editor bodies and media payloads", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-editorial-summary-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = await createPersistentEngineProtocol(join(root, "pgdata"), {
+    startSourceWorker: false
+  });
+  t.after(() => runtime.close());
+  const expectedRevision = revision({
+    media: [{
+      role: "hero",
+      path: "large-cover.webp",
+      sha256: "c".repeat(64),
+      width: 1600,
+      height: 900
+    }]
+  });
+
+  await runtime.handle(command("REVISION.SAVE", { revision: expectedRevision }, 0, "summary-save"));
+  const listed = await runtime.handle(
+    command("REVISION.LIST", { summaryOnly: true }, 1, "summary-list")
+  );
+  assert.equal(listed.ok, true, JSON.stringify(listed));
+  const summary = valueOf<Array<{ revision: Record<string, unknown> }>>(listed)[0]?.revision;
+
+  assert.ok(summary);
+  assert.equal(summary?.id, expectedRevision.id);
+  assert.equal((summary?.tr as { title?: string }).title, expectedRevision.tr.title);
+  assert.equal("media" in summary!, false);
+  assert.equal("en" in summary!, false);
+  assert.equal("generatedFiles" in summary!, false);
+});
+
 test("normal approval is exact-hash bound, idempotent, and durable", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-editorial-approval-"));
   const dataDir = join(root, "pgdata");

@@ -104,6 +104,10 @@ fn should_retry_after_transport_fault(error: &str) -> bool {
     .any(|prefix| error.starts_with(prefix))
 }
 
+fn transport_error_for_request(error: &str, request_id: &str) -> String {
+    format!("{error} request={request_id}")
+}
+
 fn owned_process_tree_kill_args(pid: u32) -> [String; 4] {
     ["/pid".into(), pid.to_string(), "/t".into(), "/f".into()]
 }
@@ -330,7 +334,10 @@ impl EngineBridge {
             Ok(Ok(line)) => line,
             Ok(Err(error)) => {
                 *guard = None;
-                return Err(format!("ENGINE_READ_FAILED: {error}"));
+                return Err(transport_error_for_request(
+                    &format!("ENGINE_READ_FAILED: {error}"),
+                    &expected_id,
+                ));
             }
             Err(error) => {
                 *guard = None;
@@ -343,7 +350,7 @@ impl EngineBridge {
         }
         if line.len() > MAX_RESPONSE_BYTES {
             *guard = None;
-            return Err("ENGINE_RESPONSE_TOO_LARGE".to_string());
+            return Err(transport_error_for_request("ENGINE_RESPONSE_TOO_LARGE", &expected_id));
         }
         let response: Value = match serde_json::from_str(&line) {
             Ok(response) => response,
@@ -608,7 +615,7 @@ fn discover_engine_node_modules(app: &AppHandle) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_engine_executable, has_pglite_assets, redact_diagnostic_for_persistence, serialize_bounded_request, sidecar_environment_with, should_retry_after_transport_fault, RESPONSE_TIMEOUT};
+    use super::{discover_engine_executable, has_pglite_assets, redact_diagnostic_for_persistence, serialize_bounded_request, sidecar_environment_with, should_retry_after_transport_fault, transport_error_for_request, RESPONSE_TIMEOUT};
     use serde_json::json;
     use std::path::Path;
     use std::time::Duration;
@@ -653,6 +660,14 @@ mod tests {
         }
         assert!(!should_retry_after_transport_fault("ENGINE_REQUEST_TOO_LARGE"));
         assert!(!should_retry_after_transport_fault("ENGINE_REQUEST_ID_MISSING"));
+    }
+
+    #[test]
+    fn transport_error_keeps_request_id_for_diagnostics_without_payload_data() {
+        assert_eq!(
+            transport_error_for_request("ENGINE_RESPONSE_TOO_LARGE", "desktop-workspace-42"),
+            "ENGINE_RESPONSE_TOO_LARGE request=desktop-workspace-42"
+        );
     }
 
     #[test]

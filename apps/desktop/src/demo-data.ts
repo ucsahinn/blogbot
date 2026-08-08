@@ -661,7 +661,7 @@ export function createDemoTransport(): InvokeTransport {
       case "get_engine_diagnostics":
         return { path: "C:\\Blogbot-Demo\\logs\\engine.stderr.log", lines: [] };
       case "export_diagnostics":
-        return { path: "C:\\Blogbot-Demo\\diagnostics\\blogbot-diagnostics-demo.json", bytes: 0, included: ["engine", "operations"] };
+        return { path: "C:\\Blogbot-Demo\\diagnostics\\blogbot-diagnostics-demo\\diagnostics.json", directory: "C:\\Blogbot-Demo\\diagnostics\\blogbot-diagnostics-demo", bytes: 0, included: ["engine", "operations", "startup"], opened: true };
       case "test_codex_runtime":
         return { available: true, authenticated: true, runnerReady: true, version: "demo", detail: "Demo çalışma alanında Codex bağlantısı hazır görünüyor." };
       case "start_codex_login":

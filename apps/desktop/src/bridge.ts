@@ -158,7 +158,7 @@ export interface BlogbotBridge {
   }): Promise<{ previewHash: string; [key: string]: unknown }>;
   getOperations(): Promise<OperationsSnapshot>;
   getEngineDiagnostics(): Promise<{ path: string | null; lines: string[] }>;
-  exportDiagnostics(): Promise<{ path: string; bytes: number; included: string[] }>;
+  exportDiagnostics(): Promise<{ path: string; directory: string; bytes: number; included: string[]; opened: boolean }>;
   completeOnboarding(
     settings: OnboardingSettings
   ): Promise<{ completed: true }>;

@@ -2184,7 +2184,7 @@ fn read_revision_list_at_version(
                 "idempotencyKey": format!("revision-list-{expected_version}"),
                 "expectedVersion": expected_version,
                 "kind": "REVISION.LIST",
-                "payload": {}
+                "payload": { "summaryOnly": true }
             }
         }),
     )?;
@@ -2193,6 +2193,37 @@ fn read_revision_list_at_version(
         .and_then(Value::as_array)
         .cloned()
         .ok_or_else(|| CommandError::EngineUnavailable("REVISION_LIST_SHAPE_INVALID".into()))
+}
+
+fn read_revision_at_version(
+    bridge: &EngineBridge,
+    expected_version: u64,
+    revision_id: &str,
+) -> Result<Value, CommandError> {
+    let request_id = format!(
+        "desktop-revision-get-{}-{expected_version}-{revision_id}",
+        std::process::id()
+    );
+    let response = engine_request(
+        bridge,
+        json!({
+            "version": 1,
+            "id": request_id,
+            "kind": "command",
+            "command": {
+                "version": 1,
+                "requestId": request_id,
+                "idempotencyKey": format!("revision-get-{expected_version}-{revision_id}"),
+                "expectedVersion": expected_version,
+                "kind": "REVISION.GET",
+                "payload": { "revisionId": revision_id }
+            }
+        }),
+    )?;
+    response
+        .pointer("/result/value")
+        .cloned()
+        .ok_or_else(|| CommandError::InvalidInput("revizyon bulunamadı".into()))
 }
 
 fn build_revision_queue(materializations: &[Value]) -> Vec<Value> {
@@ -2543,15 +2574,12 @@ pub fn get_review_revision(
     revision_id: String,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
-    let materializations = read_revision_list(&bridge)?;
-    let item = materializations
-        .iter()
-        .find(|item| {
-            item.pointer("/revision/id").and_then(Value::as_str)
-                == Some(revision_id.as_str())
-        })
-        .ok_or_else(|| CommandError::InvalidInput("revizyon bulunamadı".into()))?;
-    build_review_revision(item)
+    let expected_version = read_engine_state(&bridge)?
+        .pointer("/snapshot/serverCursor")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
+    let materialization = read_revision_at_version(&bridge, expected_version, &revision_id)?;
+    build_review_revision(&materialization)
 }
 
 fn build_approval_command(
@@ -2744,15 +2772,12 @@ pub fn approve_revision(
         .pointer("/result/value")
         .cloned()
         .ok_or_else(|| CommandError::EngineUnavailable("APPROVAL_SHAPE_INVALID".into()))?;
-    let materializations = read_revision_list(&bridge)?;
-    let materialization = materializations
-        .iter()
-        .find(|item| {
-            item.pointer("/revision/id").and_then(Value::as_str)
-                == Some(revision_id.as_str())
-        })
-        .ok_or_else(|| CommandError::EngineUnavailable("APPROVED_REVISION_MISSING".into()))?;
-    let review_revision = build_review_revision(materialization)?;
+    let materialization = read_revision_at_version(&bridge, expected_version, &revision_id)
+        .map_err(|error| match error {
+            CommandError::InvalidInput(_) => CommandError::EngineUnavailable("APPROVED_REVISION_MISSING".into()),
+            other => other,
+        })?;
+    let review_revision = build_review_revision(&materialization)?;
     Ok(json!({
         "approvedAt": approval.get("approvedAt").cloned().unwrap_or(Value::Null),
         "revisionHash": approval.get("revisionHash").cloned().unwrap_or(Value::Null),
@@ -3272,7 +3297,25 @@ fn diagnostic_bundle_path() -> Result<PathBuf, CommandError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CommandError::EngineUnavailable(error.to_string()))?
         .as_secs();
-    Ok(root.join(format!("blogbot-diagnostics-{stamp}.json")))
+    Ok(root.join(format!("blogbot-diagnostics-{stamp}")))
+}
+
+fn reveal_diagnostic_directory(directory: &Path) -> Result<(), CommandError> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer.exe");
+        configure_hidden_command(&mut command);
+        command.arg(directory);
+        command.spawn().map_err(|error| CommandError::EngineUnavailable(format!("Tanılama klasörü açılamadı: {error}")))?;
+    }
+    Ok(())
+}
+
+fn write_redacted_diagnostic_copy(source: Option<&Path>, target: &Path) {
+    let Some(source) = source else { return; };
+    let Ok(text) = std::fs::read_to_string(source) else { return; };
+    let redacted = text.lines().map(redact_diagnostic_line).collect::<Vec<_>>().join("\n");
+    let _ = std::fs::write(target, format!("{redacted}\n"));
 }
 
 fn read_recent_diagnostic_lines(path: Option<&Path>) -> Vec<String> {
@@ -3315,13 +3358,23 @@ pub fn export_diagnostics(
     });
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|error| CommandError::EngineUnavailable(error.to_string()))?;
-    let path = diagnostic_bundle_path()?;
+    let directory = diagnostic_bundle_path()?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| CommandError::EngineUnavailable(format!("Tanılama klasörü oluşturulamadı: {error}")))?;
+    let path = directory.join("diagnostics.json");
     std::fs::write(&path, &bytes)
         .map_err(|error| CommandError::EngineUnavailable(format!("Tanılama paketi yazılamadı: {error}")))?;
+    write_redacted_diagnostic_copy(engine_path.as_deref(), &directory.join("engine.stderr.log"));
+    if let Some(startup) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).map(|root| root.join("Blogbot").join("diagnostics").join("startup-state.log")) {
+        write_redacted_diagnostic_copy(Some(&startup), &directory.join("startup-state.log"));
+    }
+    reveal_diagnostic_directory(&directory)?;
     Ok(json!({
         "path": path.to_string_lossy().to_string(),
+        "directory": directory.to_string_lossy().to_string(),
         "bytes": bytes.len(),
-        "included": ["runtime", "operations", "engine"]
+        "included": ["runtime", "operations", "engine", "startup"],
+        "opened": true
     }))
 }
 
@@ -4063,12 +4116,12 @@ pub fn request_revision_edit(
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
-    let materializations = read_revision_list(&bridge)?;
-    let materialized = materializations
-        .iter()
-        .find(|item| item.pointer("/revision/id").and_then(Value::as_str) == Some(revision_id.as_str()))
-        .ok_or_else(|| CommandError::InvalidInput("revizyon yerel çalışma bileşeninde bulunamadı".into()))?;
-    let base_revision = build_review_revision(materialized)?;
+    let materialized = read_revision_at_version(&bridge, version, &revision_id)
+        .map_err(|error| match error {
+            CommandError::InvalidInput(_) => CommandError::InvalidInput("revizyon yerel çalışma bileşeninde bulunamadı".into()),
+            other => other,
+        })?;
+    let base_revision = build_review_revision(&materialized)?;
     let payload = revision_edit_payload(&revision_id, instruction.trim(), base_revision)?;
     let key = stable_source_key(&format!("revision-edit:{revision_id}:{instruction}"));
     let response = engine_request(&bridge, json!({

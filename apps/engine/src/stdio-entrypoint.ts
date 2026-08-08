@@ -545,9 +545,9 @@ export function createEngineProtocol(
           }
           candidateByStory.set(storyKey, {
             id: candidateId,
-            title: entry.title,
-            summary: entry.summary ?? entry.title,
-            primarySource: source.title ?? source.url,
+            title: String(entry.title).slice(0, 240),
+            summary: String(entry.summary ?? entry.title).slice(0, 240),
+            primarySource: String(source.title ?? source.url).slice(0, 240),
             sourceCount: 1,
             section: source.defaultSection ?? "haberler",
             articleType: source.defaultArticleType ?? "news",
@@ -555,7 +555,7 @@ export function createEngineProtocol(
             duplicateScore: 0,
             discoveredAt: entry.publishedAt ?? new Date(0).toISOString(),
             sourceId: source.id,
-            sourceUrl: entry.url,
+            sourceUrl: String(entry.url).slice(0, 320),
             scoreReasons: [
               source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? "Güven ve kullanım hakkı doğrulandı" : "Kaynak incelemesi bekliyor",
               entry.publishedAt ? "Güncel yayın zamanı bulundu" : "Yayın zamanı yok"
@@ -563,7 +563,10 @@ export function createEngineProtocol(
           });
         }
       }
-      const candidates = [...candidateByStory.values()];
+      // Candidate inventory is polled by the desktop shell. Keep this a
+      // bounded triage projection so a large feed catalog never freezes the
+      // bridge; the selected candidate is re-read when research starts.
+      const candidates = [...candidateByStory.values()].slice(0, 50);
       candidates.sort((left, right) => String(right.discoveredAt).localeCompare(String(left.discoveredAt)));
       return {
         version: 1,
@@ -889,7 +892,18 @@ export function createEngineProtocol(
         snapshot: {
           serverCursor: sync.serverCursor,
           automation: sync.snapshot.automation,
-          jobs: sync.snapshot.jobs,
+          // The state envelope is polled by the desktop shell. Keep it a
+          // dashboard projection: completed Codex records can contain large
+          // prompts/outputs and must be fetched only by an explicit detail
+          // command, never on every workspace refresh.
+          jobs: sync.snapshot.jobs.map((job) => ({
+            id: job.id,
+            kind: job.kind,
+            state: job.state,
+            attempts: job.attempts,
+            ...(job.lastError ? { lastError: job.lastError } : {}),
+            ...(job.metadata ? { metadata: job.metadata } : {})
+          })),
           outbox: sync.snapshot.outbox,
           changes: sync.changes
         }
@@ -1073,8 +1087,22 @@ export function createEngineProtocol(
         }
 
         const snapshot = (await repository.sync(0)).snapshot;
+        const summaryOnly = command.kind === "REVISION.LIST" &&
+          isRecord(command.payload) && command.payload.summaryOnly === true;
         const materialize = (revision: ArticleRevision) => ({
-          revision,
+          revision: summaryOnly ? {
+            id: revision.id,
+            tr: {
+              title: revision.tr.title,
+              slug: revision.tr.slug
+            },
+            section: revision.section,
+            articleType: revision.articleType,
+            riskLevel: revision.riskLevel,
+            scheduledAt: revision.scheduledAt,
+            sources: revision.sources,
+            claims: revision.claims
+          } : revision,
           revisionHash: computeRevisionHash(revision),
           editorialApproval:
             snapshot.approvals.find(
@@ -2084,17 +2112,25 @@ export async function runStdioEngine(
     startSourceScheduler: true,
     startPublicationScheduler: true
   });
+  let outputBroken = false;
+  output.on("error", () => {
+    // The desktop can restart the sidecar while an async response is still
+    // being flushed. Treat that as a normal transport shutdown; never let an
+    // unhandled EPIPE bring down Node with a visible console traceback.
+    outputBroken = true;
+  });
   try {
     for await (const line of readBoundedLines(input)) {
+      if (outputBroken) break;
       if (line === null) {
-        writeResponse(output, {
+        if (!writeResponse(output, {
           version: 1,
           id: "unknown",
           ok: false,
           kind: "error",
           code: "REQUEST_TOO_LARGE",
           message: "request exceeds the 1 MiB protocol limit"
-        });
+        })) break;
         continue;
       }
       if (!line.trim()) continue;
@@ -2103,28 +2139,28 @@ export async function runStdioEngine(
       try {
         parsed = JSON.parse(line);
       } catch {
-        writeResponse(output, {
+        if (!writeResponse(output, {
           version: 1,
           id: "unknown",
           ok: false,
           kind: "error",
           code: "INVALID_JSON",
           message: "request must be a JSON object"
-        });
+        })) break;
         continue;
       }
 
       try {
-        writeResponse(output, await runtime.handle(parsed));
+        if (!writeResponse(output, await runtime.handle(parsed))) break;
       } catch (error) {
-        writeResponse(output, {
+        if (!writeResponse(output, {
           version: 1,
           id: isRecord(parsed) && typeof parsed.id === "string" ? parsed.id : "unknown",
           ok: false,
           kind: "error",
           code: "ENGINE_FAILURE",
           message: error instanceof Error ? error.message : "engine failure"
-        });
+        })) break;
       }
     }
   } finally {
@@ -2183,8 +2219,12 @@ export async function* readBoundedLines(
   }
 }
 
-function writeResponse(output: NodeJS.WritableStream, response: EngineResponse): void {
-  output.write(`${JSON.stringify(response)}\n`);
+function writeResponse(output: NodeJS.WritableStream, response: EngineResponse): boolean {
+  try {
+    return output.write(`${JSON.stringify(response)}\n`);
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

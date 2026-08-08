@@ -216,7 +216,7 @@ export type EngineCommandV1 =
       { targets: SourceScanTargetV1[] }
     >
   | EngineCommandBaseV1<"REVISION.SAVE", { revision: RevisionPackageV2 }>
-  | EngineCommandBaseV1<"REVISION.LIST", Record<string, never>>
+  | EngineCommandBaseV1<"REVISION.LIST", { summaryOnly?: boolean }>
   | EngineCommandBaseV1<"REVISION.GET", { revisionId: string }>
   | EngineCommandBaseV1<
       "APPROVAL.GRANT",
@@ -751,7 +751,11 @@ export function validateEngineCommandV1(
     };
   }
   if (value.kind === "REVISION.LIST") {
-    if (!isRecord(value.payload) || !hasExactKeys(value.payload, [])) {
+    if (
+      !isRecord(value.payload) ||
+      !hasExactKeys(value.payload, Object.keys(value.payload).filter((key) => key === "summaryOnly")) ||
+      ("summaryOnly" in value.payload && typeof value.payload.summaryOnly !== "boolean")
+    ) {
       return invalid("REVISION.LIST payload is invalid");
     }
     return {
@@ -762,7 +766,9 @@ export function validateEngineCommandV1(
         idempotencyKey: value.idempotencyKey,
         expectedVersion: value.expectedVersion,
         kind: "REVISION.LIST",
-        payload: {}
+        payload: "summaryOnly" in value.payload
+          ? { summaryOnly: value.payload.summaryOnly as boolean }
+          : {}
       }
     };
   }

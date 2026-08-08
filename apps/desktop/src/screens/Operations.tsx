@@ -128,9 +128,9 @@ export function Operations({
     setNotice("");
     try {
       const result = await bridge.exportDiagnostics();
-      setDiagnosticExportPath(result.path);
+      setDiagnosticExportPath(result.directory);
       setDiagnosticsOpen(true);
-      setNotice(`Tanılama paketi hazırlandı (${result.bytes} bayt).`);
+      setNotice(`Tanılama paketi hazırlandı ve klasörü açıldı (${result.bytes} bayt).`);
     } catch (reason) {
       setNotice(userFacingBridgeError(reason, "Tanılama paketi oluşturulamadı."));
     } finally {
