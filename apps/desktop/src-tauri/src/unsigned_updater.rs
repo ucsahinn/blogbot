@@ -9,6 +9,7 @@ use crate::commands::CommandError;
 
 const MANIFEST_URL: &str =
     "https://github.com/ucsahinn/blogbot/releases/latest/download/latest.json";
+const RELEASES_API_URL: &str = "https://api.github.com/repos/ucsahinn/blogbot/releases/latest";
 const RELEASE_HOST: &str = "github.com";
 const RELEASE_PATH_PREFIX: &str = "/ucsahinn/blogbot/releases/download/";
 
@@ -39,6 +40,23 @@ struct WindowsPlatform {
 struct WindowsArtifact {
     url: String,
     sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 fn current_version() -> &'static str {
@@ -101,22 +119,69 @@ fn manifest_update(manifest: ReleaseManifest) -> Result<Option<UnsignedUpdate>, 
     }))
 }
 
+fn github_release_update(release: GithubRelease) -> Result<Option<UnsignedUpdate>, CommandError> {
+    let version = release
+        .tag_name
+        .strip_prefix('v')
+        .unwrap_or(&release.tag_name)
+        .to_string();
+    if !is_newer_version(&version)? {
+        return Ok(None);
+    }
+
+    let artifact = release
+        .assets
+        .into_iter()
+        .find(|asset| asset.name.ends_with("x64-setup.exe"))
+        .ok_or_else(|| CommandError::UpdateUnavailable("UPDATE_INSTALLER_MISSING".into()))?;
+    let sha256 = artifact
+        .digest
+        .as_deref()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .ok_or_else(|| CommandError::UpdateUnavailable("UPDATE_HASH_MISSING".into()))?
+        .to_ascii_lowercase();
+
+    validate_release_url(&artifact.browser_download_url)?;
+    validate_sha256(&sha256)?;
+    Ok(Some(UnsignedUpdate {
+        version,
+        notes: release.body,
+        url: artifact.browser_download_url,
+        sha256,
+    }))
+}
+
 async fn fetch_update() -> Result<Option<UnsignedUpdate>, CommandError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_CLIENT_UNAVAILABLE".into()))?;
-    let manifest = client
+    let manifest_response = client
         .get(MANIFEST_URL)
         .send()
         .await
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_UNAVAILABLE".into()))?
-        .error_for_status()
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_HTTP_ERROR".into()))?
-        .json::<ReleaseManifest>()
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_UNAVAILABLE".into()))?;
+    if manifest_response.status().is_success() {
+        let manifest = manifest_response
+            .json::<ReleaseManifest>()
+            .await
+            .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_INVALID".into()))?;
+        return manifest_update(manifest);
+    }
+
+    let release = client
+        .get(RELEASES_API_URL)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header(reqwest::header::USER_AGENT, "Blogbot-update-check")
+        .send()
         .await
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_INVALID".into()))?;
-    manifest_update(manifest)
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_UNAVAILABLE".into()))?
+        .error_for_status()
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_HTTP_ERROR".into()))?
+        .json::<GithubRelease>()
+        .await
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_INVALID".into()))?;
+    github_release_update(release)
 }
 
 pub async fn check_unsigned_update() -> Result<Option<UnsignedUpdate>, CommandError> {
@@ -195,17 +260,18 @@ pub async fn install_unsigned_update(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_newer_version, manifest_update, validate_release_url, validate_sha256, ReleaseManifest,
+        github_release_update, is_newer_version, manifest_update, validate_release_url,
+        validate_sha256, GithubRelease, ReleaseManifest,
     };
 
     #[test]
     fn accepts_only_new_https_github_installer_releases() {
         let manifest = ReleaseManifest {
-            version: "0.1.9".into(),
+            version: "0.1.10".into(),
             notes: String::new(),
             platforms: super::WindowsPlatform {
                 windows_x86_64: super::WindowsArtifact {
-                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.9/Blogbot_0.1.9_x64-setup.exe".into(),
+                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.10/Blogbot_0.1.10_x64-setup.exe".into(),
                     sha256: "a".repeat(64),
                 },
             },
@@ -222,5 +288,21 @@ mod tests {
         .is_err());
         assert!(validate_release_url("https://example.com/Blogbot-setup.exe").is_err());
         assert!(validate_sha256("not-a-hash").is_err());
+    }
+
+    #[test]
+    fn accepts_latest_github_release_api_when_manifest_asset_is_missing() {
+        let release: GithubRelease = serde_json::from_value(serde_json::json!({
+            "tag_name": "v0.1.10",
+            "body": "Daha hızlı yerel çalışma.",
+            "assets": [{
+                "name": "Blogbot_0.1.10_x64-setup.exe",
+                "browser_download_url": "https://github.com/ucsahinn/blogbot/releases/download/v0.1.10/Blogbot_0.1.10_x64-setup.exe",
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }]
+        })).unwrap();
+        let update = github_release_update(release).unwrap().unwrap();
+        assert_eq!(update.version, "0.1.10");
+        assert_eq!(update.sha256, "a".repeat(64));
     }
 }
