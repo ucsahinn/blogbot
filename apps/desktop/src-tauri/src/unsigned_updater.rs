@@ -201,11 +201,11 @@ mod tests {
     #[test]
     fn accepts_only_new_https_github_installer_releases() {
         let manifest = ReleaseManifest {
-            version: "0.1.8".into(),
+            version: "0.1.9".into(),
             notes: String::new(),
             platforms: super::WindowsPlatform {
                 windows_x86_64: super::WindowsArtifact {
-                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.8/Blogbot_0.1.8_x64-setup.exe".into(),
+                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.9/Blogbot_0.1.9_x64-setup.exe".into(),
                     sha256: "a".repeat(64),
                 },
             },
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn rejects_non_github_urls_and_bad_hashes() {
         assert!(validate_release_url(
-            "http://github.com/ucsahinn/blogbot/releases/download/v0.1.7/Blogbot-setup.exe"
+            "http://github.com/ucsahinn/blogbot/releases/download/v0.1.8/Blogbot-setup.exe"
         )
         .is_err());
         assert!(validate_release_url("https://example.com/Blogbot-setup.exe").is_err());

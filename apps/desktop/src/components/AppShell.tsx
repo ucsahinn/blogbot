@@ -232,7 +232,7 @@ export function AppShell({
               </div>
               {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
               <strong>Blogbot · yerel yayın uygulaması</strong>
-              <span>Sürüm 0.1.7 · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
+              <span>Sürüm 0.1.8 · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
               <a href="https://github.com/ucsahinn/blogbot" target="_blank" rel="noreferrer">
                 GitHub’da projeyi görüntüle
               </a>
