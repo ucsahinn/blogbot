@@ -128,7 +128,7 @@ export function Operations({
     setNotice("");
     try {
       const result = await bridge.exportDiagnostics();
-      setDiagnosticExportPath(result.directory);
+      setDiagnosticExportPath(result.path);
       setDiagnosticsOpen(true);
       setNotice(`Tanılama paketi hazırlandı ve klasörü açıldı (${result.bytes} bayt).`);
     } catch (reason) {
