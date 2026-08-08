@@ -57,7 +57,7 @@ test("invoke bridge forwards only the named command and its typed payload", asyn
   assert.deepEqual(result, { id: "draft-7", state: "RESEARCHING", queueState: "QUEUED" });
 });
 
-test("coalescing bridge shares an in-flight workspace read across mounted screens", async () => {
+test("coalescing bridge makes one native workspace call for concurrent readers", async () => {
   let calls = 0;
   const bridge = createCoalescingBridge(createInvokeBridge(async (command) => {
     assert.equal(command, "get_editorial_workspace");
@@ -74,6 +74,74 @@ test("coalescing bridge shares an in-flight workspace read across mounted screen
   assert.deepEqual(first, { drafts: [] });
   assert.deepEqual(second, { drafts: [] });
   assert.equal(calls, 1);
+});
+
+test("coalescing bridge retries an in-flight workspace read after a mutation", async () => {
+  const workspaceResponses: Array<(value: unknown) => void> = [];
+  let workspaceCalls = 0;
+  let finishPromotion: (() => void) | undefined;
+  const bridge = createCoalescingBridge(createInvokeBridge(async (command) => {
+    if (command === "get_editorial_workspace") {
+      workspaceCalls += 1;
+      return new Promise((resolve) => workspaceResponses.push(resolve));
+    }
+    assert.equal(command, "promote_candidate");
+    return new Promise((resolve) => {
+      finishPromotion = () => resolve({ ok: true, state: "RESEARCH_QUEUED", job: null });
+    });
+  }));
+
+  const staleRead = bridge.getEditorialWorkspace();
+  await Promise.resolve();
+  const promotion = bridge.promoteCandidate("candidate-1");
+  workspaceResponses[0]!({ snapshot: "before-mutation" });
+  await Promise.resolve();
+
+  assert.equal(workspaceCalls, 1, "a replacement read waits until the mutation settles");
+  finishPromotion?.();
+  await promotion;
+  await Promise.resolve();
+  assert.equal(workspaceCalls, 2);
+
+  workspaceResponses[1]!({ snapshot: "after-mutation" });
+  assert.deepEqual(await staleRead, { snapshot: "after-mutation" });
+});
+
+test("coalescing bridge clears rejected reads so a later reader can retry", async () => {
+  let calls = 0;
+  const bridge = createCoalescingBridge(createInvokeBridge(async (command) => {
+    assert.equal(command, "get_editorial_workspace");
+    calls += 1;
+    if (calls === 1) throw new Error("temporary native failure");
+    return { drafts: [] };
+  }));
+
+  await assert.rejects(bridge.getEditorialWorkspace(), /temporary native failure/u);
+  assert.deepEqual(await bridge.getEditorialWorkspace(), { drafts: [] });
+  assert.equal(calls, 2);
+});
+
+test("completed snapshot freshness is opt-in and scoped", async () => {
+  let defaultCalls = 0;
+  const uncachedBridge = createCoalescingBridge(createInvokeBridge(async () => {
+    defaultCalls += 1;
+    return { drafts: [] };
+  }));
+  await uncachedBridge.getEditorialWorkspace();
+  await uncachedBridge.getEditorialWorkspace();
+  assert.equal(defaultCalls, 2);
+
+  let cachedCalls = 0;
+  const cachedBridge = createCoalescingBridge(
+    createInvokeBridge(async () => {
+      cachedCalls += 1;
+      return { drafts: [] };
+    }),
+    { completedSnapshotFreshnessMs: { workspace: 1_000 } }
+  );
+  await cachedBridge.getEditorialWorkspace();
+  await cachedBridge.getEditorialWorkspace();
+  assert.equal(cachedCalls, 1);
 });
 
 test("editorial workspace actions use explicit commands instead of a generic action channel", async () => {

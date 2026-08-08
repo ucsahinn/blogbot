@@ -232,7 +232,7 @@ export function ContentFlow({
           </div>
           <div className="candidate-action-guidance" role="note">
             <strong>Araştırmaya almak yerel kuyruğu başlatır; hemen yayın yapmaz.</strong>
-            <span>Taslak hazır olduğunda Editoryal Masa’da incelenir, yayın insan onayından sonra başlar.</span>
+            <span>Yayın yalnızca hazır taslağı inceledikten sonra başlar; insan onayı olmadan hiçbir içerik gönderilmez.</span>
           </div>
           {candidates.length ? (
             <div className="candidate-grid">

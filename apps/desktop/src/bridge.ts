@@ -255,7 +255,7 @@ export function userFacingUpdateError(reason: unknown): string {
   if (/(?:timeout|timed out|connect|network|dns|http|endpoint)/u.test(raw)) {
     return "Güncelleme kaynağına ulaşılamadı. İnternet bağlantınızı kontrol edip yeniden deneyin.";
   }
-  return "Güncelleme denetimi tamamlanamadı. Güvenlik nedeniyle hiçbir kurulum başlatılmadı; Operasyonlar ekranından tanılama paketi oluşturabilirsiniz.";
+  return "Güncelleme denetlenemedi. Blogbot imzasız GitHub release akışını kullanır; indirilen kurulum yalnızca HTTPS kaynağı ve SHA-256 özeti doğrulanırsa başlatılır. Bağlantıyı kontrol edip yeniden deneyin.";
 }
 
 export function userFacingPublicationQueueError(reason: unknown): string {
@@ -373,18 +373,105 @@ export function createInvokeBridge(
  * only short-lived reads, and clear them before every mutation so a successful
  * command can never be hidden behind stale UI data.
  */
-export function createCoalescingBridge(bridge: BlogbotBridge): BlogbotBridge {
-  const reads = new Map<string, Promise<unknown>>();
-  const share = <T>(key: string, read: () => Promise<T>): Promise<T> => {
-    const existing = reads.get(key);
-    if (existing) {
-      return existing as Promise<T>;
+type CoalescedSnapshot =
+  | "bootstrap"
+  | "prerequisites"
+  | "connectors"
+  | "workspace"
+  | "operations"
+  | "diagnostics";
+
+export interface CoalescingBridgeOptions {
+  /**
+   * Completed snapshots are never reused by default. A caller may opt a
+   * specific snapshot into a short monotonic freshness window when its screen
+   * has independently established that reuse is safe.
+   */
+  completedSnapshotFreshnessMs?: Partial<Record<CoalescedSnapshot, number>>;
+}
+
+export function createCoalescingBridge(
+  bridge: BlogbotBridge,
+  options: CoalescingBridgeOptions = {}
+): BlogbotBridge {
+  const reads = new Map<CoalescedSnapshot, Promise<unknown>>();
+  const completed = new Map<CoalescedSnapshot, {
+    generation: number;
+    validThrough: number;
+    value: unknown;
+  }>();
+  let generation = 0;
+  let pendingMutations = 0;
+  let resolveMutationQuiescence: (() => void) | undefined;
+  let mutationQuiescence = Promise.resolve();
+
+  const freshnessWindow = (key: CoalescedSnapshot): number => {
+    const windowMs = options.completedSnapshotFreshnessMs?.[key];
+    return typeof windowMs === "number" && Number.isFinite(windowMs) && windowMs > 0
+      ? windowMs
+      : 0;
+  };
+  const beginMutation = () => {
+    generation += 1;
+    completed.clear();
+    reads.clear();
+    if (pendingMutations === 0) {
+      mutationQuiescence = new Promise<void>((resolve) => {
+        resolveMutationQuiescence = resolve;
+      });
     }
-    const promise = read().finally(() => reads.delete(key));
+    pendingMutations += 1;
+  };
+  const finishMutation = () => {
+    pendingMutations -= 1;
+    if (pendingMutations === 0) {
+      resolveMutationQuiescence?.();
+      resolveMutationQuiescence = undefined;
+    }
+  };
+  const readCurrent = async <T>(
+    key: CoalescedSnapshot,
+    read: () => Promise<T>
+  ): Promise<T> => {
+    await mutationQuiescence;
+    const readGeneration = generation;
+    const value = await read();
+    await mutationQuiescence;
+    if (readGeneration !== generation) {
+      return readCurrent(key, read);
+    }
+    const windowMs = freshnessWindow(key);
+    if (windowMs) {
+      completed.set(key, {
+        generation: readGeneration,
+        validThrough: performance.now() + windowMs,
+        value
+      });
+    }
+    return value;
+  };
+  const share = <T>(key: CoalescedSnapshot, read: () => Promise<T>): Promise<T> => {
+    const existing = reads.get(key);
+    if (existing) return existing as Promise<T>;
+
+    const cached = completed.get(key);
+    if (cached && cached.generation === generation && cached.validThrough > performance.now()) {
+      return Promise.resolve(cached.value as T);
+    }
+    completed.delete(key);
+
+    const promise = readCurrent(key, read);
     reads.set(key, promise);
+    void promise.then(
+      () => {
+        if (reads.get(key) === promise) reads.delete(key);
+      },
+      () => {
+        if (reads.get(key) === promise) reads.delete(key);
+      }
+    );
     return promise;
   };
-  const clearReads = () => reads.clear();
   const coalesced: BlogbotBridge = {
     ...bridge,
     getBootstrapSnapshot: () => share("bootstrap", () => bridge.getBootstrapSnapshot()),
@@ -395,12 +482,14 @@ export function createCoalescingBridge(bridge: BlogbotBridge): BlogbotBridge {
     getEngineDiagnostics: () => share("diagnostics", () => bridge.getEngineDiagnostics())
   };
   const invalidatingMutations = new Set([
-    "promoteCandidate", "dismissCandidate", "retryJob", "requestRevisionEdit",
-    "updateScheduleSlot", "saveDesktopPreferences", "saveSetupConnector",
+    "installUnsignedUpdate", "recoverLocalWorkspace", "startLocalDev",
+    "stopLocalDev", "startCodexLogin", "saveSetupConnector", "setAutostart",
+    "sendTestNotification", "promoteCandidate", "dismissCandidate", "retryJob",
+    "requestRevisionEdit", "updateScheduleSlot", "saveDesktopPreferences",
     "scanSource", "scanAllSources", "saveSources", "reviewSource",
     "createInstantDraft", "approveRevision", "approveHighRiskRevision",
     "enqueuePublication", "materializeLocalPreview", "completeOnboarding",
-    "setRuntimePause", "restoreBackup", "createBackup", "setAutostart"
+    "setRuntimePause", "restoreBackup", "createBackup"
   ]);
   return new Proxy(coalesced, {
     get(target, property, receiver) {
@@ -409,8 +498,8 @@ export function createCoalescingBridge(bridge: BlogbotBridge): BlogbotBridge {
         return value;
       }
       return (...args: unknown[]) => {
-        clearReads();
-        return value(...args);
+        beginMutation();
+        return Promise.resolve(value(...args)).finally(finishMutation);
       };
     }
   });

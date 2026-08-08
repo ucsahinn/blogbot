@@ -23,8 +23,7 @@ const navigation: Array<{
   shortcut?: string;
 }> = [
   { id: "dashboard", label: "Genel Bakış", icon: "⌂" },
-  { id: "content", label: "İçerik Akışı", icon: "◎" },
-  { id: "editorial", label: "Editoryal Masa", icon: "✓" },
+  { id: "content", label: "İçerik Çalışma Alanı", icon: "◎" },
   { id: "publishing", label: "Takvim ve Yayın", icon: "◫" },
   { id: "operations", label: "Operasyonlar", icon: "⋮" }
 ];
@@ -153,8 +152,7 @@ export function AppShell({
   const isNavigationActive = (page: PageId) =>
     activePage === page ||
     (page === "content" && activePage === "instant") ||
-    (page === "content" && activePage === "content-candidates") ||
-    (page === "editorial" && activePage === "editorial-review");
+    (page === "content" && ["content-candidates", "instant", "editorial", "editorial-review"].includes(activePage));
 
   return (
     <div className="app-shell">
@@ -186,7 +184,7 @@ export function AppShell({
               </span>
               <span>{item.label}</span>
               {item.shortcut ? <kbd>{item.shortcut}</kbd> : null}
-              {item.id === "editorial" && snapshot.pipeline[2]?.count ? (
+              {item.id === "content" && snapshot.pipeline[2]?.count ? (
                 <span className="nav-count">{snapshot.pipeline[2].count}</span>
               ) : null}
             </button>
@@ -245,7 +243,7 @@ export function AppShell({
               </div>
               {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
               <strong>Blogbot · yerel yayın uygulaması</strong>
-              <span>Sürüm 0.1.9 · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
+              <span>Sürüm 0.1.11 · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
               <a href="https://github.com/ucsahinn/blogbot" target="_blank" rel="noreferrer">
                 GitHub’da projeyi görüntüle
               </a>

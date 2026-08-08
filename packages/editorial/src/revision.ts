@@ -51,7 +51,17 @@ export interface SourceSnapshot {
   title: string;
   fetchedAt: string;
   contentHash: string;
+  /** Optional for legacy readability; absence is treated as PENDING at publish time. */
+  trustStatus?: SourcePolicyStatus;
+  /** Optional for legacy readability; absence is treated as PENDING at publish time. */
+  rightsStatus?: SourcePolicyStatus;
 }
+
+export type SourcePolicyStatus = "PENDING" | "APPROVED" | "REJECTED";
+
+export type SourcePolicyEligibility =
+  | { eligible: true }
+  | { eligible: false; reason: "SOURCE_TRUST_NOT_APPROVED" | "SOURCE_RIGHTS_NOT_APPROVED" };
 
 export interface MediaArtifact {
   role: "hero" | "inline";
@@ -93,6 +103,8 @@ export const ACCEPTABLE_EDITORIAL_WARNING_IDS = new Set([
 
 export interface ArticleRevision {
   id: string;
+  /** Immutable link to the revision replaced by this revision, when any. */
+  supersedesRevisionId?: string;
   translationKey: string;
   state: ArticleState;
   tr: LocalizedArticle;
@@ -156,12 +168,32 @@ export interface ApprovalBundle {
   highRisk: HighRiskApproval | null;
 }
 
+export interface RevisionLineageEntry {
+  id: string;
+  supersedesRevisionId?: string;
+}
+
+/** A successor's immutable parent link is the sole supersession signal. */
+export function isRevisionSuperseded(
+  revision: RevisionLineageEntry,
+  lineage: readonly RevisionLineageEntry[]
+): boolean {
+  return lineage.some(
+    (candidate) =>
+      candidate.id !== revision.id &&
+      candidate.supersedesRevisionId === revision.id
+  );
+}
+
 export type PublishBlockReason =
   | "NO_APPROVAL"
   | "REVISION_NOT_APPROVED"
+  | "REVISION_SUPERSEDED"
   | "APPROVAL_REVISION_MISMATCH"
   | "APPROVAL_HASH_MISMATCH"
   | "NEEDS_SOURCE"
+  | "SOURCE_TRUST_NOT_APPROVED"
+  | "SOURCE_RIGHTS_NOT_APPROVED"
   | "PUBLISHING_PAUSED"
   | "NOT_DUE"
   | "SCHEDULE_EXPIRED"
@@ -410,12 +442,32 @@ export function validateClaimEvidence(
   });
 }
 
+/**
+ * Source reviews are immutable revision evidence: both decisions must be
+ * explicitly approved, while absent legacy fields remain readable but block.
+ */
+export function evaluateSourcePolicy(
+  revision: ArticleRevision
+): SourcePolicyEligibility {
+  for (const source of revision.sources) {
+    if (source.trustStatus !== "APPROVED") {
+      return { eligible: false, reason: "SOURCE_TRUST_NOT_APPROVED" };
+    }
+    if (source.rightsStatus !== "APPROVED") {
+      return { eligible: false, reason: "SOURCE_RIGHTS_NOT_APPROVED" };
+    }
+  }
+  return { eligible: true };
+}
+
 export function evaluatePublishEligibility(
   revision: ArticleRevision,
   approval: Approval | ApprovalBundle | null,
   context: {
     now: Date;
     publishingPaused: boolean;
+    /** Immutable revision records known to the engine at this decision point. */
+    revisionLineage?: readonly RevisionLineageEntry[];
   }
 ): PublishEligibility {
   if (approval === null) {
@@ -432,6 +484,9 @@ export function evaluatePublishEligibility(
   }
   if (revision.state !== "REVIEW_REQUIRED" && revision.state !== "APPROVED" && revision.state !== "PR_READY" && revision.state !== "SCHEDULED") {
     return { eligible: false, reason: "REVISION_NOT_APPROVED" };
+  }
+  if (isRevisionSuperseded(revision, context.revisionLineage ?? [])) {
+    return { eligible: false, reason: "REVISION_SUPERSEDED" };
   }
   if (editorialApproval.revisionId !== revision.id) {
     return { eligible: false, reason: "APPROVAL_REVISION_MISMATCH" };
@@ -470,6 +525,8 @@ export function evaluatePublishEligibility(
       return { eligible: false, reason: "HIGH_RISK_APPROVAL_INVALID" };
     }
   }
+  const sourcePolicy = evaluateSourcePolicy(revision);
+  if (!sourcePolicy.eligible) return sourcePolicy;
   if (!validateClaimEvidence(revision)) {
     return { eligible: false, reason: "INVALID_CLAIM_EVIDENCE" };
   }

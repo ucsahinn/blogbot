@@ -72,6 +72,17 @@ test("editing an approved package creates a new review-required revision", () =>
   assert.equal(approved.tr.title, "Başlık");
 });
 
+test("editing a revision records its immutable immediate predecessor", () => {
+  const approved = minimalRevision("APPROVED");
+
+  const edited = createEditedRevision(approved, "rev-2", {
+    supersedesRevisionId: "unrelated-revision"
+  });
+
+  assert.equal(edited.supersedesRevisionId, "rev-1");
+  assert.equal(approved.supersedesRevisionId, undefined);
+});
+
 test("a weekly slot remains empty when no candidate passes quality", () => {
   const selected = chooseCandidateForSlot([
     { revisionId: "weak", score: 0.95, qualityPassed: false },

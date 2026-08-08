@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { canEnableAutomationMode, connectorDraftFromState, isRecoveryKeyUsable, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
@@ -31,6 +31,15 @@ const stateLabels = {
 const legacyConnectorKeys = ["blogbot.setup.connector-draft.v1", "blogbot.setup.site-adapter.v1"] as const;
 
 type SetupTaskId = "overview" | "first-start" | "writing" | "publishing" | "backup" | "diagnostics";
+type GuidedStatus = "ready" | "blocker" | "attention" | "running" | "not-tested";
+
+const guidedStatusLabels: Record<GuidedStatus, string> = {
+  ready: "Hazır",
+  blocker: "Engel var",
+  attention: "Dikkat gerekli",
+  running: "Kontrol ediliyor",
+  "not-tested": "Test edilmedi"
+};
 
 const setupTasks: ReadonlyArray<{
   id: Exclude<SetupTaskId, "overview">;
@@ -101,12 +110,10 @@ export function SetupCenter({
   onCompleted
 }: SetupCenterProps) {
   const [status, setStatus] = useState<PrerequisiteSnapshot | null>(null);
-  const [deviceName, setDeviceName] = useState("Blogbot Editör PC");
-  const [mode, setMode] =
-    useState<OnboardingSettings["mode"]>("INGEST_ONLY");
-  const [scanIntervalMinutes, setScanIntervalMinutes] = useState(30);
+  const deviceName = "Blogbot Editör PC";
+  const mode: OnboardingSettings["mode"] = "INGEST_ONLY";
+  const scanIntervalMinutes = 30;
   const [acknowledged, setAcknowledged] = useState(false);
-  const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [connectionMessage, setConnectionMessage] = useState("");
@@ -135,10 +142,8 @@ export function SetupCenter({
   );
   const guidedMode = selectedTask === "first-start";
   const [guidedStep, setGuidedStep] = useState(0);
-  const [guidedStatus, setGuidedStatus] = useState("");
-  const [guidedFinalResult, setGuidedFinalResult] = useState("");
+  const [guidedOutputStatus, setGuidedOutputStatus] = useState<GuidedStatus>("not-tested");
   const [engineRecoveryAvailable, setEngineRecoveryAvailable] = useState(false);
-  const quickstartRef = useRef<HTMLElement>(null);
   const restoreFolderNameValid = /^[^<>:"/\\|?*]{1,80}$/u.test(backupTargetName.trim())
     && backupTargetName.trim() !== "."
     && backupTargetName.trim() !== "..";
@@ -155,20 +160,14 @@ export function SetupCenter({
   }, [startInGuide]);
 
   useEffect(() => {
-    setConnectorDraft(connectorDraftFromState(connectorState));
-  }, [connectorState]);
+    if (!guidedMode || guidedStep !== 2 || connectorDraft.site.mode === "LOCAL_ONLY") return;
+    setConnectorDraft((current) => ({ ...current, site: { ...current.site, mode: "LOCAL_ONLY" } }));
+    setGuidedOutputStatus("not-tested");
+  }, [connectorDraft.site.mode, guidedMode, guidedStep]);
 
   useEffect(() => {
-    let active = true;
-    void bridge.getAutostartStatus()
-      .then(({ enabled }) => {
-        if (active) setAutostartEnabled(enabled);
-      })
-      .catch(() => {
-        if (active) setMessage("Windows başlangıç tercihi okunamadı. Bu tercih doğrulanana kadar değiştirilmeyecek.");
-      });
-    return () => { active = false; };
-  }, [bridge]);
+    setConnectorDraft(connectorDraftFromState(connectorState));
+  }, [connectorState]);
 
   useEffect(() => {
     let active = true;
@@ -197,29 +196,22 @@ export function SetupCenter({
 
   const guidedSteps = [
     {
-      title: "Bu bilgisayarı kontrol et",
-      detail: "Windows, WebView2 ve güvenli anahtar deposu otomatik test edilir.",
-      checkIds: ["windows", "webview2", "secure-store"]
+      id: "system",
+      title: "Yerel sistem kontrolü",
+      detail: "Windows, WebView2, güvenli anahtar deposu ve yerel çalışma alanı açıldığında otomatik kontrol edilir.",
+      checkIds: ["windows", "webview2", "secure-store", "local-engine", "local-database", "local-queue"]
     },
     {
-      title: "Blogbot'un yerel çalışma bileşenini doğrula",
-      detail: "Uygulamanın yerel veri deposu ve iş kuyruğu birlikte test edilir.",
-      checkIds: ["local-engine", "local-database", "local-queue"]
+      id: "codex",
+      title: "Codex'i bağla ve test et",
+      detail: "Codex'i bu bilgisayarda bağlayıp test edebilirsiniz. Şimdilik atlarsanız Blogbot'un diğer yerel işlevleri kullanılabilir kalır.",
+      checkIds: ["codex"]
     },
     {
-      title: "Çalışma tercihlerini seç",
-      detail: "Bu bilgisayarın adını ve otomasyon sınırını seçin. Yazar, takvim ve yayın ayarları ilgili çalışma alanlarında tutulur.",
+      id: "output",
+      title: "Çıktı klasörünü seç, test et ve bitir",
+      detail: "Onaylanan içerik paketinin gideceği klasörü seçin, hedefi test edin ve kurulumu tamamlayın.",
       checkIds: []
-    },
-    {
-      title: "İlk içerik hedefini seç",
-      detail: "Onaylanan içerik paketinin gideceği klasörü veya yerel projeyi Windows seçicisiyle belirleyin.",
-      checkIds: ["local-engine"]
-    },
-    {
-      title: "Son kontrol",
-      detail: "Temel yerel kontroller yeniden çalışır. Yazı üretimi ve yayın bağlantılarını daha sonra kendi görevlerinden tamamlayabilirsiniz.",
-      checkIds: ["windows", "local-engine"] as const
     }
   ] as const;
 
@@ -294,21 +286,23 @@ export function SetupCenter({
             : connectorDraft.site.mode !== "PUBLISH" && !connectorDraft.site.repositoryPath.trim()
               ? `Önce ${connectorDraft.site.mode === "LOCAL_DEV" ? "proje klasörünü" : "çıktı klasörünü"} seçin.`
               : "";
-  const guidedTargetSelectionReason = readOnly
-    ? "Yerel çalışma alanı yeniden bağlanana kadar hedef seçimine geçilemez."
-    : deviceName.trim().length < 3
-      ? "Devam etmek için bu bilgisayarın adını en az 3 karakter olarak yazın."
-      : "";
   const currentGuidedStep = guidedSteps[guidedStep] ?? guidedSteps[0];
   const selectedTaskDefinition = setupTasks.find((task) => task.id === selectedTask);
   const checksById = useMemo(
     () => new Map((status?.checks ?? []).map((check) => [check.id, check])),
     [status]
   );
-  const currentStepChecks = currentGuidedStep.checkIds
-    .map((id) => checksById.get(id))
-    .filter((check): check is NonNullable<typeof check> => Boolean(check));
-  const guidedReadyCount = currentStepChecks.filter((check) => check.state === "READY").length;
+  const guidedStepState = (step: (typeof guidedSteps)[number]): GuidedStatus => {
+    if (step.id === "output") return guidedOutputStatus;
+    if (step.id === currentGuidedStep.id && busy) return "running";
+    const checks = step.checkIds
+      .map((id) => checksById.get(id))
+      .filter((check): check is NonNullable<typeof check> => Boolean(check));
+    if (checks.length === 0) return "not-tested";
+    if (checks.some((check) => check.state === "MISSING" || check.state === "BLOCKED")) return "blocker";
+    if (checks.some((check) => check.state === "ATTENTION")) return "attention";
+    return checks.every((check) => check.state === "READY") ? "ready" : "not-tested";
+  };
   const focusedTaskCheckIds: Array<PrerequisiteSnapshot["checks"][number]["id"]> = selectedTask === "writing"
     ? ["codex"]
     : selectedTask === "publishing"
@@ -340,36 +334,6 @@ export function SetupCenter({
             : "first-start";
     return { check: nextCheck, task: setupTasks.find((task) => task.id === taskId)! };
   }, [status]);
-  const moveToTargetSelection = () => {
-    setGuidedStep(3);
-    window.requestAnimationFrame(() => {
-      const target = quickstartRef.current;
-      target?.scrollIntoView({ behavior: "smooth", block: "start" });
-      target?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')?.focus();
-    });
-  };
-  const runGuidedFinalCheck = async () => {
-    setBusy(true);
-    setGuidedFinalResult("");
-    try {
-      const nextStatus = await bridge.getPrerequisiteStatus();
-      const nextSummary = summarizePrerequisites(nextStatus.checks);
-      setStatus(nextStatus);
-      setGuidedFinalResult(
-        `Son kontrol tamamlandı. ${nextSummary.ready}/${nextSummary.total} kontrol hazır. ${
-          nextSummary.appUsable
-            ? "Blogbot açılabilir; hazır olmayan özellikler güvenle kapalı kalır."
-            : "Yerel çalışma bileşeni hazır değil; aşağıdaki eksikleri giderip testi yeniden çalıştırın."
-        }`
-      );
-    } catch (reason) {
-      setGuidedFinalResult(
-        explainFailure(reason, "Son kontrol tamamlanamadı.", "yerel çalışma bileşenini yeniden başlatıp testi tekrarlayın.")
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
   const save = async () => {
     if (connectorDraft.site.mode === "PUBLISH") {
       setSelectedTask("publishing");
@@ -404,7 +368,7 @@ export function SetupCenter({
         mode,
         scanIntervalMinutes,
         acknowledgeApprovalBoundary: acknowledged,
-        autostartEnabled: autostartEnabled ?? (await bridge.getAutostartStatus()).enabled
+        autostartEnabled: (await bridge.getAutostartStatus()).enabled
       });
       try {
         await refreshConnectorState();
@@ -430,30 +394,19 @@ export function SetupCenter({
     }
   };
 
-  const testConnection = async (advanceGuidedSetup = false) => {
+  const testConnection = async () => {
     setBusy(true);
-    if (advanceGuidedSetup) setGuidedStatus("");
     setConnectionMessage("Blogbot'un yerel çalışma bileşeni ve iş kuyruğu test ediliyor…");
     try {
       const result = await bridge.testLocalEngine();
       setConnectionMessage(result.detail);
       setEngineRecoveryAvailable(false);
-      if (result.ready && advanceGuidedSetup && guidedStep === 1) {
-        setGuidedStep(2);
-        setGuidedStatus("Yerel çalışma bileşeni hazır. Çalışma tercihleri adımına geçildi.");
-        setConnectionMessage("Yerel çalışma bileşeni hazır. Çalışma tercihleri adımına geçildi.");
-      }
       try {
         setStatus(await bridge.getPrerequisiteStatus());
       } catch (reason) {
         setConnectionMessage(
           `Yerel çalışma bileşeni hazır; ancak önkoşul kartları yenilenemedi. Sonraki adım: Kurulum Merkezi'nden yeniden test edin. (${explainFailure(reason, "Ayrıntı alınamadı.", "yeniden deneyin.")})`
         );
-        if (advanceGuidedSetup && result.ready) {
-          setGuidedStatus(
-            `Yerel çalışma bileşeni hazır; ancak önkoşul kartları yenilenemedi. Sonraki adım: Kurulum Merkezi'nden yeniden test edin. (${explainFailure(reason, "Ayrıntı alınamadı.", "yeniden deneyin.")})`
-          );
-        }
       }
     } catch (reason) {
       const raw = reason instanceof Error ? reason.message : "";
@@ -467,6 +420,7 @@ export function SetupCenter({
   };
   const testConnector = async (connector: SetupConnectorId) => {
     const label = setupConnectorLabel(connector);
+    if (connector === "site") setGuidedOutputStatus("running");
     setBusy(true); setConnectionMessage(`${label} biçim testi çalıştırılıyor…`);
     let result: Awaited<ReturnType<BlogbotBridge["testSetupConnector"]>> | null = null;
     try {
@@ -499,16 +453,14 @@ export function SetupCenter({
       try {
         setStatus(await bridge.getPrerequisiteStatus());
         await refreshConnectorState();
-        if (connector === "site" && tested.ready && guidedStep === 3) {
-          setGuidedStep(4);
-          setConnectionMessage("Hedef doğrulandı. Son kontrole geçildi.");
-        }
+        if (connector === "site") setGuidedOutputStatus(tested.ready ? "ready" : "blocker");
       } catch (reason) {
         const detail = `${tested.ready ? "Biçim doğrulandı" : "Biçim testi tamamlandı; hedef henüz hazır değil"}; ancak güncel bağlantı durumu yenilenemedi. Sonraki adım: Kurulum Merkezi'nden yeniden deneyin. (${explainFailure(reason, "Ayrıntı alınamadı.", "yeniden deneyin.")})`;
         setConnectionMessage(detail);
         setConnectorMessages((current) => ({ ...current, [connector]: detail }));
       }
     } catch (reason) {
+      if (connector === "site") setGuidedOutputStatus("blocker");
       const detail = result
         ? `Biçim testi tamamlandı; ancak güncel durum yenilenemedi. Sonraki adım: Kurulum Merkezi'nden yeniden deneyin. (${explainFailure(reason, "Ayrıntı alınamadı.", "yeniden deneyin.")})`
         : explainFailure(reason, "Biçim testi tamamlanamadı.", "zorunlu gizli olmayan alanları doldurup yeniden deneyin.");
@@ -556,6 +508,7 @@ export function SetupCenter({
             [target]: { ...current[target], [target === "site" ? "repositoryPath" : "folder"]: selected }
           } as SetupConnectorDraft));
         if (target === "site") setLocalDevTrusted(false);
+        if (target === "site") setGuidedOutputStatus("not-tested");
         setConnectorMessages((current) => ({
           ...current,
           [target]: `Seçilen klasör: ${selected}. Şimdi “Bilgileri doğrula” düğmesine basın.`
@@ -648,10 +601,6 @@ export function SetupCenter({
       }
       setConnectionMessage(detail);
       setEngineRecoveryAvailable(!result.ready);
-      if (result.ready && guidedStep === 1) {
-        setGuidedStep(2);
-        setGuidedStatus(detail);
-      }
     } catch (reason) {
       setConnectionMessage(
         explainFailure(reason, "Yerel çalışma alanı kurtarılamadı.", "tanılama paketini oluşturup destek ekibiyle paylaşın.")
@@ -902,206 +851,81 @@ export function SetupCenter({
                 key={step.title}
                 className={index === guidedStep ? "is-active" : index < guidedStep ? "is-complete" : ""}
                 aria-label={`${index + 1}. ${step.title}`}
-                disabled={index > guidedStep}
+                disabled={busy}
                 onClick={() => setGuidedStep(index)}
               >
-                <span className="guided-step-index" aria-hidden="true">{index < guidedStep ? "✓" : index + 1}</span>
+                <span className="guided-step-index" aria-hidden="true">{index + 1}</span>
                 <span className="guided-step-label">{step.title}</span>
-                <span className="guided-step-state">
-                  {index < guidedStep ? "Tamamlandı" : index === guidedStep ? "Şimdi" : "Bekliyor"}
+                <span className={`guided-status guided-status-${guidedStepState(step)}`}>
+                  <span className="guided-step-state">{guidedStatusLabels[guidedStepState(step)]}</span>
                 </span>
                 </button>
             ))}
-            <div
-              className="guided-progress-inline-meter"
-              role="progressbar"
-              aria-label="İlk başlangıç ilerlemesi"
-              aria-valuemin={0}
-              aria-valuemax={guidedSteps.length}
-              aria-valuenow={guidedStep + 1}
-            >
-              <span style={{ width: `${((guidedStep + 1) / guidedSteps.length) * 100}%` }} />
-            </div>
           </div>
           <div>
             <p className="section-kicker">ADIM {guidedStep + 1} / {guidedSteps.length}</p>
             <h2 id="guided-setup-title">{currentGuidedStep.title}</h2>
             <p>{currentGuidedStep.detail}</p>
-            {currentStepChecks.length > 0 ? (
-              <div className="guided-check-summary" aria-live="polite">
-                <strong>{guidedReadyCount}/{currentStepChecks.length} kontrol hazır</strong>
-                <ul>
-                  {currentStepChecks.map((check) => (
-                    <li key={check.id} className={`check-${check.state.toLowerCase()}`}>
-                      <span aria-hidden="true">{check.state === "READY" ? "✓" : "•"}</span>
-                      <span>{check.label}: {stateLabels[check.state]}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {guidedStatus ? (
-              <div className="guided-final-result" role="status" aria-live="polite">
-                <strong>Yerel bileşen sonucu</strong>
-                <span>{guidedStatus}</span>
-              </div>
-            ) : null}
-            {guidedStep === guidedSteps.length - 1 && guidedFinalResult ? (
-              <div className="guided-final-result" role="status" aria-live="polite">
-                <strong>Kurulum özeti</strong>
-                <span>{guidedFinalResult}</span>
-              </div>
-            ) : null}
-            {guidedStep === 2 ? (
-              <fieldset className="guided-preferences" disabled={readOnly}>
-                <legend>Bu bilgisayardaki çalışma tercihiniz</legend>
-                <label className="field">
-                  <span>Bu cihazın adı</span>
-                  <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} autoComplete="off" minLength={3} required />
-                </label>
-                <label className="field">
-                  <span>Blogbot ne kadar ilerlesin?</span>
-                  <select value={mode} onChange={(event) => setMode(event.target.value as OnboardingSettings["mode"])}>
-                    <option value="INGEST_ONLY">Yalnız kaynakları izle</option>
-                    <option value="DRAFT_ONLY">Taslak ve inceleme hazırla</option>
-                    <option value="PUBLISH_APPROVED">Yalnız insan onaylı paketleri yayına hazırla</option>
-                  </select>
-                  <small>Yayınlama, bu seçeneğe rağmen her zaman ayrı insan onayı ister.</small>
-                </label>
-                <label className="field">
-                  <span>Kaynakları ne sıklıkla tara?</span>
-                  <select value={scanIntervalMinutes} onChange={(event) => setScanIntervalMinutes(Number(event.target.value))}>
-                    <option value={15}>15 dakikada bir</option>
-                    <option value={30}>30 dakikada bir</option>
-                    <option value={60}>Saatte bir</option>
-                    <option value={180}>3 saatte bir</option>
-                  </select>
-                </label>
-                <label className="checkbox-field guided-autostart">
-                  <input
-                    type="checkbox"
-                    checked={autostartEnabled ?? false}
-                    disabled={readOnly || autostartEnabled === null}
-                    onChange={(event) => setAutostartEnabled(event.target.checked)}
-                  />
-                  Windows oturumu açıldığında Blogbot'u otomatik başlat.
-                  {autostartEnabled === null ? <small>Mevcut tercih okunuyor…</small> : null}
-                </label>
-              </fieldset>
-            ) : null}
+            {guidedStep !== 2 && connectionMessage ? <p className="form-message" role="status" aria-live="polite">{connectionMessage}</p> : null}
           </div>
           <div className="guided-actions">
             <button className="button button-secondary" type="button" disabled={guidedStep === 0} onClick={() => setGuidedStep((current) => current - 1)}>Geri</button>
-            {guidedStep === 1 ? (
-              <button
-                className="button button-primary"
-                type="button"
-                disabled={busy || readOnly}
-                onClick={() => void testConnection(true)}
-              >
-                {busy ? "Yerel bileşen denetleniyor…" : "Yerel bileşeni denetle ve devam et"}
-              </button>
-            ) : guidedStep === 2 ? (
+            {guidedStep === 0 ? (
               <>
-                <button
-                  className="button button-primary"
-                  type="button"
-                  disabled={Boolean(guidedTargetSelectionReason)}
-                  aria-describedby={guidedTargetSelectionReason ? "guided-target-selection-reason" : undefined}
-                  onClick={moveToTargetSelection}
-                >
-                  Hedef seçimine geç
-                </button>
-                {guidedTargetSelectionReason ? <small id="guided-target-selection-reason" className="action-unavailable-reason">{guidedTargetSelectionReason}</small> : null}
+                <button className="button button-secondary" type="button" disabled={busy} onClick={() => void refresh()}>{busy ? "Kontrol ediliyor…" : "Kontrolleri yenile"}</button>
+                <button className="button button-primary" type="button" disabled={busy} onClick={() => setGuidedStep(1)}>Codex bağlantısına devam et</button>
               </>
-            ) : guidedStep === 3 ? (
-              <span className="guided-next-hint">Aşağıdan hedefi seçin; doğrulama başarılı olunca son kontrole geçilir.</span>
-            ) : guidedStep < guidedSteps.length - 1 ? (
-              <button className="button button-primary" type="button" onClick={() => setGuidedStep((current) => current + 1)}>Sonraki adım</button>
+            ) : guidedStep === 1 ? (
+              <>
+                <button className="button button-secondary" type="button" disabled={busy || readOnly} onClick={() => void startCodexLogin()}>Giriş penceresini aç</button>
+                <button className="button button-secondary" type="button" disabled={busy} onClick={() => void testCodex()}>{busy ? "Codex test ediliyor…" : "Codex'i test et"}</button>
+                <button className="button button-primary" type="button" disabled={busy} onClick={() => setGuidedStep(2)}>Codex'i şimdilik atla</button>
+              </>
             ) : (
-              <button className="button button-primary" type="button" disabled={busy} onClick={() => void runGuidedFinalCheck()}>{busy ? "Kontrol ediliyor…" : "Son testi çalıştır"}</button>
+              <span className="guided-next-hint">Aşağıdan bir çıktı klasörü seçin, hedefi test edin ve bitirin.</span>
             )}
           </div>
           <small>Bu rehber isteğe bağlıdır. İstediğiniz an diğer menülere geçebilirsiniz.</small>
         </section>
       ) : null}
 
-      {guidedMode && guidedStep === 3 ? <section ref={quickstartRef} className="setup-quickstart" aria-labelledby="quickstart-title" tabIndex={-1}>
+      {guidedMode && guidedStep === 2 ? <section className="setup-quickstart" aria-labelledby="quickstart-title" tabIndex={-1}>
         <div className="quickstart-heading">
-          <p className="section-kicker">İLK ADIM</p>
-          <h2 id="quickstart-title">İçeriği nereye göndereceksin?</h2>
-          <p>Bir hedef seç. Blogbot yalnız seçtiğin hedef için dosya hazırlar.</p>
+          <p className="section-kicker">ÇIKTI HEDEFİ</p>
+          <h2 id="quickstart-title">Çıktı klasörünü seç</h2>
+          <p>Blogbot onaylanan içerik paketini yalnız bu bilgisayardaki seçtiğiniz klasöre hazırlar.</p>
         </div>
-        <div className="quickstart-modes" role="radiogroup" aria-label="İçerik hedefi">
-          {([
-            ["LOCAL_ONLY", "Bir klasöre yaz", "Onaylanan içerik paketini seçtiğin klasöre bırakır."],
-            ["LOCAL_DEV", "Yerel projene yaz", "Bilgisayarındaki npm run dev ile çalışan projeyi kullanır."],
-            ["PUBLISH", "Yayındaki siteye gönder", "GitHub ve sitenin kendi yayın akışıyla gönderir."]
-          ] as const).map(([value, title, detail]) => {
-            const selected = connectorDraft.site.mode === value;
-            return (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                className={`quickstart-mode ${selected ? "is-selected" : ""}`}
-                disabled={readOnly}
-                onClick={() => setConnectorDraft((current) => ({ ...current, site: { ...current.site, mode: value } }))}
-              >
-                <strong>{title}</strong>
-                <span>{detail}</span>
-              </button>
-            );
-          })}
-        </div>
-        {connectorDraft.site.mode !== "PUBLISH" ? (
-          <div className="quickstart-target">
-            <label className="field">
-              <span>{connectorDraft.site.mode === "LOCAL_DEV" ? "Proje klasörü" : "Çıktı klasörü"}</span>
-              <input
-                value={formatFolderPath(connectorDraft.site.repositoryPath)}
-                disabled={readOnly}
-                readOnly
-                placeholder={connectorDraft.site.mode === "LOCAL_DEV" ? "Örn. C:\\Siteler\\benim-projem" : "Örn. C:\\Blogbot-Cikti"}
-                aria-describedby="quickstart-target-help"
-              />
-              <button className="button button-secondary" type="button" disabled={readOnly || busy} onClick={() => void pickFolder("site")}>Bilgisayardan klasör seç</button>
-            </label>
-            <small id="quickstart-target-help">
-              {connectorDraft.site.mode === "LOCAL_DEV"
-                ? "package.json ve scripts.dev bulunan proje klasörünü seç."
-                : "Blogbot bu klasöre yalnız onaylanan içerik paketini yazar."}
-            </small>
-            {connectorDraft.site.repositoryPath.trim() ? (
-              <div className="quickstart-selection" role="status" aria-live="polite">
-                <div>
-                  <strong>Seçili klasör</strong>
-                  <code title={connectorDraft.site.repositoryPath}>{formatFolderPath(connectorDraft.site.repositoryPath)}</code>
-                  <span>
-                    {connectorDraft.site.mode === "LOCAL_DEV"
-                      ? "Sıradaki adım: proje yapısını doğrulayın; ardından isterseniz yerel geliştirme sürecini başlatın."
-                      : "Sıradaki adım: klasör yazma hedefini doğrulayın; onaylı içerik yalnız bu hedefe hazırlanır."}
-                  </span>
-                </div>
-                <button
-                  className="button button-secondary"
-                  type="button"
-                  disabled={readOnly || busy}
-                  onClick={() => void testConnector("site")}
-                >
-                  {busy ? "Doğrulanıyor…" : "Klasörü doğrula ve sonraki adıma geç"}
-                </button>
+        <div className="quickstart-target">
+          <label className="field">
+            <span>Çıktı klasörü</span>
+            <input
+              value={formatFolderPath(connectorDraft.site.repositoryPath)}
+              disabled={readOnly}
+              readOnly
+              placeholder="Örn. C:\\Blogbot-Cikti"
+              aria-describedby="quickstart-target-help"
+            />
+            <button className="button button-secondary" type="button" disabled={readOnly || busy} onClick={() => void pickFolder("site")}>Bilgisayardan klasör seç</button>
+          </label>
+          <small id="quickstart-target-help">Blogbot bu klasöre yalnız onaylanan içerik paketini yazar.</small>
+          {connectorDraft.site.repositoryPath.trim() ? (
+            <div className="quickstart-selection" role="status" aria-live="polite">
+              <div>
+                <strong>Seçili klasör</strong>
+                <code title={connectorDraft.site.repositoryPath}>{formatFolderPath(connectorDraft.site.repositoryPath)}</code>
+                <span>Sıradaki adım: klasör yazma hedefini test edin; onaylı içerik yalnız bu hedefe hazırlanır.</span>
               </div>
-            ) : null}
-          </div>
-        ) : (
-          <div className="quickstart-publish-note">
-            <strong>Yayın bağlantısı daha sonra açılır.</strong>
-            <span>GitHub bilgileri, site deposu ve workflow yalnız yayın hedefini seçtiğinde gerekir.</span>
-            <button className="button button-secondary" type="button" onClick={() => setSelectedTask("publishing")}>Yayın bağlantısı görevini aç</button>
-          </div>
-        )}
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={readOnly || busy}
+                onClick={() => void testConnector("site")}
+              >
+                {busy ? "Test ediliyor…" : "Klasörü test et"}
+              </button>
+            </div>
+          ) : null}
+        </div>
         {!summary.appUsable ? (
           <div className="quickstart-status is-warning" role="status">
             <div>
@@ -1121,18 +945,11 @@ export function SetupCenter({
           <button
             className="button button-primary"
             type="button"
-            disabled={readOnly || busy || !summary.appUsable || !acknowledged || (connectorDraft.site.mode !== "PUBLISH" && !connectorDraft.site.repositoryPath.trim())}
+            disabled={readOnly || busy || !summary.appUsable || !acknowledged || !connectorDraft.site.repositoryPath.trim()}
             aria-describedby={quickstartActivationReason ? "quickstart-activation-prerequisite" : undefined}
-            onClick={() => {
-              if (connectorDraft.site.mode === "PUBLISH") {
-                setSelectedTask("publishing");
-                setConnectionMessage("Yayın hedefi henüz kaydedilmedi. Önce yayın bağlantısı görevindeki site, GitHub ve workflow bilgilerini doğrulayın.");
-                return;
-              }
-              void save();
-            }}
+            onClick={() => void save()}
           >
-            {connectorDraft.site.mode === "PUBLISH" ? "Yayın ayarlarına geç" : "Blogbot’u bu hedefle kullan"}
+            Blogbot’u bu hedefle kullan
           </button>
           {quickstartActivationReason ? <small id="quickstart-activation-prerequisite" className="action-unavailable-reason">{quickstartActivationReason}</small> : null}
         </div>

@@ -14,7 +14,7 @@ interface EditorialDeskProps {
   connectorState: ConnectorStateSnapshot;
   onWorkspaceChange: (snapshot: EditorialWorkspaceSnapshot) => void;
   onRefreshWorkspace: () => Promise<void>;
-  onOpenOperations: () => void;
+  onOpenSetup: () => void;
   initialTab?: "drafts" | "review";
   initialMessage?: string;
   pendingDraftId?: string;
@@ -29,7 +29,7 @@ export function EditorialDesk({
   connectorState,
   onWorkspaceChange,
   onRefreshWorkspace,
-  onOpenOperations,
+  onOpenSetup,
   initialTab = "drafts",
   initialMessage = "",
   pendingDraftId,
@@ -136,6 +136,35 @@ export function EditorialDesk({
     }
   };
 
+  const executionLabel = (draft: EditorialWorkspaceSnapshot["drafts"][number]) => {
+    switch (draft.executionState) {
+      case "RUNNING": return "Çalışıyor";
+      case "WAITING": return "Müdahale bekliyor";
+      case "RETRY_SCHEDULED": return "Otomatik yeniden denenecek";
+      case "FAILED": return "Durduruldu";
+      case "COMPLETED": return "İncelemeye hazır";
+      default: return "Kuyrukta";
+    }
+  };
+
+  const handleDraftOpen = (draft: EditorialWorkspaceSnapshot["drafts"][number]) => {
+    setSelectedRevisionId(draft.id);
+    if (draft.reviewable) {
+      setTab("review");
+      return;
+    }
+    if (draft.nextAction === "CONNECT_CODEX") {
+      setMessage("Bu iş Codex bağlantısını bekliyor. Kurulum rehberi açılıyor.");
+      onOpenSetup();
+      return;
+    }
+    if (draft.nextAction === "RETRY") {
+      setMessage("İş güvenli biçimde durduruldu. Yalnızca bu hata için yeniden deneme seçeneği kullanılabilir.");
+      return;
+    }
+    setMessage(`${executionLabel(draft)} · ${draft.detail}`);
+  };
+
   return (
     <div className="page hub-page">
       <header className="page-header">
@@ -178,22 +207,15 @@ export function EditorialDesk({
               </article>
             ) : null}
             {workspace.drafts.map((draft) => {
-              const canRetry = !draft.reviewable && draft.state === "DRAFTING";
-              return <article className="draft-row-with-action" key={draft.id} aria-label={canRetry ? "Araştırma kuyruğundaki taslak" : undefined}>
+              const canRetry = !draft.reviewable && draft.nextAction === "RETRY";
+              const status = executionLabel(draft);
+              return <article className="draft-row-with-action" key={draft.id} aria-label={!draft.reviewable ? `${status}: ${draft.titleTr}` : undefined}>
               <button
                 className="draft-row"
                 type="button"
-                aria-label={`${draft.titleTr} · ${draft.reviewable ? "İncelemeyi aç" : draft.state === "NEEDS_SOURCE" ? "Kaynak ekle" : "Operasyonlarda takip et"}`}
+                aria-label={`${draft.titleTr} · ${draft.reviewable ? "İncelemeyi aç" : status}`}
                 aria-describedby={[`draft-detail-${draft.id}`, !draft.reviewable ? "queued-draft-guidance" : ""].filter(Boolean).join(" ")}
-                onClick={() => {
-                  setSelectedRevisionId(draft.id);
-                  if (!draft.reviewable) {
-                    setMessage("Bu taslak henüz incelemeye hazır değil. İlerlemeyi Operasyonlar ekranından takip edebilirsiniz.");
-                    onOpenOperations();
-                    return;
-                  }
-                  setTab("review");
-                }}
+                onClick={() => handleDraftOpen(draft)}
               >
                 {draft.completion === null ? (
                   <span className="progress-ring progress-indeterminate" aria-label="İlerleme yüzdesi henüz ölçülmedi">
@@ -210,8 +232,8 @@ export function EditorialDesk({
                   <span>{sectionLabel(draft.section)} · {draft.blockers ? `${draft.blockers} engel` : "engel yok"}</span>
                   <span id={`draft-detail-${draft.id}`}>{draft.detail}</span>
                 </span>
-                <span className={`state-pill state-${draft.state.toLowerCase()}`}>{draftStateLabel(draft.state)}</span>
-                <span className="draft-next-action">{draft.reviewable ? "İncelemeyi aç" : draft.state === "NEEDS_SOURCE" ? "Kaynak ekle" : "Operasyonlarda takip et"}</span>
+                <span className={`state-pill state-${draft.executionState?.toLowerCase() ?? draft.state.toLowerCase()}`}>{draft.reviewable ? draftStateLabel(draft.state) : status}</span>
+                <span className="draft-next-action">{draft.reviewable ? "İncelemeyi aç" : draft.nextAction === "CONNECT_CODEX" ? "Codex'i bağla" : draft.nextAction === "RETRY" ? "Yeniden dene" : "Takip ediliyor"}</span>
               </button>
               {canRetry ? (
                 <button
@@ -235,8 +257,7 @@ export function EditorialDesk({
           {hasQueuedDraft ? (
             <aside id="queued-draft-guidance" className="queued-draft-guidance" aria-label="İnceleme kilidi açıklaması">
               <strong>İnceleme neden kapalı?</strong>
-              <p>Taslak üretimi sürüyor; hazır olduğunda inceleme açılır. İş ilerlemesini ve olası bekleme nedenini Operasyonlar ekranından takip edebilirsiniz.</p>
-              <button className="button button-secondary" type="button" onClick={onOpenOperations}>Operasyonları aç</button>
+              <p>İş henüz yayınlanabilir bir taslak değil. Her satırda gerçek çalışma durumu ve varsa tek güvenli sonraki adım gösterilir; sağlıklı kuyruktaki işler için tekrar dene görünmez.</p>
             </aside>
           ) : null}
         </section>

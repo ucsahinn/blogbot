@@ -1106,7 +1106,7 @@ async function main() {
 
   const smokeDataRoot = inspectExistingProfile ? undefined : await mkdtemp(join(tmpdir(), "blogbot-native-webview-"));
   const driver = spawn(tauriDriverPath, ["--native-driver", edgeDriverPath], {
-    stdio: ["ignore", "ignore", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     // The engine derives its durable state from LOCALAPPDATA, whereas Tauri's
     // app-data and diagnostic paths derive from APPDATA.  Keep both inside the
@@ -1116,6 +1116,12 @@ async function main() {
       ? { ...process.env, LOCALAPPDATA: smokeDataRoot, APPDATA: smokeDataRoot }
       : process.env
   });
+  let driverOutput = "";
+  const appendDriverOutput = (chunk) => {
+    driverOutput = `${driverOutput}${chunk.toString()}`.slice(-12_000);
+  };
+  driver.stdout?.on("data", appendDriverOutput);
+  driver.stderr?.on("data", appendDriverOutput);
   let sessionId;
 
   try {
@@ -1218,6 +1224,11 @@ async function main() {
       fail(`expected the Turkish publishing heading at #publishing, got ${JSON.stringify(publishingHeading)}.`);
     }
     console.log(JSON.stringify({ status: "PASS", title: title.value, localEngine: localEngine.result, nativeReadCommands, singleSourceAddressCheckJourney, candidateJourney, instantCreateJourney, preferencesAndScheduleJourney, visibleSettingsSaveJourney, visibleWeeklyScheduleJourney, operationsJourney, visibleCandidateJournalJourney, visibleOperationsPauseJourney, visibleDiagnosticsExportJourney, visibleReviewEmptyJourney, setupGuideJourney, primaryNavigationJourney, routes: evidence }, null, 2));
+  } catch (error) {
+    const detail = driverOutput.trim();
+    if (!detail) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message}\nTauri driver output (last 12 KB):\n${detail}`, { cause: error });
   } finally {
     if (sessionId) {
       await fetch(`${webdriverBaseUrl}/session/${sessionId}`, { method: "DELETE" }).catch(() => undefined);

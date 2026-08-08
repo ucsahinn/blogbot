@@ -57,6 +57,11 @@ function gateSummary(gates: GateView[]) {
   };
 }
 
+function isScheduledForFuture(scheduledAt: string): boolean {
+  const scheduledAtMs = Date.parse(scheduledAt);
+  return Number.isFinite(scheduledAtMs) && scheduledAtMs > Date.now();
+}
+
 async function sha256(content: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
@@ -119,6 +124,8 @@ export function ReviewWorkspace({
   initialRevisionId
 }: ReviewWorkspaceProps) {
   const siteMode = connectorState.mode;
+  const remotePublicationReady =
+    siteMode === "PUBLISH" && connectorState.externalReadiness === "LIVE_ACCEPTED";
   const localMaterializeLabel = siteMode === "LOCAL_DEV"
     ? "Onaylı paketi yerel projeye yaz"
     : "Onaylı paketi seçili klasöre yaz";
@@ -231,7 +238,7 @@ export function ReviewWorkspace({
     setWarningsAcknowledged(false);
   };
 
-  const approve = async () => {
+  const approve = async (dispatchAfterApproval = false) => {
     if (!revision) {
       return;
     }
@@ -247,6 +254,15 @@ export function ReviewWorkspace({
       setRevision((current) =>
         current ? { ...current, state: result.state, editorialApproved: true } : current
       );
+      if (dispatchAfterApproval && result.state === "APPROVED") {
+        const approvedRevision = { ...revision, state: "APPROVED" as const, editorialApproved: true };
+        if (isScheduledForFuture(approvedRevision.scheduledAt)) {
+          await prepareScheduledPublication(approvedRevision);
+        } else {
+          await enqueuePublication(approvedRevision);
+        }
+        return;
+      }
       let refreshNotice = "";
       try {
         await onRevisionApproved?.();
@@ -335,8 +351,8 @@ export function ReviewWorkspace({
     }
   };
 
-  const enqueuePublication = async () => {
-    if (!revision || revision.state !== "APPROVED") return;
+  const enqueuePublication = async (currentRevision: ReviewRevision | null = revision) => {
+    if (!currentRevision || currentRevision.state !== "APPROVED") return;
     const previewBridge = bridge as PreviewCapableBridge;
     if (typeof previewBridge.previewPublication !== "function") {
       setNotice("Yayın kuyruğu için önce değişmez yayın önizlemesi gerekir; yerel köprü bu özelliği sunmuyor.");
@@ -346,14 +362,14 @@ export function ReviewWorkspace({
     setNotice("");
     try {
       setNotice("Yayın paketi önizlemesi hazırlanıyor…");
-      const preview = await createPublicationPreview(revision, previewBridge);
+      const preview = await createPublicationPreview(currentRevision, previewBridge);
       if (!preview.previewHash) {
         throw new Error("Yayın önizlemesi geçerli bir hash döndürmedi.");
       }
-      setLastPreview({ revisionId: revision.id, hash: preview.previewHash });
+      setLastPreview({ revisionId: currentRevision.id, hash: preview.previewHash });
       setNotice(`Önizleme doğrulandı · ${preview.previewHash.slice(0, 12)}… Kuyruğa alınıyor…`);
       setEnqueueingPublication(true);
-      await previewBridge.enqueuePublication({ revisionId: revision.id, revisionHash: revision.revisionHash, previewHash: preview.previewHash });
+      await previewBridge.enqueuePublication({ revisionId: currentRevision.id, revisionHash: currentRevision.revisionHash, previewHash: preview.previewHash });
       try {
         await onPublicationQueued?.();
         setNotice("Onaylı revizyon yerel yayın kuyruğuna alındı. GitHub bağlantısı hazır değilse güvenle beklemede kalır.");
@@ -365,6 +381,30 @@ export function ReviewWorkspace({
     } finally {
       setPreviewingPublication(false);
       setEnqueueingPublication(false);
+    }
+  };
+
+  const prepareScheduledPublication = async (currentRevision: ReviewRevision) => {
+    const previewBridge = bridge as PreviewCapableBridge;
+    if (typeof previewBridge.previewPublication !== "function") {
+      setNotice("Planlanan yayın için önce değişmez yayın önizlemesi gerekir; yerel köprü bu özelliği sunmuyor.");
+      return;
+    }
+    setPreviewingPublication(true);
+    setNotice("");
+    try {
+      const preview = await createPublicationPreview(currentRevision, previewBridge);
+      setLastPreview({ revisionId: currentRevision.id, hash: preview.previewHash });
+      try {
+        await onRevisionApproved?.();
+        setNotice(`Revizyon onaylandı ve ${new Date(currentRevision.scheduledAt).toLocaleString("tr-TR")} için hazırlandı. Seçili zamanda yerel zamanlayıcı hedefe gönderir.`);
+      } catch {
+        setNotice(`Revizyon onaylandı ve ${new Date(currentRevision.scheduledAt).toLocaleString("tr-TR")} için hazırlandı. İnceleme görünümü henüz yenilenemedi; Takvim ve Yayın ekranından yeniden açın.`);
+      }
+    } catch (reason) {
+      setNotice(userFacingPublicationQueueError(reason));
+    } finally {
+      setPreviewingPublication(false);
     }
   };
 
@@ -530,15 +570,15 @@ export function ReviewWorkspace({
                     revision.state === "APPROVED"
                   }
                   aria-describedby={readOnly ? "review-approval-read-only" : !inspectionComplete ? "review-approval-prerequisite" : undefined}
-                  onClick={() => void approve()}
+                  onClick={() => void approve(remotePublicationReady)}
                 >
                   {approving
                     ? "Onay bağlanıyor…"
                     : revision.state === "APPROVED"
                       ? "Revizyon onaylı"
-                      : "Bu revizyonu onayla"}
+                      : remotePublicationReady ? "Onayla ve hedefe gönder" : siteMode === "PUBLISH" ? "Bu revizyonu onayla" : "Bu revizyonu onayla"}
                 </button>
-                {siteMode === "PUBLISH" ? (
+                {siteMode === "PUBLISH" && remotePublicationReady ? (
                   <button
                     className="button button-secondary"
                     type="button"
@@ -619,7 +659,11 @@ export function ReviewWorkspace({
                 Onay kapalı: iddia, kaynak, medya ve kalite kontrollerinin tamamı çalışmış olmalı; engeller kaldırılmalı ve izin verilen uyarılar açıkça kabul edilmelidir.
               </div>
             ) : null}
-            {siteMode === "PUBLISH" && revision.state !== "APPROVED" ? (
+            {siteMode === "PUBLISH" && !remotePublicationReady ? (
+              <div id="review-publication-prerequisite" className="inline-notice review-notice is-warning" role="status">
+                GitHub yayın bağlantısı henüz hazır değil. Bu revizyonu şimdi onaylayabilir; bağlantı doğrulanınca aynı onaylı paketi hedefe gönderebilirsiniz.
+              </div>
+            ) : siteMode === "PUBLISH" && revision.state !== "APPROVED" ? (
               <div id="review-publication-prerequisite" className="inline-notice review-notice is-warning" role="status">
                 Yayın kuyruğu, bu tam revizyon için insan onayı gerektirir. Onaydan sonra değişmez yayın önizlemesi hazırlanır.
               </div>

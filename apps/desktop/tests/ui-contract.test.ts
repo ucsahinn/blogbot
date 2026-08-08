@@ -21,7 +21,7 @@ test("desktop boot and fatal states expose truthful assistive-technology status"
   assert.match(app, /className="fatal-state">\s*<div role="alert"/u);
 });
 
-test("setup center opens focused tasks and keeps the first-start wizard sequential", async () => {
+test("setup center keeps the legacy guide route while opening the focused first-start wizard", async () => {
   const app = await readFile(source("App.tsx"), "utf8");
   const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
 
@@ -31,11 +31,28 @@ test("setup center opens focused tasks and keeps the first-start wizard sequenti
   assert.match(setup, /setSelectedTask\(startInGuide \? "first-start" : "overview"\)/u);
   assert.match(setup, /const guidedMode = selectedTask === "first-start"/u);
   assert.match(setup, /Ne yapmak istiyorsunuz\?/u);
-  assert.match(setup, /disabled=\{index > guidedStep\}/u);
   assert.match(setup, /function formatFolderPath/u);
-  assert.match(setup, /Klasörü doğrula ve sonraki adıma geç/u);
-  assert.match(setup, /useState<boolean \| null>\(null\)/u);
-  assert.match(setup, /bridge\.getAutostartStatus\(\)/u);
+  assert.match(setup, /Klasörü test et/u);
+});
+
+test("first-start wizard is a non-blocking three-step flow with one semantic status per step", async () => {
+  const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
+
+  assert.match(setup, /type GuidedStatus = "ready" \| "blocker" \| "attention" \| "running" \| "not-tested"/u);
+  assert.match(setup, /title: "Yerel sistem kontrolü"/u);
+  assert.match(setup, /title: "Codex'i bağla ve test et"/u);
+  assert.match(setup, /title: "Çıktı klasörünü seç, test et ve bitir"/u);
+  assert.match(setup, /className=\{`guided-status guided-status-\$\{guidedStepState\(step\)\}`\}/u);
+  assert.match(setup, /Codex'i şimdilik atla/u);
+  assert.match(setup, /guidedMode && guidedStep === 2/u);
+  assert.match(setup, /Blogbot’u bu hedefle kullan/u);
+  assert.match(setup, /<h2 id="quickstart-title">Çıktı klasörünü seç<\/h2>/u);
+  assert.doesNotMatch(setup, /quickstart-modes/u);
+  assert.doesNotMatch(setup, /guided-progress-inline-meter/u);
+  assert.doesNotMatch(setup, /guided-preferences/u);
+  assert.doesNotMatch(setup, /setDeviceName/u);
+  assert.doesNotMatch(setup, /setScanIntervalMinutes/u);
+  assert.doesNotMatch(setup, /setAutostartEnabled/u);
 });
 
 test("background synchronization exposes failures without creating an unhandled rejection", async () => {

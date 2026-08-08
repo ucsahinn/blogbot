@@ -83,7 +83,8 @@ export class PublicationScheduler {
         const approvalBundle: ApprovalBundle | null = approval ? { editorial: approval, highRisk } : null;
         const eligibility = evaluatePublishEligibility(revision, approvalBundle, {
           now,
-          publishingPaused: !capabilities.canPublishApproved
+          publishingPaused: !capabilities.canPublishApproved,
+          revisionLineage: snapshot.revisions
         });
         if (!eligibility.eligible) {
           result.skipped.push({ revisionId: revision.id, reason: eligibility.reason });

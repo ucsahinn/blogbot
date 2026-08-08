@@ -267,7 +267,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             connectorState={connectorState}
             onWorkspaceChange={setWorkspace}
             onRefreshWorkspace={refreshWorkspace}
-            onOpenOperations={() => navigate("operations")}
+            onOpenSetup={() => navigate("setup-guide")}
             initialTab={activePage === "editorial-review" ? "review" : "drafts"}
             initialMessage={editorialNotice}
             {...(pendingEditorialDraft ? {

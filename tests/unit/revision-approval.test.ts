@@ -63,7 +63,9 @@ function revision(overrides: Partial<ArticleRevision> = {}): ArticleRevision {
         url: "https://example.com/primary",
         title: "Primary source",
         fetchedAt: "2026-07-29T09:00:00.000Z",
-        contentHash: "sha256:source"
+        contentHash: "sha256:source",
+        trustStatus: "APPROVED",
+        rightsStatus: "APPROVED"
       }
     ],
     media: [
@@ -253,6 +255,50 @@ test("approved revision is eligible inside six-hour compensation window", () => 
     }),
     { eligible: true }
   );
+});
+
+test("a superseded revision cannot publish when a successor points to it", () => {
+  const original = v2Revision();
+  const successor = v2Revision({
+    id: "rev-2",
+    supersedesRevisionId: original.id
+  });
+
+  assert.deepEqual(
+    evaluatePublishEligibility(original, approvalFor(original), {
+      now: new Date("2026-07-30T09:05:00.000Z"),
+      publishingPaused: false,
+      revisionLineage: [successor]
+    }),
+    { eligible: false, reason: "REVISION_SUPERSEDED" }
+  );
+});
+
+test("only approved source trust and rights evidence can publish", () => {
+  const source = v2Revision().sources[0]!;
+  const { trustStatus: _trustStatus, rightsStatus: _rightsStatus, ...legacySource } = source;
+  const cases = [
+    { source: legacySource, expected: { eligible: false, reason: "SOURCE_TRUST_NOT_APPROVED" } },
+    { source: { ...source, trustStatus: "APPROVED", rightsStatus: "APPROVED" }, expected: { eligible: true } },
+    { source: { ...source, trustStatus: "PENDING", rightsStatus: "APPROVED" }, expected: { eligible: false, reason: "SOURCE_TRUST_NOT_APPROVED" } },
+    { source: { ...source, trustStatus: "REJECTED", rightsStatus: "APPROVED" }, expected: { eligible: false, reason: "SOURCE_TRUST_NOT_APPROVED" } },
+    { source: { ...source, trustStatus: "APPROVED", rightsStatus: "PENDING" }, expected: { eligible: false, reason: "SOURCE_RIGHTS_NOT_APPROVED" } },
+    { source: { ...source, trustStatus: "APPROVED", rightsStatus: "REJECTED" }, expected: { eligible: false, reason: "SOURCE_RIGHTS_NOT_APPROVED" } }
+  ] as const;
+
+  for (const testCase of cases) {
+    const original = v2Revision({
+      sources: [testCase.source]
+    });
+
+    assert.deepEqual(
+      evaluatePublishEligibility(original, approvalFor(original), {
+        now: new Date("2026-07-30T09:05:00.000Z"),
+        publishingPaused: false
+      }),
+      testCase.expected
+    );
+  }
 });
 
 test("publication past six hours requires a new time and approval", () => {

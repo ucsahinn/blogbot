@@ -3960,11 +3960,15 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
             .and_then(|value| value.get("progressStage"))
             .and_then(Value::as_str)
             == Some("RETRYING_CODEX");
+        let wait_reason = metadata
+            .and_then(|value| value.get("codexWaitReason"))
+            .and_then(Value::as_str);
         let waiting_detail = match metadata
             .and_then(|value| value.get("codexWaitReason"))
             .and_then(Value::as_str) {
                 Some("RUNNER_TIMEOUT") => "Yazı üretimi zaman sınırına ulaştı. İş durduruldu; Operasyonlar'dan güvenle yeniden deneyin.",
                 Some("RUNNER_REQUIRES_RETRY") => "Codex çıktısı güvenlik ve biçim kontrolünden geçmedi. İş yayınlanmadı; Operasyonlar'dan yeniden deneyin.",
+                Some("RETRY_LIMIT_REACHED") => "Yazı üretimi üç kez güvenle denendi ancak tamamlanamadı. İş durduruldu; yeniden denemeden önce tanı paketini inceleyin.",
                 _ => "Codex hesabı veya izole runner bekleniyor."
             };
         // The durable queue records a phase, not a measured percentage.
@@ -3984,6 +3988,21 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
             "QUEUED" => (0, "Araştırma güvenli yerel kuyruğa alındı."),
             _ => (1, waiting_detail),
         };
+        let (execution_state, next_action, reason_code) = match job_state {
+            "RUNNING" => ("RUNNING", "NONE", Value::Null),
+            "QUEUED" if retrying_codex => ("RETRY_SCHEDULED", "NONE", json!("EXECUTION_FAILED")),
+            "QUEUED" => ("QUEUED", "NONE", Value::Null),
+            _ => match wait_reason {
+                Some("RUNNER_TIMEOUT") => ("FAILED", "RETRY", json!("RUNNER_TIMEOUT")),
+                Some("RUNNER_REQUIRES_RETRY") => ("FAILED", "RETRY", json!("RUNNER_REQUIRES_RETRY")),
+                Some("RETRY_LIMIT_REACHED") => ("FAILED", "RETRY", json!("RETRY_LIMIT_REACHED")),
+                Some("RATE_LIMIT") => ("WAITING", "NONE", json!("RATE_LIMIT")),
+                Some("USAGE_LIMIT") => ("WAITING", "NONE", json!("USAGE_LIMIT")),
+                Some("PAID_FALLBACK_DISABLED") => ("WAITING", "NONE", json!("PAID_FALLBACK_DISABLED")),
+                Some("AUTH_REQUIRED") => ("WAITING", "CONNECT_CODEX", json!("AUTH_REQUIRED")),
+                _ => ("WAITING", "CONNECT_CODEX", json!("CODEX_UNAVAILABLE")),
+            }
+        };
         drafts.push(json!({
             "id": id,
             "titleTr": title,
@@ -3995,7 +4014,10 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
             "scheduledAt": metadata.and_then(|value| value.get("scheduledAt")).cloned().unwrap_or(Value::Null),
             "state": "DRAFTING",
             "reviewable": false,
-            "detail": detail
+            "detail": detail,
+            "executionState": execution_state,
+            "nextAction": next_action,
+            "reasonCode": reason_code
         }));
     }
     drafts
@@ -4775,6 +4797,9 @@ mod tests {
         assert_eq!(drafts[0]["state"], "DRAFTING");
         assert_eq!(drafts[0]["reviewable"], false);
         assert!(drafts[0]["completion"].is_null());
+        assert_eq!(drafts[0]["executionState"], "WAITING");
+        assert_eq!(drafts[0]["nextAction"], "CONNECT_CODEX");
+        assert_eq!(drafts[0]["reasonCode"], "CODEX_UNAVAILABLE");
         assert_eq!(drafts[0]["detail"], "Codex hesabı veya izole runner bekleniyor.");
     }
 
@@ -4797,6 +4822,8 @@ mod tests {
 
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0]["detail"], "Yazı üretimi kesintiye uğradı; iş kaybolmadı ve güvenli yerel kuyrukta yeniden deneniyor.");
+        assert_eq!(drafts[0]["executionState"], "RETRY_SCHEDULED");
+        assert_eq!(drafts[0]["nextAction"], "NONE");
         assert_eq!(drafts[0]["reviewable"], false);
     }
 

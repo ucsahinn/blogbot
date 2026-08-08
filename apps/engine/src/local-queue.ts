@@ -125,7 +125,8 @@ export class LocalQueueRuntime {
   async enqueue(
     name: LocalQueueName,
     data: object,
-    idempotencyKey: string
+    idempotencyKey: string,
+    options?: { startAfterSeconds?: number }
   ): Promise<string> {
     this.assertStarted();
     const id = deterministicQueueJobId(idempotencyKey);
@@ -134,7 +135,10 @@ export class LocalQueueRuntime {
       assertSameJobPayload(existing.data, data);
       return id;
     }
-    const created = await this.boss.send(name, data, { id });
+    const created = await this.boss.send(name, data, {
+      id,
+      ...(options?.startAfterSeconds ? { startAfter: options.startAfterSeconds } : {})
+    });
     if (created) return created;
     const raced = await this.boss.getJobById<object>(name, id);
     if (!raced) {

@@ -453,6 +453,11 @@ export interface DraftView {
   state: "DRAFTING" | "NEEDS_SOURCE" | "REVIEW_REQUIRED" | "APPROVED";
   reviewable: boolean;
   detail: string;
+  /** Execution is distinct from editorial lifecycle: every visible job has one honest state. */
+  executionState?: "QUEUED" | "RUNNING" | "WAITING" | "RETRY_SCHEDULED" | "FAILED" | "COMPLETED";
+  /** The single safe next step, when human intervention is actually needed. */
+  nextAction?: "NONE" | "CONNECT_CODEX" | "RETRY" | "OPEN_REVIEW";
+  reasonCode?: string | null;
 }
 
 export interface WeeklySlotView {

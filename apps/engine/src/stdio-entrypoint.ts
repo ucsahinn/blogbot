@@ -22,6 +22,7 @@ import {
 import {
   canonicalJson,
   computeRevisionHash,
+  evaluatePublishEligibility,
   validateApprovalGates,
   validateClaimEvidence,
   validateRevisionPackageV2,
@@ -790,6 +791,13 @@ export function createEngineProtocol(
             if (computeRevisionHash(revision) !== revisionHash) throw new Error("APPROVAL_HASH_MISMATCH");
             const approval = approvalSnapshot.snapshot.approvals.find((item) => item.revisionId === revisionId);
             if (!approval || approval.revisionHash !== revisionHash) throw new Error("NO_VALID_APPROVAL");
+            const highRisk = approvalSnapshot.snapshot.highRiskApprovals.find((item) => item.revisionId === revisionId) ?? null;
+            const eligibility = evaluatePublishEligibility(revision, { editorial: approval, highRisk }, {
+              now: new Date(),
+              publishingPaused: false,
+              revisionLineage: approvalSnapshot.snapshot.revisions
+            });
+            if (!eligibility.eligible) throw new Error(eligibility.reason);
             if (revision.translationParity?.status === "MISMATCHED" || revision.translationParity?.status === "PENDING") {
               throw new Error("TRANSLATION_PARITY_NOT_READY");
             }
@@ -798,12 +806,6 @@ export function createEngineProtocol(
             }
             const gateStatus = validateApprovalGates(revision, approval.warningSetHash);
             if (gateStatus !== "READY") throw new Error(gateStatus);
-            if (revision.riskLevel === "HIGH") {
-              const highRisk = approvalSnapshot.snapshot.highRiskApprovals.find((item) =>
-                item.revisionId === revisionId && item.revisionHash === revisionHash
-              );
-              if (!highRisk) throw new Error("HIGH_RISK_APPROVAL_REQUIRED");
-            }
             const preview = await transaction.getLocalState(`publication.preview:${revisionId}`);
             if (!isRecord(preview) || preview.revisionHash !== revisionHash || preview.previewHash !== previewHash) {
               throw new Error("NO_VALID_PUBLICATION_PREVIEW");
@@ -1992,7 +1994,7 @@ export async function createPersistentEngineProtocol(
             }
           });
         },
-        onRetrying: async ({ submission, failure }) => {
+        onRetrying: async ({ submission, failure, transientFailureCount, retryAt }) => {
           reportCodexLifecycle("CODEX_JOB_RETRYING");
           if (submission.definitionId !== "DRAFT.CREATE") return;
           const job = await repository.getJob(submission.jobId);
@@ -2004,7 +2006,8 @@ export async function createPersistentEngineProtocol(
               ...(job.metadata ?? {}),
               progressStage: "RETRYING_CODEX",
               codexRetryReason: failure,
-              codexRetryAtUnixMs: Date.now()
+              codexRetryAttempt: transientFailureCount,
+              codexRetryAtUnixMs: Date.parse(retryAt)
             }
           });
         },

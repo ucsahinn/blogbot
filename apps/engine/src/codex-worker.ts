@@ -14,7 +14,8 @@ export type CodexWaitReason =
   | "USAGE_LIMIT"
   | "PAID_FALLBACK_DISABLED"
   | "RUNNER_TIMEOUT"
-  | "RUNNER_REQUIRES_RETRY";
+  | "RUNNER_REQUIRES_RETRY"
+  | "RETRY_LIMIT_REACHED";
 
 export type CodexRunnerDiagnosticCode =
   | "CODEX_PROTOCOL_REJECTED"
@@ -34,6 +35,8 @@ export interface CodexWorkSubmission {
 
 interface CodexJobBase extends CodexWorkSubmission {
   version: number;
+  transientFailureCount?: number;
+  retryAt?: string;
 }
 
 export type CodexJobSnapshot =
@@ -88,6 +91,8 @@ export interface CodexJobPersistencePort {
     jobId: string;
     expectedVersion: number;
     failure: "EXECUTION_FAILED";
+    transientFailureCount: number;
+    retryAt: string;
   }): Promise<CodexJobSnapshot>;
   requeueWaiting(
     message: CodexQueueMessage
@@ -105,7 +110,10 @@ export interface CodexJobPersistencePort {
  * that may have failed after the durable reservation was committed.
  */
 export interface CodexJobQueuePort {
-  enqueueOnce(message: CodexQueueMessage): Promise<void>;
+  enqueueOnce(
+    message: CodexQueueMessage,
+    options?: { startAfterSeconds?: number }
+  ): Promise<void>;
   recoverInterrupted?(message: CodexQueueMessage): Promise<void>;
 }
 
@@ -148,6 +156,8 @@ export interface CodexWorkerCoordinatorDependencies {
   onRetrying?: (input: {
     submission: CodexWorkSubmission;
     failure: "EXECUTION_FAILED";
+    transientFailureCount: number;
+    retryAt: string;
   }) => Promise<void>;
   onCompleted?: (input: {
     submission: CodexWorkSubmission;
@@ -164,6 +174,8 @@ function queueMessage(snapshot: CodexJobSnapshot): CodexQueueMessage {
     generation: snapshot.version
   };
 }
+
+const TRANSIENT_RETRY_DELAYS_SECONDS = [5, 30, 120] as const;
 
 export function createCodexWorkerCoordinator(
   dependencies: CodexWorkerCoordinatorDependencies
@@ -286,17 +298,40 @@ export function createCodexWorkerCoordinator(
           });
           return waiting;
         }
+        const transientFailureCount = (running.transientFailureCount ?? 0) + 1;
+        if (transientFailureCount > TRANSIENT_RETRY_DELAYS_SECONDS.length) {
+          if (!taskSelection) throw error;
+          const waiting = await persistence.markWaiting({
+            jobId: running.jobId,
+            expectedVersion: running.version,
+            reason: "RETRY_LIMIT_REACHED",
+            ...taskSelection
+          });
+          await onWaiting?.({
+            submission: { jobId: running.jobId, idempotencyKey: running.idempotencyKey, definitionId: running.definitionId, payload: running.payload },
+            reason: "RETRY_LIMIT_REACHED",
+            diagnosticCode: "CODEX_UNKNOWN_FAILURE",
+            diagnosticDetail: "Transient retry limit reached"
+          });
+          return waiting;
+        }
+        const startAfterSeconds = TRANSIENT_RETRY_DELAYS_SECONDS[transientFailureCount - 1]!;
+        const retryAt = new Date(Date.now() + startAfterSeconds * 1_000).toISOString();
         const queued = await persistence.returnToQueued({
           jobId: running.jobId,
           expectedVersion: running.version,
-          failure: "EXECUTION_FAILED"
+          failure: "EXECUTION_FAILED",
+          transientFailureCount,
+          retryAt
         });
         await onRetrying?.({
           submission: { jobId: running.jobId, idempotencyKey: running.idempotencyKey, definitionId: running.definitionId, payload: running.payload },
-          failure: "EXECUTION_FAILED"
+          failure: "EXECUTION_FAILED",
+          transientFailureCount,
+          retryAt
         });
-        await queue.enqueueOnce(queueMessage(queued));
-        throw error;
+        await queue.enqueueOnce(queueMessage(queued), { startAfterSeconds });
+        return queued;
       }
     },
 

@@ -12,7 +12,7 @@ function revision(scheduledAt: string) {
     en: { title: "Title", slug: "title", description: "Description", bodyMarkdown: "Body", heroImageAlt: "Image" },
     section: "haberler" as const, articleType: "news" as const, author: "Ada", tags: [],
     claims: [{ id: "c1", locale: "both" as const, text: "claim", sourceIds: ["s1"], status: "VERIFIED" as const, claimKey: "c1", trText: "iddia", enText: "claim", evidenceAnchors: [{ sourceId: "s1", quoteHash: "a".repeat(64) }] }],
-    sources: [{ id: "s1", url: "https://example.test", title: "Source", fetchedAt: "2026-07-30T00:00:00.000Z", contentHash: "b".repeat(64) }], media: [], scheduledAt, adapterVersion: "1",
+    sources: [{ id: "s1", url: "https://example.test", title: "Source", fetchedAt: "2026-07-30T00:00:00.000Z", contentHash: "b".repeat(64), trustStatus: "APPROVED" as const, rightsStatus: "APPROVED" as const }], media: [], scheduledAt, adapterVersion: "1",
     editorialDesk: "Blogbot Editorya", riskLevel: "STANDARD" as const,
     translationParity: { status: "MATCHED" as const, reportHash: "c".repeat(64) },
     editorialPolicyHash: "d".repeat(64), editorialReviewReportHash: "e".repeat(64),

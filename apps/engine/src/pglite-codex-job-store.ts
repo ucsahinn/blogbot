@@ -27,7 +27,8 @@ interface CodexQueueRuntimePort {
   enqueue(
     name: "blogbot.codex",
     data: object,
-    idempotencyKey: string
+    idempotencyKey: string,
+    options?: { startAfterSeconds?: number }
   ): Promise<string>;
   recoverInterrupted?(name: LocalQueueName, id: string): Promise<boolean>;
 }
@@ -44,11 +45,15 @@ const TABLE = "blogbot_codex_jobs";
 export class PGliteCodexQueueAdapter implements CodexJobQueuePort {
   constructor(private readonly queue: CodexQueueRuntimePort) {}
 
-  async enqueueOnce(message: CodexQueueMessage): Promise<void> {
+  async enqueueOnce(
+    message: CodexQueueMessage,
+    options?: { startAfterSeconds?: number }
+  ): Promise<void> {
     await this.queue.enqueue(
       "blogbot.codex",
       message,
-      `codex:${message.idempotencyKey}:${message.generation}`
+      `codex:${message.idempotencyKey}:${message.generation}`,
+      options
     );
   }
 
@@ -198,6 +203,8 @@ export class PGliteCodexJobStore implements CodexJobPersistencePort {
     jobId: string;
     expectedVersion: number;
     failure: "EXECUTION_FAILED";
+    transientFailureCount: number;
+    retryAt: string;
   }): Promise<CodexJobSnapshot> {
     return this.transitionRunning(input.jobId, input.expectedVersion, (current) => ({
       jobId: current.jobId,
@@ -206,7 +213,9 @@ export class PGliteCodexJobStore implements CodexJobPersistencePort {
       payload: current.payload,
       state: "QUEUED",
       version: current.version + 1,
-      lastFailure: input.failure
+      lastFailure: input.failure,
+      transientFailureCount: input.transientFailureCount,
+      retryAt: input.retryAt
     }));
   }
 

@@ -8,6 +8,7 @@ import {
   type CodexJobSnapshot,
   type CodexQueueMessage,
   type CodexTaskResolverPort,
+  type CodexWaitReason,
   type CodexWorkSubmission
 } from "../../apps/engine/src/codex-worker.ts";
 import type {
@@ -60,11 +61,7 @@ class MemoryCodexJobStore implements CodexJobPersistencePort {
   async markWaiting(input: {
     jobId: string;
     expectedVersion: number;
-    reason:
-      | "AUTH_REQUIRED"
-      | "RATE_LIMIT"
-      | "USAGE_LIMIT"
-      | "PAID_FALLBACK_DISABLED";
+    reason: CodexWaitReason;
     role: "FAST" | "DEFAULT" | "DEEP_REVIEW";
     model: string;
   }) {
@@ -111,6 +108,8 @@ class MemoryCodexJobStore implements CodexJobPersistencePort {
     jobId: string;
     expectedVersion: number;
     failure: "EXECUTION_FAILED";
+    transientFailureCount: number;
+    retryAt: string;
   }) {
     const current = this.requireVersion(input.jobId, input.expectedVersion);
     const snapshot: CodexJobSnapshot = {
@@ -120,7 +119,9 @@ class MemoryCodexJobStore implements CodexJobPersistencePort {
       payload: current.payload,
       state: "QUEUED",
       version: current.version + 1,
-      lastFailure: input.failure
+      lastFailure: input.failure,
+      transientFailureCount: input.transientFailureCount,
+      retryAt: input.retryAt
     };
     this.byJobId.set(snapshot.jobId, snapshot);
     return snapshot;
@@ -188,8 +189,13 @@ class MemoryCodexJobStore implements CodexJobPersistencePort {
 class MemoryCodexQueue implements CodexJobQueuePort {
   readonly messages: CodexQueueMessage[] = [];
   readonly recovered: CodexQueueMessage[] = [];
+  readonly scheduled: Array<{ message: CodexQueueMessage; startAfterSeconds?: number }> = [];
 
-  async enqueueOnce(message: CodexQueueMessage) {
+  async enqueueOnce(message: CodexQueueMessage, options?: { startAfterSeconds?: number }) {
+    this.scheduled.push({
+      message,
+      ...(options?.startAfterSeconds === undefined ? {} : { startAfterSeconds: options.startAfterSeconds })
+    });
     if (
       !this.messages.some(
         (existing) =>
@@ -442,7 +448,7 @@ test("invalid Codex protocol enters a manual retry state instead of looping the 
   assert.equal(queue.messages.length, 1);
 });
 
-test("unexpected runner failure returns the claim to QUEUED for the durable retry", async () => {
+test("unexpected runner failure is retained and retried once after the first durable backoff", async () => {
   const store = new MemoryCodexJobStore();
   const queue = new MemoryCodexQueue();
   const retries: string[] = [];
@@ -469,22 +475,21 @@ test("unexpected runner failure returns the claim to QUEUED for the durable retr
   });
   await coordinator.submit(submission);
 
-  await assert.rejects(
-    coordinator.process(queue.messages[0]!),
-    /runner crashed/
-  );
-  assert.deepEqual(store.byJobId.get("job-1"), {
-    ...submission,
-    state: "QUEUED",
-    version: 3,
-    lastFailure: "EXECUTION_FAILED"
-  });
+  const retrying = await coordinator.process(queue.messages[0]!);
+  assert.equal(retrying.state, "QUEUED");
+  assert.equal(retrying.lastFailure, "EXECUTION_FAILED");
+  assert.equal(retrying.transientFailureCount, 1);
+  assert.ok(retrying.retryAt);
   assert.deepEqual(queue.messages.at(-1), {
     jobId: "job-1",
     idempotencyKey: "draft-42:write-tr:v1",
     generation: 3
   });
   assert.deepEqual(retries, ["EXECUTION_FAILED"]);
+  assert.deepEqual(queue.scheduled.at(-1), {
+    message: queue.messages.at(-1),
+    startAfterSeconds: 5
+  });
 });
 
 test("startup recovery clears a stale active queue reservation even when the Codex record is already queued", async () => {

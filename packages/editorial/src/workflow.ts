@@ -82,6 +82,7 @@ export function createEditedRevision(
     ...current,
     ...patch,
     id: nextRevisionId,
+    supersedesRevisionId: current.id,
     translationKey: current.translationKey,
     state: "REVIEW_REQUIRED"
   };

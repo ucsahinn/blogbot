@@ -436,6 +436,7 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
     !isBoundedJson(value, 1_000_000) ||
     !hasExactKeys(value, [
       "id",
+      ...(value.supersedesRevisionId === undefined ? [] : ["supersedesRevisionId"]),
       "translationKey",
       "state",
       "tr",
@@ -461,6 +462,8 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
       "qualityGates"
     ]) ||
     !isIdentifier(value.id, 128) ||
+    (value.supersedesRevisionId !== undefined &&
+      !isIdentifier(value.supersedesRevisionId, 128)) ||
     !isIdentifier(value.translationKey, 128) ||
     ![
       "DISCOVERED",
@@ -573,7 +576,9 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
           "url",
           "title",
           "fetchedAt",
-          "contentHash"
+          "contentHash",
+          ...(source.trustStatus === undefined ? [] : ["trustStatus"]),
+          ...(source.rightsStatus === undefined ? [] : ["rightsStatus"])
         ]) &&
         isIdentifier(source.id, 128) &&
         typeof source.url === "string" &&
@@ -583,7 +588,15 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
         typeof source.fetchedAt === "string" &&
         Number.isFinite(Date.parse(source.fetchedAt)) &&
         typeof source.contentHash === "string" &&
-        /^[a-f0-9]{64}$/iu.test(source.contentHash)
+        /^[a-f0-9]{64}$/iu.test(source.contentHash) &&
+        (source.trustStatus === undefined ||
+          source.trustStatus === "PENDING" ||
+          source.trustStatus === "APPROVED" ||
+          source.trustStatus === "REJECTED") &&
+        (source.rightsStatus === undefined ||
+          source.rightsStatus === "PENDING" ||
+          source.rightsStatus === "APPROVED" ||
+          source.rightsStatus === "REJECTED")
     ) &&
     revision.media.every(
       (media) =>
