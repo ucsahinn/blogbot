@@ -1461,7 +1461,11 @@ pub fn get_bootstrap_snapshot(
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or("OFF");
-    let revision_materializations = read_revision_list(&bridge).unwrap_or_default();
+    let revision_materializations = engine_state
+        .as_ref()
+        .and_then(|value| value.pointer("/snapshot/serverCursor").and_then(Value::as_u64))
+        .map(|version| read_revision_list_at_version(&bridge, version).unwrap_or_default())
+        .unwrap_or_default();
     let revision_queue = build_revision_queue(&revision_materializations);
     let review_count = revision_queue
         .iter()
@@ -2141,6 +2145,13 @@ fn read_revision_list(bridge: &EngineBridge) -> Result<Vec<Value>, CommandError>
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
+    read_revision_list_at_version(bridge, expected_version)
+}
+
+fn read_revision_list_at_version(
+    bridge: &EngineBridge,
+    expected_version: u64,
+) -> Result<Vec<Value>, CommandError> {
     let request_id = format!(
         "desktop-revision-list-{}-{expected_version}",
         std::process::id()
@@ -3519,7 +3530,11 @@ pub fn get_editorial_workspace(
 ) -> Result<Value, CommandError> {
     let runtime = *read_lock(&state.runtime)?;
     let engine_state = workspace_engine_state(runtime, read_engine_state(&bridge))?;
-    let materializations = read_revision_list(&bridge).unwrap_or_default();
+    let materializations = engine_state
+        .as_ref()
+        .and_then(|value| value.pointer("/snapshot/serverCursor").and_then(Value::as_u64))
+        .map(|version| read_revision_list_at_version(&bridge, version).unwrap_or_default())
+        .unwrap_or_default();
     let revision_queue = build_revision_queue(&materializations);
     let jobs = engine_state
         .as_ref()
