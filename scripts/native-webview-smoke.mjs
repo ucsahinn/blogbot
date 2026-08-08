@@ -325,7 +325,7 @@ async function clickCandidateResearchAction(sessionId, candidateTitle) {
           (item) => item.querySelector('h2')?.textContent?.trim() === ${JSON.stringify(candidateTitle)}
         );
         const button = card
-          ? [...card.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Taslak hazırla')
+          ? [...card.querySelectorAll('button')].find((item) => ['Araştırmaya al', 'Taslak hazırla'].includes(item.textContent?.trim()))
           : undefined;
         if (!button || button.disabled) return false;
         button.click();
@@ -335,7 +335,7 @@ async function clickCandidateResearchAction(sessionId, candidateTitle) {
     if (clicked) return;
     await new Promise((resolveWait) => setTimeout(resolveWait, 150));
   }
-  fail(`the visible Taslak hazırla action was not available for ${JSON.stringify(candidateTitle)}.`);
+  fail(`the visible candidate research action was not available for ${JSON.stringify(candidateTitle)}.`);
 }
 
 async function verifyInitialEngineSurface(sessionId) {

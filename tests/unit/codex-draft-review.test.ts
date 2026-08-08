@@ -5,7 +5,9 @@ import {
   createDraftCodexTaskResolver,
   finalizeReviewedRevision,
   isFinalReviewCodexOutput,
+  isDraftCodexOutput,
   materializeDraftRevision,
+  normalizeDraftCodexOutput,
   type DraftCodexOutput
 } from "../../apps/engine/src/codex-draft.ts";
 import { assertRevisionGeneratedFilesMatch } from "../../apps/engine/src/stdio-entrypoint.ts";
@@ -40,6 +42,22 @@ test("final review is a separate DEEP_REVIEW task with a strict output contract"
   assert.equal(task.taskKind, "FINAL_QUALITY");
   assert.equal(isFinalReviewCodexOutput(review), true);
   assert.equal(isFinalReviewCodexOutput({ ...review, gates: review.gates.slice(1) }), false);
+});
+
+test("draft output repair fills only derivable metadata before strict validation", () => {
+  const repaired = normalizeDraftCodexOutput({
+    translationKey: "ornek",
+    author: "Editör",
+    tags: ["haber"],
+    tr: { title: "Yeni güvenlik gelişmesi", bodyMarkdown: "# Kısa açıklama\n\nDoğrulanmış içerik." },
+    en: { title: "New security development", bodyMarkdown: "A short verified account." },
+    claims: []
+  });
+
+  assert.equal(isDraftCodexOutput(repaired), true);
+  assert.equal((repaired as DraftCodexOutput).tr.slug, "yeni-guvenlik-gelismesi");
+  assert.match((repaired as DraftCodexOutput).tr.description, /Kısa açıklama/u);
+  assert.match((repaired as DraftCodexOutput).en.heroImageAlt, /original cover image/u);
 });
 
 test("review completion creates an immutable V2 local package from checks that actually ran", () => {

@@ -231,8 +231,8 @@ export function ContentFlow({
             <span>{candidates.length} etkin aday</span>
           </div>
           <div className="candidate-action-guidance" role="note">
-            <strong>Taslak hazırlamak yalnız yerel araştırmayı başlatır; yayın yapmaz.</strong>
-            <span>Yayın yalnızca hazır taslağı inceledikten sonra başlar.</span>
+            <strong>Araştırmaya almak yerel kuyruğu başlatır; hemen yayın yapmaz.</strong>
+            <span>Taslak hazır olduğunda Editoryal Masa’da incelenir, yayın insan onayından sonra başlar.</span>
           </div>
           {candidates.length ? (
             <div className="candidate-grid">
@@ -271,7 +271,7 @@ export function ContentFlow({
                       aria-describedby={dismissReason ? `candidate-dismiss-unavailable-${candidate.id}` : undefined}
                       onClick={() => void mutate(candidate.id, "dismiss")}
                     >
-                      Kapat
+                      Adayı kapat
                     </button>
                     {hasFailedResearch ? (
                       <button className="button button-danger" type="button" onClick={onOpenOperations}>
@@ -298,7 +298,7 @@ export function ContentFlow({
                         aria-describedby={researchReason ? `candidate-action-unavailable-${candidate.id}` : undefined}
                         onClick={() => void mutate(candidate.id, "promote")}
                       >
-                        Taslak hazırla
+                        Araştırmaya al
                       </button>
                     )}
                   </div>

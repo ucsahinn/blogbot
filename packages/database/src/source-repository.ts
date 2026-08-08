@@ -140,6 +140,8 @@ export interface SourceRepository {
   listSources(): Promise<LocalSource[]>;
   saveEntries(sourceId: string, entries: SourceFeedEntry[]): Promise<number>;
   listEntries(sourceId: string): Promise<StoredSourceEntry[]>;
+  /** Read only the newest bounded slice needed for candidate triage. */
+  listEntriesBounded(sourceId: string, limit: number): Promise<StoredSourceEntry[]>;
   purgeExpiredEntries(beforeIso: string, protectedSourceIds?: readonly string[]): Promise<number>;
   getSourceCapabilities(sourceId: string): Promise<SourceCapabilities>;
   prepareScanBatch(
@@ -501,7 +503,23 @@ export class PGliteSourceRepository implements SourceRepository {
         ORDER BY external_id`,
       [sourceId]
     );
-    return result.rows.map(({ external_id, value }) => {
+    return result.rows.map(({ external_id, value }) => this.openSourceEntryRow(sourceId, external_id, value));
+  }
+
+  async listEntriesBounded(sourceId: string, limit: number): Promise<StoredSourceEntry[]> {
+    const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const result = await this.database.query<JsonRow>(
+      `SELECT external_id, value
+         FROM blogbot_source_entries
+        WHERE source_id = $1
+        ORDER BY external_id DESC
+        LIMIT $2`,
+      [sourceId, safeLimit]
+    );
+    return result.rows.map(({ external_id, value }) => this.openSourceEntryRow(sourceId, external_id, value));
+  }
+
+  private openSourceEntryRow(sourceId: string, external_id: string | undefined, value: unknown): StoredSourceEntry {
       if (!external_id) {
         throw new Error("LOCAL_DATA_IDENTITY_MISSING");
       }
@@ -516,7 +534,6 @@ export class PGliteSourceRepository implements SourceRepository {
       // Keep the historical public shape stable while retaining the sealed value.
       const { capturedAt: _capturedAt, ...publicEntry } = entry;
       return publicEntry;
-    });
   }
 
   async purgeExpiredEntries(

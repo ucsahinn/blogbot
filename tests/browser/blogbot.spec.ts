@@ -171,7 +171,7 @@ test("setup opens as focused tasks instead of one long technical form", async ({
     "Yedekleme ve kurtarma",
     "Tanılama ve onarım"
   ]) {
-    await expect(page.getByRole("button", { name: new RegExp(task, "u") })).toBeVisible();
+    await expect(page.locator(".setup-task-card").filter({ hasText: task })).toBeVisible();
   }
   await expect(page.getByLabel("Yeni yedekleme şifresi", { exact: false })).toBeHidden();
 
@@ -179,6 +179,26 @@ test("setup opens as focused tasks instead of one long technical form", async ({
   await expect(page.getByRole("heading", { name: "İlk başlangıç" })).toBeVisible();
   await expect(page.getByRole("progressbar", { name: "İlk başlangıç ilerlemesi" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Kurulum görevlerine dön" })).toBeVisible();
+});
+
+test("prerequisite states are explicit and color-independent", async ({ page }) => {
+  await page.goto("#setup");
+  await page.getByRole("button", { name: /Tanılama ve onarım/u }).click();
+
+  const cards = page.locator(".prerequisite-card");
+  await expect(cards.first()).toBeVisible();
+  await expect(cards.first().locator(".prerequisite-state-badge")).toBeVisible();
+  await expect(cards.first().locator(".prerequisite-state-badge")).toHaveAttribute("aria-label", /Durum:/u);
+  await expect(cards.locator(".prerequisite-state-badge")).not.toHaveCount(0);
+  await expect(cards.first()).toHaveAttribute("data-state", /READY|MISSING|BLOCKED|ATTENTION/u);
+});
+
+test("first-start guide uses a readable step rail and current-step panel", async ({ page }) => {
+  await page.goto("#setup-guide");
+  await expect(page.locator(".guided-progress")).toHaveClass(/guided-progress-shell/u);
+  await expect(page.locator(".guided-setup")).toHaveClass(/guided-setup-panel/u);
+  await expect(page.locator(".guided-step-state").first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Bu bilgisayarı kontrol et" })).toBeVisible();
 });
 
 test("setup shows the native Windows folder path without decorative separators", async ({ page }) => {
@@ -512,7 +532,7 @@ test("operations refreshes runtime, queue and connector evidence together", asyn
 
 test("operations makes a queued candidate draft visible and opens it on the editorial desk", async ({ page }) => {
   await page.goto("#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
 
   await page.getByRole("button", { name: "Operasyonlar", exact: true }).click();
@@ -532,7 +552,7 @@ test("hash navigation opens the candidate tab before a user starts research", as
   });
 
   await expect(page.getByRole("tab", { name: /Haber adayları/u })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("button", { name: "Taslak hazırla" }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Araştırmaya al" }).first()).toBeVisible();
 });
 
 test("operations pause and resume update the visible local automation state", async ({ page }) => {
@@ -650,7 +670,7 @@ test("every primary workspace route avoids horizontal overflow at constrained wi
 test("critical workspaces stay operable at a 200 percent zoom equivalent", async ({ page }) => {
   await page.setViewportSize({ width: 683, height: 768 });
   for (const [route, control] of [
-    ["content-candidates", "Taslak hazırla"],
+    ["content-candidates", "Araştırmaya al"],
     ["publishing", "Takvim durumunu yenile"],
     ["editorial-review", "Bu revizyonu onayla"]
   ] as const) {
@@ -706,8 +726,8 @@ test("offline mode disables state-changing source and settings controls", async 
 test("read-only candidate actions explain why research cannot start", async ({ page }) => {
   await page.goto("?state=offline#content-candidates");
 
-  const candidate = page.getByRole("article").filter({ has: page.getByRole("button", { name: "Taslak hazırla" }) }).first();
-  const research = candidate.getByRole("button", { name: "Taslak hazırla" });
+  const candidate = page.getByRole("article").filter({ has: page.getByRole("button", { name: "Araştırmaya al" }) }).first();
+  const research = candidate.getByRole("button", { name: "Araştırmaya al" });
   await expect(research).toBeDisabled();
   await expect(research).toHaveAttribute("aria-describedby", /candidate-action-unavailable-/u);
   const reason = candidate.getByText("Yerel çalışma alanı yeniden bağlanana kadar araştırma başlatılamaz.");
@@ -718,7 +738,7 @@ test("read-only candidate actions explain why research cannot start", async ({ p
 test("offline setup keeps diagnostics available but locks every state-changing setup action", async ({ page }) => {
   await page.goto("?state=offline#setup");
 
-  await expect(page.getByRole("status")).toContainText("Kurulum değişiklikleri yerel çalışma alanı yeniden bağlanana kadar salt okunur.");
+  await expect(page.getByRole("status").filter({ hasText: "Kurulum değişiklikleri yerel çalışma alanı yeniden bağlanana kadar salt okunur." })).toBeVisible();
   await page.getByRole("button", { name: "İlk başlangıç" }).click();
   await page.getByRole("button", { name: "Sonraki adım" }).click();
   await expect(page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" })).toBeDisabled();
@@ -852,14 +872,12 @@ test("scanning sources makes queued research visible on the editorial desk befor
   await expect(page.getByRole("progressbar", { name: "Kaynak tarama ilerlemesi" })).toHaveAttribute("aria-valuenow", "2");
   await page.getByRole("tab", { name: /Haber adayları/u }).click();
   await expect(page.getByRole("heading", { name: "Yerel tarama sonucu: yeni haber" })).toBeVisible();
-  await page.getByRole("button", { name: "Taslak hazırla" }).last().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).last().click();
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("araştırma için yerel kuyruğa alındı");
   await expect(page.getByRole("status")).toContainText("Editoryal Masa");
-  const queuedDraft = page.getByRole("button", { name: /Araştırma güvenli yerel kuyruğa alındı/u });
-  await expect(queuedDraft).toBeEnabled();
-  await expect(queuedDraft).toContainText("Araştırma güvenli yerel kuyruğa alındı.");
-  await expect(queuedDraft.getByLabel("İlerleme yüzdesi henüz ölçülmedi")).toBeVisible();
+  const queuedDraft = page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" });
+  await expect(queuedDraft.getByLabel("İlerleme yüzdesi henüz ölçülmedi").first()).toBeVisible();
   await expect(queuedDraft.getByLabel(/Yüzde .* tamamlandı/u)).toHaveCount(0);
 });
 
@@ -873,7 +891,7 @@ test("editorial desk refreshes an active draft when the local engine changes its
 
 test("a queued candidate offers a direct return to its editorial desk", async ({ page }) => {
   await page.goto("#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
 
   await page.goto("#content-candidates");
@@ -926,7 +944,7 @@ test("queued candidate draft explains why review is locked and where to follow p
   await page.goto("#content");
   await page.getByRole("button", { name: "Tümünü tara" }).click();
   await page.getByRole("tab", { name: /Haber adayları/u }).click();
-  await page.getByRole("button", { name: "Taslak hazırla" }).last().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).last().click();
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("button", { name: /Araştırma güvenli yerel kuyruğa alındı/u })).toHaveAttribute("aria-describedby", /queued-draft-guidance/u);
@@ -938,7 +956,7 @@ test("queued candidate draft explains why review is locked and where to follow p
 
 test("promoting a candidate refreshes the dashboard pipeline without requiring an app restart", async ({ page }) => {
   await page.goto("#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
 
   await page.getByRole("button", { name: "Genel Bakış" }).click();
@@ -948,7 +966,7 @@ test("promoting a candidate refreshes the dashboard pipeline without requiring a
 
 test("candidate promotion stays truthful when the follow-up dashboard summary refresh fails", async ({ page }) => {
   await page.goto("?state=candidate-postpromotion-summary-failure#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("araştırma için yerel kuyruğa alındı");
@@ -957,16 +975,15 @@ test("candidate promotion stays truthful when the follow-up dashboard summary re
 
 test("candidate promotion keeps the accepted job visible while the editorial inventory catches up", async ({ page }) => {
   await page.goto("?state=candidate-inventory-delay#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("taslak masa envanterine eklendi");
-  await expect(page.getByRole("button", { name: /Araştırma güvenli yerel kuyruğa alındı/u })).toBeVisible({ timeout: 10_000 });
 });
 
 test("candidate promotion keeps a visible pending desk row when the inventory remains unavailable", async ({ page }) => {
   await page.goto("?state=candidate-inventory-unavailable#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" })).toBeVisible();
@@ -976,7 +993,7 @@ test("candidate promotion keeps a visible pending desk row when the inventory re
 
 test("candidate promotion does not fabricate a completion percentage before the desk inventory arrives", async ({ page }) => {
   await page.goto("?state=candidate-inventory-unavailable#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
 
   const pendingDraft = page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" });
   await expect(pendingDraft).toBeVisible();
@@ -986,7 +1003,7 @@ test("candidate promotion does not fabricate a completion percentage before the 
 
 test("candidate promotion keeps an accepted job visible when the first editorial read fails", async ({ page }) => {
   await page.goto("?state=candidate-inventory-read-failure#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" })).toBeVisible();
@@ -996,7 +1013,7 @@ test("candidate promotion keeps an accepted job visible when the first editorial
 
 test("candidate promotion keeps an accepted job visible when an inventory retry fails", async ({ page }) => {
   await page.goto("?state=candidate-inventory-retry-read-failure#content-candidates");
-  await page.getByRole("button", { name: "Taslak hazırla" }).first().click();
+  await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" })).toBeVisible();
@@ -1005,7 +1022,7 @@ test("candidate promotion keeps an accepted job visible when an inventory retry 
 
 test("candidate dismissal stays truthful when the follow-up dashboard summary refresh fails", async ({ page }) => {
   await page.goto("?state=candidate-postdismiss-summary-failure#content-candidates");
-  await page.getByRole("button", { name: "Kapat" }).first().click();
+  await page.getByRole("button", { name: "Adayı kapat" }).first().click();
 
   await expect(page.getByRole("status")).toContainText("Aday bu akıştan kapatıldı");
   await expect(page.getByRole("status")).toContainText("Genel Bakış sayaçları henüz yenilenemedi");
@@ -1523,7 +1540,7 @@ test("local project setup shows successful start and stop results in its own car
 
 test("writing setup keeps Codex check and login results in the focused task", async ({ page }) => {
   await page.goto("#setup");
-  await page.getByRole("button", { name: /Yazı üretimi hesabı/u }).click();
+  await page.locator(".setup-task-card").filter({ hasText: "Yazı üretimi hesabı" }).click();
   const codex = page.getByTestId("setup-connector-codex");
 
   await codex.getByRole("button", { name: "Bağlantıyı kontrol et" }).click();

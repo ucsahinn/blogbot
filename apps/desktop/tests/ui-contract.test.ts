@@ -112,7 +112,7 @@ test("source flow explains one simple editorial path instead of treating checks 
   const flow = await readFile(source("screens", "ContentFlow.tsx"), "utf8");
 
   assert.match(sourceCenter, /Kaynak ekle[\s\S]*?Tara[\s\S]*?Taslak hazırla[\s\S]*?İncele ve onayla/u);
-  assert.match(flow, /Taslak hazırla/u);
+  assert.match(flow, /Araştırmaya al/u);
   assert.match(flow, /Yayın yalnızca hazır taslağı inceledikten sonra başlar/u);
 });
 

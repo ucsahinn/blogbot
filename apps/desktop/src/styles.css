@@ -801,6 +801,12 @@ strong {
   font-weight: 400;
 }
 
+.nav-svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
 .is-active .nav-icon {
   color: #f68a69;
 }
@@ -5895,6 +5901,39 @@ strong {
   padding: 24px;
 }
 
+.setup-readiness-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: -4px 0 24px;
+  padding: 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-raised));
+}
+
+.setup-readiness-summary.is-ready {
+  border-color: color-mix(in srgb, var(--teal) 35%, var(--line));
+  background: color-mix(in srgb, var(--teal) 7%, var(--surface-raised));
+}
+
+.setup-readiness-summary > div {
+  display: grid;
+  gap: 3px;
+}
+
+.setup-readiness-summary strong {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.setup-readiness-summary span {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .setup-task-hub-heading {
   max-width: 720px;
   margin-bottom: 20px;
@@ -6271,6 +6310,48 @@ strong {
   white-space: nowrap;
 }
 
+.draft-next-action {
+  justify-self: end;
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.draft-row-with-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.draft-row-with-action .draft-row {
+  min-width: 0;
+}
+
+.draft-row-retry {
+  align-self: center;
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.draft-row-retry:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.draft-row-retry:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .guided-step-state {
   color: var(--ink-soft);
   font-size: 11px;
@@ -6307,7 +6388,32 @@ strong {
   font-weight: 700;
 }
 
+.guided-progress-inline-meter {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-soft);
+}
+
+.guided-progress-inline-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
 @media (max-width: 760px) {
+  .setup-readiness-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .setup-readiness-summary .button {
+    width: 100%;
+  }
+
   .guided-progress {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -6343,5 +6449,180 @@ strong {
 
   .guided-setup > small {
     grid-column: auto;
+  }
+}
+
+/* Setup state clarity: status is carried by label, shape, icon, and surface,
+   so a quick glance never depends on color perception alone. */
+.prerequisite-card {
+  gap: 12px;
+  border-color: var(--line-strong);
+  box-shadow: 0 5px 16px rgb(20 36 41 / 0.045);
+}
+
+.prerequisite-card.state-ready {
+  border-color: color-mix(in srgb, var(--teal) 45%, var(--line));
+  background: color-mix(in srgb, var(--teal-soft) 58%, var(--surface));
+}
+
+.prerequisite-card.state-missing,
+.prerequisite-card.state-blocked {
+  border-color: color-mix(in srgb, var(--red) 48%, var(--line));
+  background: color-mix(in srgb, var(--red-soft) 52%, var(--surface));
+}
+
+.prerequisite-card.state-attention {
+  border-color: color-mix(in srgb, var(--amber) 55%, var(--line));
+  background: color-mix(in srgb, var(--amber-soft) 58%, var(--surface));
+}
+
+.prerequisite-card > div {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.prerequisite-card .status-dot {
+  width: 11px;
+  height: 11px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--amber) 13%, transparent);
+}
+
+.prerequisite-card.state-ready .status-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--teal) 15%, transparent);
+}
+
+.prerequisite-card.state-missing .status-dot,
+.prerequisite-card.state-blocked .status-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 15%, transparent);
+}
+
+.prerequisite-state-badge {
+  display: inline-flex;
+  min-width: 78px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.prerequisite-state-badge > span {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--line);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.state-ready .prerequisite-state-badge {
+  border-color: color-mix(in srgb, var(--teal) 52%, var(--line));
+  color: var(--teal-dark, var(--teal));
+}
+
+.state-ready .prerequisite-state-badge > span {
+  background: var(--teal);
+  color: var(--surface-raised);
+}
+
+.state-missing .prerequisite-state-badge,
+.state-blocked .prerequisite-state-badge {
+  border-color: color-mix(in srgb, var(--red) 52%, var(--line));
+  color: var(--red);
+}
+
+.state-missing .prerequisite-state-badge > span,
+.state-blocked .prerequisite-state-badge > span {
+  background: var(--red);
+  color: var(--surface-raised);
+}
+
+.state-attention .prerequisite-state-badge {
+  border-color: color-mix(in srgb, var(--amber) 58%, var(--line));
+  color: var(--amber-dark, var(--amber));
+}
+
+.state-attention .prerequisite-state-badge > span {
+  background: var(--amber);
+  color: var(--surface-raised);
+}
+
+/* First-start guide: one calm panel with an unmistakable step rail above the
+   active task, instead of three competing columns. */
+.guided-setup-panel {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  align-items: stretch;
+  overflow: hidden;
+  padding: 0;
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+  box-shadow: 0 12px 30px rgb(20 36 41 / 0.08);
+}
+
+.guided-setup-panel > .guided-progress-shell {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  padding: 16px 18px 13px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.guided-setup-panel > div:nth-child(2) {
+  min-height: 238px;
+  padding: 28px 30px 22px;
+  background: var(--surface-raised);
+}
+
+.guided-setup-panel > .guided-actions {
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.guided-setup-panel > small {
+  padding: 0 18px 14px;
+  background: var(--surface-soft);
+}
+
+.guided-progress-shell .guided-progress-inline-meter {
+  height: 5px;
+  margin-top: 1px;
+  background: var(--line);
+}
+
+.guided-progress-shell .guided-progress-inline-meter span {
+  background: var(--accent);
+}
+
+@media (max-width: 760px) {
+  .prerequisite-card > div {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .prerequisite-state-badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .guided-setup-panel > .guided-progress-shell {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .guided-setup-panel > div:nth-child(2) {
+    padding: 22px 18px 18px;
   }
 }

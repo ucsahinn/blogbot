@@ -223,6 +223,17 @@ impl EngineBridge {
     }
 
     pub fn request(&self, request: Value) -> Result<Value, String> {
+        let started = Instant::now();
+        let request_kind = request
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let request_id = request
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("missing")
+            .to_string();
         let mut result = self.request_with_restart(request.clone(), true);
         // A write/read/response fault invalidates the owned sidecar process
         // and request_with_restart drops it. The next request can therefore
@@ -243,6 +254,13 @@ impl EngineBridge {
             // alone hides the actionable error from the user.
             self.remember_error(error.clone());
         }
+        self.record_diagnostic_event(&format!(
+            "BRIDGE_REQUEST kind={} id={} duration_ms={} outcome={}",
+            request_kind,
+            request_id,
+            started.elapsed().as_millis(),
+            if result.is_ok() { "OK" } else { "ERROR" }
+        ));
         result
     }
 
@@ -509,6 +527,15 @@ impl EngineBridge {
                 );
                 let _ = writeln!(file, "BRIDGE_ERROR {detail}");
             }
+        }
+    }
+
+    fn record_diagnostic_event(&self, event: &str) {
+        let Some(path) = &self.diagnostic_log else { return; };
+        if let Some(parent) = path.parent() { let _ = create_dir_all(parent); }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let detail = redact_diagnostic_for_persistence(event);
+            let _ = writeln!(file, "{detail}");
         }
     }
 

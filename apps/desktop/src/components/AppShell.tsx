@@ -29,6 +29,19 @@ const navigation: Array<{
   { id: "operations", label: "Operasyonlar", icon: "⋮" }
 ];
 
+function NavIcon({ page }: { page: PageId }) {
+  const path = page === "dashboard"
+    ? "M3 10.5 12 3l9 7.5V21a1 1 0 0 1-1 1h-5v-6H8v6H3a1 1 0 0 1-1-1V10.5Z"
+    : page === "content"
+      ? "M4 5h16M4 12h16M4 19h10"
+      : page === "editorial"
+        ? "m5 12 4 4L19 6"
+        : page === "publishing"
+          ? "M4 5h16v14H4zM8 3v4M16 3v4M4 10h16"
+          : "M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4";
+  return <svg className="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={path} /></svg>;
+}
+
 interface AppShellProps {
   activePage: PageId;
   snapshot: BootstrapSnapshot;
@@ -169,7 +182,7 @@ export function AppShell({
               aria-current={isNavigationActive(item.id) ? "page" : undefined}
             >
               <span className="nav-icon" aria-hidden="true">
-                {item.icon}
+                <NavIcon page={item.id} />
               </span>
               <span>{item.label}</span>
               {item.shortcut ? <kbd>{item.shortcut}</kbd> : null}

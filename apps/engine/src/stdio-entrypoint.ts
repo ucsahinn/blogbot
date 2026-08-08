@@ -67,6 +67,10 @@ const MAX_LINE_BYTES = 1_000_000;
 const MAX_BACKUP_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MAX_AUTOMATIC_BACKUP_FILES = 256;
 const MAX_AUTOMATIC_BACKUP_BYTES = 512 * 1024 * 1024;
+// Candidate triage is a projection, not a full archive browser. Reading and
+// decrypting an unbounded feed catalog on every desktop refresh was the main
+// source of multi-second freezes on large local workspaces.
+const MAX_CANDIDATE_ENTRIES_PER_SOURCE = 250;
 
 /**
  * Background maintenance has no request/response caller to surface failures
@@ -91,10 +95,17 @@ export function reportBackgroundTaskFault(
  */
 export function reportCodexLifecycle(
   code: "CODEX_JOB_STARTED" | "CODEX_JOB_WAITING" | "CODEX_JOB_RETRYING" | "CODEX_JOB_COMPLETED" | "CODEX_PROTOCOL_REJECTED" | "CODEX_OUTPUT_INVALID" | "CODEX_OUTPUT_MISSING" | "CODEX_CLI_INVALID_EVENT" | "CODEX_CLI_INVALID_FINAL_OUTPUT" | "CODEX_PROCESS_FAILED" | "CODEX_UNKNOWN_FAILURE",
-  write: (line: string) => void = (line) => process.stderr.write(line)
+  writeOrDetail: ((line: string) => void) | string = (line) => process.stderr.write(line),
+  detail?: string
 ): void {
   try {
-    write(`[Blogbot] ${code}\n`);
+    const write = typeof writeOrDetail === "function" ? writeOrDetail : (line: string) => process.stderr.write(line);
+    const safeDetail = detail
+      ?.replace(/[A-Za-z]:\\[^\r\n ]+/gu, "[path]")
+      .replace(/https?:\/\/[^\s]+/gu, "[url]")
+      .replace(/\s+/gu, " ")
+      .slice(0, 240);
+    write(`[Blogbot] ${code}${safeDetail ? ` detail=${safeDetail}` : ""}\n`);
   } catch {
     // Diagnostics must never alter the durable job outcome.
   }
@@ -421,6 +432,10 @@ export function createEngineProtocol(
   options: EngineProtocolOptions = {}
 ) {
   const engine = new LocalEngine({ repository });
+  // The desktop asks for the same candidate projection from bootstrap,
+  // workspace and the active-draft poll. Keep that read cheap and stable for
+  // a short window; mutations still become visible on the next refresh.
+  let candidateCache: { expiresAt: number; candidates: Record<string, unknown>[] } | undefined;
 
   return async (input: unknown): Promise<EngineResponse> => {
     if (!isRecord(input) || input.version !== 1 || typeof input.id !== "string") {
@@ -500,7 +515,10 @@ export function createEngineProtocol(
         kind: "source.list",
         sources: await Promise.all(
           sources.map(async (source) => {
-            const entries = await options.sourceRepository!.listEntries(source.id);
+            // The catalog view only needs a recent freshness hint. Reading the
+            // complete encrypted feed for every source made bootstrap scale
+            // with the user's entire history and blocked the serialized bridge.
+            const entries = await options.sourceRepository!.listEntriesBounded(source.id, 25);
             const lastItemAt = entries
               .map((entry) => entry.publishedAt)
               .filter((value): value is string => typeof value === "string" && value.length > 0)
@@ -526,15 +544,32 @@ export function createEngineProtocol(
           "Local source catalog is not configured"
         );
       }
+      const now = Date.now();
+      if (candidateCache && candidateCache.expiresAt > now) {
+        return {
+          version: 1,
+          id: input.id,
+          ok: true,
+          kind: "candidate.list",
+          candidates: structuredClone(candidateCache.candidates)
+        };
+      }
       const sources = await options.sourceRepository.listSources();
       const candidateByStory = new Map<string, Record<string, unknown>>();
+      const storyTokens = new Map<string, Set<string>>();
+      const storyIndex = new Map<string, Set<string>>();
       for (const source of sources) {
         if (source.status !== "ACTIVE") continue;
-        const entries = await options.sourceRepository.listEntries(source.id);
+        const entries = await options.sourceRepository.listEntriesBounded(source.id, MAX_CANDIDATE_ENTRIES_PER_SOURCE);
         for (const entry of entries) {
           const candidateId = `candidate-${createCandidateKey(source.id, entry.externalId)}`;
           const title = String(entry.title);
-          const storyKey = [...candidateByStory.keys()].find((key) => candidateSimilarity(key, title) >= 0.72)
+          const titleTokens = candidateTokens(title);
+          const possibleStories = new Set<string>();
+          for (const token of titleTokens) {
+            for (const story of storyIndex.get(token) ?? []) possibleStories.add(story);
+          }
+          const storyKey = [...possibleStories].find((key) => candidateSimilarityTokens(storyTokens.get(key) ?? new Set(), titleTokens) >= 0.72)
             ?? (title.toLocaleLowerCase("tr-TR").replace(/[^\p{L}\p{N}]+/gu, " ").trim() || entry.externalId);
           const existing = candidateByStory.get(storyKey);
           if (existing) {
@@ -561,6 +596,12 @@ export function createEngineProtocol(
               entry.publishedAt ? "Güncel yayın zamanı bulundu" : "Yayın zamanı yok"
             ]
           });
+          storyTokens.set(storyKey, titleTokens);
+          for (const token of titleTokens) {
+            const stories = storyIndex.get(token) ?? new Set<string>();
+            stories.add(storyKey);
+            storyIndex.set(token, stories);
+          }
         }
       }
       // Candidate inventory is polled by the desktop shell. Keep this a
@@ -568,12 +609,13 @@ export function createEngineProtocol(
       // bridge; the selected candidate is re-read when research starts.
       const candidates = [...candidateByStory.values()].slice(0, 50);
       candidates.sort((left, right) => String(right.discoveredAt).localeCompare(String(left.discoveredAt)));
+      candidateCache = { expiresAt: Date.now() + 2_000, candidates };
       return {
         version: 1,
         id: input.id,
         ok: true,
         kind: "candidate.list",
-        candidates
+        candidates: structuredClone(candidates)
       };
     }
 
@@ -1597,9 +1639,7 @@ function candidateTokens(value: string): Set<string> {
   return new Set(value.toLocaleLowerCase("tr-TR").normalize("NFKC").match(/[\p{L}\p{N}]{3,}/gu) ?? []);
 }
 
-function candidateSimilarity(left: string, right: string): number {
-  const a = candidateTokens(left);
-  const b = candidateTokens(right);
+function candidateSimilarityTokens(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 || b.size === 0) return 0;
   let intersection = 0;
   for (const token of a) if (b.has(token)) intersection += 1;
@@ -1935,9 +1975,9 @@ export async function createPersistentEngineProtocol(
             metadata: { ...(job.metadata ?? {}), progressStage: "RUNNING_CODEX", codexStartedAtUnixMs: Date.now() }
           });
         },
-        onWaiting: async ({ submission, reason, diagnosticCode }) => {
+        onWaiting: async ({ submission, reason, diagnosticCode, diagnosticDetail }) => {
           reportCodexLifecycle("CODEX_JOB_WAITING");
-          if (diagnosticCode) reportCodexLifecycle(diagnosticCode);
+          if (diagnosticCode) reportCodexLifecycle(diagnosticCode, (line) => process.stderr.write(line), diagnosticDetail);
           if (submission.definitionId !== "DRAFT.CREATE") return;
           const job = await repository.getJob(submission.jobId);
           if (job.state !== "RUNNING" && job.state !== "QUEUED") return;
@@ -1947,6 +1987,7 @@ export async function createPersistentEngineProtocol(
             metadata: {
               ...(job.metadata ?? {}),
               codexWaitReason: reason,
+              ...(diagnosticDetail ? { codexDiagnosticDetail: diagnosticDetail.slice(0, 240) } : {}),
               waitingAtUnixMs: Date.now()
             }
           });
@@ -2074,19 +2115,20 @@ export async function createPersistentEngineProtocol(
     await repository.close();
     throw error;
   }
+  const protocolOptions: EngineProtocolOptions = {
+    sourceRepository,
+    sourceTransport,
+    sourceScanCoordinator,
+    publicationReady,
+    ...(codexCoordinator ? { codexCoordinator } : {})
+  };
+  const protocol = createEngineProtocol(repository, "ready", protocolOptions);
   return {
     handle: async (input: unknown) => {
       if (isRecord(input) && (input.kind === "backup.create" || input.kind === "backup.auto" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore")) {
         return handleBackupRequest(input, dataDir);
       }
-      const protocolOptions: EngineProtocolOptions = {
-        sourceRepository,
-        sourceTransport,
-        sourceScanCoordinator,
-        publicationReady
-      };
-      if (codexCoordinator) protocolOptions.codexCoordinator = codexCoordinator;
-      return createEngineProtocol(repository, "ready", protocolOptions)(input);
+      return protocol(input);
     },
     close: async () => {
       try {

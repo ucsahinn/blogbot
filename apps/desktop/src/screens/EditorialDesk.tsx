@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { BlogbotBridge } from "../bridge.ts";
+import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
 import { draftStateLabel, sectionLabel } from "../app-model.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
@@ -37,6 +37,7 @@ export function EditorialDesk({
 }: EditorialDeskProps) {
   const [tab, setTab] = useState<"drafts" | "review">(initialTab);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | undefined>();
+  const [retryingDraftId, setRetryingDraftId] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState(initialMessage);
   const [queuedDraftId, setQueuedDraftId] = useState<string | undefined>();
@@ -68,11 +69,11 @@ export function EditorialDesk({
         // The initial accepted queue result remains visible. A later timeout
         // gives the user a truthful manual recovery path instead of erasing it.
       }
-      if (attempts >= 20) {
+      if (attempts >= 10) {
         setMessage("Yerel kuyruk işi kabul edildi ancak taslak envanteri henüz güncellenmedi. Taslak envanterini yenileyin; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun.");
         return;
       }
-      window.setTimeout(() => void poll(), 500);
+      window.setTimeout(() => void poll(), 1_200);
     };
     void poll();
     return () => { cancelled = true; };
@@ -97,7 +98,11 @@ export function EditorialDesk({
         // false failure. Manual refresh and Operations remain available.
       }
     };
-    const timer = window.setInterval(() => void refreshActiveDrafts(), 5_000);
+    // Workspace reads include the local candidate projection. Polling every
+    // five seconds made a busy draft turn navigation into a stream of full
+    // database reads. The engine now bounds and briefly caches that projection;
+    // this calmer cadence keeps progress visible without competing with it.
+    const timer = window.setInterval(() => void refreshActiveDrafts(), 15_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -114,6 +119,20 @@ export function EditorialDesk({
       setMessage("Taslak envanteri yenilenemedi. Yerel engine durumunu Operasyonlar ekranından inceleyin.");
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const retryDraft = async (draftId: string) => {
+    setRetryingDraftId(draftId);
+    setMessage("");
+    try {
+      await bridge.retryJob(draftId);
+      setMessage("Taslak yerel kuyruğa yeniden alındı. İlerlemeyi burada veya Operasyonlar ekranında takip edebilirsiniz.");
+      await onRefreshWorkspace();
+    } catch (reason) {
+      setMessage(userFacingBridgeError(reason, "Taslak yeniden kuyruğa alınamadı."));
+    } finally {
+      setRetryingDraftId(undefined);
     }
   };
 
@@ -158,18 +177,22 @@ export function EditorialDesk({
                 <span aria-hidden="true">…</span>
               </article>
             ) : null}
-            {workspace.drafts.map((draft) => (
+            {workspace.drafts.map((draft) => {
+              const canRetry = !draft.reviewable && draft.state === "DRAFTING";
+              return <article className="draft-row-with-action" key={draft.id} aria-label={canRetry ? "Araştırma kuyruğundaki taslak" : undefined}>
               <button
                 className="draft-row"
                 type="button"
-                key={draft.id}
+                aria-label={`${draft.titleTr} · ${draft.reviewable ? "İncelemeyi aç" : draft.state === "NEEDS_SOURCE" ? "Kaynak ekle" : "Operasyonlarda takip et"}`}
                 aria-describedby={[`draft-detail-${draft.id}`, !draft.reviewable ? "queued-draft-guidance" : ""].filter(Boolean).join(" ")}
                 onClick={() => {
                   setSelectedRevisionId(draft.id);
-                  setTab("review");
                   if (!draft.reviewable) {
-                    setMessage("Bu taslak henüz incelemeye hazır değil. Durumu açılan inceleme alanında görebilirsiniz.");
+                    setMessage("Bu taslak henüz incelemeye hazır değil. İlerlemeyi Operasyonlar ekranından takip edebilirsiniz.");
+                    onOpenOperations();
+                    return;
                   }
+                  setTab("review");
                 }}
               >
                 {draft.completion === null ? (
@@ -188,9 +211,20 @@ export function EditorialDesk({
                   <span id={`draft-detail-${draft.id}`}>{draft.detail}</span>
                 </span>
                 <span className={`state-pill state-${draft.state.toLowerCase()}`}>{draftStateLabel(draft.state)}</span>
-                <span aria-hidden="true">›</span>
+                <span className="draft-next-action">{draft.reviewable ? "İncelemeyi aç" : draft.state === "NEEDS_SOURCE" ? "Kaynak ekle" : "Operasyonlarda takip et"}</span>
               </button>
-            ))}
+              {canRetry ? (
+                <button
+                  className="draft-row-retry"
+                  type="button"
+                  disabled={retryingDraftId === draft.id}
+                  onClick={() => void retryDraft(draft.id)}
+                >
+                  {retryingDraftId === draft.id ? "Kuyruğa alınıyor…" : "Tekrar dene"}
+                </button>
+              ) : null}
+              </article>;
+            })}
             {workspace.drafts.length === 0 ? (
               <div className="empty-state">
                 <strong>Henüz taslak yok.</strong>

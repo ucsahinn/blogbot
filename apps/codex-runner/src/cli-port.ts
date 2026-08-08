@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import {
@@ -47,6 +48,19 @@ function quoteCmdArgument(value: string): string {
 }
 
 function resolveSpawn(command: string, args: string[]): { command: string; args: string[] } {
+  // npm exposes Codex as a .cmd shim on Windows. Launching that shim creates
+  // a visible cmd.exe parent for every background draft. The shim's real
+  // target is stable, so invoke node directly and keep the process hidden.
+  if (process.platform === "win32" && /[\\/]codex\.cmd$/iu.test(command)) {
+    const npmDirectory = dirname(command);
+    const localNodeExecutable = join(npmDirectory, "node.exe");
+    const codexEntry = join(npmDirectory, "node_modules", "@openai", "codex", "bin", "codex.js");
+    if (existsSync(codexEntry)) {
+      // The npm shim normally falls back to PATH when node.exe is not next to
+      // it. An explicit .exe command still bypasses cmd.exe in that case.
+      return { command: existsSync(localNodeExecutable) ? localNodeExecutable : "node.exe", args: [codexEntry, ...args] };
+    }
+  }
   if (process.platform !== "win32" || !/\.(?:cmd|bat)$/iu.test(command)) {
     return { command, args };
   }

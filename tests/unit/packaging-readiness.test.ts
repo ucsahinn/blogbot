@@ -219,7 +219,7 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
   assert.match(
     smokeScript,
     /clickCandidateResearchAction/u,
-    "native smoke must click the visible Taslak hazırla action instead of promoting a candidate through the bridge alone"
+    "native smoke must click the visible candidate research action instead of promoting a candidate through the bridge alone"
   );
   assert.match(
     smokeScript,
@@ -233,8 +233,8 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
   );
   assert.match(
     smokeScript,
-    /Taslak hazırla/u,
-    "native smoke must locate the candidate action by its user-visible Turkish label"
+    /Araştırmaya al/u,
+    "native smoke must locate the candidate research action by its user-visible Turkish label"
   );
   assert.match(
     smokeScript,

@@ -222,7 +222,7 @@ export function OperationsHub(props: OperationsHubProps) {
                     <button className="button button-primary" type="button" onClick={props.onOpenEditorial}>
                       Editoryal Masa’da aç
                     </button>
-                    {draft.blockers > 0 ? (
+                    {draft.blockers > 0 || draft.state === "DRAFTING" ? (
                       <button
                         className="button button-secondary"
                         type="button"
@@ -233,7 +233,7 @@ export function OperationsHub(props: OperationsHubProps) {
                         {busyId === draft.id ? "Kuyruğa alınıyor" : "Tekrar dene"}
                       </button>
                     ) : null}
-                    {draft.blockers > 0 && props.readOnly ? (
+                    {(draft.blockers > 0 || draft.state === "DRAFTING") && props.readOnly ? (
                       <small id="active-draft-retry-unavailable" className="action-unavailable-reason">
                         Yerel çalışma alanı yeniden bağlanana kadar iş yeniden başlatılamaz.
                       </small>

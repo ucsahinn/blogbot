@@ -146,6 +146,69 @@ export function isDraftCodexOutput(value: unknown): value is DraftCodexOutput {
   });
 }
 
+function slugFromTitle(value: string, fallback: string): string {
+  const slug = value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLowerCase()
+    .replace(/ı/gu, "i")
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 120)
+    .replace(/-+$/gu, "");
+  return slug || fallback;
+}
+
+function derivedDescription(title: string, body: string): string {
+  const plain = body
+    .replace(/```[\s\S]*?```/gu, "")
+    .replace(/[#>*_`]/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return (plain || title).slice(0, 320).trim();
+}
+
+/**
+ * Codex occasionally omits metadata that is deterministic from its own
+ * article body. Repair only slug, description, and hero alt text. Claims,
+ * source IDs, titles, and article bodies remain untouched and are still
+ * checked by isDraftCodexOutput afterwards.
+ */
+export function normalizeDraftCodexOutput(value: unknown, context?: { candidateTitle?: string }): unknown {
+  const item = record(value);
+  if (!item) return value;
+  const normalizeLocale = (raw: unknown, fallbackSlug: string, english: boolean) => {
+    const locale = record(raw);
+    if (!locale) return raw;
+    const title = typeof locale.title === "string" ? locale.title.trim() : "";
+    const fallbackTitle = context?.candidateTitle?.trim() || (english ? "Original article" : "Özgün haber");
+    const body = typeof locale.bodyMarkdown === "string" ? locale.bodyMarkdown : "";
+    const next = { ...locale };
+    if (!title) next.title = fallbackTitle;
+    if (typeof next.slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(next.slug)) {
+      next.slug = slugFromTitle(title, fallbackSlug);
+    }
+    if (typeof next.description !== "string" || !next.description.trim()) {
+      next.description = derivedDescription(title || fallbackTitle, body);
+    }
+    if (typeof next.heroImageAlt !== "string" || !next.heroImageAlt.trim()) {
+      next.heroImageAlt = english
+        ? `${title || fallbackTitle} original cover image`
+        : `${title || fallbackTitle} için özgün kapak görseli`;
+    }
+    return next;
+  };
+  const tr = record(item.tr);
+  const en = record(item.en);
+  const trTitle = typeof tr?.title === "string" ? tr.title : "haber";
+  const enTitle = typeof en?.title === "string" ? en.title : "article";
+  return {
+    ...item,
+    tr: normalizeLocale(item.tr, slugFromTitle(trTitle, "haber"), false),
+    en: normalizeLocale(item.en, slugFromTitle(enTitle, "article"), true)
+  };
+}
+
 export function isFinalReviewCodexOutput(value: unknown): value is FinalReviewCodexOutput {
   const item = record(value);
   const parity = record(item?.translationParity);
@@ -179,6 +242,7 @@ export function createDraftCodexTaskResolver(): CodexTaskResolverPort {
           validateOutput: isFinalReviewCodexOutput
         };
       }
+      const draftPayload = record(snapshot.payload) ?? {};
       return {
         taskKind: "WRITE_TR",
         input: {
@@ -187,7 +251,12 @@ export function createDraftCodexTaskResolver(): CodexTaskResolverPort {
           outputContract: "Use only the supplied source IDs. All claims must cite source IDs; unresolved claims must be NEEDS_SOURCE."
         },
         outputSchema: articleSchema,
-        validateOutput: isDraftCodexOutput
+        validateOutput: isDraftCodexOutput,
+        normalizeOutput: (value) => normalizeDraftCodexOutput(value,
+          typeof draftPayload.candidateTitle === "string"
+            ? { candidateTitle: draftPayload.candidateTitle }
+            : undefined
+        )
       };
     }
   };

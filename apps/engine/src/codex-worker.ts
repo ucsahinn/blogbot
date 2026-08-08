@@ -143,6 +143,7 @@ export interface CodexWorkerCoordinatorDependencies {
     submission: CodexWorkSubmission;
     reason: CodexWaitReason;
     diagnosticCode?: CodexRunnerDiagnosticCode;
+    diagnosticDetail?: string;
   }) => Promise<void>;
   onRetrying?: (input: {
     submission: CodexWorkSubmission;
@@ -280,7 +281,8 @@ export function createCodexWorkerCoordinator(
           await onWaiting?.({
             submission: { jobId: running.jobId, idempotencyKey: running.idempotencyKey, definitionId: running.definitionId, payload: running.payload },
             reason: "RUNNER_REQUIRES_RETRY",
-            diagnosticCode
+            diagnosticCode,
+            diagnosticDetail: error instanceof Error ? error.message : "runner failure"
           });
           return waiting;
         }

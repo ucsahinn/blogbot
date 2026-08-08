@@ -326,6 +326,20 @@ export function SetupCenter({
     () => buildSetupRequirements(status?.checks ?? []),
     [status]
   );
+  const nextSetupTask = useMemo(() => {
+    const nextCheck = (status?.checks ?? []).find((check) => check.state !== "READY");
+    if (!nextCheck) return null;
+    const taskId: Exclude<SetupTaskId, "overview"> = ["codex"].includes(nextCheck.id)
+      ? "writing"
+      : ["github", "site-adapter", "deploy"].includes(nextCheck.id)
+        ? "publishing"
+        : ["backup"].includes(nextCheck.id)
+          ? "backup"
+          : ["local-engine", "local-database", "local-queue"].includes(nextCheck.id)
+            ? "diagnostics"
+            : "first-start";
+    return { check: nextCheck, task: setupTasks.find((task) => task.id === taskId)! };
+  }, [status]);
   const moveToTargetSelection = () => {
     setGuidedStep(3);
     window.requestAnimationFrame(() => {
@@ -808,6 +822,18 @@ export function SetupCenter({
 
       {selectedTask === "overview" ? (
         <section className="setup-task-hub" aria-labelledby="setup-task-hub-title">
+          <div className={`setup-readiness-summary ${nextSetupTask ? "is-actionable" : "is-ready"}`} role="status" aria-live="polite">
+            <div>
+              <p className="section-kicker">ŞİMDİ YAPILACAK</p>
+              <strong>{nextSetupTask ? nextSetupTask.check.label : "Blogbot kullanıma hazır"}</strong>
+              <span>{nextSetupTask ? nextSetupTask.check.detail : `${summary.ready}/${summary.total} kontrol hazır. Hazır olmayan özellikler güvenle kapalı kalır.`}</span>
+            </div>
+            {nextSetupTask ? (
+              <button className="button button-primary" type="button" onClick={() => { setSelectedTask(nextSetupTask.task.id); setGuidedStep(0); }}>
+                {nextSetupTask.task.action}
+              </button>
+            ) : null}
+          </div>
           <div className="setup-task-hub-heading">
             <p className="section-kicker">KISA VE ODAKLI KURULUM</p>
             <h2 id="setup-task-hub-title">Ne yapmak istiyorsunuz?</h2>
@@ -868,8 +894,8 @@ export function SetupCenter({
       )}
 
       {guidedMode ? (
-        <section className="guided-setup" aria-labelledby="guided-setup-title">
-          <div className="guided-progress" aria-label={`Kurulum adımı ${guidedStep + 1} / ${guidedSteps.length}`}>
+        <section className="guided-setup guided-setup-panel" aria-labelledby="guided-setup-title">
+          <div className="guided-progress guided-progress-shell" aria-label={`Kurulum adımı ${guidedStep + 1} / ${guidedSteps.length}`}>
             {guidedSteps.map((step, index) => (
               <button
                 type="button"
@@ -884,14 +910,18 @@ export function SetupCenter({
                 <span className="guided-step-state">
                   {index < guidedStep ? "Tamamlandı" : index === guidedStep ? "Şimdi" : "Bekliyor"}
                 </span>
-              </button>
+                </button>
             ))}
-          </div>
-          <div className="guided-progress-meter" aria-label={`İlerleme: ${guidedStep + 1} / ${guidedSteps.length}`}>
-            <div className="guided-progress-track" role="progressbar" aria-label="İlk başlangıç ilerlemesi" aria-valuemin={0} aria-valuemax={guidedSteps.length} aria-valuenow={guidedStep + 1}>
+            <div
+              className="guided-progress-inline-meter"
+              role="progressbar"
+              aria-label="İlk başlangıç ilerlemesi"
+              aria-valuemin={0}
+              aria-valuemax={guidedSteps.length}
+              aria-valuenow={guidedStep + 1}
+            >
               <span style={{ width: `${((guidedStep + 1) / guidedSteps.length) * 100}%` }} />
             </div>
-            <small>{guidedStep + 1} / {guidedSteps.length}</small>
           </div>
           <div>
             <p className="section-kicker">ADIM {guidedStep + 1} / {guidedSteps.length}</p>
@@ -1154,12 +1184,16 @@ export function SetupCenter({
         {(status?.checks ?? []).map((check) => (
           <article
             className={`prerequisite-card state-${check.state.toLowerCase()}`}
+            data-state={check.state}
             key={check.id}
           >
             <div>
               <span className="status-dot" aria-hidden="true" />
               <strong>{check.label}</strong>
-              <small>{stateLabels[check.state]}</small>
+              <span className="prerequisite-state-badge" aria-label={`Durum: ${stateLabels[check.state]}`}>
+                <span aria-hidden="true">{check.state === "READY" ? "✓" : check.state === "MISSING" || check.state === "BLOCKED" ? "!" : "?"}</span>
+                {stateLabels[check.state]}
+              </span>
             </div>
             <p>{check.detail}</p>
             {check.userAction ? <em>{check.userAction}</em> : null}

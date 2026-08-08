@@ -45,6 +45,8 @@ export interface StructuredCodexTask<T> {
   input: unknown;
   outputSchema: Record<string, unknown>;
   validateOutput(value: unknown): value is T;
+  /** Optional bounded repair for deterministic, derivable metadata only. */
+  normalizeOutput?(value: unknown): unknown;
   paidFallbackRequested?: boolean;
   roleModels?: CodexRoleModels;
 }
@@ -107,6 +109,20 @@ const allowedEventTypes = new Set([
 ]);
 
 const allowedItemTypes = new Set(["agent_message", "reasoning"]);
+
+function outputShape(value: unknown, depth = 0): string {
+  if (value === null) return "null";
+  if (typeof value !== "object") return `${typeof value}:${String(value).length}`;
+  if (Array.isArray(value)) return `array:${value.length}`;
+  const record = value as Record<string, unknown>;
+  const allKeys = Object.keys(record).sort();
+  const keys = allKeys.slice(0, 24);
+  const nested = depth < 1
+    ? ["tr", "en"].flatMap((key) => key in record ? `${key}={${outputShape(record[key], depth + 1)}}` : [])
+    : [];
+  const claims = Array.isArray(record.claims) ? ` claims=array:${record.claims.length}` : "";
+  return `object keys=${keys.join(",")}${allKeys.length > keys.length ? ",…" : ""}${nested.length ? ` ${nested.join(" ")}` : ""}${claims}`;
+}
 
 export async function runStructuredCodexTask<T>(
   task: StructuredCodexTask<T>,
@@ -184,16 +200,17 @@ export async function runStructuredCodexTask<T>(
       "Codex runner completed without structured output"
     );
   }
-  if (!task.validateOutput(output)) {
+  const normalizedOutput = task.normalizeOutput ? task.normalizeOutput(output) : output;
+  if (!task.validateOutput(normalizedOutput)) {
     throw new CodexRunnerError(
       "INVALID_OUTPUT",
-      "Codex output did not match the required schema"
+      `Codex output did not match the required schema; shape=${outputShape(normalizedOutput)}`
     );
   }
 
   return {
     status: "COMPLETED",
     ...selection,
-    output
+    output: normalizedOutput
   };
 }

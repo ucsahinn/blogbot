@@ -3318,6 +3318,25 @@ fn write_redacted_diagnostic_copy(source: Option<&Path>, target: &Path) {
     let _ = std::fs::write(target, format!("{redacted}\n"));
 }
 
+fn write_diagnostic_lines<F>(source: Option<&Path>, target: &Path, include: F)
+where
+    F: Fn(&str) -> bool,
+{
+    let Some(source) = source else { return; };
+    let Ok(text) = std::fs::read_to_string(source) else { return; };
+    let redacted = text
+        .lines()
+        .filter(|line| include(line))
+        .map(redact_diagnostic_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = std::fs::write(target, format!("{redacted}\n"));
+}
+
+fn diagnostic_file_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
+}
+
 fn read_recent_diagnostic_lines(path: Option<&Path>) -> Vec<String> {
     path.and_then(|value| std::fs::read_to_string(value).ok())
         .map(|text| text.lines().rev().take(500).map(redact_diagnostic_line).collect())
@@ -3365,15 +3384,44 @@ pub fn export_diagnostics(
     std::fs::write(&path, &bytes)
         .map_err(|error| CommandError::EngineUnavailable(format!("Tanılama paketi yazılamadı: {error}")))?;
     write_redacted_diagnostic_copy(engine_path.as_deref(), &directory.join("engine.stderr.log"));
+    write_diagnostic_lines(
+        engine_path.as_deref(),
+        &directory.join("bridge-events.log"),
+        |line| line.starts_with("BRIDGE_") || line.starts_with("ENGINE_")
+    );
     if let Some(startup) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).map(|root| root.join("Blogbot").join("diagnostics").join("startup-state.log")) {
         write_redacted_diagnostic_copy(Some(&startup), &directory.join("startup-state.log"));
     }
+    let files = ["diagnostics.json", "engine.stderr.log", "bridge-events.log", "startup-state.log"]
+        .into_iter()
+        .filter_map(|name| {
+            let file = directory.join(name);
+            file.is_file().then(|| json!({ "name": name, "bytes": diagnostic_file_size(&file) }))
+        })
+        .collect::<Vec<_>>();
+    let manifest = json!({
+        "format": "blogbot-diagnostics-manifest-v2",
+        "generatedAtUnixMs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "processId": std::process::id(),
+        "engineRunning": bridge.is_running(),
+        "files": files,
+        "redaction": {
+            "applied": true,
+            "policy": "Sensitive markers, opaque long values, identities and absolute paths are removed before persistence.",
+            "rawSourceIncluded": false
+        }
+    });
+    let _ = std::fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap_or_default()
+    );
     reveal_diagnostic_directory(&directory)?;
     Ok(json!({
         "path": path.to_string_lossy().to_string(),
         "directory": directory.to_string_lossy().to_string(),
         "bytes": bytes.len(),
-        "included": ["runtime", "operations", "engine", "startup"],
+        "included": ["runtime", "operations", "engine", "bridge-events", "startup", "manifest"],
         "opened": true
     }))
 }
