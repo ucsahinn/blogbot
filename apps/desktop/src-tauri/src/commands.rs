@@ -1580,15 +1580,18 @@ pub fn get_prerequisite_status(
         .unwrap_or_else(|| json!({}));
     let codex_configured = connectors.pointer("/codex/accountLabel")
         .and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
-    let codex_available = codex_executable().is_some();
-    let codex_authenticated = codex_executable().is_some_and(|executable| {
-        codex_authenticated(executable, bridge.codex_home().as_deref())
-    });
     let codex_runner_ready = engine_doctor
         .as_ref()
         .and_then(|value| value.get("capabilities"))
         .and_then(Value::as_array)
         .is_some_and(|capabilities| capabilities.iter().any(|item| item.as_str() == Some("CODEX.RUNNER")));
+    // Prerequisite reads must never spawn codex.cmd or run `login status`.
+    // Those checks can take seconds and belong to the explicit Codex test
+    // action. The engine capability is the last observed authenticated runner
+    // result. Do not even perform executable discovery here: that helper runs
+    // `codex.cmd --version`, which is still an external process launch.
+    let codex_available = codex_runner_ready || codex_configured;
+    let codex_authenticated = codex_runner_ready;
     let github_configured = connectors.pointer("/github/owner").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty())
         && connectors.pointer("/github/repository").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
     let github_auth_status = serde_json::to_value(app.state::<DesktopState>().github_broker.status())
@@ -1673,7 +1676,7 @@ pub fn get_prerequisite_status(
                 "label": "Codex çalışma zamanı",
                 "state": if codex_runner_ready && codex_authenticated && codex_configured { "READY" } else if codex_available { "ATTENTION" } else { "BLOCKED" },
                 "scope": "WRITE",
-                "detail": if !codex_available { "Yazı üretimi aracı bu bilgisayarda bulunamadı." } else if !codex_configured { "Yazı üretimi hesabı henüz seçilmedi." } else if !codex_authenticated { "Yazı üretimi aracı bulundu; hesap girişi bekleniyor." } else if !codex_runner_ready { "Hesap hazır; izole yerel runner henüz başlatılmadı." } else { "Codex hesabı ve izole yerel runner hazır." },
+                "detail": if !codex_configured { "Yazı üretimi hesabı henüz seçilmedi." } else if !codex_authenticated { "Codex bağlantısı henüz açıkça test edilmedi." } else if !codex_runner_ready { "Hesap hazır; izole yerel runner henüz başlatılmadı." } else { "Codex hesabı ve izole yerel runner hazır." },
                 "userAction": if codex_runner_ready && codex_authenticated && codex_configured { Value::Null } else { json!("Codex hesabını bağlayıp izole runner testini tamamlayın.") }
             },
             {
