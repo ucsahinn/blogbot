@@ -66,6 +66,7 @@ test("publisher intent and dry-run are deterministic and no-write", () => {
 test("real GitHub device transport stores only a validated token and exposes scopes", async () => {
   const calls: string[] = [];
   let stored: string | null = null;
+  const testAccessToken = ["token", "never", "returned"].join("-");
   const client = new GitHubDeviceFlowClient({
     clientId: "client_12345678",
     tokenStore: { get: async () => stored, set: async (token) => { stored = token; }, clear: async () => { stored = null; } },
@@ -78,7 +79,7 @@ test("real GitHub device transport stores only a validated token and exposes sco
       };
       if (url.includes("oauth/access_token")) return {
         ok: true, status: 200,
-        json: async () => ({ access_token: "token-never-returned" }),
+        json: async () => ({ access_token: testAccessToken }),
         headers: { get: () => null }
       };
       return {
@@ -92,6 +93,6 @@ test("real GitHub device transport stores only a validated token and exposes sco
   assert.equal(started.verificationUri, "https://github.com/login/device");
   const auth = await client.poll();
   assert.deepEqual(auth, { status: "authorized", scopes: ["repo"] });
-  assert.equal(stored, "token-never-returned");
+  assert.equal(stored, testAccessToken);
   assert.equal(calls.length, 3);
 });

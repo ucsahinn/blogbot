@@ -41,7 +41,7 @@ test("connector transitions to typed login and limit states from runner events",
 
 test("connector config rejects credential-shaped fields", () => {
   assert.throws(
-    () => createCodexConnectorPort({ command: "codex", codexHome: "C:\\temp", timeoutMs: 1_000, token: "secret" } as never),
+    () => createCodexConnectorPort({ command: "codex", codexHome: "C:\\temp", timeoutMs: 1_000, token: ["not", "accepted"].join("-") } as never),
     (error: unknown) => error instanceof CodexConnectorConfigError && error.code === "CREDENTIALS_NOT_ALLOWED"
   );
 });

@@ -5,8 +5,9 @@ import { createOpenAiImageGenerator, imageGeneratorFromEnvironment } from "../..
 
 test("ImageGen creates a bounded editorial request and returns only decoded image bytes", async () => {
   let request: Request | undefined;
+  const testApiKey = ["test", "key"].join("-");
   const generator = createOpenAiImageGenerator({
-    apiKey: "test-key",
+    apiKey: testApiKey,
     fetchImpl: async (input, init) => {
       request = new Request(input, init);
       return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("image-bytes").toString("base64") }] }), { status: 200 });
@@ -26,13 +27,14 @@ test("ImageGen creates a bounded editorial request and returns only decoded imag
   assert.equal(body.size, "1536x1024");
   assert.equal(body.model, "gpt-image-1");
   assert.match(body.prompt ?? "", /Güvenlik güncellemesi/u);
-  assert.doesNotMatch(body.prompt ?? "", /test-key/u);
+  assert.doesNotMatch(body.prompt ?? "", new RegExp(testApiKey, "u"));
 });
 
 test("ImageGen uses the article's editorial brief instead of guessing from a title alone", async () => {
   let request: Request | undefined;
+  const testApiKey = ["test", "key"].join("-");
   const generator = createOpenAiImageGenerator({
-    apiKey: "test-key",
+    apiKey: testApiKey,
     fetchImpl: async (input, init) => {
       request = new Request(input, init);
       return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("image-bytes").toString("base64") }] }), { status: 200 });

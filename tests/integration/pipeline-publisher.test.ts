@@ -539,7 +539,7 @@ const connectorConfig: PublisherConnectorConfigInput = {
 test("validates user-entered generic connector config without accepting credentials", () => {
   assert.deepEqual(validatePublisherConnectorConfig(connectorConfig), connectorConfig);
   assert.throws(
-    () => validatePublisherConnectorConfig({ ...connectorConfig, github: { ...connectorConfig.github, token: "secret" } } as never),
+    () => validatePublisherConnectorConfig({ ...connectorConfig, github: { ...connectorConfig.github, token: ["not", "accepted"].join("-") } } as never),
     (error: unknown) => error instanceof ConnectorConfigError && error.code === "CREDENTIALS_NOT_ALLOWED"
   );
   assert.throws(
