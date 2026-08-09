@@ -293,11 +293,11 @@ mod tests {
     #[test]
     fn accepts_only_new_https_github_installer_releases() {
         let manifest = ReleaseManifest {
-            version: "0.1.12".into(),
+            version: "0.1.13".into(),
             notes: String::new(),
             platforms: super::WindowsPlatform {
                 windows_x86_64: super::WindowsArtifact {
-                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.12/Blogbot_0.1.12_x64-setup.exe".into(),
+                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.13/Blogbot_0.1.13_x64-setup.exe".into(),
                     sha256: "a".repeat(64),
                 },
             },
@@ -319,25 +319,25 @@ mod tests {
     #[test]
     fn accepts_latest_github_release_api_when_manifest_asset_is_missing() {
         let release: GithubRelease = serde_json::from_value(serde_json::json!({
-            "tag_name": "v0.1.12",
+            "tag_name": "v0.1.13",
             "body": "Daha hızlı yerel çalışma.",
             "assets": [{
-                "name": "Blogbot_0.1.12_x64-setup.exe",
-                "browser_download_url": "https://github.com/ucsahinn/blogbot/releases/download/v0.1.12/Blogbot_0.1.12_x64-setup.exe",
+                "name": "Blogbot_0.1.13_x64-setup.exe",
+                "browser_download_url": "https://github.com/ucsahinn/blogbot/releases/download/v0.1.13/Blogbot_0.1.13_x64-setup.exe",
                 "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }]
         })).unwrap();
         let update = github_release_update(release).unwrap().unwrap();
-        assert_eq!(update.version, "0.1.12");
+        assert_eq!(update.version, "0.1.13");
         assert_eq!(update.sha256, "a".repeat(64));
     }
 
     #[test]
     fn falls_back_to_the_github_release_when_the_manifest_endpoint_is_temporarily_unavailable() {
         let fallback = UnsignedUpdate {
-            version: "0.1.12".into(),
+            version: "0.1.13".into(),
             notes: "Yerel düzeltmeler.".into(),
-            url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.12/Blogbot_0.1.12_x64-setup.exe".into(),
+            url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.13/Blogbot_0.1.13_x64-setup.exe".into(),
             sha256: "a".repeat(64),
         };
 
@@ -348,6 +348,6 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(result.version, "0.1.12");
+        assert_eq!(result.version, "0.1.13");
     }
 }
