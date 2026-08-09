@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { canEnableAutomationMode, connectorDraftFromState, isRecoveryKeyUsable, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
+import { canEnableAutomationMode, connectorDraftFromState, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
 import { buildSetupRequirements } from "../types.ts";
 import type { BlogbotBridge } from "../bridge.ts";
@@ -321,7 +321,7 @@ export function SetupCenter({
     [status]
   );
   const nextSetupTask = useMemo(() => {
-    const nextCheck = (status?.checks ?? []).find((check) => check.state !== "READY");
+    const nextCheck = nextSetupPrerequisite(status?.checks ?? [], connectorDraft.site.mode);
     if (!nextCheck) return null;
     const taskId: Exclude<SetupTaskId, "overview"> = ["codex"].includes(nextCheck.id)
       ? "writing"
@@ -333,7 +333,8 @@ export function SetupCenter({
             ? "diagnostics"
             : "first-start";
     return { check: nextCheck, task: setupTasks.find((task) => task.id === taskId)! };
-  }, [status]);
+  }, [status, connectorDraft.site.mode]);
+  const setupReadinessState = nextSetupTask?.check.state.toLowerCase() ?? "ready";
   const save = async () => {
     if (connectorDraft.site.mode === "PUBLISH") {
       setSelectedTask("publishing");
@@ -732,11 +733,10 @@ export function SetupCenter({
       <header className="page-header">
         <div>
           <p className="section-kicker">KURULUM VE BAĞLANTI MERKEZİ</p>
-          <h1>Blogbot her zaman açılır; hazır olmayan işlem güvenle kilitlenir.</h1>
+          <h1>Yerel çalışma durumu</h1>
           <p>
-            Bu ekran kurulumu zorunlu bir açılış kapısı yapmaz. Eksik bileşenleri
-            test eder, ne gerektiğini açıklar ve diğer uygulama menülerini
-            erişilebilir bırakır.
+            Taslak üretimi için gerekenleri burada görün. Yayın ve yedekleme gibi
+            isteğe bağlı bağlantılar, ancak onları kullanmak istediğinizde açılır.
           </p>
           <p className="setup-note">
             Blogbot tamamen bu bilgisayarda çalışır. Siz yalnız kaynakları,
@@ -749,17 +749,9 @@ export function SetupCenter({
             className="button button-secondary"
             type="button"
             disabled={busy}
-            onClick={() => void testConnection()}
-          >
-            {busy ? "Yerel bileşen test ediliyor…" : "Yerel bileşeni test et"}
-          </button>
-          <button
-            className="button button-secondary"
-            type="button"
-            disabled={busy}
             onClick={() => void refresh()}
           >
-            {busy ? "Kontroller çalışıyor…" : "Tümünü yeniden test et"}
+            {busy ? "Durum denetleniyor…" : "Durumu yenile"}
           </button>
         </div>
       </header>
@@ -784,7 +776,7 @@ export function SetupCenter({
 
       {selectedTask === "overview" ? (
         <section className="setup-task-hub" aria-labelledby="setup-task-hub-title">
-          <div className={`setup-readiness-summary ${nextSetupTask ? "is-actionable" : "is-ready"}`} role="status" aria-live="polite">
+          <div className={`setup-readiness-summary ${nextSetupTask ? `is-${setupReadinessState}` : "is-ready"}`} role="status" aria-live="polite">
             <div>
               <p className="section-kicker">ŞİMDİ YAPILACAK</p>
               <strong>{nextSetupTask ? nextSetupTask.check.label : "Blogbot kullanıma hazır"}</strong>
@@ -805,7 +797,7 @@ export function SetupCenter({
             {setupTasks.map((task, index) => (
               <button
                 key={task.id}
-                className="setup-task-card"
+                className={`setup-task-card ${task.id === "publishing" || task.id === "backup" ? "is-optional" : ""}`}
                 type="button"
                 onClick={() => {
                   setSelectedTask(task.id);
@@ -815,6 +807,7 @@ export function SetupCenter({
               >
                 <span className="setup-task-index" aria-hidden="true">{index + 1}</span>
                 <span>
+                  {task.id === "publishing" || task.id === "backup" ? <small className="setup-task-kind">İsteğe bağlı</small> : null}
                   <strong>{task.title}</strong>
                   <small>{task.detail}</small>
                 </span>
@@ -994,6 +987,16 @@ export function SetupCenter({
         </h3>
 
       {selectedTask === "diagnostics" ? <>
+      <div className="setup-detail-actions">
+        <button
+          className="button button-primary"
+          type="button"
+          disabled={busy}
+          onClick={() => void testConnection()}
+        >
+          {busy ? "Yerel bileşen test ediliyor…" : "Yerel bileşeni test et"}
+        </button>
+      </div>
       <div className="setup-overview">
         <div>
           <span>Uygulama</span>

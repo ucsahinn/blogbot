@@ -928,6 +928,22 @@ export function createEngineProtocol(
       input.afterCursor >= 0
     ) {
       const sync = await repository.sync(input.afterCursor);
+      // A desktop refresh needs a current projection, not the full durable
+      // audit history.  Keeping the optional tail bounded prevents a long
+      // lived local workspace from exceeding the NDJSON bridge limit and
+      // restarting the engine while the UI is polling it.
+      const requestedChangeLimit =
+        typeof input.changeLimit === "number" &&
+        Number.isSafeInteger(input.changeLimit) &&
+        input.changeLimit >= 0
+          ? input.changeLimit
+          : undefined;
+      const changeLimit = requestedChangeLimit === undefined
+        ? undefined
+        : Math.min(requestedChangeLimit, 200);
+      const changes = changeLimit === undefined
+        ? sync.changes
+        : sync.changes.slice(-changeLimit);
       return {
         version: 1,
         id: input.id,
@@ -949,7 +965,7 @@ export function createEngineProtocol(
             ...(job.metadata ? { metadata: job.metadata } : {})
           })),
           outbox: sync.snapshot.outbox,
-          changes: sync.changes
+          changes
         }
       };
     }

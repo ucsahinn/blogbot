@@ -247,6 +247,33 @@ test("engine protocol returns a versioned local state snapshot", async () => {
   assert.deepEqual(snapshot.changes, []);
 });
 
+test("state projection bounds stale history for desktop polling", async () => {
+  const repository = new InMemoryBackendStore();
+  for (let index = 0; index < 5; index += 1) {
+    await repository.setAutomation({
+      mode: "INGEST_ONLY",
+      onboardingComplete: index > 0,
+      ingestionPaused: false,
+      publishingPaused: true,
+      timezone: "Europe/Istanbul",
+      scanIntervalMinutes: 30 + index
+    });
+  }
+  const handle = createEngineProtocol(repository, "memory");
+
+  const result = await handle({
+    version: 1,
+    id: "state-bounded-history",
+    kind: "state",
+    afterCursor: 0,
+    changeLimit: 2
+  });
+
+  assert.equal(result.ok, true);
+  const changes = (result.snapshot as { changes?: Array<{ cursor?: number }> }).changes ?? [];
+  assert.deepEqual(changes.map((change) => change.cursor), [4, 5]);
+});
+
 test("engine protocol rejects malformed requests without throwing", async () => {
   const handle = createEngineProtocol();
   const result = await handle({ version: 2, id: "bad", kind: "doctor" });

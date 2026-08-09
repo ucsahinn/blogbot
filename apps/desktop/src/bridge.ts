@@ -61,6 +61,7 @@ export class BridgeError extends Error {
 }
 
 export interface BlogbotBridge {
+  openProjectPage(): Promise<{ opened: true }>;
   checkUnsignedUpdate(): Promise<UnsignedDesktopUpdate | null>;
   installUnsignedUpdate(update: UnsignedDesktopUpdate): Promise<void>;
   getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
@@ -294,6 +295,7 @@ export function createInvokeBridge(
   };
 
   return {
+    openProjectPage: () => read("open_project_page"),
     checkUnsignedUpdate: () => read("check_unsigned_update"),
     installUnsignedUpdate: (update) => mutate("install_unsigned_update", { request: update }),
     getBootstrapSnapshot: () => read("get_bootstrap_snapshot"),

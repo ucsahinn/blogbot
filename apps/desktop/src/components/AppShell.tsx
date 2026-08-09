@@ -71,6 +71,14 @@ export function AppShell({
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [diagnosticMessage, setDiagnosticMessage] = useState("");
 
+  const openProjectPage = async () => {
+    try {
+      await bridge.openProjectPage();
+    } catch {
+      setUpdateMessage("GitHub sayfası varsayılan tarayıcıda açılamadı. Bağlantıyı daha sonra yeniden deneyin.");
+    }
+  };
+
   const exportDiagnostics = async () => {
     setDiagnosticBusy(true);
     setDiagnosticMessage("");
@@ -243,8 +251,17 @@ export function AppShell({
               </div>
               {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
               <strong>Blogbot · yerel yayın uygulaması</strong>
-              <span>Sürüm 0.1.12 · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
-              <a href="https://github.com/ucsahinn/blogbot" target="_blank" rel="noreferrer">
+              <span>Sürüm 0.1.13 · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
+              <a
+                className="about-project-link"
+                href="https://github.com/ucsahinn/blogbot"
+                target="_blank"
+                rel="noreferrer"
+                onClick={(event) => {
+                  event.preventDefault();
+                  void openProjectPage();
+                }}
+              >
                 GitHub’da projeyi görüntüle
               </a>
             </div>

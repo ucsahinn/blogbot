@@ -142,7 +142,11 @@ export function isDraftCodexOutput(value: unknown): value is DraftCodexOutput {
       typeof c.enText === "string" && c.enText.trim() &&
       Array.isArray(c.sourceIds) && c.sourceIds.every((id) => typeof id === "string" && id.trim()) &&
       ["VERIFIED", "NEEDS_SOURCE", "DISPUTED"].includes(String(c.status)) &&
-      (c.quoteHash === undefined || /^[a-f0-9]{64}$/u.test(String(c.quoteHash))));
+      // The closed structured-output schema uses an empty string when a
+      // source has no quote hash yet. Accept that draft so its evidence gate
+      // can truthfully block approval instead of trapping the job in
+      // WAITING_CODEX. A non-empty value must still be a SHA-256 hash.
+      (c.quoteHash === undefined || c.quoteHash === "" || /^[a-f0-9]{64}$/u.test(String(c.quoteHash))));
   });
 }
 

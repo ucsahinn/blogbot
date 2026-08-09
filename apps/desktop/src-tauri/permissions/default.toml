@@ -17,5 +17,5 @@ permissions = [
   "allow-complete-onboarding", "allow-set-runtime-pause", "allow-secure-store-status",
   "allow-send-test-notification", "allow-autostart-status", "allow-set-autostart",
   "allow-backup-create", "allow-backup-verify", "allow-backup-restore-preview", "allow-backup-restore-apply",
-  "allow-check-unsigned-update", "allow-install-unsigned-update"
+  "allow-check-unsigned-update", "allow-install-unsigned-update", "allow-open-project-page"
 ]

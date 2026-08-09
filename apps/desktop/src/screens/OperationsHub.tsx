@@ -32,6 +32,20 @@ const codexStateLabels = {
   UNAVAILABLE: "Kullanılamıyor"
 } as const;
 
+const healthStateLabels = {
+  HEALTHY: "Hazır",
+  DEGRADED: "Dikkat gerekli",
+  OFFLINE: "Sorun var",
+  NOT_CONFIGURED: "Kurulmadı"
+} as const;
+
+const healthStateIcons = {
+  HEALTHY: "✓",
+  DEGRADED: "!",
+  OFFLINE: "×",
+  NOT_CONFIGURED: "–"
+} as const;
+
 function formatObservedTime(value: string): string {
   const timestamp = Date.parse(value);
   return Number.isNaN(timestamp) ? "Ölçülmedi" : new Date(timestamp).toLocaleString("tr-TR");
@@ -319,7 +333,20 @@ export function OperationsHub(props: OperationsHubProps) {
                 </aside>
               ) : null}
               {props.workspace.systemHealth.map((item) => (
-                <article key={item.id}><span className={`status-dot status-${item.state.toLowerCase()}`} aria-hidden="true" /><div><strong>{item.label}</strong><p>{item.detail}</p><small>{new Date(item.checkedAt).toLocaleTimeString("tr-TR")}</small></div></article>
+                <article key={item.id} data-state={item.state}>
+                  <span className={`status-dot status-${item.state.toLowerCase()}`} aria-hidden="true" />
+                  <div>
+                    <div className="health-row-heading">
+                      <strong>{item.label}</strong>
+                      <span className={`health-state health-state-${item.state.toLowerCase()}`}>
+                        <span aria-hidden="true">{healthStateIcons[item.state]}</span>
+                        {healthStateLabels[item.state]}
+                      </span>
+                    </div>
+                    <p>{item.detail}</p>
+                    <small>{new Date(item.checkedAt).toLocaleTimeString("tr-TR")}</small>
+                  </div>
+                </article>
               ))}
               {props.workspace.systemHealth.length === 0 ? (
                 <div className="empty-state"><strong>Sistem sağlık kontrolü çalıştırılmadı.</strong><span>Durumu yenileyin; çalıştırılmayan kontrol başarılı sayılmaz.</span></div>

@@ -635,6 +635,8 @@ export function createDemoTransport(): InvokeTransport {
 
   return async (command, args) => {
     switch (command) {
+      case "open_project_page":
+        return { opened: true };
       case "get_bootstrap_snapshot":
         return structuredClone(demoBootstrap);
       case "get_connector_state":

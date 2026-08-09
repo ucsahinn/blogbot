@@ -63,6 +63,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::open_project_page,
             commands::get_bootstrap_snapshot,
             commands::engine_doctor,
             commands::get_prerequisite_status,

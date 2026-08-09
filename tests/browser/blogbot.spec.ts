@@ -11,8 +11,8 @@ const surfaces = [
   ["publishing", "Haftalık ritim, hazır çıktılar ve geçmiş"],
   ["operations", "İşler, Codex kapasitesi ve sistem sağlığı"],
   ["settings", "Editoryal varsayılanlar ve bildirimler"],
-  ["setup", "Blogbot her zaman açılır; hazır olmayan işlem güvenle kilitlenir."],
-  ["setup-guide", "Blogbot her zaman açılır; hazır olmayan işlem güvenle kilitlenir."]
+  ["setup", "Yerel çalışma durumu"],
+  ["setup-guide", "Yerel çalışma durumu"]
 ] as const;
 
 const runtimeErrors = new WeakMap<Page, string[]>();
@@ -191,6 +191,16 @@ test("prerequisite states are explicit and color-independent", async ({ page }) 
   await expect(cards.first().locator(".prerequisite-state-badge")).toHaveAttribute("aria-label", /Durum:/u);
   await expect(cards.locator(".prerequisite-state-badge")).not.toHaveCount(0);
   await expect(cards.first()).toHaveAttribute("data-state", /READY|MISSING|BLOCKED|ATTENTION/u);
+});
+
+test("operations health exposes a readable state for every local component", async ({ page }) => {
+  await page.goto("#operations");
+  await page.getByRole("tab", { name: "Yerel sistem ve bağlantılar" }).click();
+
+  const health = page.locator(".health-list article");
+  await expect(health.first()).toBeVisible();
+  await expect(health.locator(".health-state")).toHaveCount(await health.count());
+  await expect(health.locator(".health-state").first()).toContainText(/Hazır|Dikkat gerekli|Sorun var|Kurulmadı/u);
 });
 
 test("first-start guide uses a readable step rail and current-step panel", async ({ page }) => {
@@ -738,7 +748,7 @@ test("offline setup keeps diagnostics available but locks every state-changing s
   await page.getByRole("button", { name: "İlk başlangıç" }).click();
   await page.getByRole("button", { name: "Codex bağlantısına devam et" }).click();
   await expect(page.getByRole("button", { name: "Giriş penceresini aç" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Tümünü yeniden test et" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Durumu yenile" })).toBeEnabled();
 });
 
 test("guided setup shows local readiness without turning it into a blocking wizard gate", async ({ page }) => {
@@ -1353,6 +1363,7 @@ test("completed source scan explains when the wider dashboard summary cannot ref
 
 test("a ready local engine test stays truthful when prerequisite cards cannot refresh", async ({ page }) => {
   await page.goto("?state=engine-posttest-refresh-failure#setup");
+  await page.getByRole("button", { name: "Tanılama ve onarım" }).click();
   await page.getByRole("button", { name: "Yerel bileşeni test et" }).click();
   const result = page.getByText(/Yerel çalışma bileşeni hazır; ancak önkoşul kartları yenilenemedi/u);
   await expect(result).toBeVisible();
@@ -1545,10 +1556,9 @@ test("about panel shows the project signature and keeps update checks explicit",
   await about.click();
   await expect(about).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByText("@ucsahinn")).toBeVisible();
-  await expect(page.getByRole("link", { name: "GitHub’da projeyi görüntüle" })).toHaveAttribute(
-    "href",
-    "https://github.com/ucsahinn/blogbot"
-  );
+  const projectPage = page.getByRole("link", { name: "GitHub’da projeyi görüntüle" });
+  await expect(projectPage).toBeVisible();
+  await projectPage.click();
 
   await page.getByRole("button", { name: "Güncellemeleri denetle" }).click();
   await expect(page.getByRole("status")).toContainText(

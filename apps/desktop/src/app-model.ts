@@ -15,6 +15,26 @@ import type {
   WeeklySlotView
 } from "./types.ts";
 
+/**
+ * Setup is local-first: publishing and backup are optional until the editor
+ * explicitly chooses a publishing target. Do not turn those blocked optional
+ * checks into the next action for ordinary drafting work.
+ */
+export function nextSetupPrerequisite(
+  checks: readonly PrerequisiteCheck[],
+  siteMode: "LOCAL_ONLY" | "LOCAL_DEV" | "PUBLISH"
+): PrerequisiteCheck | undefined {
+  const requiredIds = siteMode === "PUBLISH"
+    ? ["local-engine", "local-database", "local-queue", "codex", "github", "site-adapter", "deploy"] as const
+    : ["local-engine", "local-database", "local-queue", "codex"] as const;
+
+  for (const id of requiredIds) {
+    const check = checks.find((candidate) => candidate.id === id);
+    if (check && check.state !== "READY") return check;
+  }
+  return undefined;
+}
+
 export function describeInstantDraftSubmission(submission: InstantDraftSubmission): {
   waitingForCodex: boolean;
   kicker: string;

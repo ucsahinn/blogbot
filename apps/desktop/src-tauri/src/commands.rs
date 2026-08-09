@@ -15,6 +15,8 @@ use crate::github_broker::GitHubBroker;
 use crate::notifications;
 use crate::secure_store;
 
+const PROJECT_PAGE_URL: &str = "https://github.com/ucsahinn/blogbot";
+
 fn configure_hidden_command(command: &mut Command) {
     #[cfg(windows)]
     {
@@ -257,6 +259,20 @@ fn is_http_url(value: &str) -> bool {
     value.starts_with("https://")
 }
 
+#[tauri::command]
+pub fn open_project_page() -> Result<Value, CommandError> {
+    // A WebView hyperlink cannot reliably create an external browser window
+    // under this app's restrictive capability set. Keep the target fixed and
+    // launch it through Windows without exposing an arbitrary URL command.
+    let mut command = Command::new("explorer.exe");
+    configure_hidden_command(&mut command);
+    command
+        .arg(PROJECT_PAGE_URL)
+        .spawn()
+        .map_err(|error| CommandError::EngineUnavailable(format!("PROJECT_PAGE_OPEN_FAILED: {error}")))?;
+    Ok(json!({ "opened": true }))
+}
+
 fn decode_xml_attribute(value: &str) -> String {
     value
         .replace("&amp;", "&")
@@ -435,7 +451,8 @@ fn read_engine_state(bridge: &EngineBridge) -> Result<Value, CommandError> {
             "version": 1,
             "id": "desktop-state",
             "kind": "state",
-            "afterCursor": 0
+            "afterCursor": 0,
+            "changeLimit": 50
         }))
         .map_err(CommandError::EngineUnavailable)
 }

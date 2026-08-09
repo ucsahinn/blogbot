@@ -60,6 +60,22 @@ test("draft output repair fills only derivable metadata before strict validation
   assert.match((repaired as DraftCodexOutput).en.heroImageAlt, /original cover image/u);
 });
 
+test("draft output with an unresolved empty evidence hash remains reviewable", () => {
+  const unresolved = {
+    ...draft,
+    claims: [{
+      ...draft.claims[0]!,
+      status: "NEEDS_SOURCE" as const,
+      quoteHash: ""
+    }]
+  };
+
+  // The structured-output schema deliberately represents an absent evidence
+  // hash as an empty string. It must produce a reviewable draft with the
+  // evidence gate blocked, rather than leave the durable task waiting forever.
+  assert.equal(isDraftCodexOutput(unresolved), true);
+});
+
 test("review completion creates an immutable V2 local package from checks that actually ran", () => {
   const base = materializeDraftRevision("r1", {
     sources: [{ id: "s1", url: "https://example.org/evidence", title: "Evidence", contentHash: "b".repeat(64), fetchedAt: "2026-08-02T00:00:00.000Z" }],

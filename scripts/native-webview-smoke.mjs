@@ -38,8 +38,8 @@ const expectedHeadings = {
   publishing: ["Haftalık ritim, hazır yayınlar ve geçmiş.", "Haftalık ritim, hazır çıktılar ve geçmiş."],
   operations: "İşler, Codex kapasitesi ve sistem sağlığı.",
   settings: "Editoryal varsayılanlar ve bildirimler.",
-  setup: "Blogbot her zaman açılır; hazır olmayan işlem güvenle kilitlenir.",
-  "setup-guide": "Blogbot her zaman açılır; hazır olmayan işlem güvenle kilitlenir."
+  setup: "Yerel çalışma durumu",
+  "setup-guide": "Yerel çalışma durumu"
 };
 const requiredNativeReadCommands = [
   "get_bootstrap_snapshot",
@@ -174,39 +174,28 @@ async function verifySetupGuideStartsFocusedWizard(sessionId) {
       const nextClicked = await execute(
         sessionId,
         `return (() => {
-          const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Sonraki adım');
+          const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Codex bağlantısına devam et');
           if (!button || button.disabled) return false;
           button.click();
           return true;
         })();`
       );
       if (nextClicked !== true) fail("setup guide could not advance from its initial system-check step.");
-      await waitForSetupGuideStep(sessionId, "Blogbot'un yerel çalışma bileşenini doğrula", "2");
-      const engineCheckClicked = await execute(
+      await waitForSetupGuideStep(sessionId, "Codex'i bağla ve test et", "2");
+      const skipClicked = await execute(
         sessionId,
         `return (() => {
-          const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Yerel bileşeni denetle ve devam et');
+          const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === "Codex'i şimdilik atla");
           if (!button || button.disabled) return false;
           button.click();
           return true;
         })();`
       );
-      if (engineCheckClicked !== true) fail("setup guide did not offer an enabled local engine check.");
-      await waitForSetupGuideStep(sessionId, "Çalışma tercihlerini seç", "3");
-      const targetClicked = await execute(
-        sessionId,
-        `return (() => {
-          const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Hedef seçimine geç');
-          if (!button || button.disabled) return false;
-          button.click();
-          return true;
-        })();`
-      );
-      if (targetClicked !== true) fail("setup guide did not offer an enabled target-selection action.");
-      const target = await waitForSetupGuideStep(sessionId, "İlk içerik hedefini seç", "4");
+      if (skipClicked !== true) fail("setup guide did not offer an enabled Codex skip action.");
+      const target = await waitForSetupGuideStep(sessionId, "Çıktı klasörünü seç, test et ve bitir", "3");
       const targetSelectionVisible = await execute(
         sessionId,
-        "return document.querySelector('#quickstart-title')?.textContent?.trim() === 'İçeriği nereye göndereceksin?';"
+        "return document.querySelector('#quickstart-title')?.textContent?.trim() === 'Çıktı klasörünü seç';"
       );
       if (targetSelectionVisible !== true) fail("setup guide reached the target step without rendering its target choices.");
       return { ...state, finalTitle: target.title, finalProgress: target.progress, targetSelectionVisible };
@@ -491,7 +480,13 @@ async function scanSourceThroughVisibleUI(sessionId, source) {
       sessionId,
       "return document.body?.innerText?.includes('Tarama tamamlandı') ?? false;"
     );
-    if (complete) return { visibleAction: true, complete: true };
+    if (complete) {
+      const detail = await execute(
+        sessionId,
+        "return document.querySelector('.source-scan-progress')?.innerText ?? '';"
+      );
+      return { visibleAction: true, complete: true, detail };
+    }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
   fail(`visible source scan did not report completion for ${JSON.stringify(source.name)}.`);
@@ -966,7 +961,6 @@ async function verifyPrimaryNavigationJourney(sessionId) {
   const destinations = [
     ["Genel Bakış", "#dashboard", "Yayın akışı kontrol altında."],
     ["İçerik Akışı", "#content", "Kaynaklardan yayın fikrine tek çalışma alanı."],
-    ["Editoryal Masa", "#editorial", "Taslak, iki dil ve kanıt paketi aynı masada."],
     ["Takvim ve Yayın", "#publishing", "Haftalık ritim, hazır çıktılar ve geçmiş."],
     ["Operasyonlar", "#operations", "İşler, Codex kapasitesi ve sistem sağlığı."]
   ];
