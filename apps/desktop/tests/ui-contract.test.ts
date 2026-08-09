@@ -39,7 +39,7 @@ test("first-start wizard is a non-blocking three-step flow with one semantic sta
   const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
 
   assert.match(setup, /type GuidedStatus = "ready" \| "blocker" \| "attention" \| "running" \| "not-tested"/u);
-  assert.match(setup, /title: "Yerel sistem kontrolü"/u);
+  assert.match(setup, /title: "Bu bilgisayarı kontrol et"/u);
   assert.match(setup, /title: "Codex'i bağla ve test et"/u);
   assert.match(setup, /title: "Çıktı klasörünü seç, test et ve bitir"/u);
   assert.match(setup, /className=\{`guided-status guided-status-\$\{guidedStepState\(step\)\}`\}/u);
