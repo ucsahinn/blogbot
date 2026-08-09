@@ -64,7 +64,9 @@ function revision(
         url: "https://example.com/report",
         title: "Primary report",
         fetchedAt: "2026-07-30T08:00:00.000Z",
-        contentHash: "b".repeat(64)
+        contentHash: "b".repeat(64),
+        trustStatus: "APPROVED",
+        rightsStatus: "APPROVED"
       }
     ],
     media: [
@@ -535,6 +537,7 @@ test("publication enqueue persists one approved preview without nesting the PGli
     id: "revision-publication-enqueue",
     targetRepository: "owner/site",
     adapterVersion: "test@1",
+    scheduledAt: new Date(Date.now() - 60_000).toISOString(),
     generatedFiles: files.map((file) => ({
       path: file.path,
       sha256: createHash("sha256").update(file.content, "utf8").digest("hex"),
@@ -609,7 +612,7 @@ test("publication enqueue persists one approved preview without nesting the PGli
     }),
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("PUBLICATION_ENQUEUE_TIMEOUT")), 1_000))
   ]);
-  assert.equal(enqueued.ok, true);
+  assert.equal(enqueued.ok, true, JSON.stringify(enqueued));
   const persisted = (await runtime.handle({ version: 1, id: "enqueue-state", kind: "state", afterCursor: 0 })).snapshot as { outbox: Array<{ aggregateId: string }> };
   assert.equal(persisted.outbox.filter((effect) => effect.aggregateId === expectedRevision.id).length, 1);
 });
