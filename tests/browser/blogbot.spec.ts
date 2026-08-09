@@ -49,9 +49,10 @@ async function advanceSetupToTarget(page: Page): Promise<void> {
     await page.getByRole("button", { name: /İlk başlangıç/u }).click();
     await expect(guideHeading).toBeVisible();
   }
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" }).click();
-  await page.getByRole("button", { name: "Hedef seçimine geç" }).click();
+  await page.getByRole("button", { name: "Codex bağlantısına devam et" }).click();
+  await expect(page.getByRole("heading", { name: "Codex'i bağla ve test et" })).toBeVisible();
+  await page.getByRole("button", { name: "Codex'i şimdilik atla" }).click();
+  await expect(page.getByRole("heading", { name: "Çıktı klasörünü seç", exact: true })).toBeVisible();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -76,7 +77,6 @@ test("primary navigation buttons open their named workspaces", async ({ page }) 
   const destinations = [
     ["Genel Bakış", "#dashboard", "Yayın akışı kontrol altında."],
     ["İçerik Akışı", "#content", "Kaynaklardan yayın fikrine tek çalışma alanı."],
-    ["Editoryal Masa", "#editorial", "Taslak, iki dil ve kanıt paketi aynı masada."],
     ["Takvim ve Yayın", "#publishing", "Haftalık ritim, hazır çıktılar ve geçmiş."],
     ["Operasyonlar", "#operations", "İşler, Codex kapasitesi ve sistem sağlığı."]
   ] as const;
@@ -203,10 +203,7 @@ test("first-start guide uses a readable step rail and current-step panel", async
 
 test("setup shows the native Windows folder path without decorative separators", async ({ page }) => {
   await page.goto("#setup");
-  await page.getByRole("button", { name: /İlk başlangıç/u }).click();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" }).click();
-  await page.getByRole("button", { name: "Hedef seçimine geç" }).click();
+  await advanceSetupToTarget(page);
   await page.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
 
   const selectedPath = page.getByRole("status").filter({ hasText: "Seçili klasör" });
@@ -214,14 +211,13 @@ test("setup shows the native Windows folder path without decorative separators",
   await expect(selectedPath).not.toContainText("›");
 });
 
-test("guided setup does not keep the first target-selection panel visible after that step", async ({ page }) => {
+test("guided setup keeps its output target in one compact final panel", async ({ page }) => {
   await page.goto("#setup");
   await advanceSetupToTarget(page);
   await page.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
-  await page.getByRole("button", { name: "Klasörü doğrula ve sonraki adıma geç" }).click();
-
-  await expect(page.getByRole("heading", { name: "Son kontrol" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "İçeriği nereye göndereceksin?" })).toBeHidden();
+  await expect(page.getByRole("status").filter({ hasText: "Seçili klasör" })).toContainText("C:\\Blogbot-Demo");
+  await expect(page.getByRole("button", { name: "Klasörü test et" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Blogbot’u bu hedefle kullan" })).toBeVisible();
 });
 
 test("guided setup names the missing activation steps before its final action is available", async ({ page }) => {
@@ -740,43 +736,34 @@ test("offline setup keeps diagnostics available but locks every state-changing s
 
   await expect(page.getByRole("status").filter({ hasText: "Kurulum değişiklikleri yerel çalışma alanı yeniden bağlanana kadar salt okunur." })).toBeVisible();
   await page.getByRole("button", { name: "İlk başlangıç" }).click();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await expect(page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" })).toBeDisabled();
+  await page.getByRole("button", { name: "Codex bağlantısına devam et" }).click();
+  await expect(page.getByRole("button", { name: "Giriş penceresini aç" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Tümünü yeniden test et" })).toBeEnabled();
 });
 
-test("guided setup requires a successful local engine check before it advances to work preferences", async ({ page }) => {
+test("guided setup shows local readiness without turning it into a blocking wizard gate", async ({ page }) => {
   await page.goto("#setup");
 
   await page.getByRole("button", { name: "İlk başlangıç" }).click();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await expect(page.getByRole("heading", { name: "Blogbot'un yerel çalışma bileşenini doğrula" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Sonraki adım" })).toHaveCount(0);
-
-  await page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" }).click();
-  await expect(page.getByRole("heading", { name: "Çalışma tercihlerini seç" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Hedef seçimine geç" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Bu bilgisayarı kontrol et" })).toBeVisible();
+  await expect(page.locator(".guided-step-state").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Codex bağlantısına devam et" })).toBeEnabled();
 });
 
-test("guided setup explains why target selection cannot advance", async ({ page }) => {
+test("guided setup keeps final activation disabled until an output folder and approval are provided", async ({ page }) => {
   await page.goto("#setup");
-
-  await page.getByRole("button", { name: "İlk başlangıç" }).click();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" }).click();
-  await page.getByLabel("Bu cihazın adı").fill("PC");
-
-  await expect(page.getByRole("button", { name: "Hedef seçimine geç" })).toBeDisabled();
-  await expect(page.getByText("Devam etmek için bu bilgisayarın adını en az 3 karakter olarak yazın.")).toBeVisible();
+  await advanceSetupToTarget(page);
+  const activation = page.getByRole("button", { name: "Blogbot’u bu hedefle kullan" });
+  await expect(activation).toBeDisabled();
+  await expect(page.locator("#quickstart-activation-prerequisite")).toContainText("Önce çıktı klasörünü seçin");
 });
 
 test("guided setup back control returns to the previous focused step", async ({ page }) => {
   await page.goto("#setup");
   await page.getByRole("button", { name: "İlk başlangıç" }).click();
   await expect(page.getByRole("heading", { name: "Bu bilgisayarı kontrol et" })).toBeVisible();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await expect(page.getByRole("heading", { name: "Blogbot'un yerel çalışma bileşenini doğrula" })).toBeVisible();
+  await page.getByRole("button", { name: "Codex bağlantısına devam et" }).click();
+  await expect(page.getByRole("heading", { name: "Codex'i bağla ve test et" })).toBeVisible();
   await page.getByRole("button", { name: "Geri" }).click();
   await expect(page.getByRole("heading", { name: "Bu bilgisayarı kontrol et" })).toBeVisible();
   await expect(page.getByRole("progressbar", { name: "İlk başlangıç ilerlemesi" })).toHaveAttribute("aria-valuenow", "1");
@@ -784,23 +771,20 @@ test("guided setup back control returns to the previous focused step", async ({ 
 
 test("guided setup offers an explicit data-preserving recovery after an engine timeout", async ({ page }) => {
   await page.goto("?state=engine-timeout#setup");
-  await page.getByRole("button", { name: "İlk başlangıç" }).click();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" }).click();
+  await page.getByRole("button", { name: "Tanılama ve onarım" }).click();
+  await page.getByRole("button", { name: "Yerel bileşeni test et" }).click();
 
   await expect(page.getByRole("heading", { name: "Yerel çalışma alanı kurtarma gerektiriyor" })).toBeVisible();
   await page.getByRole("button", { name: "Yeni yerel çalışma alanıyla kurtar" }).click();
-  await expect(page.getByRole("heading", { name: "Çalışma tercihlerini seç" })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Yeni yerel çalışma alanı hazır");
 });
 
 test("a successful local workspace recovery stays truthful when its prerequisite refresh is unavailable", async ({ page }) => {
   await page.goto("?state=recovery-postsuccess-refresh-failure#setup");
-  await page.getByRole("button", { name: "İlk başlangıç" }).click();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" }).click();
+  await page.getByRole("button", { name: "Tanılama ve onarım" }).click();
+  await page.getByRole("button", { name: "Yerel bileşeni test et" }).click();
   await page.getByRole("button", { name: "Yeni yerel çalışma alanıyla kurtar" }).click();
 
-  await expect(page.getByRole("heading", { name: "Çalışma tercihlerini seç" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("Yeni yerel çalışma alanı hazır");
   await expect(page.getByRole("status")).toContainText("Önkoşul kartları yenilenemedi");
   await expect(page.getByRole("status")).not.toContainText("Yerel çalışma alanı kurtarılamadı");
@@ -1028,18 +1012,12 @@ test("candidate dismissal stays truthful when the follow-up dashboard summary re
   await expect(page.getByRole("status")).toContainText("Genel Bakış sayaçları henüz yenilenemedi");
 });
 
-test("first-start publishing choice opens the publishing task instead of trying to save an incomplete target", async ({ page }) => {
+test("first start keeps the local output target focused instead of opening remote publishing", async ({ page }) => {
   await page.goto("#setup");
-  await page.getByRole("button", { name: /İlk başlangıç: Bu bilgisayarı/i }).click();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" }).click();
-  await page.getByRole("button", { name: "Hedef seçimine geç" }).click();
-  await page.getByRole("radio", { name: "Yayındaki siteye gönder" }).click();
-  await page.getByLabel(/İçerik değişirse yeniden onay gerektiğini anlıyorum/u).check();
-  await page.getByRole("button", { name: "Yayın ayarlarına geç" }).click();
-
-  await expect(page.getByRole("heading", { name: "Yayın bağlantısı", exact: true })).toBeVisible();
-  await expect(page.getByText("Gerekli gizli olmayan alanları doldurun.")).not.toBeVisible();
+  await advanceSetupToTarget(page);
+  await expect(page.getByRole("heading", { name: "Çıktı klasörünü seç", exact: true })).toBeVisible();
+  await expect(page.getByRole("radio", { name: /Yayındaki siteye gönder/u })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Blogbot’u bu hedefle kullan" })).toBeDisabled();
 });
 
 test("offline engine health has direct recovery and redacted diagnostics actions", async ({ page }) => {
@@ -1172,7 +1150,7 @@ test("operations refresh does not overwrite the desk with a pre-Doctor workspace
   await page.goto("?state=operations-refresh-race#operations");
   await page.getByRole("button", { name: "Operasyon durumunu yenile" }).click();
   await expect(page.getByRole("status")).toContainText("Operasyon durumu yerel veriden yenilendi.");
-  await page.getByRole("button", { name: "Editoryal Masa", exact: true }).click();
+  await page.goto("?state=operations-refresh-race#editorial");
 
   await expect(page.getByText("Henüz taslak yok.")).toHaveCount(0);
   await expect(page.locator(".draft-row").first()).toBeVisible();
@@ -1428,7 +1406,8 @@ test("narrow review keeps queue search, filters, and revision selection operable
 test("setup guide sends the user from preferences to the real target selection", async ({ page }) => {
   await page.goto("#setup-guide");
   await advanceSetupToTarget(page);
-  await expect(page.getByRole("radio", { name: /Bir klasöre yaz/u })).toBeFocused();
+  await expect(page.getByRole("heading", { name: "Çıktı klasörünü seç", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Bilgisayardan klasör seç" })).toBeVisible();
 });
 
 test("setup guide route opens the first-start wizard directly", async ({ page }) => {
@@ -1443,11 +1422,9 @@ test("setup guide finishes with evidence from a fresh prerequisite check", async
   await page.goto("#setup-guide");
   await advanceSetupToTarget(page);
   await page.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
-  await page.getByRole("button", { name: "Klasörü doğrula ve sonraki adıma geç" }).click();
-  await page.getByRole("button", { name: "Son testi çalıştır" }).click();
-  const finalResult = page.getByRole("status").filter({ hasText: "Son kontrol tamamlandı." });
-  await expect(finalResult).toContainText("Son kontrol tamamlandı.");
-  await expect(finalResult).toContainText("kontrol hazır");
+  await page.getByRole("button", { name: "Klasörü test et" }).click();
+  const finalResult = page.getByText("Biçim doğrulandı", { exact: false });
+  await expect(finalResult).toContainText("Biçim doğrulandı");
 });
 
 test("setup explains security-gated external execution and filesystem actions", async ({ page }) => {

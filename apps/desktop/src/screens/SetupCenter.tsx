@@ -197,7 +197,7 @@ export function SetupCenter({
   const guidedSteps = [
     {
       id: "system",
-      title: "Yerel sistem kontrolü",
+      title: "Bu bilgisayarı kontrol et",
       detail: "Windows, WebView2, güvenli anahtar deposu ve yerel çalışma alanı açıldığında otomatik kontrol edilir.",
       checkIds: ["windows", "webview2", "secure-store", "local-engine", "local-database", "local-queue"]
     },
@@ -443,7 +443,10 @@ export function SetupCenter({
           }));
         }
       }
-      setConnectionMessage(`${tested.detail}${suggestion}${migrationHint}`);
+      const outcomeMessage = tested.ready
+        ? `Biçim doğrulandı. ${tested.detail}${suggestion}${migrationHint}`
+        : `${tested.detail}${suggestion}${migrationHint}`;
+      setConnectionMessage(outcomeMessage);
       setConnectorMessages((current) => ({
         ...current,
         [connector]: tested.ready
@@ -741,14 +744,24 @@ export function SetupCenter({
             değilse ilgili düğme güvenle kilitli kalır.
           </p>
         </div>
-        <button
-          className="button button-secondary"
-          type="button"
-          disabled={busy}
-          onClick={() => void refresh()}
-        >
-              {busy ? "Kontroller çalışıyor…" : "Tümünü yeniden test et"}
-        </button>
+        <div className="page-header-actions">
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={busy}
+            onClick={() => void testConnection()}
+          >
+            {busy ? "Yerel bileşen test ediliyor…" : "Yerel bileşeni test et"}
+          </button>
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={busy}
+            onClick={() => void refresh()}
+          >
+            {busy ? "Kontroller çalışıyor…" : "Tümünü yeniden test et"}
+          </button>
+        </div>
       </header>
 
       {readOnly ? (
@@ -844,7 +857,8 @@ export function SetupCenter({
 
       {guidedMode ? (
         <section className="guided-setup guided-setup-panel" aria-labelledby="guided-setup-title">
-          <div className="guided-progress guided-progress-shell" aria-label={`Kurulum adımı ${guidedStep + 1} / ${guidedSteps.length}`}>
+          <div className="guided-progress guided-progress-shell">
+            <span className="sr-only" role="progressbar" aria-label="İlk başlangıç ilerlemesi" aria-valuemin={1} aria-valuemax={guidedSteps.length} aria-valuenow={guidedStep + 1} aria-valuetext={`Kurulum adımı ${guidedStep + 1} / ${guidedSteps.length}`} />
             {guidedSteps.map((step, index) => (
               <button
                 type="button"
@@ -967,6 +981,10 @@ export function SetupCenter({
             {busy ? "Kurtarılıyor…" : "Yeni yerel çalışma alanıyla kurtar"}
           </button>
         </section>
+      ) : null}
+
+      {!guidedMode && connectionMessage ? (
+        <p className="form-message" role="status" aria-live="polite">{connectionMessage}</p>
       ) : null}
 
       {selectedTask !== "overview" && selectedTask !== "first-start" ? (

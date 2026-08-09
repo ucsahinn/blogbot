@@ -23,7 +23,7 @@ const navigation: Array<{
   shortcut?: string;
 }> = [
   { id: "dashboard", label: "Genel Bakış", icon: "⌂" },
-  { id: "content", label: "İçerik Çalışma Alanı", icon: "◎" },
+  { id: "content", label: "İçerik Akışı", icon: "◎" },
   { id: "publishing", label: "Takvim ve Yayın", icon: "◫" },
   { id: "operations", label: "Operasyonlar", icon: "⋮" }
 ];
