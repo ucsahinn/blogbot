@@ -285,19 +285,31 @@ pub async fn install_unsigned_update(
 #[cfg(test)]
 mod tests {
     use super::{
-        github_release_update, is_newer_version, manifest_update, validate_release_url,
+        current_version, github_release_update, is_newer_version, manifest_update, validate_release_url,
         validate_sha256, resolve_manifest_or_release, CommandError, GithubRelease,
         ReleaseManifest, UnsignedUpdate,
     };
 
+    fn next_test_version() -> String {
+        let mut segments = current_version()
+            .split('.')
+            .map(|segment| segment.parse::<u64>().expect("package version is semver"));
+        let major = segments.next().expect("major version");
+        let minor = segments.next().expect("minor version");
+        let patch = segments.next().expect("patch version") + 1;
+        assert!(segments.next().is_none(), "package version has three segments");
+        format!("{major}.{minor}.{patch}")
+    }
+
     #[test]
     fn accepts_only_new_https_github_installer_releases() {
+        let version = next_test_version();
         let manifest = ReleaseManifest {
-            version: "0.1.13".into(),
+            version: version.clone(),
             notes: String::new(),
             platforms: super::WindowsPlatform {
                 windows_x86_64: super::WindowsArtifact {
-                    url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.13/Blogbot_0.1.13_x64-setup.exe".into(),
+                    url: format!("https://github.com/ucsahinn/blogbot/releases/download/v{version}/Blogbot_{version}_x64-setup.exe"),
                     sha256: "a".repeat(64),
                 },
             },
@@ -318,17 +330,18 @@ mod tests {
 
     #[test]
     fn accepts_latest_github_release_api_when_manifest_asset_is_missing() {
+        let version = next_test_version();
         let release: GithubRelease = serde_json::from_value(serde_json::json!({
-            "tag_name": "v0.1.13",
+            "tag_name": format!("v{version}"),
             "body": "Daha hızlı yerel çalışma.",
             "assets": [{
-                "name": "Blogbot_0.1.13_x64-setup.exe",
-                "browser_download_url": "https://github.com/ucsahinn/blogbot/releases/download/v0.1.13/Blogbot_0.1.13_x64-setup.exe",
+                "name": format!("Blogbot_{version}_x64-setup.exe"),
+                "browser_download_url": format!("https://github.com/ucsahinn/blogbot/releases/download/v{version}/Blogbot_{version}_x64-setup.exe"),
                 "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }]
         })).unwrap();
         let update = github_release_update(release).unwrap().unwrap();
-        assert_eq!(update.version, "0.1.13");
+        assert_eq!(update.version, version);
         assert_eq!(update.sha256, "a".repeat(64));
     }
 
