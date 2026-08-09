@@ -107,13 +107,34 @@ test("focus indicators use an opaque semantic color with sufficient contrast", a
   assert.match(styles, /\.field input:focus-visible[\s\S]*?outline:\s*3px solid var\(--blue\)/u);
 });
 
+test("settings separates saving, reversible changes, and notification diagnostics by intent", async () => {
+  const settings = await readFile(source("screens", "SettingsCenter.tsx"), "utf8");
+
+  assert.match(settings, /settings-action-primary/u);
+  assert.match(settings, /settings-action-secondary/u);
+  assert.match(settings, /settings-action-notification/u);
+});
+
+test("dashboard exposes one actionable next task before supporting system detail", async () => {
+  const dashboard = await readFile(source("screens", "Dashboard.tsx"), "utf8");
+
+  assert.match(dashboard, /primaryToday/u);
+  assert.match(dashboard, /dashboard-next-action/u);
+  assert.match(dashboard, /ŞİMDİ YAPILACAK/u);
+});
+
 test("compact desktop turns the editable weekly calendar into an operable grid instead of a horizontal strip", async () => {
-  const styles = await readFile(source("styles.css"), "utf8");
+  const [styles, publishing] = await Promise.all([
+    readFile(source("styles.css"), "utf8"),
+    readFile(source("screens", "PublishingCenter.tsx"), "utf8")
+  ]);
 
   assert.match(
     styles,
     /@media \(max-width: 1100px\)[\s\S]*?\.week-grid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)[\s\S]*?overflow-x:\s*visible/u
   );
+  assert.match(publishing, /activeSlotId/u);
+  assert.match(publishing, /Takvimde bu slotu düzenle/u);
 });
 
 test("candidate triage uses dense comparable rows and falls back cleanly on narrow screens", async () => {

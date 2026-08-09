@@ -185,12 +185,12 @@ test("REVISION.SAVE fails closed on incomplete or malformed nested claims", () =
   for (const revision of [
     {},
     {
-      editorialDesk: "SiberDergi",
+      editorialDesk: "Yerel Editorya",
       riskLevel: "STANDARD",
       translationParity: { status: "MATCHED", reportHash: "a".repeat(64) },
       editorialPolicyHash: "b".repeat(64),
       editorialReviewReportHash: "c".repeat(64),
-      targetRepository: "ucsahinn/siberdergi.net",
+      targetRepository: "owner/site",
       targetBaseBranch: "main",
       targetBaseSha: "d".repeat(40),
       generatedFiles: [

@@ -134,6 +134,19 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
         state: "DRAFTING",
         reviewable: false,
         detail: "Kaynaklar araştırılıyor ve TR / EN taslak hazırlanıyor."
+      },
+      {
+        id: "approved-incident",
+        titleTr: "Ekipler için uygulama kontrol listesi",
+        titleEn: "An implementation checklist for teams",
+        section: "rehberler",
+        completion: 100,
+        blockers: 0,
+        updatedAt: "2026-07-29T09:00:00.000Z",
+        scheduledAt: "2026-07-31T11:00:00.000Z",
+        state: "APPROVED",
+        reviewable: true,
+        detail: "Onaylı revizyon; yerel paylaşım slotuna atanabilir."
       }
     ],
     weeklySlots: expandWeeklySlots([
@@ -297,7 +310,8 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
       reviewer: "Ulaş Şahin",
       notifications: true,
       emailDigest: false,
-      defaultSection: "haberler"
+      defaultSection: "haberler",
+      showSourceReferences: true
     },
     systemHealth: [
       {

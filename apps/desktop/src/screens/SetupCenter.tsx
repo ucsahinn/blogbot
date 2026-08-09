@@ -797,7 +797,7 @@ export function SetupCenter({
             {setupTasks.map((task, index) => (
               <button
                 key={task.id}
-                className={`setup-task-card ${task.id === "publishing" || task.id === "backup" ? "is-optional" : ""}`}
+                className={`setup-task-card ${task.id === "publishing" || task.id === "backup" ? "is-optional" : ""} ${task.id === nextSetupTask?.task.id ? "is-recommended" : ""}`}
                 type="button"
                 onClick={() => {
                   setSelectedTask(task.id);
@@ -808,6 +808,7 @@ export function SetupCenter({
                 <span className="setup-task-index" aria-hidden="true">{index + 1}</span>
                 <span>
                   {task.id === "publishing" || task.id === "backup" ? <small className="setup-task-kind">İsteğe bağlı</small> : null}
+                  {task.id === nextSetupTask?.task.id ? <small className="setup-task-kind">Önerilen sonraki adım</small> : null}
                   <strong>{task.title}</strong>
                   <small>{task.detail}</small>
                 </span>

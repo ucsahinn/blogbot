@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createDraftCodexTaskResolver,
+  draftLengthRequirements,
   finalizeReviewedRevision,
   isFinalReviewCodexOutput,
   isDraftCodexOutput,
@@ -10,8 +11,8 @@ import {
   normalizeDraftCodexOutput,
   type DraftCodexOutput
 } from "../../apps/engine/src/codex-draft.ts";
-import { assertRevisionGeneratedFilesMatch } from "../../apps/engine/src/stdio-entrypoint.ts";
-import { validateClaimEvidence, validateRevisionPackageV2 } from "../../packages/editorial/src/revision.ts";
+import { assertRevisionGeneratedFilesMatch, fallbackDraftSourceEvidence } from "../../apps/engine/src/stdio-entrypoint.ts";
+import { evaluateSourcePolicy, validateClaimEvidence, validateRevisionPackageV2 } from "../../packages/editorial/src/revision.ts";
 import { astroGenericAdapter } from "../../packages/site-adapter/src/astro-generic.ts";
 
 const draft: DraftCodexOutput = {
@@ -40,6 +41,10 @@ test("final review is a separate DEEP_REVIEW task with a strict output contract"
   const resolver = createDraftCodexTaskResolver();
   const task = await resolver.resolve({ jobId: "r:review", idempotencyKey: "k", definitionId: "REVISION.FINAL_REVIEW", payload: { draft }, state: "RUNNING", version: 1 });
   assert.equal(task.taskKind, "FINAL_QUALITY");
+  assert.match(
+    String((task.input as { policy?: unknown }).policy),
+    /SEO gate: block only for a concrete, remediable article defect/u
+  );
   assert.equal(isFinalReviewCodexOutput(review), true);
   assert.equal(isFinalReviewCodexOutput({ ...review, gates: review.gates.slice(1) }), false);
 });
@@ -65,6 +70,16 @@ test("draft tasks retain substantial selected-source context without exposing an
   const sources = ((task.input as { task?: { sources?: Array<{ excerpt?: string }> } }).task?.sources);
   assert.equal(sources?.[0]?.excerpt, evidenceText.slice(0, 12_000));
   assert.equal(sources?.[0]?.excerpt?.length, 12_000);
+});
+
+test("standard drafts keep a quality floor even when one selected source is brief", () => {
+  const requirements = draftLengthRequirements({
+    articleType: "news",
+    sources: [{ evidenceText: "Kısa ama doğrulanmış kanıt." }]
+  });
+
+  assert.equal(requirements.trMinimumWords, 700);
+  assert.equal(requirements.enMinimumWords, 595);
 });
 
 test("draft tasks reject a teaser when the selected evidence supports a full standard article", async () => {
@@ -145,6 +160,59 @@ test("review completion creates an immutable V2 local package from checks that a
   assert.equal(revision.qualityGates.some((gate) => gate.state === "NOT_RUN"), false);
 });
 
+test("final review keeps model-reported editorial polish findings as an acknowledgeable warning", () => {
+  const quoteHash = "b".repeat(64);
+  const base = materializeDraftRevision("r-review-warning", {
+    sources: [{
+      id: "s1",
+      url: "https://example.org/evidence",
+      title: "Evidence",
+      contentHash: "c".repeat(64),
+      fetchedAt: "2026-08-09T00:00:00.000Z",
+      evidenceAnchors: [{ sourceId: "s1", quoteHash }]
+    }],
+    scheduledAt: "2026-08-10T00:00:00.000Z"
+  }, draft, "2026-08-09T00:00:00.000Z");
+  const modelReportedBlock = {
+    ...review,
+    gates: review.gates.map((gate) => gate.id === "seo"
+      ? { ...gate, state: "BLOCK" as const, detail: "İç bağlantı önerisi eklenebilir." }
+      : gate)
+  };
+
+  const revision = finalizeReviewedRevision(base, modelReportedBlock, undefined);
+
+  assert.deepEqual(revision.qualityGates.find((gate) => gate.id === "seo"), {
+    id: "seo",
+    group: "seo",
+    state: "WARN",
+    detail: "İç bağlantı önerisi eklenebilir.",
+    policyVersion: "1"
+  });
+});
+
+test("final review never downgrades a missing hero image into an acknowledgeable warning", () => {
+  const base = materializeDraftRevision("r-review-media-required", {
+    sources: [{
+      id: "s1",
+      url: "https://example.org/evidence",
+      title: "Evidence",
+      contentHash: "c".repeat(64),
+      fetchedAt: "2026-08-09T00:00:00.000Z",
+      evidenceAnchors: [{ sourceId: "s1", quoteHash: "b".repeat(64) }]
+    }]
+  }, draft, "2026-08-09T00:00:00.000Z");
+
+  const revision = finalizeReviewedRevision(base, review, undefined);
+  assert.deepEqual(revision.qualityGates.find((gate) => gate.id === "media"), {
+    id: "media",
+    group: "media",
+    state: "BLOCK",
+    detail: "Zorunlu hero görseli üretilemedi veya yerel olarak doğrulanamadı.",
+    policyVersion: "1"
+  });
+});
+
 test("a finalized review package matches the publication preview file boundary", () => {
   const base = materializeDraftRevision("r-preview", {
     sources: [{ id: "s1", url: "https://example.org/evidence", title: "Evidence", contentHash: "b".repeat(64), fetchedAt: "2026-08-02T00:00:00.000Z" }],
@@ -204,6 +272,66 @@ test("materialization applies the locally configured editorial author", () => {
   assert.equal(revision.author, "Yerel Editorya");
 });
 
+test("materialization preserves approved source policy decisions for publication eligibility", () => {
+  const revision = materializeDraftRevision(
+    "r-approved-source-policy",
+    {
+      sources: [{
+        id: "s1",
+        url: "https://example.org/evidence",
+        title: "Approved evidence",
+        contentHash: "b".repeat(64),
+        fetchedAt: "2026-08-02T00:00:00.000Z",
+        trustStatus: "APPROVED",
+        rightsStatus: "APPROVED"
+      }]
+    },
+    draft,
+    "2026-08-02T00:00:00.000Z"
+  );
+
+  assert.deepEqual(revision.sources[0], {
+    id: "s1",
+    url: "https://example.org/evidence",
+    title: "Approved evidence",
+    contentHash: "b".repeat(64),
+    fetchedAt: "2026-08-02T00:00:00.000Z",
+    trustStatus: "APPROVED",
+    rightsStatus: "APPROVED"
+  });
+  assert.deepEqual(evaluateSourcePolicy(revision), { eligible: true });
+});
+
+test("materialization keeps pending source policy decisions fail-closed", () => {
+  const revision = materializeDraftRevision(
+    "r-pending-source-policy",
+    {
+      sources: [{
+        id: "s1",
+        url: "https://example.org/evidence",
+        title: "Pending evidence",
+        contentHash: "b".repeat(64),
+        fetchedAt: "2026-08-02T00:00:00.000Z",
+        trustStatus: "PENDING",
+        rightsStatus: "PENDING"
+      }]
+    },
+    draft,
+    "2026-08-02T00:00:00.000Z"
+  );
+
+  assert.deepEqual(revision.sources[0], {
+    id: "s1",
+    url: "https://example.org/evidence",
+    title: "Pending evidence",
+    contentHash: "b".repeat(64),
+    fetchedAt: "2026-08-02T00:00:00.000Z",
+    trustStatus: "PENDING",
+    rightsStatus: "PENDING"
+  });
+  assert.deepEqual(evaluateSourcePolicy(revision), { eligible: false, reason: "SOURCE_TRUST_NOT_APPROVED" });
+});
+
 test("materialization binds a claim to the immutable source anchor instead of trusting a model hash", () => {
   const quoteHash = "b".repeat(64);
   const revision = materializeDraftRevision(
@@ -240,4 +368,24 @@ test("materialization downgrades a verified claim when any requested source cann
 
   assert.equal(revision.claims[0]?.status, "NEEDS_SOURCE");
   assert.deepEqual(revision.claims[0]?.evidenceAnchors, []);
+});
+
+test("revision repair retains immutable source anchors when a source URL cannot be fetched again", () => {
+  const anchor = { sourceId: "source-1", quoteHash: "e".repeat(64), start: 0, end: 42 };
+
+  assert.deepEqual(fallbackDraftSourceEvidence([{
+    id: "source-1",
+    url: "https://example.org/evidence",
+    title: "Archived evidence",
+    fetchedAt: "2026-08-09T00:00:00.000Z",
+    contentHash: "f".repeat(64),
+    evidenceAnchors: [anchor]
+  }]), [{
+    id: "source-1",
+    url: "https://example.org/evidence",
+    title: "Archived evidence",
+    fetchedAt: "2026-08-09T00:00:00.000Z",
+    contentHash: "f".repeat(64),
+    evidenceAnchors: [anchor]
+  }]);
 });

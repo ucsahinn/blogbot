@@ -10,6 +10,7 @@ import {
   type BackendChange,
   type BackendChangeKind,
   type BackendJob,
+  type DashboardSyncResult,
   type BackendRepository,
   type BackendRepositoryTransaction,
   type OutboxEffect,
@@ -144,6 +145,18 @@ export class InMemoryBackendStore implements BackendRepository {
         outbox: await this.listOutbox(),
         jobs: await this.listJobs()
       },
+      changes: this.state.changes
+        .filter((change) => change.cursor > afterCursor)
+        .map((change) => structuredClone(change))
+    };
+  }
+
+  async syncDashboard(afterCursor: number): Promise<DashboardSyncResult> {
+    return {
+      serverCursor: this.state.cursor,
+      automation: structuredClone(this.state.automation),
+      outbox: await this.listOutbox(),
+      jobs: await this.listJobs(),
       changes: this.state.changes
         .filter((change) => change.cursor > afterCursor)
         .map((change) => structuredClone(change))

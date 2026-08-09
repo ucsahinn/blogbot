@@ -47,7 +47,7 @@ import {
 import { SourceScanScheduler } from "./source-scheduler.ts";
 import { createCodexCliPort } from "../../codex-runner/src/cli-port.ts";
 import type { StructuredCodexPort } from "../../codex-runner/src/structured-runner.ts";
-import { createCodexWorkerCoordinator, type CodexWorkerCoordinator } from "./codex-worker.ts";
+import { createCodexWorkerCoordinator, type CodexWorkSubmission, type CodexWorkerCoordinator } from "./codex-worker.ts";
 import {
   createDraftCodexTaskResolver,
   finalizeReviewedRevision,
@@ -63,6 +63,7 @@ import { PublicationScheduler } from "./publication-scheduler.ts";
 import { renderCoverVariants, renderGeneratedImageVariants, type ArtDirection } from "../../../packages/visuals/src/index.ts";
 import { imageGeneratorFromEnvironment, type ImageGeneratorPort } from "./imagegen-provider.ts";
 import type { PublicationBundlePolicy } from "../../publisher/src/publication.ts";
+import type { DashboardSyncResult } from "../../../packages/database/src/backend-repository.ts";
 
 const MAX_LINE_BYTES = 1_000_000;
 // Keep restore verification bounded even when a compromised/local renderer
@@ -75,6 +76,23 @@ const MAX_AUTOMATIC_BACKUP_BYTES = 512 * 1024 * 1024;
 // decrypting an unbounded feed catalog on every desktop refresh was the main
 // source of multi-second freezes on large local workspaces.
 const MAX_CANDIDATE_ENTRIES_PER_SOURCE = 250;
+
+async function readDashboardSync(
+  repository: BackendRepository,
+  afterCursor: number
+): Promise<DashboardSyncResult> {
+  if (repository.syncDashboard) {
+    return repository.syncDashboard(afterCursor);
+  }
+  const sync = await repository.sync(afterCursor);
+  return {
+    serverCursor: sync.serverCursor,
+    automation: sync.snapshot.automation,
+    outbox: sync.snapshot.outbox,
+    jobs: sync.snapshot.jobs,
+    changes: sync.changes
+  };
+}
 
 /**
  * Background maintenance has no request/response caller to surface failures
@@ -98,7 +116,7 @@ export function reportBackgroundTaskFault(
  * queue diagnosable without turning the diagnostic bundle into user data.
  */
 export function reportCodexLifecycle(
-  code: "CODEX_JOB_STARTED" | "CODEX_JOB_WAITING" | "CODEX_JOB_RETRYING" | "CODEX_JOB_COMPLETED" | "CODEX_PROTOCOL_REJECTED" | "CODEX_OUTPUT_INVALID" | "CODEX_OUTPUT_MISSING" | "CODEX_CLI_INVALID_EVENT" | "CODEX_CLI_INVALID_FINAL_OUTPUT" | "CODEX_PROCESS_FAILED" | "CODEX_UNKNOWN_FAILURE" | "IMAGEGEN_FALLBACK_LOCAL",
+  code: "CODEX_JOB_STARTED" | "CODEX_JOB_WAITING" | "CODEX_JOB_RETRYING" | "CODEX_JOB_COMPLETED" | "CODEX_PROTOCOL_REJECTED" | "CODEX_OUTPUT_INVALID" | "CODEX_OUTPUT_MISSING" | "CODEX_CLI_INVALID_EVENT" | "CODEX_CLI_INVALID_FINAL_OUTPUT" | "CODEX_PROCESS_FAILED" | "CODEX_UNKNOWN_FAILURE" | "IMAGEGEN_FALLBACK_LOCAL" | "IMAGEGEN_REQUIRED_FAILED" | "IMAGEGEN_REQUIRED_UNAVAILABLE",
   writeOrDetail: ((line: string) => void) | string = (line) => process.stderr.write(line),
   detail?: string
 ): void {
@@ -937,7 +955,7 @@ export function createEngineProtocol(
       Number.isSafeInteger(input.afterCursor) &&
       input.afterCursor >= 0
     ) {
-      const sync = await repository.sync(input.afterCursor);
+      const sync = await readDashboardSync(repository, input.afterCursor);
       // A desktop refresh needs a current projection, not the full durable
       // audit history.  Keeping the optional tail bounded prevents a long
       // lived local workspace from exceeding the NDJSON bridge limit and
@@ -961,12 +979,12 @@ export function createEngineProtocol(
         kind: "state",
         snapshot: {
           serverCursor: sync.serverCursor,
-          automation: sync.snapshot.automation,
+          automation: sync.automation,
           // The state envelope is polled by the desktop shell. Keep it a
           // dashboard projection: completed Codex records can contain large
           // prompts/outputs and must be fetched only by an explicit detail
           // command, never on every workspace refresh.
-          jobs: sync.snapshot.jobs.map((job) => ({
+          jobs: sync.jobs.map((job) => ({
             id: job.id,
             kind: job.kind,
             state: job.state,
@@ -974,7 +992,7 @@ export function createEngineProtocol(
             ...(job.lastError ? { lastError: job.lastError } : {}),
             ...(job.metadata ? { metadata: job.metadata } : {})
           })),
-          outbox: sync.snapshot.outbox,
+          outbox: sync.outbox,
           changes
         }
       };
@@ -1577,11 +1595,12 @@ async function handleLocalWorkflowCommand(
         : options.sourceTransport
           ? await collectDraftSourceEvidence(undefined, [], urls, options.sourceTransport)
           : [];
+      const retainedEvidence = fallbackDraftSourceEvidence(payload.sources);
       codex = await options.codexCoordinator.submit({
         jobId: draftId,
         idempotencyKey: `draft:${idempotencyKey}`,
         definitionId: "DRAFT.CREATE",
-        payload: { ...effectivePayload, sources: sourceEvidence }
+        payload: { ...effectivePayload, sources: sourceEvidence.length > 0 ? sourceEvidence : retainedEvidence }
       });
     }
     if (kind === "JOB.RETRY" && options.codexCoordinator) {
@@ -1589,7 +1608,7 @@ async function handleLocalWorkflowCommand(
       // The workflow row and the Codex coordinator record share the draft ID,
       // but have separate durable state. Requeue both sides so the Operations
       // button is a real recovery action rather than a misleading success.
-      codex = await options.codexCoordinator.recoverInterrupted(jobId);
+      codex = await options.codexCoordinator.recoverInterrupted(codexRecoveryJobId(await repository.getJob(jobId)));
     }
     return revisionCommandSuccess(envelopeId, { requestId, idempotencyKey, kind: kind as "LOCAL_STATE.SET" }, { backendJob: result, codex }, await repository.getVersion());
   } catch (error) {
@@ -1692,6 +1711,34 @@ export const CODEX_RUNNER_TIMEOUT_MS = 5 * 60 * 1_000;
 function boundedEvidenceText(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.replaceAll("\u0000", "").slice(0, MAX_EVIDENCE_TEXT);
+}
+
+/**
+ * A repair must not lose a revision's already captured evidence merely because
+ * the original publisher URL is temporarily unavailable. This is a strict
+ * structural copy of immutable local snapshots, not a network-derived claim.
+ */
+export function fallbackDraftSourceEvidence(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw) => {
+    if (!isRecord(raw)) return [];
+    const id = typeof raw.id === "string" && raw.id.trim() ? raw.id : "";
+    const url = typeof raw.url === "string" && validCandidateUrl(raw.url) ? raw.url : "";
+    const title = typeof raw.title === "string" && raw.title.trim() ? raw.title : "";
+    const fetchedAt = typeof raw.fetchedAt === "string" && Number.isFinite(Date.parse(raw.fetchedAt)) ? raw.fetchedAt : "";
+    const contentHash = typeof raw.contentHash === "string" && /^[a-f0-9]{64}$/iu.test(raw.contentHash) ? raw.contentHash : "";
+    const evidenceAnchors = Array.isArray(raw.evidenceAnchors)
+      ? raw.evidenceAnchors.flatMap((anchor) => {
+        if (!isRecord(anchor) || anchor.sourceId !== id || typeof anchor.quoteHash !== "string" || !/^[a-f0-9]{64}$/iu.test(anchor.quoteHash)) return [];
+        const start = typeof anchor.start === "number" && Number.isInteger(anchor.start) && anchor.start >= 0 ? anchor.start : undefined;
+        const end = typeof anchor.end === "number" && Number.isInteger(anchor.end) && anchor.end >= (start ?? 0) ? anchor.end : undefined;
+        return [{ sourceId: id, quoteHash: anchor.quoteHash, ...(start === undefined ? {} : { start }), ...(end === undefined ? {} : { end }) }];
+      })
+      : [];
+    return id && url && title && fetchedAt && contentHash && evidenceAnchors.length > 0
+      ? [{ id, url, title, fetchedAt, contentHash, evidenceAnchors }]
+      : [];
+  }).slice(0, 20);
 }
 
 /**
@@ -1970,8 +2017,36 @@ export async function recoverWaitingDraftJobs(
   let recovered = 0;
   const jobs = await repository.listJobs();
   for (const job of jobs) {
-    if (job.kind !== "DRAFT" || !["QUEUED", "RUNNING", "WAITING_CODEX"].includes(job.state)) continue;
+    if (job.kind !== "DRAFT" || !["QUEUED", "RUNNING", "WAITING_CODEX", "RETRY_SCHEDULED"].includes(job.state)) continue;
     const metadata = isRecord(job.metadata) ? job.metadata : {};
+    const finalReviewJobId = typeof metadata.finalReviewJobId === "string" && metadata.finalReviewJobId.trim()
+      ? metadata.finalReviewJobId
+      : undefined;
+    if (finalReviewJobId && typeof metadata.progressStage === "string" && metadata.progressStage.startsWith("FINAL_REVIEW")) {
+      const persisted = await coordinator.recoverInterrupted(finalReviewJobId);
+      if (persisted.recovered) {
+        const { lastError: _lastError, ...queued } = job;
+        await repository.saveJob({
+          ...queued,
+          state: "QUEUED",
+          metadata: {
+            ...metadata,
+            progressStage: "FINAL_REVIEW_RETRYING",
+            lastQueuedAtUnixMs: Date.now(),
+            recoveryReason: "ENGINE_RESTART"
+          }
+        });
+        recovered += 1;
+      } else if (job.state === "RUNNING") {
+        await repository.saveJob({
+          ...job,
+          state: "WAITING_CODEX",
+          lastError: "FINAL_REVIEW_RECOVERY_REQUIRED",
+          metadata: { ...metadata, progressStage: "FINAL_REVIEW_RECOVERY_REQUIRED", finalReviewJobId }
+        });
+      }
+      continue;
+    }
     // A bounded runner timeout is a completed, user-visible stop condition,
     // not an interrupted process. Replaying it on every application start
     // would hide the failure and make the promised manual retry ineffective.
@@ -2151,72 +2226,19 @@ export async function createPersistentEngineProtocol(
         },
         onStarted: async ({ submission }) => {
           reportCodexLifecycle("CODEX_JOB_STARTED");
-          if (submission.definitionId === "REVISION.FINAL_REVIEW" && isRecord(submission.payload)) {
-            const originalJobId = typeof submission.payload.originalJobId === "string" ? submission.payload.originalJobId : "";
-            if (!originalJobId) return;
-            const job = await repository.getJob(originalJobId);
-            if (job.state !== "RUNNING") return;
-            await repository.saveJob({
-              ...job,
-              metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW", finalReviewStartedAtUnixMs: Date.now() }
-            });
-            return;
-          }
-          if (submission.definitionId !== "DRAFT.CREATE") return;
-          const job = await repository.getJob(submission.jobId);
-          if (job.state !== "QUEUED") return;
-          await repository.saveJob({
-            ...job,
-            state: "RUNNING",
-            metadata: {
-              ...(job.metadata ?? {}),
-              startedAtUnixMs: Date.now(),
-              progressStage: "PREPARING_SOURCES"
-            }
-          });
+          await syncCodexParentJobState(repository, submission, { kind: "STARTED" });
         },
         onTaskReady: async ({ submission }) => {
-          if (submission.definitionId !== "DRAFT.CREATE") return;
-          const job = await repository.getJob(submission.jobId);
-          if (job.state !== "RUNNING") return;
-          await repository.saveJob({
-            ...job,
-            metadata: { ...(job.metadata ?? {}), progressStage: "RUNNING_CODEX", codexStartedAtUnixMs: Date.now() }
-          });
+          await syncCodexParentJobState(repository, submission, { kind: "TASK_READY" });
         },
         onWaiting: async ({ submission, reason, diagnosticCode, diagnosticDetail }) => {
           reportCodexLifecycle("CODEX_JOB_WAITING");
           if (diagnosticCode) reportCodexLifecycle(diagnosticCode, (line) => process.stderr.write(line), diagnosticDetail);
-          if (submission.definitionId !== "DRAFT.CREATE") return;
-          const job = await repository.getJob(submission.jobId);
-          if (job.state !== "RUNNING" && job.state !== "QUEUED") return;
-          await repository.saveJob({
-            ...job,
-            state: "WAITING_CODEX",
-            metadata: {
-              ...(job.metadata ?? {}),
-              codexWaitReason: reason,
-              ...(diagnosticDetail ? { codexDiagnosticDetail: diagnosticDetail.slice(0, 240) } : {}),
-              waitingAtUnixMs: Date.now()
-            }
-          });
+          await syncCodexParentJobState(repository, submission, { kind: "WAITING", reason, ...(diagnosticDetail ? { diagnosticDetail } : {}) });
         },
         onRetrying: async ({ submission, failure, transientFailureCount, retryAt }) => {
           reportCodexLifecycle("CODEX_JOB_RETRYING");
-          if (submission.definitionId !== "DRAFT.CREATE") return;
-          const job = await repository.getJob(submission.jobId);
-          if (job.state !== "RUNNING" && job.state !== "QUEUED") return;
-          await repository.saveJob({
-            ...job,
-            state: "QUEUED",
-            metadata: {
-              ...(job.metadata ?? {}),
-              progressStage: "RETRYING_CODEX",
-              codexRetryReason: failure,
-              codexRetryAttempt: transientFailureCount,
-              codexRetryAtUnixMs: Date.parse(retryAt)
-            }
-          });
+          await syncCodexParentJobState(repository, submission, { kind: "RETRYING", failure, transientFailureCount, retryAt });
         },
         onCompleted: async ({ submission, output }) => {
           reportCodexLifecycle("CODEX_JOB_COMPLETED");
@@ -2227,14 +2249,6 @@ export async function createPersistentEngineProtocol(
               ? draftPayload.visualPolicy
               : "GENERATE";
             if (visualPolicy !== "NONE") {
-              const direction: ArtDirection = {
-                title: output.tr.title,
-                palette: ["#08131f", "#32d3a6"],
-                motifs: ["network", "shield"],
-                externalAssets: [],
-                depictsRealPerson: false,
-                depictsBrandLogo: false
-              };
               let artifacts;
               if (visualPolicy === "GENERATE" && imageGenerator) {
                 try {
@@ -2245,18 +2259,34 @@ export async function createPersistentEngineProtocol(
                     title: output.tr.title,
                     articleType: typeof draftPayload.articleType === "string" ? draftPayload.articleType : "news",
                     section: typeof draftPayload.section === "string" ? draftPayload.section : "haberler",
-                    sourceTitles
+                    sourceTitles,
+                    summary: output.tr.description,
+                    keyClaims: output.claims.map((claim) => claim.trText),
+                    visualIntent: `Makalenin ana konusu olan ${output.tr.title} için, ${typeof draftPayload.articleType === "string" ? draftPayload.articleType : "editoryal"} türüne uygun özgün ve metinsiz bir editoryal kompozisyon oluştur.`
                   });
                   artifacts = await renderGeneratedImageVariants(generated, join(dataDir, "media", revision.id), revision.tr.slug);
                 } catch {
-                  // A configured provider can be unavailable without making a
-                  // sourced draft disappear. The local cover fallback stays
-                  // explicit in diagnostics rather than pretending ImageGen ran.
-                  reportCodexLifecycle("IMAGEGEN_FALLBACK_LOCAL");
+                  // ImageGen is an explicit editorial requirement. Do not
+                  // replace a failed article-specific visual with a generic
+                  // local cover and accidentally make it approval-eligible.
+                  reportCodexLifecycle("IMAGEGEN_REQUIRED_FAILED");
                 }
               }
-              artifacts ??= await renderCoverVariants(direction, join(dataDir, "media", revision.id), revision.tr.slug);
-              revision.media = await Promise.all(artifacts.map(async (artifact) => ({
+              if (visualPolicy === "GENERATE" && !imageGenerator) {
+                reportCodexLifecycle("IMAGEGEN_REQUIRED_UNAVAILABLE");
+              }
+              if (visualPolicy === "LOCAL_RENDERER") {
+                const direction: ArtDirection = {
+                  title: output.tr.title,
+                  palette: ["#08131f", "#32d3a6"],
+                  motifs: ["network", "shield"],
+                  externalAssets: [],
+                  depictsRealPerson: false,
+                  depictsBrandLogo: false
+                };
+                artifacts = await renderCoverVariants(direction, join(dataDir, "media", revision.id), revision.tr.slug);
+              }
+              revision.media = await Promise.all((artifacts ?? []).map(async (artifact) => ({
                 role: "hero",
                 path: `media/${revision.id}/${artifact.path}`,
                 sha256: artifact.sha256,
@@ -2269,7 +2299,7 @@ export async function createPersistentEngineProtocol(
             await repository.saveJob({
               ...job,
               state: "RUNNING",
-              metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW_QUEUED", qualityReviewQueuedAtUnixMs: Date.now() }
+              metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW_QUEUED", finalReviewJobId: `${submission.jobId}:final-review`, qualityReviewQueuedAtUnixMs: Date.now() }
             });
             await codexCoordinator!.submit({
               jobId: `${submission.jobId}:final-review`,
@@ -2376,6 +2406,104 @@ export async function createPersistentEngineProtocol(
       }
     }
   };
+}
+
+export async function syncCodexParentJobState(
+  repository: BackendRepository,
+  submission: CodexWorkSubmission,
+  update:
+    | { kind: "STARTED" }
+    | { kind: "TASK_READY" }
+    | { kind: "WAITING"; reason: string; diagnosticDetail?: string }
+    | { kind: "RETRYING"; failure: string; transientFailureCount: number; retryAt: string }
+): Promise<void> {
+  const finalReview = submission.definitionId === "REVISION.FINAL_REVIEW";
+  const originalJobId = finalReview && isRecord(submission.payload) && typeof submission.payload.originalJobId === "string"
+    ? submission.payload.originalJobId
+    : submission.jobId;
+  if (!originalJobId) return;
+  const job = await repository.getJob(originalJobId);
+  if (finalReview) {
+    if (update.kind === "STARTED") {
+      if (!["QUEUED", "RUNNING", "RETRY_SCHEDULED"].includes(job.state)) return;
+      await repository.saveJob({
+        ...job,
+        state: "RUNNING",
+        metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW", finalReviewJobId: submission.jobId, finalReviewStartedAtUnixMs: Date.now() }
+      });
+      return;
+    }
+    if (update.kind === "WAITING") {
+      if (!["QUEUED", "RUNNING", "RETRY_SCHEDULED"].includes(job.state)) return;
+      await repository.saveJob({
+        ...job,
+        state: "WAITING_CODEX",
+        metadata: {
+          ...(job.metadata ?? {}),
+          progressStage: "FINAL_REVIEW_WAITING_CODEX",
+          finalReviewJobId: submission.jobId,
+          finalReviewWaitReason: update.reason,
+          ...(update.diagnosticDetail ? { codexDiagnosticDetail: update.diagnosticDetail.slice(0, 240) } : {}),
+          waitingAtUnixMs: Date.now()
+        }
+      });
+      return;
+    }
+    if (update.kind === "RETRYING") {
+      if (!["QUEUED", "RUNNING", "RETRY_SCHEDULED"].includes(job.state)) return;
+      await repository.saveJob({
+        ...job,
+        state: "RETRY_SCHEDULED",
+        metadata: {
+          ...(job.metadata ?? {}),
+          progressStage: "FINAL_REVIEW_RETRYING",
+          finalReviewJobId: submission.jobId,
+          finalReviewRetryReason: update.failure,
+          finalReviewRetryAttempt: update.transientFailureCount,
+          finalReviewRetryAtUnixMs: Date.parse(update.retryAt)
+        }
+      });
+    }
+    return;
+  }
+  if (update.kind === "STARTED") {
+    if (job.state !== "QUEUED") return;
+    await repository.saveJob({
+      ...job,
+      state: "RUNNING",
+      metadata: { ...(job.metadata ?? {}), startedAtUnixMs: Date.now(), progressStage: "PREPARING_SOURCES" }
+    });
+    return;
+  }
+  if (update.kind === "TASK_READY") {
+    if (job.state !== "RUNNING") return;
+    await repository.saveJob({ ...job, metadata: { ...(job.metadata ?? {}), progressStage: "RUNNING_CODEX", codexStartedAtUnixMs: Date.now() } });
+    return;
+  }
+  if (update.kind === "WAITING") {
+    if (job.state !== "RUNNING" && job.state !== "QUEUED") return;
+    await repository.saveJob({
+      ...job,
+      state: "WAITING_CODEX",
+      metadata: { ...(job.metadata ?? {}), codexWaitReason: update.reason, ...(update.diagnosticDetail ? { codexDiagnosticDetail: update.diagnosticDetail.slice(0, 240) } : {}), waitingAtUnixMs: Date.now() }
+    });
+    return;
+  }
+  if (update.kind === "RETRYING" && (job.state === "RUNNING" || job.state === "QUEUED")) {
+    await repository.saveJob({
+      ...job,
+      state: "QUEUED",
+      metadata: { ...(job.metadata ?? {}), progressStage: "RETRYING_CODEX", codexRetryReason: update.failure, codexRetryAttempt: update.transientFailureCount, codexRetryAtUnixMs: Date.parse(update.retryAt) }
+    });
+  }
+}
+
+export function codexRecoveryJobId(job: BackendJob): string {
+  const metadata = isRecord(job.metadata) ? job.metadata : {};
+  const finalReviewJobId = typeof metadata.finalReviewJobId === "string" ? metadata.finalReviewJobId.trim() : "";
+  return finalReviewJobId && typeof metadata.progressStage === "string" && metadata.progressStage.startsWith("FINAL_REVIEW")
+    ? finalReviewJobId
+    : job.id;
 }
 
 export async function runStdioEngine(

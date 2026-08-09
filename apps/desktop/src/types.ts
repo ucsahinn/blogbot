@@ -517,6 +517,8 @@ export interface DesktopPreferences {
   notifications: boolean;
   emailDigest: boolean;
   defaultSection: Section;
+  /** Show the exact local evidence links beside a review by default. */
+  showSourceReferences: boolean;
 }
 
 export interface SystemHealthView {

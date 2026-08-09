@@ -34,22 +34,15 @@ export interface PublicationFile {
 
 export interface PublisherConnectorConfigInput {
   github: { repository: string; baseBranch: string; [key: string]: unknown };
-  /** Generic site/hosting names are the active contract. */
-  site?: { siteOrigin: string; contentRoot: string; adapterId?: string; [key: string]: unknown };
+  /** Generic site/hosting names are the only active contract. */
+  site: { siteOrigin: string; contentRoot: string; adapterId?: string; [key: string]: unknown };
   hosting?: { host: string; releaseRoot: string; [key: string]: unknown };
-  /** Legacy first-adapter fields retained only for migration compatibility. */
-  siberdergi?: { siteOrigin: string; contentRoot: string; [key: string]: unknown };
-  hetzner?: { host: string; releaseRoot: string; [key: string]: unknown };
 }
 
 export interface PublisherConnectorConfig {
   github: { repository: string; baseBranch: string };
-  site?: { siteOrigin: string; contentRoot: string; adapterId?: string };
+  site: { siteOrigin: string; contentRoot: string; adapterId?: string };
   hosting?: { host: string; releaseRoot: string };
-  /** @deprecated Only populated by the explicit legacy SiberDergi adapter branch. */
-  siberdergi?: { siteOrigin: string; contentRoot: string };
-  /** @deprecated Only populated by the explicit legacy Hetzner deployment branch. */
-  hetzner?: { host: string; releaseRoot: string };
 }
 
 export type ConnectorConfigErrorCode =
@@ -112,11 +105,10 @@ export function validatePublisherConnectorConfig(input: PublisherConnectorConfig
   const github = input.github;
   const genericSite = input.site;
   const genericHosting = input.hosting;
-  const siberdergi = input.siberdergi;
-  const hetzner = input.hetzner;
-  // A selected generic site always takes precedence over stale legacy
-  // connector fields left behind by an older setup migration.
-  if (genericSite) {
+  if (!github || !genericSite) {
+    throw new ConnectorConfigError("INVALID_CONFIG", "github and site connectors are required");
+  }
+  {
     assertNoCredentials(github, "github");
     assertNoCredentials(genericSite, "site");
     if (genericHosting) assertNoCredentials(genericHosting, "hosting");
@@ -150,35 +142,10 @@ export function validatePublisherConnectorConfig(input: PublisherConnectorConfig
     }
     return result;
   }
-  if (!github || !siberdergi || !hetzner) {
-    throw new ConnectorConfigError("INVALID_CONFIG", "github, siberdergi, and hetzner connectors are required");
-  }
-  assertNoCredentials(github, "github");
-  assertNoCredentials(siberdergi, "siberdergi");
-  assertNoCredentials(hetzner, "hetzner");
-  const repository = requiredConfigString(github.repository, "github.repository");
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
-    throw new ConnectorConfigError("INVALID_REPOSITORY", "github.repository must be owner/name");
-  }
-  const baseBranch = requiredConfigString(github.baseBranch, "github.baseBranch");
-  if (!/^[A-Za-z0-9._/-]+$/u.test(baseBranch) || baseBranch.startsWith("/") || baseBranch.includes("..")) {
-    throw new ConnectorConfigError("INVALID_BRANCH", "github.baseBranch is unsafe");
-  }
-  const siteOrigin = requiredConfigString(siberdergi.siteOrigin, "siberdergi.siteOrigin").replace(/\/$/u, "");
-  if (siteOrigin !== "https://siberdergi.net") {
-    throw new ConnectorConfigError("INVALID_SITE_ORIGIN", "siberdergi.siteOrigin must be https://siberdergi.net");
-  }
-  const contentRoot = absolutePosixPath(siberdergi.contentRoot, "siberdergi.contentRoot");
-  const host = requiredConfigString(hetzner.host, "hetzner.host");
-  if (!/^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/u.test(host) || host.includes("..")) {
-    throw new ConnectorConfigError("INVALID_HOST", "hetzner.host must be a DNS host name");
-  }
-  const releaseRoot = absolutePosixPath(hetzner.releaseRoot, "hetzner.releaseRoot");
-  return { github: { repository, baseBranch }, siberdergi: { siteOrigin, contentRoot }, hetzner: { host, releaseRoot } };
 }
 
 export interface PublisherDryRunStep {
-  connector: "github" | "site" | "hosting" | "siberdergi" | "hetzner";
+  connector: "github" | "site" | "hosting";
   action: "validate-bundle" | "create-pull-request" | "merge-after-checks" | "deploy-release-preview";
   target: string;
   writes: false;
@@ -198,7 +165,7 @@ export function buildPublisherDryRunPlan(input: {
   now: string;
 }): PublisherDryRunPlan {
   const connectors = validatePublisherConnectorConfig(input.connectors);
-  if (input.connectors.site && !input.command.bundlePolicy) {
+  if (!input.command.bundlePolicy) {
     throw new PublisherGuardError("BUNDLE_POLICY_REQUIRED", "a generic site publication requires its adapter bundle policy");
   }
   assertApprovedBundle(input.command.files, input.command.approvedRevisionHash, input.command.revisionId, input.command.bundlePolicy);
@@ -210,31 +177,17 @@ export function buildPublisherDryRunPlan(input: {
   if (!Number.isFinite(generatedAtMs) || new Date(generatedAtMs).toISOString() !== generatedAt) {
     throw new ConnectorConfigError("INVALID_CONFIG", "now must be an exact UTC ISO timestamp");
   }
-  if (input.connectors.site) {
-    const site = connectors.site!;
-    return {
-      mode: "dry-run",
-      generatedAt,
-      credentialsRequired: false,
-      target: { repository: connectors.github.repository, baseBranch: connectors.github.baseBranch, siteOrigin: site.siteOrigin },
-      steps: [
-        { connector: "site", action: "validate-bundle", target: site.contentRoot, writes: false },
-        { connector: "github", action: "create-pull-request", target: `${connectors.github.repository}:${connectors.github.baseBranch}`, writes: false },
-        { connector: "github", action: "merge-after-checks", target: connectors.github.repository, writes: false },
-        ...(connectors.hosting ? [{ connector: "hosting" as const, action: "deploy-release-preview" as const, target: `${connectors.hosting.host}:${connectors.hosting.releaseRoot}`, writes: false as const }] : [])
-      ]
-    };
-  }
+  const site = connectors.site;
   return {
     mode: "dry-run",
     generatedAt,
     credentialsRequired: false,
-    target: { repository: connectors.github.repository, baseBranch: connectors.github.baseBranch, siteOrigin: connectors.siberdergi!.siteOrigin, host: connectors.hetzner!.host },
+    target: { repository: connectors.github.repository, baseBranch: connectors.github.baseBranch, siteOrigin: site.siteOrigin, ...(connectors.hosting ? { host: connectors.hosting.host } : {}) },
     steps: [
-      { connector: "siberdergi", action: "validate-bundle", target: connectors.siberdergi!.contentRoot, writes: false },
+      { connector: "site", action: "validate-bundle", target: site.contentRoot, writes: false },
       { connector: "github", action: "create-pull-request", target: `${connectors.github.repository}:${connectors.github.baseBranch}`, writes: false },
       { connector: "github", action: "merge-after-checks", target: connectors.github.repository, writes: false },
-      { connector: "hetzner", action: "deploy-release-preview", target: `${connectors.hetzner!.host}:${connectors.hetzner!.releaseRoot}`, writes: false }
+      ...(connectors.hosting ? [{ connector: "hosting" as const, action: "deploy-release-preview" as const, target: `${connectors.hosting.host}:${connectors.hosting.releaseRoot}`, writes: false as const }] : [])
     ]
   };
 }
@@ -288,8 +241,8 @@ export interface ApprovedPublicationCommand {
   approvedHeadSha: string;
   currentHeadSha: string;
   files: readonly PublicationFile[];
-  /** Adapter-provided path contract. Omitted only for the legacy SiberDergi bundle. */
-  bundlePolicy?: PublicationBundlePolicy;
+  /** Hash-bound adapter-provided path contract. */
+  bundlePolicy: PublicationBundlePolicy;
 }
 
 export interface PublicationBundlePolicy {
@@ -347,23 +300,7 @@ export function createPublicationEffectKey(
   return `blogbot:${effect}:${digest}`;
 }
 
-const articlePath =
-  /^src\/content\/articles\/(?:tr\/(?:haberler|analiz|dosyalar|rehberler)|en\/(?:news|analysis|deep-dives|guides))\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
-const imagePath =
-  /^public\/images\/articles\/[a-z0-9]+(?:-[a-z0-9]+)*\/[a-z0-9]+(?:-[a-z0-9]+)*\.(?:png|webp|avif)$/;
-const manifestPath =
-  /^\.blogbot\/manifests\/[a-z0-9]+(?:-[a-z0-9]+)*\.json$/;
-const indexPath = /^(?:public\/(?:sitemap\.xml|news-sitemap\.xml|robots\.txt|rss\.xml)|public\/en\/rss\.xml)$/;
-
-const legacyBundlePolicy: PublicationBundlePolicy = {
-  adapterId: "siberdergi",
-  manifestPath: ".blogbot/manifests/",
-  allowedPathPrefixes: ["src/content/articles/", "public/images/articles/", "public/", ".blogbot/manifests/"],
-  requiredLocalePrefixes: ["src/content/articles/tr/", "src/content/articles/en/"],
-  requiredMediaPrefix: "public/images/articles/"
-};
-
-export function assertAllowedContentPath(path: string, policy: PublicationBundlePolicy = legacyBundlePolicy): void {
+export function assertAllowedContentPath(path: string, policy: PublicationBundlePolicy): void {
   if (typeof path !== "string") {
     throw new PublisherGuardError("CONTENT_PATH_FORBIDDEN", "publisher cannot modify a non-text path");
   }
@@ -372,7 +309,7 @@ export function assertAllowedContentPath(path: string, policy: PublicationBundle
   // generic adapters. Empty segments and a trailing slash can otherwise be
   // normalized differently by Git, Node, and the local materializer (and can
   // turn a supposed file entry into a directory target).
-  const genericPolicyPath = policy !== legacyBundlePolicy && policy.allowedPathPrefixes.some((prefix) =>
+  const policyPathAllowed = policy.allowedPathPrefixes.some((prefix) =>
     // The engine derives this list from the hash-bound generated file set.
     // A single exact file is therefore a valid allow-list entry; a trailing
     // slash remains the only form that grants a directory subtree.
@@ -386,8 +323,7 @@ export function assertAllowedContentPath(path: string, policy: PublicationBundle
     path.startsWith("/") ||
     path.endsWith("/") ||
     segments.some((segment) => segment.length === 0 || segment === "." || segment === "..") ||
-    (!articlePath.test(path) && !imagePath.test(path) && !manifestPath.test(path) && !indexPath.test(path)) &&
-    !genericPolicyPath
+    !policyPathAllowed
   ) {
     throw new PublisherGuardError(
       "CONTENT_PATH_FORBIDDEN",
@@ -406,8 +342,11 @@ function assertApprovedBundle(
   files: readonly PublicationFile[],
   approvedHash: string,
   expectedRevisionId?: string,
-  bundlePolicy: PublicationBundlePolicy = legacyBundlePolicy
+  bundlePolicy?: PublicationBundlePolicy
 ): void {
+  if (!bundlePolicy) {
+    throw new PublisherGuardError("BUNDLE_POLICY_REQUIRED", "publication requires an adapter bundle policy");
+  }
   if (files.length === 0) {
     throw new PublisherGuardError("BUNDLE_EMPTY", "approved bundle cannot be empty");
   }

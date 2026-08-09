@@ -199,6 +199,15 @@ export function OperationsHub(props: OperationsHubProps) {
         </div>
       </header>
       {message ? <div className="inline-notice" role="status" aria-live="polite">{message}</div> : null}
+      <aside className="automation-continuity" aria-label="Yerel otomasyon durumu">
+        <span aria-hidden="true">{props.snapshot.automation.ingestionPaused ? "Ⅱ" : "●"}</span>
+        <div>
+          <strong>Kaynak taraması: <span className={`automation-state ${props.snapshot.automation.ingestionPaused ? "is-paused" : "is-running"}`}>{props.snapshot.automation.ingestionPaused ? "Duraklatıldı" : "Çalışıyor"}</span></strong>
+          <p>{props.snapshot.automation.ingestionPaused
+            ? "Yeni kaynak alma durdu; mevcut yerel içerikler ve inceleme ekranları kullanılabilir."
+            : "Yeni kaynaklar yerel plana göre taranabilir; yayın onayı ayrı tutulur."}</p>
+        </div>
+      </aside>
       <div className="workspace-tabs" role="tablist" aria-label="Operasyon bölümleri" onKeyDown={handleTabListKeyDown}>
         {([
           ["jobs", `Hatalar · ${props.workspace.failures.filter((item) => item.state === "ACTION_REQUIRED").length}`],

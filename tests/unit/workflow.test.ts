@@ -29,7 +29,7 @@ function minimalRevision(state: ArticleRevision["state"]): ArticleRevision {
     },
     section: "haberler",
     articleType: "news",
-    author: "SiberDergi",
+    author: "Yerel Editorya",
     tags: [],
     claims: [],
     sources: [],

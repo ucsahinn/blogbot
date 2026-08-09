@@ -11,12 +11,12 @@ import {
 } from "../../apps/publisher/src/github-connector.ts";
 import { GitHubDeviceFlowClient } from "../../apps/publisher/src/github-http.ts";
 
-const config = { owner: "siberdergi", repository: "site", workflow: "deploy.yml" };
+const config = { owner: "owner", repository: "site", workflow: "deploy.yml" };
 
 test("validates wizard owner, repository, and workflow scope", () => {
   assert.deepEqual(evaluateGitHubConnectorState(config, { status: "logged-out" }), {
     state: "LOGIN_REQUIRED",
-    repository: "siberdergi/site",
+    repository: "owner/site",
     workflow: "deploy.yml",
     requiredScopes: ["repo"]
   });
@@ -54,9 +54,9 @@ test("device flow rejects untrusted verification URLs and unsafe polling bounds"
 });
 
 test("publisher intent and dry-run are deterministic and no-write", () => {
-  const intent = createPublisherIntent({ repository: "siberdergi/site", workflow: "deploy.yml", revisionId: "rev-1", revisionHash: "a".repeat(64) });
+  const intent = createPublisherIntent({ repository: "owner/site", workflow: "deploy.yml", revisionId: "rev-1", revisionHash: "a".repeat(64) });
   assert.equal(intent.state, "PENDING");
-  assert.equal(intent.key, createPublisherIntent({ repository: "siberdergi/site", workflow: "deploy.yml", revisionId: "rev-1", revisionHash: "a".repeat(64) }).key);
+  assert.equal(intent.key, createPublisherIntent({ repository: "owner/site", workflow: "deploy.yml", revisionId: "rev-1", revisionHash: "a".repeat(64) }).key);
   assert.equal(advancePublisherIntent(intent, evaluateGitHubConnectorState(config, { status: "authorized", scopes: ["repo", "workflow"] })).state, "READY");
   const plan = buildGitHubPublisherDryRun({ config, intent, now: "2026-07-30T00:00:00.000Z" });
   assert.equal(plan.writes, false);

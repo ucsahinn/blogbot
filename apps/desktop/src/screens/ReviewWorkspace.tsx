@@ -18,6 +18,7 @@ interface ReviewWorkspaceProps {
   snapshot: BootstrapSnapshot;
   readOnly: boolean;
   connectorState: ConnectorStateSnapshot;
+  showSourceReferences?: boolean;
   onDraftQueued?: (message: string, expectedDraftId?: string) => Promise<void>;
   onPublicationQueued?: () => Promise<void>;
   onRevisionApproved?: () => Promise<void>;
@@ -47,7 +48,7 @@ const tabLabels: Array<{ id: ReviewTab; label: string }> = [
   { id: "diff", label: "Değişiklikler" }
 ];
 
-const acceptableWarningIds = new Set(["SINGLE_OFFICIAL_SOURCE_EXCEPTION"]);
+const acceptableWarningIds = new Set(["SINGLE_OFFICIAL_SOURCE_EXCEPTION", "contradictions", "seo", "media"]);
 
 function gateSummary(gates: GateView[]) {
   return {
@@ -64,6 +65,17 @@ function isScheduledForFuture(scheduledAt: string): boolean {
 
 function wordCount(value: string): number {
   return value.trim().split(/\s+/u).filter(Boolean).length;
+}
+
+function safeSourceReferenceUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function editorialTargetWords(articleType: ReviewRevision["articleType"]): number {
@@ -128,6 +140,7 @@ export function ReviewWorkspace({
   snapshot,
   readOnly,
   connectorState,
+  showSourceReferences = true,
   onDraftQueued,
   onPublicationQueued,
   onRevisionApproved,
@@ -198,6 +211,10 @@ export function ReviewWorkspace({
     () => gateSummary(revision?.gates ?? []),
     [revision]
   );
+  const sourceById = useMemo(
+    () => new Map((revision?.sources ?? []).map((source) => [source.id, source])),
+    [revision]
+  );
   const acceptedWarnings = revision?.gates.filter((gate) => gate.state === "WARN") ?? [];
   const comprehensiveTargetWords = revision ? editorialTargetWords(revision.articleType) : 0;
   const trWordCount = revision ? wordCount(revision.tr.bodyMarkdown) : 0;
@@ -205,6 +222,7 @@ export function ReviewWorkspace({
     revision && revision.state === "REVIEW_REQUIRED" && trWordCount < comprehensiveTargetWords
   );
   const hasUnacceptableWarning = acceptedWarnings.some((gate) => !acceptableWarningIds.has(gate.id));
+  const claimsBlocked = Boolean(revision?.gates.some((gate) => gate.id === "claims" && gate.state === "BLOCK"));
   const activeContent = revision?.[locale];
   const previousContent = revision?.previous[locale];
   const heroMedia = revision?.media.find((media) => media.role === "hero");
@@ -398,6 +416,29 @@ export function ReviewWorkspace({
     } finally {
       setPreviewingPublication(false);
       setEnqueueingPublication(false);
+    }
+  };
+
+  const requestEvidenceRepair = async () => {
+    if (!revision) return;
+    setRequestingEdit(true);
+    setNotice("");
+    try {
+      const queued = await bridge.requestRevisionEdit({
+        revisionId: revision.id,
+        title: "Kanıt odaklı revizyon hazırlanıyor",
+        instruction: "Kaynak kanıtlarını ve mevcut iddia listesini yeniden eşleştirin. Kanıt bağını taşımayan olgusal iddiaları yalnızca destekleyen yerel kaynak varsa düzeltin; destek yoksa metinden çıkarın. Türkçe ve İngilizce sürümlerde aynı olgusal kapsamı koruyun. SEO veya üslup uğruna yeni iddia eklemeyin."
+      });
+      const queuedMessage = "Kanıt düzeltmesi Codex kuyruğuna alındı. Yeni revizyon ayrı bir hash ile hazırlanacak.";
+      if (onDraftQueued) {
+        await onDraftQueued(queuedMessage, queued.job?.id);
+      } else {
+        setNotice(queuedMessage);
+      }
+    } catch (reason) {
+      setNotice(userFacingBridgeError(reason, "Kanıt düzeltmesi kuyruğa alınamadı."));
+    } finally {
+      setRequestingEdit(false);
     }
   };
 
@@ -837,6 +878,29 @@ export function ReviewWorkspace({
                     })}
                   </div>
                   <aside className="article-metadata">
+                    {showSourceReferences && revision.sources.length > 0 ? (
+                      <section className="metadata-section source-reference-summary" aria-label="Taslak kaynak referansları">
+                        <p className="section-kicker">KAYNAK REFERANSLARI</p>
+                        <strong>{revision.sources.length} yerel kanıt kaydı</strong>
+                        <ul>
+                          {revision.sources.map((source) => {
+                            const href = safeSourceReferenceUrl(source.url);
+                            return (
+                              <li key={source.id}>
+                                {href ? (
+                                  <a href={href} target="_blank" rel="noreferrer">{source.title}</a>
+                                ) : (
+                                  <span>{source.title}</span>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                        <button type="button" className="text-button" onClick={() => setTab("claims")}>
+                          İddialar ve kaynaklar sekmesinde eşleşmeleri incele
+                        </button>
+                      </section>
+                    ) : null}
                     <div className="metadata-section">
                       <p className="section-kicker">YAYIN PAKETİ</p>
                       <dl>
@@ -894,6 +958,15 @@ export function ReviewWorkspace({
                                 : claim.locale.toUpperCase()}{" "}
                               · {claim.sourceIds.length} kanıt
                             </small>
+                            <small className="claim-source-links">
+                              {claim.sourceIds.map((sourceId) => {
+                                const source = sourceById.get(sourceId);
+                                const href = source ? safeSourceReferenceUrl(source.url) : null;
+                                return source ? (
+                                  href ? <a key={sourceId} href={href} target="_blank" rel="noreferrer">{source.title}</a> : <span key={sourceId}>{source.title}</span>
+                                ) : <span key={sourceId}>{sourceId}</span>;
+                              })}
+                            </small>
                           </span>
                           <span className={`claim-state state-${claim.status.toLowerCase()}`}>
                             {claim.status === "VERIFIED"
@@ -918,7 +991,11 @@ export function ReviewWorkspace({
                             {source.title.slice(0, 1)}
                           </span>
                           <span>
-                            <strong>{source.title}</strong>
+                            {safeSourceReferenceUrl(source.url) ? (
+                              <a href={safeSourceReferenceUrl(source.url) ?? undefined} target="_blank" rel="noreferrer">{source.title}</a>
+                            ) : (
+                              <strong>{source.title}</strong>
+                            )}
                             <small>{source.url}</small>
                           </span>
                           <span className="snapshot-meta">
@@ -982,6 +1059,16 @@ export function ReviewWorkspace({
                       Yayın paketi editoryal, SEO ve güvenlik sınırlarından
                       geçti. Engel oluşursa onay düğmesi otomatik kapanır.
                     </p>
+                    {claimsBlocked ? (
+                      <button
+                        className="button button-secondary"
+                        type="button"
+                        disabled={readOnly || requestingEdit}
+                        onClick={() => void requestEvidenceRepair()}
+                      >
+                        {requestingEdit ? "Kanıt düzeltmesi kuyruğa alınıyor…" : "Kanıtı Codex ile düzelt"}
+                      </button>
+                    ) : null}
                   </div>
                   {(["editorial", "seo", "security"] as const).map((group) => (
                     <section className="gate-group" key={group}>

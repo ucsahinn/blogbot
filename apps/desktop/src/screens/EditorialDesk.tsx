@@ -268,6 +268,7 @@ export function EditorialDesk({
           snapshot={snapshot}
           readOnly={readOnly}
           connectorState={connectorState}
+          showSourceReferences={workspace.preferences.showSourceReferences !== false}
           onPublicationQueued={onRefreshWorkspace}
           onRevisionApproved={onRefreshWorkspace}
           onDraftQueued={async (queuedMessage, expectedDraftId) => {

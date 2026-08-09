@@ -16,6 +16,7 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState("");
   const summary = summarizeWorkspace(workspace);
+  const primaryToday = workspace.today.find((item) => item.state !== "DONE") ?? workspace.today[0];
   const formatTime = (value: string) => {
     const date = new Date(value);
     return Number.isNaN(date.getTime())
@@ -96,6 +97,19 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
           Son sağlam görünüm korunuyor. Önkoşul testi tamamlanana kadar değişiklik
           ve onay işlemleri güvenle bekletilir.
         </div>
+      ) : null}
+
+      {primaryToday ? (
+        <section className="dashboard-next-action" aria-labelledby="dashboard-next-action-title">
+          <div>
+            <p className="section-kicker">ŞİMDİ YAPILACAK</p>
+            <h2 id="dashboard-next-action-title">{primaryToday.title}</h2>
+            <p>{primaryToday.detail}</p>
+          </div>
+          <button className="button button-primary" type="button" onClick={() => navigateToWork(primaryToday.target)}>
+            {primaryToday.state === "DONE" ? "Sonucu görüntüle" : "Bu işi aç"}
+          </button>
+        </section>
       ) : null}
 
       <div className="automation-continuity" role="note">

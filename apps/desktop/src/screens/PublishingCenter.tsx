@@ -5,6 +5,7 @@ import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
 import { sectionLabel, slotStateLabel } from "../app-model.ts";
 import {
   PREFERRED_PUBLISHING_TIMES,
+  recommendBalancedSeoSlots,
   resolveScheduleTime,
   scheduleTimeChoice,
   type ScheduleTimeChoice
@@ -15,6 +16,7 @@ interface SlotDraft {
   enabled: boolean;
   choice: ScheduleTimeChoice;
   customTime: string;
+  articleId: string | null;
 }
 
 const HOURS = Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, "0"));
@@ -64,14 +66,17 @@ export function PublishingCenter({
   const [busyId, setBusyId] = useState("");
   const [message, setMessage] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [suggestingSeoSlots, setSuggestingSeoSlots] = useState(false);
   const [slotDrafts, setSlotDrafts] = useState<Record<string, SlotDraft>>({});
+  const [activeSlotId, setActiveSlotId] = useState("");
   const siteMode = connectorState.mode;
 
   const getSlotDraft = (slot: EditorialWorkspaceSnapshot["weeklySlots"][number]): SlotDraft =>
     slotDrafts[slot.id] ?? {
       enabled: slot.enabled,
       choice: scheduleTimeChoice(slot.time),
-      customTime: slot.time
+      customTime: slot.time,
+      articleId: slot.articleId
     };
 
   const slotActionUnavailableReason = (slotId: string): string =>
@@ -111,7 +116,16 @@ export function PublishingCenter({
     setMessage("");
     try {
       const time = resolveScheduleTime(draft.choice, draft.customTime);
-      await bridge.updateScheduleSlot({ slotId: slot.id, enabled: draft.enabled, time });
+      const selectedPost = draft.articleId
+        ? workspace.drafts.find((item) => item.id === draft.articleId && item.state === "APPROVED")
+        : null;
+      await bridge.updateScheduleSlot({
+        slotId: slot.id,
+        enabled: draft.enabled,
+        time,
+        articleId: selectedPost?.id ?? null,
+        articleTitle: selectedPost?.titleTr ?? null
+      });
       setSlotDrafts((current) => {
         const { [slot.id]: _saved, ...rest } = current;
         return rest;
@@ -129,6 +143,29 @@ export function PublishingCenter({
     }
   };
 
+  const suggestSeoSlots = async () => {
+    const recommendations = recommendBalancedSeoSlots(workspace.weeklySlots);
+    if (recommendations.length === 0) {
+      setMessage("Atanmamış uygun slot bulunamadı; mevcut editoryal plan korunuyor.");
+      return;
+    }
+    setSuggestingSeoSlots(true);
+    setMessage("");
+    try {
+      await Promise.all(recommendations.map((recommendation) => bridge.updateScheduleSlot({
+        ...recommendation,
+        articleId: null,
+        articleTitle: null
+      })));
+      onWorkspaceChange(await bridge.getEditorialWorkspace());
+      setMessage(`${recommendations.length} dengeli SEO slotu yerel takvime uygulandı.`);
+    } catch (reason) {
+      setMessage(userFacingBridgeError(reason, "SEO saat önerisi kaydedilemedi."));
+    } finally {
+      setSuggestingSeoSlots(false);
+    }
+  };
+
   return (
     <div className="page hub-page">
       <header className="page-header">
@@ -142,9 +179,14 @@ export function PublishingCenter({
             </p>
           ) : null}
         </div>
+        <div className="page-header-actions">
+          <button className="button button-secondary" type="button" disabled={readOnly || suggestingSeoSlots} onClick={() => void suggestSeoSlots()}>
+            {suggestingSeoSlots ? "SEO saatleri uygulanıyor…" : "Dengeli SEO saatlerini öner"}
+          </button>
         <button className="button button-secondary" type="button" disabled={refreshing} onClick={() => void refresh()}>
           {refreshing ? "Yenileniyor…" : "Takvim durumunu yenile"}
         </button>
+        </div>
       </header>
       <div className="workspace-tabs" role="tablist" aria-label="Yayın bölümleri" onKeyDown={handleTabListKeyDown}>
         {([
@@ -161,8 +203,29 @@ export function PublishingCenter({
             {workspace.weeklySlots.map((slot) => {
               const actionReason = slotActionUnavailableReason(slot.id);
               const actionReasonId = `slot-action-unavailable-${slot.id}`;
+              const approvedPosts = workspace.drafts.filter((item) => item.state === "APPROVED");
+              const selectedTitle = getSlotDraft(slot).articleId
+                ? approvedPosts.find((item) => item.id === getSlotDraft(slot).articleId)?.titleTr ?? slot.articleTitle
+                : null;
+              const activeSlot = activeSlotId || workspace.weeklySlots[0]?.id;
+              if (slot.id !== activeSlot) {
+                return (
+                  <button
+                    className={`slot-summary ${getSlotDraft(slot).enabled ? "" : "is-disabled"}`}
+                    type="button"
+                    key={slot.id}
+                    aria-pressed={false}
+                    aria-label={`${slotLabel(slot)}: Takvimde bu slotu düzenle`}
+                    onClick={() => setActiveSlotId(slot.id)}
+                  >
+                    <span><strong>{slotLabel(slot)}</strong><em>{getSlotDraft(slot).enabled ? resolveScheduleTime(getSlotDraft(slot).choice, getSlotDraft(slot).customTime) : "Kapalı"}</em></span>
+                    <span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span>
+                    <small>{selectedTitle ?? (approvedPosts.length === 0 ? "Onaylı post bekleniyor" : "Post atanmadı")}</small>
+                  </button>
+                );
+              }
               return (
-              <article aria-label={`${slotLabel(slot)} yayın slotu`} className={`slot-card ${getSlotDraft(slot).enabled ? "" : "is-disabled"}`} key={slot.id}>
+              <article aria-label={`${slotLabel(slot)} yayın slotu`} className={`slot-card slot-card-active ${getSlotDraft(slot).enabled ? "" : "is-disabled"}`} key={slot.id}>
                 <div><strong>{slotLabel(slot)}</strong><span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span></div>
                 <label className="slot-time-field">
                   <span>Yayın saati</span>
@@ -204,7 +267,20 @@ export function PublishingCenter({
                     <output aria-label={`${slot.dayLabel} seçilen özel yayın saati`}>{getSlotDraft(slot).customTime}</output>
                   </fieldset>
                 ) : null}
-                <p>{slot.articleTitle ?? "Henüz içerik atanmadı"}</p>
+                <label className="slot-time-field">
+                  <span>Paylaşılacak onaylı post</span>
+                  <select
+                    aria-label={`${slot.dayLabel} paylaşılacak onaylı post`}
+                    value={getSlotDraft(slot).articleId ?? ""}
+                    disabled={readOnly || busyId === slot.id || approvedPosts.length === 0}
+                    aria-describedby={actionReason ? actionReasonId : undefined}
+                    onChange={(event) => updateSlotDraft(slot.id, { articleId: event.target.value || null })}
+                  >
+                    <option value="">Post seçilmedi</option>
+                    {approvedPosts.map((post) => <option key={post.id} value={post.id}>{post.titleTr}</option>)}
+                  </select>
+                </label>
+                <p>{selectedTitle ?? (approvedPosts.length === 0 ? "Atanabilecek onaylı post yok" : "Henüz onaylı post atanmadı")}</p>
                 <label className="toggle-label">
                   <input
                     type="checkbox"

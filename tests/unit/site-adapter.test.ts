@@ -4,7 +4,7 @@ import { SiteAdapterRegistry } from "../../packages/site-adapter/src/index.ts";
 import { astroGenericAdapter } from "../../packages/site-adapter/src/astro-generic.ts";
 import { parseSiteArtifactManifest } from "../../packages/site-adapter/src/artifact.ts";
 
-test("site adapter registry supports a user-selected adapter without SiberDergi coupling", async () => {
+test("site adapter registry supports a user-selected generic adapter", async () => {
   const registry = new SiteAdapterRegistry();
   registry.register({
     id: "astro",
@@ -57,7 +57,7 @@ test("generic Astro adapter builds bilingual section-aware files without a legac
   assert.match(files["src/content/articles/tr/haberler/ornek-haber.md"] ?? "", /translationKey/);
   assert.match(files["src/content/articles/tr/haberler/ornek-haber.md"] ?? "", /authorId/);
   assert.match(files["src/content/articles/tr/haberler/ornek-haber.md"] ?? "", /sources/);
-  assert.doesNotMatch(Object.values(files).join("\n"), /SiberDergi/u);
+  assert.doesNotMatch(Object.values(files).join("\n"), /legacy site name/u);
 });
 
 test("generic Astro adapter advertises general-news and general-blog sections", () => {

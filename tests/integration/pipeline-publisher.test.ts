@@ -8,10 +8,6 @@ import {
   type ArticleRevision
 } from "../../packages/editorial/src/revision.ts";
 import {
-  materializeApprovedSiberDergiBundle,
-  type ApprovedMediaFile
-} from "../../packages/siberdergi/src/bundle.ts";
-import {
   PublisherGuardError,
   assertAllowedContentPath,
   createPublicationEffectKey,
@@ -40,7 +36,7 @@ const approvedMedia = [
     path: "hero-square.webp",
     content: new Uint8Array([82, 73, 70, 70, 5, 6, 7, 8])
   }
-] satisfies ApprovedMediaFile[];
+];
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -66,7 +62,7 @@ const revision: ArticleRevision = {
   },
   section: "haberler",
   articleType: "news",
-  author: "SiberDergi",
+  author: "Example Editorial",
   tags: ["güvenlik"],
   claims: [
     {
@@ -123,12 +119,8 @@ const approval: Approval = {
   approvedAt: "2026-07-29T09:00:00.000Z"
 };
 const approvedHash = approval.revisionHash;
-const files: PublicationFile[] = materializeApprovedSiberDergiBundle(
-  revision,
-  approval,
-  approvedMedia,
-  { now: "2026-07-29T11:00:00.000Z" }
-).files;
+const generic = genericBundle();
+const files: PublicationFile[] = [...generic.files];
 
 function command(overrides: Partial<Parameters<typeof reconcileApprovedPublication>[0]> = {}) {
   return {
@@ -136,15 +128,21 @@ function command(overrides: Partial<Parameters<typeof reconcileApprovedPublicati
     revisionId: "rev-7",
     approvedRevisionHash: approvedHash,
     currentRevisionHash: approvedHash,
-    targetRepository: "ucsahinn/siberdergi.net",
+    targetRepository: "owner/site",
     baseBranch: "main",
     approvedBaseSha: "c".repeat(40),
     currentBaseSha: "c".repeat(40),
     approvedHeadSha: approvedSha,
     currentHeadSha: approvedSha,
     files,
+    bundlePolicy: generic.bundlePolicy,
     ...overrides
   };
+}
+
+function commandWithoutBundlePolicy(): Omit<Parameters<typeof reconcileApprovedPublication>[0], "bundlePolicy"> {
+  const { bundlePolicy: _bundlePolicy, ...withoutBundlePolicy } = command();
+  return withoutBundlePolicy;
 }
 
 function genericBundle() {
@@ -249,7 +247,7 @@ class StrictMemoryEffects implements PublicationEffectsPort {
   }
 }
 
-test("accepts only article, generated image, and Blogbot manifest paths", async () => {
+test("accepts only selected adapter artifact paths and the Blogbot manifest", async () => {
   const effects = new StrictMemoryEffects();
   const result = await reconcileApprovedPublication(command(), effects);
 
@@ -272,9 +270,9 @@ test("rejects an empty publication bundle before creating effects", async () => 
 
 test("rejects missing TR, EN, or media files before creating effects", async () => {
   for (const prefix of [
-    "src/content/articles/tr/",
-    "src/content/articles/en/",
-    "public/images/articles/"
+    "content/tr/",
+    "content/en/",
+    "assets/"
   ]) {
     const effects = new StrictMemoryEffects();
     await assert.rejects(
@@ -292,7 +290,7 @@ test("rejects missing TR, EN, or media files before creating effects", async () 
 
 test("rejects extra and duplicate publication paths before creating effects", async () => {
   const extra: PublicationFile = {
-    path: "src/content/articles/tr/haberler/fazladan.md",
+    path: "content/tr/extra.md",
     content: "extra"
   };
   const duplicate = files[0];
@@ -313,7 +311,7 @@ test("rejects extra and duplicate publication paths before creating effects", as
 
 test("rejects tampered content and manifest bytes before creating effects", async () => {
   const mediaIndex = files.findIndex((file) =>
-    file.path.endsWith("hero-wide.webp")
+    file.path === "assets/story.webp"
   );
   const manifestIndex = files.findIndex((file) =>
     file.path.startsWith(".blogbot/manifests/")
@@ -351,15 +349,17 @@ test("rejects tampered content and manifest bytes before creating effects", asyn
   }
 });
 
-test("accepts the public deep-dives English section and rejects stale section aliases", () => {
+test("accepts selected adapter paths and rejects paths outside its policy", () => {
   assert.doesNotThrow(() =>
     assertAllowedContentPath(
-      "src/content/articles/en/deep-dives/identity-security.md"
+      "content/en/deep-dives/identity-security.md",
+      generic.bundlePolicy
     )
   );
   assert.throws(() =>
     assertAllowedContentPath(
-      "src/content/articles/en/dossiers/identity-security.md"
+      "config/identity-security.md",
+      generic.bundlePolicy
     )
   );
 });
@@ -367,22 +367,16 @@ test("accepts the public deep-dives English section and rejects stale section al
 test("rejects traversal and repository-control paths before creating effects", async () => {
   for (const path of [
     "../outside.md",
-    "src/content/articles/tr/haberler/../../config.ts",
+    "content/tr/../../config.ts",
     ".github/workflows/deploy.yml",
-    "astro.config.mjs",
-    "public/images/articles/rev-7/payload.svg"
+    "astro.config.mjs"
   ]) {
-    const effects = new StrictMemoryEffects();
-    await assert.rejects(
-      reconcileApprovedPublication(
-        command({ files: [{ path, content: "forbidden" }] }),
-        effects
-      ),
+    assert.throws(
+      () => assertAllowedContentPath(path, generic.bundlePolicy),
       (error: unknown) =>
         error instanceof PublisherGuardError &&
         error.code === "CONTENT_PATH_FORBIDDEN"
     );
-    assert.equal(effects.createPullRequestCalls.length, 0);
   }
 });
 
@@ -424,7 +418,7 @@ test("pending required checks wait without merge or deploy effects", async () =>
     "article-7",
     "rev-7",
     approvedHash,
-    "ucsahinn/siberdergi.net",
+    "owner/site",
     "main",
     "c".repeat(40)
   );
@@ -450,7 +444,7 @@ test("failed required checks block merge and deploy effects", async () => {
     "article-7",
     "rev-7",
     approvedHash,
-    "ucsahinn/siberdergi.net",
+    "owner/site",
     "main",
     "c".repeat(40)
   );
@@ -521,7 +515,7 @@ test("changes every publication effect key when the approved revision changes", 
       "article-7",
       "rev-7",
       approvedHash,
-      "ucsahinn/siberdergi.net",
+      "owner/site",
       "main",
       "c".repeat(40)
     ),
@@ -538,17 +532,12 @@ test("changes every publication effect key when the approved revision changes", 
 });
 
 const connectorConfig: PublisherConnectorConfigInput = {
-  github: { repository: "ucsahinn/siberdergi.net", baseBranch: "main" },
-  siberdergi: { siteOrigin: "https://siberdergi.net", contentRoot: "/srv/siberdergi" },
-  hetzner: { host: "edge.example.net", releaseRoot: "/srv/siberdergi/releases" }
+  github: { repository: "owner/site", baseBranch: "main" },
+  site: { siteOrigin: "https://example.org", contentRoot: "/srv/site", adapterId: "astro" }
 };
 
-test("validates user-entered connector config without accepting credentials", () => {
-  assert.deepEqual(validatePublisherConnectorConfig(connectorConfig), {
-    github: { repository: "ucsahinn/siberdergi.net", baseBranch: "main" },
-    siberdergi: { siteOrigin: "https://siberdergi.net", contentRoot: "/srv/siberdergi" },
-    hetzner: { host: "edge.example.net", releaseRoot: "/srv/siberdergi/releases" }
-  });
+test("validates user-entered generic connector config without accepting credentials", () => {
+  assert.deepEqual(validatePublisherConnectorConfig(connectorConfig), connectorConfig);
   assert.throws(
     () => validatePublisherConnectorConfig({ ...connectorConfig, github: { ...connectorConfig.github, token: "secret" } } as never),
     (error: unknown) => error instanceof ConnectorConfigError && error.code === "CREDENTIALS_NOT_ALLOWED"
@@ -559,7 +548,25 @@ test("validates user-entered connector config without accepting credentials", ()
   );
 });
 
-test("builds a deterministic no-write plan for GitHub, SiberDergi, and Hetzner", () => {
+test("requires a generic site connector instead of accepting legacy connector fields", () => {
+  assert.throws(
+    () => validatePublisherConnectorConfig({
+      github: { repository: "owner/site", baseBranch: "main" },
+      legacySite: { siteOrigin: "https://legacy.example", contentRoot: "/srv/site" },
+      legacyHosting: { host: "example.org", releaseRoot: "/var/www/site" }
+    } as never),
+    (error: unknown) => error instanceof ConnectorConfigError && error.code === "INVALID_CONFIG"
+  );
+});
+
+test("publication reconciliation fails closed when the bundle policy is missing", async () => {
+  await assert.rejects(
+    reconcileApprovedPublication(commandWithoutBundlePolicy() as Parameters<typeof reconcileApprovedPublication>[0], new StrictMemoryEffects()),
+    (error: unknown) => error instanceof PublisherGuardError && error.code === "BUNDLE_POLICY_REQUIRED"
+  );
+});
+
+test("builds a deterministic no-write plan for a generic site and GitHub", () => {
   const plan = buildPublisherDryRunPlan({
     command: command(),
     connectors: connectorConfig,
@@ -568,16 +575,15 @@ test("builds a deterministic no-write plan for GitHub, SiberDergi, and Hetzner",
   assert.equal(plan.mode, "dry-run");
   assert.equal(plan.credentialsRequired, false);
   assert.deepEqual(plan.steps.map((step) => [step.connector, step.action]), [
-    ["siberdergi", "validate-bundle"],
+    ["site", "validate-bundle"],
     ["github", "create-pull-request"],
-    ["github", "merge-after-checks"],
-    ["hetzner", "deploy-release-preview"]
+    ["github", "merge-after-checks"]
   ]);
   assert.equal(plan.steps.at(-1)?.writes, false);
-  assert.equal(plan.target.repository, "ucsahinn/siberdergi.net");
+  assert.equal(plan.target.repository, "owner/site");
 });
 
-test("accepts a user-selected generic site without requiring SiberDergi or Hetzner", () => {
+test("accepts a user-selected generic site", () => {
   const bundle = genericBundle();
   const plan = buildPublisherDryRunPlan({
     command: command(bundle),
@@ -592,22 +598,9 @@ test("accepts a user-selected generic site without requiring SiberDergi or Hetzn
   assert.deepEqual(plan.steps.map((step) => step.connector), ["site", "github", "github"]);
 });
 
-test("generic site config wins over stale legacy connector fields", () => {
-  const generic = {
-    github: { repository: "owner/site", baseBranch: "main" },
-    site: { siteOrigin: "https://example.org", contentRoot: "/srv/site", adapterId: "astro" },
-    siberdergi: { siteOrigin: "https://siberdergi.net", contentRoot: "/srv/legacy" },
-    hetzner: { host: "legacy.example.net", releaseRoot: "/srv/legacy/releases" }
-  } satisfies PublisherConnectorConfigInput;
-  assert.deepEqual(validatePublisherConnectorConfig(generic), {
-    github: { repository: "owner/site", baseBranch: "main" },
-    site: { siteOrigin: "https://example.org", contentRoot: "/srv/site", adapterId: "astro" }
-  });
-});
-
 test("generic dry-run fails closed when the adapter bundle policy is missing", () => {
   assert.throws(() => buildPublisherDryRunPlan({
-    command: command(),
+    command: commandWithoutBundlePolicy() as Parameters<typeof reconcileApprovedPublication>[0],
     connectors: {
       github: { repository: "owner/site", baseBranch: "main" },
       site: { siteOrigin: "https://example.org", contentRoot: "/srv/site", adapterId: "astro" }

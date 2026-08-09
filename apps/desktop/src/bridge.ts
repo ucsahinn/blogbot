@@ -107,6 +107,8 @@ export interface BlogbotBridge {
     slotId: string;
     enabled: boolean;
     time: string;
+    articleId?: string | null;
+    articleTitle?: string | null;
   }): Promise<{ ok: true }>;
   saveDesktopPreferences(
     preferences: DesktopPreferences

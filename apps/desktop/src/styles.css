@@ -5003,6 +5003,19 @@ strong {
   display: none;
 }
 
+/* OperationsHub owns system health and pause controls. Its activity tab keeps
+   only the event log and diagnostics, preventing the same controls from being
+   presented twice in one decision flow. */
+.embedded-page.operations-page > .runtime-grid,
+.embedded-page.operations-page > .operations-layout > .schedule-panel {
+  display: none;
+}
+
+.embedded-page.operations-page > .operations-layout {
+  display: block;
+  margin-top: 0;
+}
+
 .workspace-tabs {
   display: flex;
   gap: 4px;
@@ -5489,6 +5502,61 @@ strong {
   border-color: var(--line-strong);
 }
 
+.slot-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px 10px;
+  min-width: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  order: 1;
+}
+
+.slot-summary:hover {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.slot-summary > span:first-child {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.slot-summary strong,
+.slot-summary small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slot-summary em {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.slot-summary small {
+  grid-column: 1 / -1;
+  color: var(--ink-soft);
+}
+
+.slot-summary.is-disabled {
+  background: var(--surface-soft);
+  color: var(--ink-soft);
+}
+
+.slot-card-active {
+  grid-column: 1 / -1;
+  order: 2;
+}
+
 .slot-time-field {
   display: grid;
   gap: 6px;
@@ -5726,6 +5794,32 @@ strong {
   color: var(--ink-soft);
 }
 
+.dashboard-next-action {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 18px 0;
+  padding: 18px 20px;
+  border: 1px solid var(--blue);
+  border-radius: 14px;
+  background: var(--blue-soft);
+}
+
+.dashboard-next-action h2,
+.dashboard-next-action p {
+  margin: 0;
+}
+
+.dashboard-next-action h2 {
+  margin-top: 3px;
+}
+
+.dashboard-next-action p:not(.section-kicker) {
+  margin-top: 6px;
+  color: var(--ink-soft);
+}
+
 .automation-continuity {
   display: flex;
   gap: 12px;
@@ -5744,6 +5838,24 @@ strong {
 
 .automation-continuity p {
   margin: 0;
+}
+
+.automation-state {
+  display: inline-flex;
+  margin-inline-start: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.82em;
+}
+
+.automation-state.is-running {
+  background: #ccefe5;
+  color: #075f4c;
+}
+
+.automation-state.is-paused {
+  background: #fce2bf;
+  color: #854000;
 }
 
 .dual-review-layout {
@@ -5987,6 +6099,12 @@ strong {
   background: color-mix(in srgb, var(--surface-raised) 88%, var(--surface-muted));
 }
 
+.setup-task-card.is-recommended {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
 .setup-task-kind {
   color: var(--ink-soft) !important;
   font-size: 10px !important;
@@ -6199,18 +6317,38 @@ strong {
   accent-color: var(--teal);
 }
 
-.settings-page .setup-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
+.settings-actions {
+  display: grid;
+  gap: 14px;
   padding: 18px 20px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface-muted);
 }
 
-.settings-page .setup-actions small {
+.settings-action-primary,
+.settings-action-secondary,
+.settings-action-notification {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+.settings-action-primary {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-action-notification {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-action-primary .action-unavailable-reason,
+.settings-action-secondary .action-unavailable-reason,
+.settings-action-notification .action-unavailable-reason,
+.settings-actions > small {
   flex-basis: 100%;
 }
 

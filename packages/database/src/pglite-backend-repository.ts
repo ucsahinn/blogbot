@@ -15,6 +15,7 @@ import {
   BackendStoreError,
   type BackendChange,
   type BackendJob,
+  type DashboardSyncResult,
   type BackendRepository,
   type BackendRepositoryTransaction,
   type OutboxEffect,
@@ -561,6 +562,12 @@ export class PGliteBackendRepository
     );
   }
 
+  async syncDashboard(afterCursor: number): Promise<DashboardSyncResult> {
+    return this.database.transaction((transaction) =>
+      readDashboardSync(transaction, this.protector, afterCursor)
+    );
+  }
+
   async runIdempotent<T>(
     idempotencyKey: string,
     requestFingerprint: string,
@@ -868,6 +875,52 @@ async function readSyncSnapshot(
         backendContext("blogbot_jobs", requiredKey(row))
       ))
     },
+    changes: changes.rows.map((row) => ({
+      cursor: Number(row.cursor),
+      kind: row.kind,
+      entityId: row.entity_id
+    }))
+  };
+}
+
+async function readDashboardSync(
+  client: PGliteQueryPort,
+  protector: JsonProtector,
+  afterCursor: number
+): Promise<DashboardSyncResult> {
+  const automation = await client.query<JsonRow>(
+    "SELECT value FROM blogbot_automation WHERE singleton_id = 1"
+  );
+  const outbox = await client.query<JsonRow>(
+    "SELECT id AS key, value FROM blogbot_outbox ORDER BY id"
+  );
+  const jobs = await client.query<JsonRow>(
+    "SELECT id AS key, value FROM blogbot_jobs ORDER BY id"
+  );
+  const changes = await client.query<ChangeRow>(
+    `SELECT cursor, kind, entity_id
+       FROM blogbot_changes
+      WHERE cursor > $1
+      ORDER BY cursor`,
+    [afterCursor]
+  );
+  const cursor = await client.query<{ cursor: string | number }>(
+    "SELECT COALESCE(MAX(cursor), 0) AS cursor FROM blogbot_changes"
+  );
+  return {
+    serverCursor: Number(cursor.rows[0]?.cursor ?? 0),
+    automation: protector.open<AutomationSettings>(
+      automation.rows[0]?.value,
+      backendContext("blogbot_automation", "1")
+    ),
+    outbox: outbox.rows.map((row) => protector.open<OutboxEffect>(
+      row.value,
+      backendContext("blogbot_outbox", requiredKey(row))
+    )),
+    jobs: jobs.rows.map((row) => protector.open<BackendJob>(
+      row.value,
+      backendContext("blogbot_jobs", requiredKey(row))
+    )),
     changes: changes.rows.map((row) => ({
       cursor: Number(row.cursor),
       kind: row.kind,

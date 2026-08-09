@@ -998,8 +998,20 @@ export function createDemoTransport(): InvokeTransport {
         if (!slot || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(time)) {
           throw new BridgeError("COMMAND_FAILED", "Takvim slotu veya saat geçersiz.");
         }
+        const articleId = args?.articleId === null || args?.articleId === undefined
+          ? null
+          : String(args.articleId);
+        const article = articleId
+          ? editorialWorkspace.drafts.find((item) => item.id === articleId && item.state === "APPROVED")
+          : null;
+        if (articleId && !article) {
+          throw new BridgeError("COMMAND_FAILED", "Yalnızca mevcut onaylı bir post seçilebilir.");
+        }
         slot.enabled = Boolean(args?.enabled);
         slot.time = time;
+        slot.articleId = article?.id ?? null;
+        slot.articleTitle = article?.titleTr ?? null;
+        slot.state = article ? "READY" : "EMPTY";
         return { ok: true };
       }
       case "save_desktop_preferences": {

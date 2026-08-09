@@ -341,6 +341,28 @@ test("settings save, cancel and defaults expose truthful state", async ({ page }
   await expect(page.getByRole("textbox", { name: "Varsayılan yazar" })).toHaveValue("Blogbot Editorya");
 });
 
+test("saved source-reference preference keeps review evidence visible beside the article", async ({ page }) => {
+  await page.goto("#settings");
+  const sourceReferences = page.getByRole("checkbox", { name: "Taslakta kaynak referanslarını öne çıkar" });
+
+  await sourceReferences.uncheck();
+  await page.getByRole("button", { name: "Ayarları kaydet" }).click();
+  await expect(page.getByText("Masaüstü tercihleri kaydedildi.")).toBeVisible();
+  await page.goto("#editorial-review");
+  await expect(page.getByRole("region", { name: "Taslak kaynak referansları" })).toHaveCount(0);
+
+  await page.goto("#settings");
+  await sourceReferences.check();
+  await page.getByRole("button", { name: "Ayarları kaydet" }).click();
+  await expect(page.getByText("Masaüstü tercihleri kaydedildi.")).toBeVisible();
+
+  await page.goto("#editorial-review");
+  const references = page.getByRole("region", { name: "Taslak kaynak referansları" });
+  await expect(references).toBeVisible();
+  await expect(references.getByRole("link", { name: /Birincil kaynak · Uygulama rehberi/i })).toHaveAttribute("href", "https://example.org/guides/primary");
+  await expect(references.getByText(/İddialar ve kaynaklar sekmesinde/i)).toBeVisible();
+});
+
 test("notification test waits until a changed notification preference is saved", async ({ page }) => {
   await page.goto("#settings");
   const notifications = page.getByRole("checkbox", { name: /Windows bildirimleri/u });
@@ -373,6 +395,19 @@ test("weekly calendar lets every day use a preset or an explicit custom publishi
   await expect(monday.getByText("17:15", { exact: true })).toBeVisible();
   await monday.getByRole("button", { name: "Slotu kaydet" }).click();
   await expect(page.getByText("Pazartesi için haftalık yayın slotu güncellendi.")).toBeVisible();
+});
+
+test("weekly calendar suggests a modest SEO cadence and lets an approved post be selected", async ({ page }) => {
+  await page.goto("#publishing");
+  await page.getByRole("button", { name: "Dengeli SEO saatlerini öner" }).click();
+  await expect(page.getByText("3 dengeli SEO slotu yerel takvime uygulandı.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Cumartesi · 1. slot: Takvimde bu slotu düzenle" }).click();
+  const saturday = page.getByRole("article", { name: "Cumartesi · 1. slot yayın slotu" });
+  await expect(saturday.getByRole("combobox", { name: "Cumartesi paylaşılacak onaylı post" })).toBeVisible();
+  await saturday.getByRole("combobox", { name: "Cumartesi paylaşılacak onaylı post" }).selectOption("approved-incident");
+  await saturday.getByRole("button", { name: "Slotu kaydet" }).click();
+  await expect(saturday.locator("p").filter({ hasText: "Ekipler için uygulama kontrol listesi" })).toBeVisible();
 });
 
 test("weekly slot controls stay inside their cards at supported widths", async ({ page }) => {
@@ -516,6 +551,14 @@ test("dashboard work and navigation actions open their named destinations", asyn
   }
 });
 
+test("dashboard surfaces one next task before system detail and routes it to the actionable desk", async ({ page }) => {
+  await page.goto("#dashboard");
+
+  await expect(page.getByText("ŞİMDİ YAPILACAK", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Bu işi aç" }).click();
+  await expect(page).toHaveURL(/#editorial$/u);
+});
+
 test("dashboard priority rows route each work type to its actionable workspace", async ({ page }) => {
   for (const [work, route, heading] of [
     ["Örnek analiz paketini incele", "#editorial", "Taslak, iki dil ve kanıt paketi aynı masada."],
@@ -568,7 +611,7 @@ test("operations pause and resume update the visible local automation state", as
   await pause.click();
   await expect(page.getByRole("status")).toContainText("Kaynak taraması duraklatıldı.");
   await expect(page.getByRole("button", { name: "Taramayı sürdür" })).toBeVisible();
-  await expect(page.getByText("Duraklatıldı", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Yerel otomasyon durumu").getByText("Duraklatıldı", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Taramayı sürdür" }).click();
   await expect(page.getByRole("status")).toContainText("Kaynak taraması devam ettirildi.");

@@ -247,6 +247,49 @@ test("engine protocol returns a versioned local state snapshot", async () => {
   assert.deepEqual(snapshot.changes, []);
 });
 
+test("desktop state projection uses the lightweight repository read instead of the full revision sync", async () => {
+  class DashboardProjectionRepository extends InMemoryBackendStore {
+    dashboardReads = 0;
+
+    override async sync(): Promise<never> {
+      throw new Error("FULL_SYNC_MUST_NOT_RUN_FOR_DESKTOP_STATE");
+    }
+
+    async syncDashboard(afterCursor: number) {
+      this.dashboardReads += 1;
+      assert.equal(afterCursor, 42);
+      return {
+        serverCursor: 42,
+        automation: {
+          mode: "INGEST_ONLY" as const,
+          onboardingComplete: false,
+          ingestionPaused: false,
+          publishingPaused: true,
+          timezone: "Europe/Istanbul",
+          scanIntervalMinutes: 30
+        },
+        jobs: [],
+        outbox: [],
+        changes: []
+      };
+    }
+  }
+
+  const repository = new DashboardProjectionRepository();
+  const handle = createEngineProtocol(repository, "memory");
+
+  const result = await handle({
+    version: 1,
+    id: "state-lightweight-projection",
+    kind: "state",
+    afterCursor: 42
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(repository.dashboardReads, 1);
+  assert.equal((result.snapshot as { serverCursor?: number }).serverCursor, 42);
+});
+
 test("state projection bounds stale history for desktop polling", async () => {
   const repository = new InMemoryBackendStore();
   for (let index = 0; index < 5; index += 1) {

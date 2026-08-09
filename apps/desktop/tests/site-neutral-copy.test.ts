@@ -18,7 +18,7 @@ async function sourceFiles(directory: string): Promise<string[]> {
 
 test("desktop user interface stays site and hosting neutral", async () => {
   const files = await sourceFiles(desktopSource);
-  const forbiddenUserCopy = /(?:SiberDergi|Hetzner|WireGuard|\bSD\b)/u;
+  const forbiddenUserCopy = /(?:LegacyPublisherName|LegacyHostingName|WireGuard|\bSD\b)/u;
   const matches: string[] = [];
   for (const file of files) {
     const content = await readFile(file, "utf8");

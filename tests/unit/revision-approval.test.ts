@@ -35,7 +35,7 @@ function revision(overrides: Partial<ArticleRevision> = {}): ArticleRevision {
     },
     section: "haberler",
     articleType: "news",
-    author: "SiberDergi",
+    author: "Yerel Editorya",
     tags: ["kimlik", "güvenlik"],
     claims: [
       {
@@ -87,7 +87,7 @@ function v2Revision(
   overrides: Record<string, unknown> = {}
 ): ArticleRevision {
   return Object.assign(revision(), {
-    editorialDesk: "SiberDergi",
+    editorialDesk: "Yerel Editorya",
     riskLevel: "STANDARD",
     translationParity: {
       status: "MATCHED",
@@ -95,7 +95,7 @@ function v2Revision(
     },
     editorialPolicyHash: "c".repeat(64),
     editorialReviewReportHash: "d".repeat(64),
-    targetRepository: "ucsahinn/siberdergi.net",
+    targetRepository: "owner/site",
     targetBaseBranch: "main",
     targetBaseSha: "e".repeat(40),
     generatedFiles: [
@@ -493,7 +493,7 @@ test("V2 revision package rejects missing hashes and unsafe generated paths", ()
 
 test("partially migrated V2 package fails closed before publication", () => {
   const partial = Object.assign(revision(), {
-    editorialDesk: "SiberDergi"
+    editorialDesk: "Yerel Editorya"
   });
   const approval: Approval = {
     revisionId: partial.id,

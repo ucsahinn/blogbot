@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   PREFERRED_PUBLISHING_TIMES,
   createWeeklySlotIds,
+  recommendBalancedSeoSlots,
   resolveScheduleTime,
   scheduleTimeChoice,
   weeklySlotDay
@@ -29,4 +30,19 @@ test("weekly schedule permits up to five independently configurable slots per da
   assert.equal(weeklySlotDay("slot-mon-3"), "mon");
   assert.equal(weeklySlotDay("slot-sun-5"), "sun");
   assert.equal(weeklySlotDay("slot-mon-6"), null);
+});
+
+test("balanced SEO recommendation selects three spaced custom slots and leaves assigned slots intact", () => {
+  const recommendation = recommendBalancedSeoSlots([
+    { id: "slot-tue-1", articleId: null },
+    { id: "slot-thu-1", articleId: "approved-guide" },
+    { id: "slot-thu-2", articleId: null },
+    { id: "slot-sat-1", articleId: null }
+  ]);
+
+  assert.deepEqual(recommendation, [
+    { slotId: "slot-tue-1", time: "10:30", enabled: true },
+    { slotId: "slot-thu-2", time: "14:00", enabled: true },
+    { slotId: "slot-sat-1", time: "11:00", enabled: true }
+  ]);
 });

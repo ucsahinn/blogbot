@@ -165,11 +165,12 @@ test("editorial workspace actions use explicit commands instead of a generic act
     time: "10:30"
   });
   await bridge.saveDesktopPreferences({
-    author: "SiberDergi Editorya",
+    author: "Yerel Editorya",
     reviewer: "Ulaş Şahin",
     notifications: true,
     emailDigest: false,
-    defaultSection: "haberler"
+    defaultSection: "haberler",
+    showSourceReferences: true
   });
   await bridge.scanSource("source-1");
   await bridge.scanAllSources();
@@ -194,11 +195,12 @@ test("editorial workspace actions use explicit commands instead of a generic act
       command: "save_desktop_preferences",
       args: {
         preferences: {
-          author: "SiberDergi Editorya",
+          author: "Yerel Editorya",
           reviewer: "Ulaş Şahin",
           notifications: true,
           emailDigest: false,
-          defaultSection: "haberler"
+          defaultSection: "haberler",
+          showSourceReferences: true
         }
       }
     },
@@ -352,8 +354,8 @@ test("setup requirements distinguish local installation from external authorizat
 test("setup connector dry-run forwards only redacted configuration", async () => {
   const calls: Array<{ command: string; args: unknown }> = [];
   const bridge = createInvokeBridge(async (command, args) => { calls.push({ command, args }); return { connector: "github", ready: true, detail: "ok" }; });
-  await bridge.testSetupConnector({ connector: "github", config: { owner: "siberdergi", repository: "site" } });
-  assert.deepEqual(calls, [{ command: "test_setup_connector", args: { connector: "github", config: { owner: "siberdergi", repository: "site" } } }]);
+  await bridge.testSetupConnector({ connector: "github", config: { owner: "owner", repository: "site" } });
+  assert.deepEqual(calls, [{ command: "test_setup_connector", args: { connector: "github", config: { owner: "owner", repository: "site" } } }]);
 });
 
 test("connector state is read from the native engine-owned snapshot", async () => {
@@ -400,18 +402,18 @@ test("GitHub bridge exposes read-only broker status and dry-run intent commands"
   const bridge = createInvokeBridge(async (command, args) => {
     calls.push({ command, args });
     if (command === "github_device_flow_status") return { status: "logged-out", writes: false, network: false };
-    if (command === "github_validate_repository") return { valid: true, repository: "siberdergi/site", workflow: "deploy.yml", writes: false };
-    return { mode: "dry-run", writes: false, repository: "siberdergi/site", workflow: "deploy.yml", steps: ["validate-scope", "preview-pull-request", "record-intent"] };
+    if (command === "github_validate_repository") return { valid: true, repository: "owner/site", workflow: "deploy.yml", writes: false };
+    return { mode: "dry-run", writes: false, repository: "owner/site", workflow: "deploy.yml", steps: ["validate-scope", "preview-pull-request", "record-intent"] };
   });
 
   await bridge.getGitHubDeviceFlowStatus();
-  await bridge.validateGitHubRepository({ owner: "siberdergi", repository: "site", workflow: "deploy.yml" });
-  await bridge.previewGitHubPullRequest({ repository: "siberdergi/site", workflow: "deploy.yml", revisionId: "rev-1", revisionHash: "a".repeat(64) });
+  await bridge.validateGitHubRepository({ owner: "owner", repository: "site", workflow: "deploy.yml" });
+  await bridge.previewGitHubPullRequest({ repository: "owner/site", workflow: "deploy.yml", revisionId: "rev-1", revisionHash: "a".repeat(64) });
 
   assert.deepEqual(calls, [
     { command: "github_device_flow_status", args: undefined },
-    { command: "github_validate_repository", args: { owner: "siberdergi", repository: "site", workflow: "deploy.yml" } },
-    { command: "github_preview_pull_request", args: { repository: "siberdergi/site", workflow: "deploy.yml", revisionId: "rev-1", revisionHash: "a".repeat(64) } }
+    { command: "github_validate_repository", args: { owner: "owner", repository: "site", workflow: "deploy.yml" } },
+    { command: "github_preview_pull_request", args: { repository: "owner/site", workflow: "deploy.yml", revisionId: "rev-1", revisionHash: "a".repeat(64) } }
   ]);
 });
 

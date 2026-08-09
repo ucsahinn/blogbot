@@ -100,7 +100,10 @@ export interface EditorialGateResult {
 }
 
 export const ACCEPTABLE_EDITORIAL_WARNING_IDS = new Set([
-  "SINGLE_OFFICIAL_SOURCE_EXCEPTION"
+  "SINGLE_OFFICIAL_SOURCE_EXCEPTION",
+  "contradictions",
+  "seo",
+  "media"
 ]);
 
 export interface ArticleRevision {

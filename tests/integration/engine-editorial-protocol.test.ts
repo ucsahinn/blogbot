@@ -80,7 +80,7 @@ function revision(
     ],
     scheduledAt: "2026-07-30T12:00:00.000Z",
     adapterVersion: "2.0.0",
-    editorialDesk: "SiberDergi Editorya",
+    editorialDesk: "Yerel Editorya",
     riskLevel: "STANDARD",
     translationParity: {
       status: "MATCHED",
@@ -88,7 +88,7 @@ function revision(
     },
     editorialPolicyHash: "e".repeat(64),
     editorialReviewReportHash: "f".repeat(64),
-    targetRepository: "ucsahinn/siberdergi.net",
+    targetRepository: "owner/site",
     targetBaseBranch: "main",
     targetBaseSha: "1".repeat(40),
     generatedFiles: [

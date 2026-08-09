@@ -68,7 +68,8 @@ impl Default for DesktopState {
                 "reviewer": "Editör",
                 "notifications": true,
                 "emailDigest": false,
-                "defaultSection": "haberler"
+                "defaultSection": "haberler",
+                "showSourceReferences": true
             })),
             local_dev_process: RwLock::new(None),
             folder_grants: RwLock::new(Vec::new()),
@@ -112,7 +113,7 @@ fn authorize_connector_directory(
     config: &mut Value,
 ) -> Result<(), CommandError> {
     let field = match connector {
-        "site" | "siberdergi" => "repositoryPath",
+        "site" => "repositoryPath",
         "backup" => "folder",
         _ => return Ok(()),
     };
@@ -648,7 +649,7 @@ pub fn engine_doctor(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, Co
 
 #[tauri::command]
 pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, CommandError> {
-    let allowed = ["codex", "github", "site", "siberdergi", "deploy", "backup"];
+    let allowed = ["codex", "github", "site", "deploy", "backup"];
     if !allowed.contains(&connector.as_str()) {
         return Err(CommandError::InvalidInput("unknown setup connector".into()));
     }
@@ -658,7 +659,7 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
     let allowed_fields: &[&str] = match connector.as_str() {
         "codex" => &["accountLabel"],
         "github" => &["owner", "repository", "clientId"],
-        "site" | "siberdergi" => &["repositoryPath", "publicSiteUrl", "mode"],
+        "site" => &["repositoryPath", "publicSiteUrl", "mode"],
         "deploy" => &["workflowName"],
         "backup" => &["folder"],
         _ => &[],
@@ -681,7 +682,7 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
     let missing = match connector.as_str() {
         "codex" => text("accountLabel").map(|value| value.is_empty()).unwrap_or(true),
         "github" => ["owner", "repository"].iter().any(|key| text(key).map(|value| value.is_empty()).unwrap_or(true)),
-        "site" | "siberdergi" => text("repositoryPath").map(|value| value.is_empty()).unwrap_or(true),
+        "site" => text("repositoryPath").map(|value| value.is_empty()).unwrap_or(true),
         "deploy" => text("workflowName").map(|value| value.is_empty()).unwrap_or(true),
         "backup" => text("folder").map(|value| value.is_empty()).unwrap_or(true),
         _ => true,
@@ -700,7 +701,7 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
             let repository = text("repository").unwrap_or_default();
             (!valid_github_segment(owner) || !valid_github_segment(repository)).then_some("GitHub sahibi ve depo adı yalnız güvenli ad karakterlerini içerebilir.")
         }
-        "site" | "siberdergi" => {
+        "site" => {
             let path = text("repositoryPath").unwrap_or_default();
             let site = text("publicSiteUrl").unwrap_or_default();
             let mode = text("mode").unwrap_or("LOCAL_ONLY");
@@ -737,7 +738,7 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
     if let Some(detail) = semantic_error {
         return Ok(json!({ "connector": connector, "ready": false, "state": "ATTENTION", "detail": detail }));
     }
-    let adapter_dry_run = if matches!(connector.as_str(), "site" | "siberdergi") && site_mode == "PUBLISH" {
+    let adapter_dry_run = if connector == "site" && site_mode == "PUBLISH" {
         let path = text("repositoryPath").unwrap_or_default();
         Some(match site_adapter_dry_run(path) {
             Ok(value) => value,
@@ -765,9 +766,9 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
         "ready": true,
         "state": "DRY_RUN_READY",
         "authorizationState": "NOT_CHECKED",
-        "contentModel": if matches!(connector.as_str(), "site" | "siberdergi") { detect_site_content_model(text("repositoryPath").unwrap_or_default()) } else { "N/A" },
-        "siteFormat": if matches!(connector.as_str(), "site" | "siberdergi") { detect_site_format(text("repositoryPath").unwrap_or_default()).unwrap_or("UNKNOWN") } else { "N/A" },
-        "repositorySuggestion": if matches!(connector.as_str(), "site" | "siberdergi") { detect_repository_remote(text("repositoryPath").unwrap_or_default()) } else { None::<String> },
+        "contentModel": if connector == "site" { detect_site_content_model(text("repositoryPath").unwrap_or_default()) } else { "N/A" },
+        "siteFormat": if connector == "site" { detect_site_format(text("repositoryPath").unwrap_or_default()).unwrap_or("UNKNOWN") } else { "N/A" },
+        "repositorySuggestion": if connector == "site" { detect_repository_remote(text("repositoryPath").unwrap_or_default()) } else { None::<String> },
         "adapterDryRun": adapter_dry_run,
         "localOnly": local_only,
         "mode": site_mode,
@@ -1106,7 +1107,6 @@ pub fn stop_local_dev(
 fn configured_site_origin(connectors: &Value) -> Option<String> {
     connectors
         .pointer("/site/publicSiteUrl")
-        .or_else(|| connectors.pointer("/siberdergi/publicSiteUrl"))
         .and_then(Value::as_str)
         .map(|value| value.trim_end_matches('/').to_string())
 }
@@ -1225,7 +1225,7 @@ pub fn save_setup_connector(
     let object = saved
         .as_object_mut()
         .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_STATE_INVALID".into()))?;
-    let storage_key = if connector == "siberdergi" { "site" } else { connector.as_str() };
+    let storage_key = connector.as_str();
     object.insert(storage_key.to_string(), config.clone());
     write_engine_local_state(&bridge, "desktop.connectors", Value::Object(object.clone()))?;
     // The engine workers consume connector-scoped records directly. Mirror
@@ -1240,7 +1240,7 @@ pub fn save_setup_connector(
         .as_object_mut()
         .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_CHECK_STATE_INVALID".into()))?;
     let site_mode = config.get("mode").and_then(Value::as_str).unwrap_or("LOCAL_ONLY");
-    let adapter_verified = if connector == "site" || connector == "siberdergi" {
+    let adapter_verified = if connector == "site" {
         site_mode != "PUBLISH"
             || validation.get("adapterDryRun").and_then(Value::as_object).and_then(|value| value.get("ok")).and_then(Value::as_bool) == Some(true)
     } else {
@@ -1284,11 +1284,7 @@ pub fn get_connector_state(
     if !connectors.is_object() || !checks.is_object() {
         return Err(CommandError::EngineUnavailable("CONNECTOR_SNAPSHOT_CORRUPT".into()));
     }
-    let site = connectors
-        .get("site")
-        .or_else(|| connectors.get("siberdergi"))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let site = connectors.get("site").cloned().unwrap_or_else(|| json!({}));
     let mode = site
         .get("mode")
         .and_then(Value::as_str)
@@ -1302,9 +1298,7 @@ pub fn get_connector_state(
         .get("publicSiteUrl")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let site_check = checks
-        .get("site")
-        .or_else(|| checks.get("siberdergi"));
+    let site_check = checks.get("site");
     let locally_validated = site_check
         .and_then(|value| value.get("ready"))
         .and_then(Value::as_bool)
@@ -1621,14 +1615,12 @@ pub fn get_prerequisite_status(
         .unwrap_or_else(|_| json!({"status": "degraded"}));
     let github_authorized = github_auth_status.get("status").and_then(Value::as_str) == Some("authorized");
     let site_configured = connectors.pointer("/site/repositoryPath")
-        .or_else(|| connectors.pointer("/siberdergi/repositoryPath"))
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
     let backup_configured = connectors.pointer("/backup/folder").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
     let connector_checks = read_engine_local_state(&bridge, "desktop.connectorChecks")
         .unwrap_or_else(|| json!({}));
     let site_check_ready = connector_checks.pointer("/site/ready").and_then(Value::as_bool)
-        .or_else(|| connector_checks.pointer("/siberdergi/ready").and_then(Value::as_bool))
         .unwrap_or(false);
 
     Ok(json!({
@@ -2386,6 +2378,7 @@ fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
                         "url": source.get("url").cloned().unwrap_or(Value::Null),
                         "fetchedAt": source.get("fetchedAt").cloned().unwrap_or(Value::Null),
                         "contentHash": source.get("contentHash").cloned().unwrap_or(Value::Null),
+                        "evidenceAnchors": source.get("evidenceAnchors").cloned().unwrap_or_else(|| json!([])),
                         "primary": index == 0
                     })
                 })
@@ -3883,6 +3876,17 @@ pub fn get_editorial_workspace(
                     if let Some(object) = slot.as_object_mut() {
                         if let Some(time) = slot_value.get("time").and_then(Value::as_str) { object.insert("time".into(), json!(time)); }
                         if let Some(enabled) = slot_value.get("enabled").and_then(Value::as_bool) { object.insert("enabled".into(), json!(enabled)); }
+                        let article_id = slot_value.get("articleId").and_then(Value::as_str);
+                        let article_title = slot_value.get("articleTitle").and_then(Value::as_str);
+                        if let Some(article_id) = article_id {
+                            object.insert("articleId".into(), json!(article_id));
+                            object.insert("articleTitle".into(), json!(article_title.unwrap_or("Onaylı post")));
+                            object.insert("state".into(), json!("READY"));
+                        } else if slot_value.get("articleId").is_some() {
+                            object.insert("articleId".into(), Value::Null);
+                            object.insert("articleTitle".into(), Value::Null);
+                            object.insert("state".into(), json!("EMPTY"));
+                        }
                     }
                 }
             }
@@ -3901,7 +3905,8 @@ pub fn get_editorial_workspace(
         "reviewer": "Editör",
         "notifications": true,
         "emailDigest": false,
-        "defaultSection": "haberler"
+        "defaultSection": "haberler",
+        "showSourceReferences": true
     }));
     let site_origin = configured_site_origin(&connectors);
     let history = outbox
@@ -4248,6 +4253,7 @@ fn revision_edit_payload(
         "revisionId": revision_id,
         "sourceIds": [],
         "urls": source_urls,
+        "sources": base_revision.get("sources").cloned().unwrap_or_else(|| json!([])),
         "instruction": instruction,
         "candidateTitle": title,
         "section": base_revision.get("section").and_then(Value::as_str).unwrap_or("haberler"),
@@ -4322,6 +4328,8 @@ pub fn update_schedule_slot(
     slot_id: String,
     enabled: bool,
     time: String,
+    article_id: Option<String>,
+    article_title: Option<String>,
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
@@ -4331,11 +4339,28 @@ pub fn update_schedule_slot(
     }
     let slot_id = slot_id.trim().to_string();
     let time = time.trim().to_string();
+    let article_id = article_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let article_title = article_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if article_id.as_ref().is_some_and(|value| value.len() > 200 || !value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.')))
+        || article_title.as_ref().is_some_and(|value| value.len() > 240)
+    {
+        return Err(CommandError::InvalidInput("optional approved article assignment is invalid".into()));
+    }
     let mutation = json!({
-        "kind": "SCHEDULE.SET",
+        "kind": "SCHEDULE.SLOT",
         "slotId": slot_id,
         "enabled": enabled,
-        "time": time
+        "time": time,
+        "articleId": article_id,
+        "articleTitle": article_title
     });
     let mut schedule_state = read_engine_local_state(&bridge, "desktop.editorial")
         .unwrap_or_else(|| json!({}));
@@ -4355,7 +4380,7 @@ pub fn update_schedule_slot(
         .insert(slot_id.clone(), mutation.clone());
     persist_editorial_state(&bridge, mutation.clone(), Some(("schedule", schedule_state.get("schedule").cloned().unwrap_or_else(|| json!({"slots": {}})))))?;
     write_lock(&state.editorial_mutations)?.push(mutation);
-    Ok(json!({ "ok": true, "slotId": slot_id, "enabled": enabled, "time": time }))
+    Ok(json!({ "ok": true, "slotId": slot_id, "enabled": enabled, "time": time, "articleId": article_id, "articleTitle": article_title }))
 }
 
 #[tauri::command]
@@ -5029,7 +5054,11 @@ mod tests {
             "section": "dosyalar",
             "articleType": "deep_dive",
             "tr": { "bodyMarkdown": "Özgün metin" },
-            "sources": [{ "url": "https://example.org/evidence" }]
+            "sources": [{
+                "id": "source-1",
+                "url": "https://example.org/evidence",
+                "evidenceAnchors": [{ "sourceId": "source-1", "quoteHash": "a".repeat(64) }]
+            }]
         });
         let payload = revision_edit_payload(
             "revision-1",
@@ -5042,6 +5071,7 @@ mod tests {
         assert_eq!(payload["section"], "dosyalar");
         assert_eq!(payload["candidateTitle"], "Kapsamlı yeniden oluşturma işleniyor");
         assert_eq!(payload["baseRevision"], base);
+        assert_eq!(payload["sources"][0]["evidenceAnchors"][0]["quoteHash"], "a".repeat(64));
         assert!(revision_edit_payload("revision-1", "Düzenle", json!({ "sources": [] }), None).is_err());
     }
 
@@ -5159,7 +5189,7 @@ mod tests {
         assert!(valid_site_work_mode("LOCAL_DEV"));
         assert!(validate_local_dev_project("relative-project").is_err());
         assert!(valid_site_work_mode("PUBLISH"));
-        assert!(!valid_site_work_mode("HETZNER"));
+        assert!(!valid_site_work_mode("REMOTE_HOST"));
     }
 
     #[test]
@@ -5236,19 +5266,19 @@ mod tests {
     }
 
     #[test]
-    fn generic_site_origin_precedes_legacy_adapter_storage() {
+    fn configured_site_origin_uses_only_the_active_generic_connector() {
         assert_eq!(
             configured_site_origin(&json!({
                 "site": { "publicSiteUrl": "https://example.org/" },
-                "siberdergi": { "publicSiteUrl": "https://siberdergi.net/" }
+                "legacySite": { "publicSiteUrl": "https://legacy.example/" }
             })),
             Some("https://example.org".to_string())
         );
         assert_eq!(
             configured_site_origin(&json!({
-                "siberdergi": { "publicSiteUrl": "https://legacy.example/" }
+                "legacySite": { "publicSiteUrl": "https://legacy.example/" }
             })),
-            Some("https://legacy.example".to_string())
+            None
         );
     }
 

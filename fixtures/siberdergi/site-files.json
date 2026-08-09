@@ -1,4 +1,0 @@
-{
-  "public/robots.txt": "User-agent: *\nAllow: /\n",
-  "src/site-config.ts": "export const siteName = \"SiberDergi\";\n"
-}

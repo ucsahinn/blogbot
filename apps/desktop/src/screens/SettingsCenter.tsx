@@ -15,7 +15,8 @@ const defaultPreferences: DesktopPreferences = {
   reviewer: "Editör",
   notifications: true,
   emailDigest: false,
-  defaultSection: "haberler"
+  defaultSection: "haberler",
+  showSourceReferences: true
 };
 
 export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange }: SettingsCenterProps) {
@@ -147,16 +148,23 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
         <div className="preference-toggles">
           <label><input type="checkbox" checked={autostart ?? false} disabled={readOnly || autostart === null || busy} aria-describedby={autostartStatusError ? "autostart-status-unavailable" : undefined} onChange={(event) => void toggleAutostart(event.target.checked)} /><span><strong>Windows ile başlat</strong><small>Blogbot oturum açılışında tepsiye hazır biçimde gelir; istediğiniz zaman kapatabilirsiniz.</small>{autostartStatusError ? <small id="autostart-status-unavailable" role="status">Windows başlangıç durumu okunamadı; bu ayar güvenle değiştirilemez.</small> : null}</span></label>
           <label><input type="checkbox" checked={form.notifications} disabled={readOnly || busy} onChange={(event) => setForm({ ...form, notifications: event.target.checked })} /><span><strong>Windows bildirimleri</strong><small>Bu cihazdaki yerel bildirim kanalını açar; kapalıyken test bildirimi gönderilmez.</small></span></label>
+          <label><input type="checkbox" checked={form.showSourceReferences !== false} disabled={readOnly || busy} onChange={(event) => setForm({ ...form, showSourceReferences: event.target.checked })} /><span><strong>Taslakta kaynak referanslarını öne çıkar</strong><small>İnceleme ekranında kullanılan kaynakların bağlantılarını ve iddia eşleşmelerini içeriğin yanında gösterir.</small></span></label>
         </div>
-        <div className="setup-actions">
-          <button className="button button-primary" type="button" disabled={Boolean(saveUnavailableReason)} title={saveUnavailableReason || undefined} aria-describedby={saveUnavailableReason ? "settings-save-unavailable" : undefined} onClick={() => void save()}>{busy ? "Kaydediliyor…" : "Ayarları kaydet"}</button>
+        <div className="settings-actions">
+          <div className="settings-action-primary">
+            <button className="button button-primary" type="button" disabled={Boolean(saveUnavailableReason)} title={saveUnavailableReason || undefined} aria-describedby={saveUnavailableReason ? "settings-save-unavailable" : undefined} onClick={() => void save()}>{busy ? "Kaydediliyor…" : "Ayarları kaydet"}</button>
+            {saveUnavailableReason ? <small id="settings-save-unavailable" className="action-unavailable-reason">{saveUnavailableReason}</small> : null}
+          </div>
+          <div className="settings-action-secondary">
           <button className="button button-secondary" type="button" disabled={Boolean(cancelUnavailableReason)} title={cancelUnavailableReason || undefined} aria-describedby={cancelUnavailableReason ? "settings-cancel-unavailable" : undefined} onClick={() => { setForm(workspace.preferences); setMessage("Kaydedilmemiş değişiklikler geri alındı."); }}>Değişiklikleri iptal et</button>
           <button className="button button-secondary" type="button" disabled={Boolean(defaultsUnavailableReason)} title={defaultsUnavailableReason || undefined} aria-describedby={defaultsUnavailableReason ? "settings-defaults-unavailable" : undefined} onClick={() => { setForm(defaultPreferences); setMessage("Varsayılanlar forma yüklendi; kalıcı olması için kaydedin."); }}>Varsayılana dön</button>
-          <button className="button button-secondary" type="button" disabled={Boolean(notificationUnavailableReason)} title={notificationUnavailableReason || undefined} aria-describedby={notificationUnavailableReason ? "settings-notification-unavailable" : undefined} onClick={() => void testNotification()}>Test bildirimi gönder</button>
-          {saveUnavailableReason ? <small id="settings-save-unavailable" className="action-unavailable-reason">{saveUnavailableReason}</small> : null}
           {cancelUnavailableReason ? <small id="settings-cancel-unavailable" className="action-unavailable-reason">{cancelUnavailableReason}</small> : null}
           {defaultsUnavailableReason ? <small id="settings-defaults-unavailable" className="action-unavailable-reason">{defaultsUnavailableReason}</small> : null}
+          </div>
+          <div className="settings-action-notification">
+            <button className="button button-secondary" type="button" disabled={Boolean(notificationUnavailableReason)} title={notificationUnavailableReason || undefined} aria-describedby={notificationUnavailableReason ? "settings-notification-unavailable" : undefined} onClick={() => void testNotification()}>Test bildirimi gönder</button>
           {notificationUnavailableReason ? <small id="settings-notification-unavailable" className="action-unavailable-reason">{notificationUnavailableReason}</small> : null}
+          </div>
           <small>{readOnly ? "Yerel engine kurtarma modundayken ayarlar ve bildirim testi değişiklik yapmaz." : dirty ? "Kaydedilmemiş değişiklik var." : "Tüm değişiklikler kaydedildi."}</small>
         </div>
         {message ? <p className="form-message" role="status" aria-live="polite">{message}</p> : null}

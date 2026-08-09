@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { InMemoryBackendStore } from "../../packages/database/src/in-memory-backend-store.ts";
-import { CODEX_RUNNER_TIMEOUT_MS, createEngineProtocol, collectDraftSourceEvidence, recoverWaitingDraftJobs, resolveCandidateSourceUrl } from "../../apps/engine/src/stdio-entrypoint.ts";
+import { CODEX_RUNNER_TIMEOUT_MS, codexRecoveryJobId, createEngineProtocol, collectDraftSourceEvidence, recoverWaitingDraftJobs, resolveCandidateSourceUrl, syncCodexParentJobState } from "../../apps/engine/src/stdio-entrypoint.ts";
 import type { CodexWorkerCoordinator } from "../../apps/engine/src/codex-worker.ts";
 import type { SourceRepository } from "../../packages/database/src/source-repository.ts";
 
@@ -141,6 +141,163 @@ test("a durable draft waiting for Codex is re-dispatched when the local runner b
   const job = await repository.getJob("draft-recover-1");
   assert.equal(job.state, "QUEUED");
   assert.equal(job.lastError, undefined);
+});
+
+test("restart recovery resumes the final-review subjob and clears the parent draft from RUNNING", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-final-review-recover-1",
+    kind: "DRAFT",
+    state: "RUNNING",
+    attempts: 0,
+    metadata: {
+      progressStage: "FINAL_REVIEW",
+      finalReviewJobId: "draft-final-review-recover-1:final-review"
+    }
+  });
+  const recoveredJobIds: string[] = [];
+  const coordinator: CodexWorkerCoordinator = {
+    async submit() { throw new Error("not used"); },
+    async recoverInterrupted(jobId) {
+      recoveredJobIds.push(jobId);
+      return { recovered: true, snapshot: null };
+    },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  };
+
+  const recovered = await recoverWaitingDraftJobs(repository, coordinator);
+
+  assert.equal(recovered, 1);
+  assert.deepEqual(recoveredJobIds, ["draft-final-review-recover-1:final-review"]);
+  const job = await repository.getJob("draft-final-review-recover-1");
+  assert.equal(job.state, "QUEUED");
+  assert.equal(job.metadata?.progressStage, "FINAL_REVIEW_RETRYING");
+});
+
+test("restart recovery leaves an unrecoverable final review visibly waiting instead of RUNNING", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-final-review-missing-1",
+    kind: "DRAFT",
+    state: "RUNNING",
+    attempts: 0,
+    metadata: {
+      progressStage: "FINAL_REVIEW",
+      finalReviewJobId: "draft-final-review-missing-1:final-review"
+    }
+  });
+  const coordinator: CodexWorkerCoordinator = {
+    async submit() { throw new Error("not used"); },
+    async recoverInterrupted() { return { recovered: false, snapshot: null }; },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  };
+
+  await recoverWaitingDraftJobs(repository, coordinator);
+
+  const job = await repository.getJob("draft-final-review-missing-1");
+  assert.equal(job.state, "WAITING_CODEX");
+  assert.equal(job.lastError, "FINAL_REVIEW_RECOVERY_REQUIRED");
+  assert.equal(job.metadata?.progressStage, "FINAL_REVIEW_RECOVERY_REQUIRED");
+});
+
+test("a waiting final-review subjob makes its original draft visibly waiting", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-final-review-waiting-1",
+    kind: "DRAFT",
+    state: "RUNNING",
+    attempts: 0,
+    metadata: { progressStage: "FINAL_REVIEW" }
+  });
+
+  await syncCodexParentJobState(repository, {
+    jobId: "draft-final-review-waiting-1:final-review",
+    idempotencyKey: "final-review:draft-final-review-waiting-1",
+    definitionId: "REVISION.FINAL_REVIEW",
+    payload: { originalJobId: "draft-final-review-waiting-1" }
+  }, { kind: "WAITING", reason: "RUNNER_REQUIRES_RETRY" });
+
+  const job = await repository.getJob("draft-final-review-waiting-1");
+  assert.equal(job.state, "WAITING_CODEX");
+  assert.equal(job.metadata?.progressStage, "FINAL_REVIEW_WAITING_CODEX");
+  assert.equal(job.metadata?.finalReviewJobId, "draft-final-review-waiting-1:final-review");
+  assert.equal(job.metadata?.finalReviewWaitReason, "RUNNER_REQUIRES_RETRY");
+});
+
+test("a retrying final-review subjob schedules retry on its original draft", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-final-review-retrying-1",
+    kind: "DRAFT",
+    state: "RUNNING",
+    attempts: 0,
+    metadata: { progressStage: "FINAL_REVIEW" }
+  });
+
+  await syncCodexParentJobState(repository, {
+    jobId: "draft-final-review-retrying-1:final-review",
+    idempotencyKey: "final-review:draft-final-review-retrying-1",
+    definitionId: "REVISION.FINAL_REVIEW",
+    payload: { originalJobId: "draft-final-review-retrying-1" }
+  }, { kind: "RETRYING", failure: "EXECUTION_FAILED", transientFailureCount: 2, retryAt: "2026-08-10T10:00:00.000Z" });
+
+  const job = await repository.getJob("draft-final-review-retrying-1");
+  assert.equal(job.state, "RETRY_SCHEDULED");
+  assert.equal(job.metadata?.progressStage, "FINAL_REVIEW_RETRYING");
+  assert.equal(job.metadata?.finalReviewJobId, "draft-final-review-retrying-1:final-review");
+  assert.equal(job.metadata?.finalReviewRetryAttempt, 2);
+});
+
+test("manual retry targets a final-review subjob instead of its completed draft subjob", () => {
+  assert.equal(codexRecoveryJobId({
+    id: "draft-final-review-retry-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 0,
+    metadata: {
+      progressStage: "FINAL_REVIEW_WAITING_CODEX",
+      finalReviewJobId: "draft-final-review-retry-1:final-review"
+    }
+  }), "draft-final-review-retry-1:final-review");
+});
+
+test("job.retry sends a waiting final review to its durable subjob", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-final-review-command-retry-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 0,
+    metadata: {
+      progressStage: "FINAL_REVIEW_WAITING_CODEX",
+      finalReviewJobId: "draft-final-review-command-retry-1:final-review"
+    }
+  });
+  const recoveredJobIds: string[] = [];
+  const codexCoordinator: CodexWorkerCoordinator = {
+    async submit() { throw new Error("not used"); },
+    async recoverInterrupted(jobId) {
+      recoveredJobIds.push(jobId);
+      return { recovered: true, snapshot: null };
+    },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  };
+  const handle = createEngineProtocol(repository, "memory", { codexCoordinator });
+
+  const response = await handle(envelope({
+    version: 1,
+    requestId: "final-review-retry-1",
+    idempotencyKey: "final-review-retry-1",
+    expectedVersion: 1,
+    kind: "JOB.RETRY",
+    payload: { jobId: "draft-final-review-command-retry-1" }
+  }));
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(recoveredJobIds, ["draft-final-review-command-retry-1:final-review"]);
 });
 
 test("a timed-out Codex draft remains waiting after restart until the editor explicitly retries it", async () => {

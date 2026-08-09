@@ -76,6 +76,18 @@ export interface SyncResult {
   changes: BackendChange[];
 }
 
+/**
+ * Small projection consumed by the desktop shell on every refresh. It must
+ * never require opening immutable article bodies or approval packages.
+ */
+export interface DashboardSyncResult {
+  serverCursor: number;
+  automation: AutomationSettings;
+  outbox: OutboxEffect[];
+  jobs: BackendJob[];
+  changes: BackendChange[];
+}
+
 export class BackendStoreError extends Error {
   constructor(
     readonly code:
@@ -123,4 +135,6 @@ export interface BackendRepository extends BackendRepositoryTransaction {
     ) => Promise<T> | T
   ): Promise<T>;
   sync(afterCursor: number): Promise<SyncResult>;
+  /** Optional while compatibility stores migrate to the lightweight read. */
+  syncDashboard?(afterCursor: number): Promise<DashboardSyncResult>;
 }

@@ -30,8 +30,6 @@
     "native:lint": "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings",
     "check:all": "npm run test:all && npm run lint && npm run typecheck && npm run build && npm run build:engine && npm run smoke:engine && npm run security:verify && npm run native:test && npm run native:lint",
     "icons:generate": "node --experimental-transform-types scripts/generate-desktop-icons.ts",
-    "backup:verify": "node --test --experimental-transform-types --test-name-pattern=\"backup creates\" tests/integration/siberdergi-infra.test.ts",
-    "restore:drill": "node --test --experimental-transform-types --test-name-pattern=\"backup creates\" tests/integration/siberdergi-infra.test.ts",
     "pilot:report": "node --experimental-transform-types scripts/pilot-report.ts",
     "token:audit": "node scripts/token-audit.mjs",
     "test:browser": "playwright test",

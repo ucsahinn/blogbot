@@ -3,6 +3,12 @@ export interface ImageGenerationRequest {
   articleType: string;
   section: string;
   sourceTitles: string[];
+  /** Article-owned editorial context, never raw source bodies. */
+  summary?: string;
+  /** Small, bounded factual anchors that define the visual subject. */
+  keyClaims?: string[];
+  /** Explicit visual direction authored for this article. */
+  visualIntent?: string;
 }
 
 export interface ImageGeneratorPort {
@@ -15,16 +21,30 @@ export interface OpenAiImageGeneratorOptions {
   fetchImpl?: typeof fetch;
 }
 
+function boundedPromptText(value: unknown, maximum: number): string {
+  return typeof value === "string"
+    ? value.replaceAll("\u0000", "").replace(/\s+/gu, " ").trim().slice(0, maximum)
+    : "";
+}
+
 function promptFor(request: ImageGenerationRequest): string {
   const context = request.sourceTitles.filter(Boolean).slice(0, 3).join("; ");
+  const summary = boundedPromptText(request.summary, 900);
+  const claims = Array.isArray(request.keyClaims)
+    ? request.keyClaims.map((claim) => boundedPromptText(claim, 280)).filter(Boolean).slice(0, 4)
+    : [];
+  const visualIntent = boundedPromptText(request.visualIntent, 600);
   return [
     "Create an original editorial hero image for a Turkish publication.",
     `Article title: ${request.title.slice(0, 240)}`,
     `Article type: ${request.articleType.slice(0, 80)}. Section: ${request.section.slice(0, 80)}.`,
     context ? `Verified context only: ${context.slice(0, 600)}.` : "Use the title as the only context.",
+    summary ? `Editorial summary: ${summary}` : "",
+    claims.length > 0 ? `Key factual anchors: ${claims.join(" | ")}` : "",
+    visualIntent ? `Required visual direction: ${visualIntent}` : "",
     "Use a polished documentary-editorial visual language, with a clear main subject and room for an article headline overlay.",
     "Do not include readable text, logos, watermarks, public figures, brand marks, screenshots, or copied artwork."
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 /**
