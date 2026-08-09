@@ -249,7 +249,7 @@ test("Windows command wrappers cannot keep a timed-out Codex task running", { sk
   await assert.rejects(
     Promise.race([
       consume(),
-      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("timeout did not terminate the wrapped process tree")), 4_000))
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("timeout did not release the Codex caller")), 2_000))
     ]),
     (error: unknown) =>
       error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
@@ -259,12 +259,18 @@ test("Windows command wrappers cannot keep a timed-out Codex task running", { sk
     (await readFile(join(isolatedCodexHome, "fake-codex-child.pid"), "utf8")).trim()
   );
   assert.ok(Number.isSafeInteger(childPid) && childPid > 0, "fixture must report its exact child PID");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  try {
-    process.kill(childPid, 0);
-  } catch (error) {
-    assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
-    return;
+  const deadline = Date.now() + 3_000;
+  for (;;) {
+    try {
+      process.kill(childPid, 0);
+    } catch (error) {
+      assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+      return;
+    }
+    if (Date.now() >= deadline) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
   try {
     process.kill(childPid, "SIGKILL");

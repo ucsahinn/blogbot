@@ -929,12 +929,26 @@ export function createDemoTransport(): InvokeTransport {
       case "retry_job": {
         const jobId = String(args?.jobId ?? "");
         const failure = editorialWorkspace.failures.find((item) => item.id === jobId);
-        if (!failure) {
+        const draft = editorialWorkspace.drafts.find(
+          (item) => item.id === jobId && !item.reviewable
+        );
+        if (!failure && !draft) {
           throw new BridgeError("COMMAND_FAILED", "Tekrar denenecek iş bulunamadı.");
         }
-        failure.state = "RETRYING";
-        failure.attempts += 1;
-        failure.lastAttemptAt = new Date().toISOString();
+        if (failure) {
+          failure.state = "RETRYING";
+          failure.attempts += 1;
+          failure.lastAttemptAt = new Date().toISOString();
+        }
+        if (draft) {
+          draft.state = "DRAFTING";
+          draft.executionState = "RETRY_SCHEDULED";
+          draft.nextAction = "NONE";
+          draft.reasonCode = null;
+          draft.blockers = 0;
+          draft.detail = "İş güvenli yerel kuyrukta yeniden deneniyor.";
+          draft.updatedAt = new Date().toISOString();
+        }
         return { ok: true };
       }
       case "request_revision_edit": {

@@ -71,12 +71,12 @@ export class LocalQueueRuntime {
       backend: "pglite",
       db: fromPglite(database),
       application_name: "blogbot-local-engine",
-      // PGlite is embedded in the local engine.  Relying on LISTEN/NOTIFY
-      // here leaves a recovery gap when a desktop process exits between a
-      // durable enqueue and a listener becoming available.  A short local
-      // poll makes queued work live again after restart without opening any
-      // network listener or changing the durable job identity.
-      useListenNotify: false,
+      // PGlite supports an in-process LISTEN/NOTIFY channel.  Use it to wake
+      // an already-running desktop worker as soon as local work is queued,
+      // while the short poll remains the recovery path after a process exit
+      // or a listener reconnect.  Neither path opens a network listener or
+      // changes the durable job identity.
+      useListenNotify: true,
       schedule: true,
       supervise: true
     });
@@ -102,7 +102,8 @@ export class LocalQueueRuntime {
           expireInSeconds: plan.expireInSeconds,
           retentionSeconds: 1_209_600,
           deleteAfterSeconds: 604_800,
-          warningQueueSize: 1_000
+          warningQueueSize: 1_000,
+          notify: true
         });
       }
       this.started = true;
@@ -184,7 +185,7 @@ export class LocalQueueRuntime {
     handler: (job: Job<T>) => Promise<void>
   ): Promise<string> {
     this.assertStarted();
-    return this.boss.work<T>(name, { pollingIntervalSeconds: 1 }, async (jobs) => {
+    return this.boss.work<T>(name, { pollingIntervalSeconds: 0.5 }, async (jobs) => {
       const job = jobs[0];
       if (job) {
         await handler(job);

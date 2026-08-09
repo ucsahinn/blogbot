@@ -47,7 +47,7 @@ function quoteCmdArgument(value: string): string {
   return `"${value.replace(/"/gu, '""')}"`;
 }
 
-function resolveSpawn(command: string, args: string[]): { command: string; args: string[] } {
+async function resolveSpawn(command: string, args: string[]): Promise<{ command: string; args: string[] }> {
   // npm exposes Codex as a .cmd shim on Windows. Launching that shim creates
   // a visible cmd.exe parent for every background draft. The shim's real
   // target is stable, so invoke node directly and keep the process hidden.
@@ -63,6 +63,31 @@ function resolveSpawn(command: string, args: string[]): { command: string; args:
   }
   if (process.platform !== "win32" || !/\.(?:cmd|bat)$/iu.test(command)) {
     return { command, args };
+  }
+  // A number of local development launchers are just `node "%~dp0file.mjs"
+  // %*`. Running that shape through cmd.exe creates a visible console and
+  // leaves a fragile parent/child kill race. Accept only this narrow,
+  // non-shell grammar and invoke its sibling script directly; anything more
+  // complex keeps using the hidden cmd fallback below.
+  try {
+    const wrapper = await readFile(command, "utf8");
+    const commands = wrapper
+      .replace(/^\uFEFF/u, "")
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line && !/^@?echo\s+off$/iu.test(line));
+    const match = commands.length === 1
+      ? /^node(?:\.exe)?\s+"%~dp0([^"\\/:]+\.mjs)"\s+%\*$/iu.exec(commands[0] ?? "")
+      : null;
+    if (match?.[1]) {
+      const entry = join(dirname(command), match[1]);
+      if (existsSync(entry)) {
+        return { command: "node.exe", args: [entry, ...args] };
+      }
+    }
+  } catch {
+    // The fallback below preserves compatibility with a user-supplied wrapper
+    // that cannot be read or does not match the intentionally strict grammar.
   }
   const comspec = process.env.ComSpec ?? process.env.COMSPEC ?? "cmd.exe";
   const commandLine = [command, ...args].map(quoteCmdArgument).join(" ");
@@ -118,9 +143,7 @@ function safeProcessDetail(stderr: string): string {
  * Killing the launcher alone can leave its child holding stdout/stderr open,
  * which would otherwise keep the JSONL iterator and durable job RUNNING.
  */
-async function terminateProcessTree(
-  child: ReturnType<typeof spawn>
-): Promise<void> {
+async function terminateProcessTree(child: ReturnType<typeof spawn>): Promise<void> {
   if (child.pid === undefined) return;
   if (process.platform !== "win32") {
     child.kill("SIGKILL");
@@ -135,6 +158,10 @@ async function terminateProcessTree(
     killer.once("error", () => resolve());
     killer.once("close", () => resolve());
   });
+  // taskkill reports after the termination request has been accepted, but a
+  // nested batch launcher can keep a handle alive briefly. Give that exact
+  // owned tree a bounded chance to quiesce before cleanup removes its files.
+  await new Promise<void>((resolve) => setTimeout(resolve, 250));
 }
 
 export function createCodexCliPort(
@@ -175,7 +202,7 @@ export function createCodexCliPort(
         environmentKeys: Object.keys(environment).sort()
       });
 
-      const spawnTarget = resolveSpawn(options.command, args);
+      const spawnTarget = await resolveSpawn(options.command, args);
       const child = spawn(spawnTarget.command, spawnTarget.args, {
         cwd: taskDirectory,
         env: environment,
@@ -325,7 +352,16 @@ export function createCodexCliPort(
           termination ??= terminateProcessTree(child);
         }
         if (termination) {
-          await termination;
+          // Windows can delay taskkill itself while the desktop is under
+          // load. A timed-out draft must release the UI immediately; the
+          // already-started owned-tree cleanup continues in the background.
+          // Successful or ordinary failed runs still wait for cleanup before
+          // returning so their isolated files are deterministic.
+          if (timedOut) {
+            void termination.catch(() => undefined);
+          } else {
+            await termination;
+          }
         }
         const cleanup = rm(taskDirectory, {
           recursive: true,

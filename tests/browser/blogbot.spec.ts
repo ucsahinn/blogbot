@@ -829,24 +829,24 @@ test("backup setup guides the user through picker-backed create, verify, preview
   await page.getByLabel("Alınacak dosyalar").fill("state.json");
   await page.getByLabel(/Yedekleme şifresi/u).fill("yerel-yedek-anahtari-123");
   await page.getByRole("button", { name: "Şifreli yedek oluştur" }).click();
-  await expect(page.getByRole("status")).toContainText("Yedek oluşturuldu: 0 dosya, 0 bayt.");
+  await expect(page.getByText("Yedek oluşturuldu: 0 dosya, 0 bayt.", { exact: true })).toBeVisible();
 
   await page.locator("label:has(#backup-archive-path)").getByRole("button", { name: "Yedek klasörü seç" }).click();
   await page.locator("label:has(#backup-target-parent)").getByRole("button", { name: "Üst klasörü seç" }).click();
   await page.getByLabel(/Yedekleme şifresi/u).fill("yerel-yedek-anahtari-123");
   await page.getByRole("button", { name: "Yedeği doğrula" }).click();
-  await expect(page.getByRole("status")).toContainText("Yedek doğrulandı: 0 dosya.");
+  await expect(page.getByText("Yedek doğrulandı: 0 dosya.", { exact: true })).toBeVisible();
 
   await page.getByLabel(/Yedekleme şifresi/u).fill("yerel-yedek-anahtari-123");
   await page.getByRole("button", { name: "Geri yüklemeyi önizle" }).click();
-  await expect(page.getByRole("status")).toContainText("Geri yükleme önizlemesi hazır: 0 dosya; hiçbir dosya yazılmadı.");
+  await expect(page.getByText("Geri yükleme önizlemesi hazır: 0 dosya; hiçbir dosya yazılmadı.", { exact: true })).toBeVisible();
 
   await page.getByLabel(/Yedekleme şifresi/u).fill("yerel-yedek-anahtari-123");
   await page.getByRole("button", { name: "Yeni klasöre geri yükle" }).click();
   const restoreConfirmation = page.getByRole("alertdialog", { name: "Geri yüklemeyi onayla" });
   await expect(restoreConfirmation).toContainText("Yalnızca boş ve yeni bir klasöre geri yükleme yapılacak.");
   await restoreConfirmation.getByRole("button", { name: "Geri yüklemeyi başlat" }).click();
-  await expect(page.getByRole("status")).toContainText("Geri yükleme tamamlandı: 0 dosya.");
+  await expect(page.getByText("Geri yükleme tamamlandı: 0 dosya.", { exact: true })).toBeVisible();
 });
 
 test("scanning sources makes queued research visible on the editorial desk before review is available", async ({ page }) => {
@@ -860,15 +860,16 @@ test("scanning sources makes queued research visible on the editorial desk befor
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("araştırma için yerel kuyruğa alındı");
   await expect(page.getByRole("status")).toContainText("Editoryal Masa");
-  const queuedDraft = page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" });
-  await expect(queuedDraft.getByLabel("İlerleme yüzdesi henüz ölçülmedi").first()).toBeVisible();
+  const queuedDraft = page.getByRole("button", { name: /Kuyrukta$/u }).first();
+  await expect(queuedDraft).toBeVisible();
+  await expect(queuedDraft.getByLabel("İlerleme yüzdesi henüz ölçülmedi")).toBeVisible();
   await expect(queuedDraft.getByLabel(/Yüzde .* tamamlandı/u)).toHaveCount(0);
 });
 
 test("editorial desk refreshes an active draft when the local engine changes its phase", async ({ page }) => {
   await page.goto("?state=live-draft-refresh#editorial");
   const draft = page.getByRole("button", { name: /Bir hizmetin sınırlarını daraltmak/u });
-  await expect(draft).toContainText("Hazırlanıyor");
+  await expect(draft).toContainText("Kuyrukta");
   await expect(draft).toContainText("İnceleme bekliyor", { timeout: 8_000 });
   await expect(draft).toContainText("TR / EN incelemesine hazır.");
 });
@@ -912,8 +913,8 @@ test("failed candidate guidance does not overlap its primary-source detail", asy
 test("candidate triage explains that drafting is local and publication follows review", async ({ page }) => {
   await page.goto("#content-candidates");
 
-  await expect(page.getByText("Taslak hazırlamak yalnız yerel araştırmayı başlatır; yayın yapmaz.")).toBeVisible();
-  await expect(page.getByText("Yayın yalnızca hazır taslağı inceledikten sonra başlar.")).toBeVisible();
+  await expect(page.getByText("Araştırmaya almak yerel kuyruğu başlatır; hemen yayın yapmaz.")).toBeVisible();
+  await expect(page.getByText("Yayın yalnızca hazır taslağı inceledikten sonra başlar; insan onayı olmadan hiçbir içerik gönderilmez.")).toBeVisible();
 });
 
 test("section and article-type labels avoid mechanical duplication", async ({ page }) => {
@@ -931,11 +932,10 @@ test("queued candidate draft explains why review is locked and where to follow p
   await page.getByRole("button", { name: "Araştırmaya al" }).last().click();
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Araştırma güvenli yerel kuyruğa alındı/u })).toHaveAttribute("aria-describedby", /queued-draft-guidance/u);
-  await expect(page.getByText("İnceleme neden kapalı?", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Taslak üretimi sürüyor; hazır olduğunda inceleme açılır/u)).toBeVisible();
-  await page.getByRole("button", { name: "Operasyonları aç" }).click();
-  await expect(page.getByRole("heading", { name: "İşler, Codex kapasitesi ve sistem sağlığı." })).toBeVisible();
+  const guidance = page.getByLabel("İnceleme kilidi açıklaması");
+  await expect(guidance).toContainText("İnceleme neden kapalı?");
+  await expect(guidance).toContainText("Her satırda gerçek çalışma durumu ve varsa tek güvenli sonraki adım gösterilir");
+  await expect(page.getByRole("button", { name: "Operasyonları aç" })).toHaveCount(0);
 });
 
 test("promoting a candidate refreshes the dashboard pipeline without requiring an app restart", async ({ page }) => {
@@ -972,7 +972,7 @@ test("candidate promotion keeps a visible pending desk row when the inventory re
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" })).toBeVisible();
   await expect(page.getByText("Taslak envanteri henüz güncellenmedi; yerel kuyruk işi kaydedildi.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Operasyonları aç" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Operasyonları aç" })).toHaveCount(0);
 });
 
 test("candidate promotion does not fabricate a completion percentage before the desk inventory arrives", async ({ page }) => {
@@ -992,7 +992,7 @@ test("candidate promotion keeps an accepted job visible when the first editorial
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("yerel kuyruk işi kabul edildi");
-  await expect(page.getByRole("button", { name: "Operasyonları aç" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Operasyonları aç" })).toHaveCount(0);
 });
 
 test("candidate promotion keeps an accepted job visible when an inventory retry fails", async ({ page }) => {
@@ -1117,7 +1117,7 @@ test("instant-create happy path queues a review-only job", async ({ page }) => {
   const queuedDraft = page.getByRole("button", { name: /Seçilen kanıtları karşılaştır ve özgün bir analiz hazırla/u });
   await expect(queuedDraft).toBeEnabled();
   await queuedDraft.click();
-  await expect(page.getByText(/henüz incelemeye hazır değil/u)).toBeVisible();
+  await expect(queuedDraft.getByText("Yazı üretimi hesabı veya izole runner bekleniyor.", { exact: true })).toBeVisible();
 });
 
 test("instant create carries an accepted delayed draft to the editorial desk", async ({ page }) => {
@@ -1258,24 +1258,18 @@ test("high-risk approval requires reauthentication acknowledgement and refreshes
   await expect(page.getByText("1 açık revizyon")).toBeVisible();
 });
 
-test("publication enqueue refreshes the planned-work view after the local queue accepts it", async ({ page }) => {
+test("an approved revision keeps remote publication unavailable until the GitHub broker is configured", async ({ page }) => {
   await page.goto("?state=publish-ready#editorial-review");
   await page.getByRole("button", { name: "Bu revizyonu onayla" }).click();
-  await expect(page.getByRole("button", { name: "Yayın kuyruğuna al" })).toBeEnabled();
-  await page.getByRole("button", { name: "Yayın kuyruğuna al" }).click();
-
-  await page.getByRole("button", { name: "Takvim ve Yayın" }).click();
-  await page.getByRole("tab", { name: /Planlananlar/u }).click();
-  await expect(page.getByText("Kuyruğa alınan yayın paketi")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Yayın kuyruğuna al" })).toHaveCount(0);
+  await expect(page.getByText("GitHub yayın bağlantısı henüz hazır değil. Bu revizyonu şimdi onaylayabilir; bağlantı doğrulanınca aynı onaylı paketi hedefe gönderebilirsiniz.")).toBeVisible();
 });
 
-test("publication queue explains that exact review approval is required", async ({ page }) => {
+test("publication setup does not offer a misleading remote queue before the GitHub broker is ready", async ({ page }) => {
   await page.goto("?state=publish-ready#editorial-review");
 
-  const enqueue = page.getByRole("button", { name: "Yayın kuyruğuna al" });
-  await expect(enqueue).toBeDisabled();
-  await expect(enqueue).toHaveAttribute("aria-describedby", "review-publication-prerequisite");
-  await expect(page.getByText("Yayın kuyruğu, bu tam revizyon için insan onayı gerektirir. Onaydan sonra değişmez yayın önizlemesi hazırlanır.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Yayın kuyruğuna al" })).toHaveCount(0);
+  await expect(page.getByText("GitHub yayın bağlantısı henüz hazır değil. Bu revizyonu şimdi onaylayabilir; bağlantı doğrulanınca aynı onaylı paketi hedefe gönderebilirsiniz.")).toBeVisible();
 });
 
 test("saved local output target unlocks approved revision materialization", async ({ page }) => {
@@ -1284,7 +1278,7 @@ test("saved local output target unlocks approved revision materialization", asyn
   const localOutput = page.getByRole("group", { name: "Çıktı klasörü" });
   await localOutput.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
   await localOutput.getByRole("button", { name: "Bu ayarı kaydet" }).click();
-  await expect(page.getByRole("status")).toContainText("Kurulum alanları demo çalışma alanında doğrulandı.");
+  await expect(localOutput.getByRole("status")).toContainText("Kurulum alanları demo çalışma alanında doğrulandı.");
 
   await page.goto("#editorial-review");
   await page.getByRole("button", { name: "Bu revizyonu onayla" }).click();
@@ -1321,9 +1315,9 @@ test("saving a setup target stays truthful when the post-save status refresh is 
   await localOutput.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
   await localOutput.getByRole("button", { name: "Bu ayarı kaydet" }).click();
 
-  await expect(page.getByRole("status")).toContainText("Ayar yerel olarak kaydedildi");
-  await expect(page.getByRole("status")).toContainText("güncel bağlantı durumu yenilenemedi");
-  await expect(page.getByRole("status")).not.toContainText("Ayarlar kaydedilemedi");
+  await expect(localOutput.getByRole("status")).toContainText("Ayar yerel olarak kaydedildi");
+  await expect(localOutput.getByRole("status")).toContainText("güncel bağlantı durumu yenilenemedi");
+  await expect(localOutput.getByRole("status")).not.toContainText("Ayarlar kaydedilemedi");
 });
 
 test("testing a setup target stays truthful when the post-test status refresh is unavailable", async ({ page }) => {
@@ -1333,9 +1327,9 @@ test("testing a setup target stays truthful when the post-test status refresh is
   await localOutput.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
   await localOutput.getByRole("button", { name: "Bilgileri doğrula" }).click();
 
-  await expect(page.getByRole("status")).toContainText("Biçim doğrulandı");
-  await expect(page.getByRole("status")).toContainText("güncel bağlantı durumu yenilenemedi");
-  await expect(page.getByRole("status")).not.toContainText("Biçim testi tamamlanamadı");
+  await expect(localOutput.getByRole("status")).toContainText("Biçim doğrulandı");
+  await expect(localOutput.getByRole("status")).toContainText("güncel bağlantı durumu yenilenemedi");
+  await expect(localOutput.getByRole("status")).not.toContainText("Biçim testi tamamlanamadı");
 });
 
 test("an accepted source scan stays truthful when its first status read is unavailable", async ({ page }) => {
@@ -1359,11 +1353,7 @@ test("completed source scan explains when the wider dashboard summary cannot ref
 
 test("a ready local engine test stays truthful when prerequisite cards cannot refresh", async ({ page }) => {
   await page.goto("?state=engine-posttest-refresh-failure#setup");
-  await page.getByRole("button", { name: "İlk başlangıç" }).click();
-  await page.getByRole("button", { name: "Sonraki adım" }).click();
-  await page.getByRole("button", { name: "Yerel bileşeni denetle ve devam et" }).click();
-
-  await expect(page.getByRole("heading", { name: "Çalışma tercihlerini seç" })).toBeVisible();
+  await page.getByRole("button", { name: "Yerel bileşeni test et" }).click();
   const result = page.getByText(/Yerel çalışma bileşeni hazır; ancak önkoşul kartları yenilenemedi/u);
   await expect(result).toBeVisible();
   await expect(result).not.toContainText("yerel çalışma bileşeni test edilemedi");
@@ -1528,7 +1518,7 @@ test("writing setup keeps Codex check and login results in the focused task", as
 
 test("a successful Codex check stays truthful when its prerequisite refresh is unavailable", async ({ page }) => {
   await page.goto("?state=codex-posttest-refresh-failure#setup");
-  await page.getByRole("button", { name: /Yazı üretimi hesabı/u }).click();
+  await page.locator(".setup-task-card").filter({ hasText: "Yazı üretimi hesabı" }).click();
   const codex = page.getByTestId("setup-connector-codex");
 
   await codex.getByRole("button", { name: "Bağlantıyı kontrol et" }).click();

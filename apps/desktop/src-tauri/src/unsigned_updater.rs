@@ -151,25 +151,49 @@ fn github_release_update(release: GithubRelease) -> Result<Option<UnsignedUpdate
     }))
 }
 
+/// The release manifest is the primary update contract because it binds the
+/// installer hash explicitly. GitHub's release API carries the same digest as
+/// a recoverable read-only fallback when the `latest/download` edge is
+/// temporarily unavailable. A valid manifest always wins, including a valid
+/// "already current" result, so a stale API response can never override it.
+fn resolve_manifest_or_release(
+    manifest: Result<Option<UnsignedUpdate>, CommandError>,
+    release: Result<Option<UnsignedUpdate>, CommandError>,
+) -> Result<Option<UnsignedUpdate>, CommandError> {
+    match manifest {
+        Ok(update) => Ok(update),
+        Err(manifest_error) => release.or(Err(manifest_error)),
+    }
+}
+
 async fn fetch_update() -> Result<Option<UnsignedUpdate>, CommandError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_CLIENT_UNAVAILABLE".into()))?;
-    let manifest_response = client
+    let manifest = client
         .get(MANIFEST_URL)
         .send()
         .await
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_UNAVAILABLE".into()))?;
-    if manifest_response.status().is_success() {
-        let manifest = manifest_response
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_UNAVAILABLE".into()))
+        .and_then(|response| {
+            response
+                .error_for_status()
+                .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_HTTP_ERROR".into()))
+        });
+    let manifest_update_result = match manifest {
+        Ok(response) => response
             .json::<ReleaseManifest>()
             .await
-            .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_INVALID".into()))?;
-        return manifest_update(manifest);
+            .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_INVALID".into()))
+            .and_then(manifest_update),
+        Err(error) => Err(error),
+    };
+    if manifest_update_result.is_ok() {
+        return manifest_update_result;
     }
 
-    let release = client
+    let release_update_result = client
         .get(RELEASES_API_URL)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .header(reqwest::header::USER_AGENT, "Blogbot-update-check")
@@ -180,8 +204,9 @@ async fn fetch_update() -> Result<Option<UnsignedUpdate>, CommandError> {
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_HTTP_ERROR".into()))?
         .json::<GithubRelease>()
         .await
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_INVALID".into()))?;
-    github_release_update(release)
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_INVALID".into()))
+        .and_then(github_release_update);
+    resolve_manifest_or_release(manifest_update_result, release_update_result)
 }
 
 pub async fn check_unsigned_update() -> Result<Option<UnsignedUpdate>, CommandError> {
@@ -261,7 +286,8 @@ pub async fn install_unsigned_update(
 mod tests {
     use super::{
         github_release_update, is_newer_version, manifest_update, validate_release_url,
-        validate_sha256, GithubRelease, ReleaseManifest,
+        validate_sha256, resolve_manifest_or_release, CommandError, GithubRelease,
+        ReleaseManifest, UnsignedUpdate,
     };
 
     #[test]
@@ -304,5 +330,24 @@ mod tests {
         let update = github_release_update(release).unwrap().unwrap();
         assert_eq!(update.version, "0.1.12");
         assert_eq!(update.sha256, "a".repeat(64));
+    }
+
+    #[test]
+    fn falls_back_to_the_github_release_when_the_manifest_endpoint_is_temporarily_unavailable() {
+        let fallback = UnsignedUpdate {
+            version: "0.1.12".into(),
+            notes: "Yerel düzeltmeler.".into(),
+            url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.12/Blogbot_0.1.12_x64-setup.exe".into(),
+            sha256: "a".repeat(64),
+        };
+
+        let result = resolve_manifest_or_release(
+            Err(CommandError::UpdateUnavailable("UPDATE_MANIFEST_UNAVAILABLE".into())),
+            Ok(Some(fallback)),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.version, "0.1.12");
     }
 }
