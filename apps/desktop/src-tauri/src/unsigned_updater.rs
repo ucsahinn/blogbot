@@ -348,9 +348,9 @@ mod tests {
     #[test]
     fn falls_back_to_the_github_release_when_the_manifest_endpoint_is_temporarily_unavailable() {
         let fallback = UnsignedUpdate {
-            version: "0.1.14".into(),
+            version: "0.1.15".into(),
             notes: "Yerel düzeltmeler.".into(),
-            url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.14/Blogbot_0.1.14_x64-setup.exe".into(),
+            url: "https://github.com/ucsahinn/blogbot/releases/download/v0.1.15/Blogbot_0.1.15_x64-setup.exe".into(),
             sha256: "a".repeat(64),
         };
 
@@ -361,6 +361,6 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(result.version, "0.1.14");
+        assert_eq!(result.version, "0.1.15");
     }
 }

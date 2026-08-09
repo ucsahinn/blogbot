@@ -1,10 +1,12 @@
-import { copyFile, cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
+
+import { setWindowsGuiSubsystem } from "./windows-pe-subsystem.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const work = join(root, "build", "engine-sidecar");
@@ -85,6 +87,10 @@ await run(process.execPath, [
   "--sentinel-fuse",
   "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"
 ]);
+const sidecarImage = await readFile(executable);
+if (setWindowsGuiSubsystem(sidecarImage)) {
+  await writeFile(executable, sidecarImage);
+}
 
 for (const asset of ["pglite.wasm", "initdb.wasm", "pglite.data"]) {
   await copyFile(
