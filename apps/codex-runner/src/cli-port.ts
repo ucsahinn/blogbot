@@ -149,6 +149,16 @@ async function terminateProcessTree(child: ReturnType<typeof spawn>): Promise<vo
     child.kill("SIGKILL");
     return;
   }
+  // The ordinary runner path resolves `.cmd` shims to their Node entrypoint,
+  // so terminate that exact process first.  `taskkill /t` below remains the
+  // fallback for custom wrappers that create descendants.  This two-stage
+  // sequence avoids a race where a hidden batch wrapper exits but its Node
+  // child keeps the desktop's stdout handle and looks like a frozen task.
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // The child may have exited between the timeout and this owned cleanup.
+  }
   await new Promise<void>((resolve) => {
     const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
       stdio: "ignore",

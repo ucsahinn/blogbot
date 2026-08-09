@@ -199,6 +199,53 @@ test("revision save, list, and get are versioned, exact-hash bound, and durable"
   });
 });
 
+test("a missing-media draft gets an immutable successor with local hero variants", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-editorial-media-repair-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = await createPersistentEngineProtocol(dataDir, { startSourceWorker: false });
+  t.after(() => runtime.close());
+  const doctor = await runtime.handle({ version: 1, id: "media-repair-doctor", kind: "doctor" });
+  assert.equal(doctor.ok, true);
+  assert.ok(
+    "capabilities" in doctor &&
+    Array.isArray(doctor.capabilities) &&
+    doctor.capabilities.includes("REVISION.REPAIR_MEDIA")
+  );
+  const original = revision({
+    id: "revision-media-missing",
+    media: []
+  });
+
+  const saved = await runtime.handle(
+    command("REVISION.SAVE", { revision: original }, 0, "media-repair-save")
+  );
+  assert.equal(saved.ok, true);
+
+  const repaired = await runtime.handle(
+    command("REVISION.REPAIR_MEDIA", { revisionId: original.id }, 1, "media-repair")
+  );
+  const value = valueOf<{
+    revision: RevisionPackageV2;
+    revisionHash: string;
+  }>(repaired);
+  assert.notEqual(value.revision.id, original.id);
+  assert.equal(value.revision.supersedesRevisionId, original.id);
+  assert.equal(value.revision.state, "REVIEW_REQUIRED");
+  assert.equal(value.revision.media.length, 3);
+  assert.deepEqual(
+    value.revision.media.map((asset) => [asset.width, asset.height]),
+    [[1600, 900], [1200, 900], [1200, 1200]]
+  );
+  assert.ok(value.revision.media.every((asset) => Boolean(asset.contentBase64)));
+  assert.ok(value.revision.generatedFiles.some((file) => file.path.includes("images/")));
+
+  const originalLoaded = valueOf<{ revision: RevisionPackageV2 }>(
+    await runtime.handle(command("REVISION.GET", { revisionId: original.id }, 2, "media-repair-original"))
+  );
+  assert.deepEqual(originalLoaded.revision.media, []);
+});
+
 test("revision summary list omits editor bodies and media payloads", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-editorial-summary-"));
   t.after(() => rm(root, { recursive: true, force: true }));

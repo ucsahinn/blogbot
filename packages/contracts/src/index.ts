@@ -218,6 +218,7 @@ export type EngineCommandV1 =
   | EngineCommandBaseV1<"REVISION.SAVE", { revision: RevisionPackageV2 }>
   | EngineCommandBaseV1<"REVISION.LIST", { summaryOnly?: boolean }>
   | EngineCommandBaseV1<"REVISION.GET", { revisionId: string }>
+  | EngineCommandBaseV1<"REVISION.REPAIR_MEDIA", { revisionId: string }>
   | EngineCommandBaseV1<
       "APPROVAL.GRANT",
       {
@@ -801,6 +802,26 @@ export function validateEngineCommandV1(
         idempotencyKey: value.idempotencyKey,
         expectedVersion: value.expectedVersion,
         kind: "REVISION.GET",
+        payload: { revisionId: value.payload.revisionId }
+      }
+    };
+  }
+  if (value.kind === "REVISION.REPAIR_MEDIA") {
+    if (
+      !isRecord(value.payload) ||
+      !hasExactKeys(value.payload, ["revisionId"]) ||
+      !isIdentifier(value.payload.revisionId, 128)
+    ) {
+      return invalid("REVISION.REPAIR_MEDIA payload is invalid");
+    }
+    return {
+      valid: true,
+      command: {
+        version: 1,
+        requestId: value.requestId,
+        idempotencyKey: value.idempotencyKey,
+        expectedVersion: value.expectedVersion,
+        kind: "REVISION.REPAIR_MEDIA",
         payload: { revisionId: value.payload.revisionId }
       }
     };

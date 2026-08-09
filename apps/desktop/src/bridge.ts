@@ -94,10 +94,14 @@ export interface BlogbotBridge {
   requestRevisionEdit(input: {
     revisionId: string;
     instruction: string;
+    title?: string;
   }): Promise<{
     ok: true;
     state: "RESEARCH_QUEUED";
     job: { id?: string } | null;
+  }>;
+  repairRevisionMedia(revisionId: string): Promise<{
+    revision: { id: string; revisionHash: string };
   }>;
   updateScheduleSlot(input: {
     slotId: string;
@@ -324,6 +328,8 @@ export function createInvokeBridge(
       mutate("dismiss_candidate", { candidateId }),
     retryJob: (jobId) => mutate("retry_job", { jobId }),
     requestRevisionEdit: (input) => mutate("request_revision_edit", input),
+    repairRevisionMedia: (revisionId) =>
+      mutate("repair_revision_media", { revisionId }),
     updateScheduleSlot: (input) => mutate("update_schedule_slot", input),
     saveDesktopPreferences: (preferences) =>
       mutate("save_desktop_preferences", { preferences }),
@@ -487,7 +493,7 @@ export function createCoalescingBridge(
     "installUnsignedUpdate", "recoverLocalWorkspace", "startLocalDev",
     "stopLocalDev", "startCodexLogin", "saveSetupConnector", "setAutostart",
     "sendTestNotification", "promoteCandidate", "dismissCandidate", "retryJob",
-    "requestRevisionEdit", "updateScheduleSlot", "saveDesktopPreferences",
+    "requestRevisionEdit", "repairRevisionMedia", "updateScheduleSlot", "saveDesktopPreferences",
     "scanSource", "scanAllSources", "saveSources", "reviewSource",
     "createInstantDraft", "approveRevision", "approveHighRiskRevision",
     "enqueuePublication", "materializeLocalPreview", "completeOnboarding",

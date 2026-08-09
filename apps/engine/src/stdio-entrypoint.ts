@@ -30,6 +30,7 @@ import {
   type ArticleRevision,
   type HighRiskApproval
 } from "../../../packages/editorial/src/revision.ts";
+import { createEditedRevision } from "../../../packages/editorial/src/workflow.ts";
 import {
   analyzeSourceDocument,
   SourceDocumentError
@@ -50,6 +51,7 @@ import { createCodexWorkerCoordinator, type CodexWorkerCoordinator } from "./cod
 import {
   createDraftCodexTaskResolver,
   finalizeReviewedRevision,
+  generatedPackageFiles,
   isDraftCodexOutput,
   isFinalReviewCodexOutput,
   materializeDraftRevision
@@ -58,7 +60,8 @@ import { buildPublicationPreview } from "./publication-preview.ts";
 import { PGliteCodexJobStore, PGliteCodexQueueAdapter, registerCodexQueueWorker } from "./pglite-codex-job-store.ts";
 import { startPublicationOutboxWorker, type PublicationEffectProcessor, type PublicationOutboxWorker } from "./publication-outbox-worker.ts";
 import { PublicationScheduler } from "./publication-scheduler.ts";
-import { renderCoverVariants, type ArtDirection } from "../../../packages/visuals/src/index.ts";
+import { renderCoverVariants, renderGeneratedImageVariants, type ArtDirection } from "../../../packages/visuals/src/index.ts";
+import { imageGeneratorFromEnvironment, type ImageGeneratorPort } from "./imagegen-provider.ts";
 import type { PublicationBundlePolicy } from "../../publisher/src/publication.ts";
 
 const MAX_LINE_BYTES = 1_000_000;
@@ -95,7 +98,7 @@ export function reportBackgroundTaskFault(
  * queue diagnosable without turning the diagnostic bundle into user data.
  */
 export function reportCodexLifecycle(
-  code: "CODEX_JOB_STARTED" | "CODEX_JOB_WAITING" | "CODEX_JOB_RETRYING" | "CODEX_JOB_COMPLETED" | "CODEX_PROTOCOL_REJECTED" | "CODEX_OUTPUT_INVALID" | "CODEX_OUTPUT_MISSING" | "CODEX_CLI_INVALID_EVENT" | "CODEX_CLI_INVALID_FINAL_OUTPUT" | "CODEX_PROCESS_FAILED" | "CODEX_UNKNOWN_FAILURE",
+  code: "CODEX_JOB_STARTED" | "CODEX_JOB_WAITING" | "CODEX_JOB_RETRYING" | "CODEX_JOB_COMPLETED" | "CODEX_PROTOCOL_REJECTED" | "CODEX_OUTPUT_INVALID" | "CODEX_OUTPUT_MISSING" | "CODEX_CLI_INVALID_EVENT" | "CODEX_CLI_INVALID_FINAL_OUTPUT" | "CODEX_PROCESS_FAILED" | "CODEX_UNKNOWN_FAILURE" | "IMAGEGEN_FALLBACK_LOCAL",
   writeOrDetail: ((line: string) => void) | string = (line) => process.stderr.write(line),
   detail?: string
 ): void {
@@ -408,6 +411,10 @@ export interface EngineProtocolOptions {
   sourceTransport?: FetchTransport;
   sourceScanCoordinator?: SourceScanCoordinator;
   codexCoordinator?: CodexWorkerCoordinator;
+  /** Persistent runtimes provide an application-owned media directory. */
+  mediaDataDir?: string;
+  /** Optional ImageGen provider; local artwork remains the safe fallback. */
+  imageGenerator?: ImageGeneratorPort;
   /** True only when the host injected a processor that can reconcile the durable outbox. */
   publicationReady?: boolean;
 }
@@ -421,6 +428,8 @@ export interface PersistentEngineProtocolOptions {
   codexHome?: string;
   /** Test-only host seam; production always supplies the isolated CLI port. */
   codexPort?: StructuredCodexPort;
+  /** Test-only seam; production reads an explicitly configured local ImageGen key. */
+  imageGenerator?: ImageGeneratorPort;
   publicationProcessor?: PublicationEffectProcessor;
   /** Enabled by default so due approved work is recovered after restart. */
   startPublicationScheduler?: boolean;
@@ -483,6 +492,7 @@ export function createEngineProtocol(
           "REVISION.SAVE",
           "REVISION.LIST",
           "REVISION.GET",
+          ...(options.mediaDataDir ? ["REVISION.REPAIR_MEDIA"] : []),
           "APPROVAL.GRANT",
           "APPROVAL.GRANT_HIGH_RISK",
           "PUBLICATION.PREVIEW",
@@ -1105,7 +1115,8 @@ export function createEngineProtocol(
       validation.valid &&
       (validation.command.kind === "REVISION.SAVE" ||
         validation.command.kind === "REVISION.LIST" ||
-        validation.command.kind === "REVISION.GET")
+        validation.command.kind === "REVISION.GET" ||
+        validation.command.kind === "REVISION.REPAIR_MEDIA")
     ) {
       const command = validation.command;
       try {
@@ -1140,6 +1151,43 @@ export function createEngineProtocol(
               return {
                 revision,
                 revisionHash: computeRevisionHash(revision)
+              };
+            }
+          );
+          return revisionCommandSuccess(input.id, command, result, await repository.getVersion());
+        }
+
+        if (command.kind === "REVISION.REPAIR_MEDIA") {
+          const result = await repository.runIdempotent(
+            `engine:${command.idempotencyKey}`,
+            canonicalJson({
+              kind: command.kind,
+              payload: command.payload,
+              expectedVersion: command.expectedVersion
+            }),
+            async (transaction) => {
+              const version = await transaction.getVersion();
+              if (version !== command.expectedVersion) {
+                throw new Error(
+                  `VERSION_CONFLICT:${command.expectedVersion}:${version}`
+                );
+              }
+              const revision = await transaction.getRevision(command.payload.revisionId);
+              if (await transaction.getApproval(revision.id)) {
+                throw new Error("REVISION_ALREADY_APPROVED");
+              }
+              if (!options.mediaDataDir) {
+                throw new Error("MEDIA_REPAIR_UNAVAILABLE");
+              }
+              const successor = await createMediaRepairSuccessor(
+                revision,
+                options.mediaDataDir,
+                options.imageGenerator
+              );
+              const saved = await transaction.insertRevision(successor);
+              return {
+                revision: saved,
+                revisionHash: computeRevisionHash(saved)
               };
             }
           );
@@ -1606,7 +1654,7 @@ function revisionCommandSuccess(
       version: 1,
       requestId: command.requestId,
       idempotencyKey: command.idempotencyKey,
-      kind: command.kind as "REVISION.SAVE" | "DRAFT.CREATE" | "JOB.RETRY" | "LOCAL_STATE.SET" | "APPROVAL.GRANT" | "APPROVAL.GRANT_HIGH_RISK",
+      kind: command.kind as "REVISION.SAVE" | "REVISION.REPAIR_MEDIA" | "DRAFT.CREATE" | "JOB.RETRY" | "LOCAL_STATE.SET" | "APPROVAL.GRANT" | "APPROVAL.GRANT_HIGH_RISK",
       sequence,
       value
     }
@@ -1632,7 +1680,10 @@ function revisionCommandFailure(
   };
 }
 
-const MAX_EVIDENCE_TEXT = 4_096;
+// Keep one selected source article sufficiently intact for an original,
+// evidence-led draft.  This remains bounded so a hostile or malformed page
+// cannot dominate the local Codex task.
+const MAX_EVIDENCE_TEXT = 12_000;
 // A desktop editor must never leave an apparent live task running for a
 // quarter-hour without a user-visible decision. Longer work can be retried
 // explicitly from Operations after the runner explains its stop condition.
@@ -1641,6 +1692,130 @@ export const CODEX_RUNNER_TIMEOUT_MS = 5 * 60 * 1_000;
 function boundedEvidenceText(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.replaceAll("\u0000", "").slice(0, MAX_EVIDENCE_TEXT);
+}
+
+/**
+ * The source parser intentionally does not retain arbitrary page bodies in
+ * the catalog. At drafting time we may use the already bounded fetched bytes
+ * as untrusted evidence, after stripping executable and presentational HTML.
+ */
+function sourceEvidenceText(body: Uint8Array): string {
+  try {
+    return boundedEvidenceText(
+      new TextDecoder("utf-8", { fatal: true })
+        .decode(body)
+        .replace(/<(?:script|style|noscript)\b[^>]*>[\s\S]*?<\/(?:script|style|noscript)\s*>/giu, " ")
+        .replace(/<[^>]*>/gu, " ")
+        .replace(/\s+/gu, " ")
+        .trim()
+    );
+  } catch {
+    return "";
+  }
+}
+
+function mediaRepairRevisionId(revision: ArticleRevision): string {
+  return `media-${createHash("sha256")
+    .update(`${revision.id}:${computeRevisionHash(revision)}`, "utf8")
+    .digest("hex")
+    .slice(0, 40)}`;
+}
+
+function mediaRepairTarget(revision: ArticleRevision) {
+  if (revision.generatedFiles?.some((file) => file.path.startsWith(".blogbot/generated/"))) {
+    return { mode: "LOCAL_ONLY" as const };
+  }
+  if (revision.targetRepository === "local/blogbot-preview") {
+    return { mode: "LOCAL_DEV" as const };
+  }
+  return { mode: "PUBLISH" as const };
+}
+
+function repairMediaGates(revision: ArticleRevision) {
+  const ready = {
+    id: "media",
+    group: "media" as const,
+    state: "PASS" as const,
+    detail: "Hero medya paketi üç yayın oranında yerel olarak doğrulandı.",
+    policyVersion: "1"
+  };
+  const existing = revision.qualityGates ?? [];
+  const replacesMediaGate = existing.some((gate) => gate.id === "media");
+  return [
+    ...existing.map((gate) => gate.id === "media" ? ready : gate),
+    ...(replacesMediaGate ? [] : [ready])
+  ];
+}
+
+async function createMediaRepairSuccessor(
+  revision: ArticleRevision,
+  dataDir: string,
+  imageGenerator: ImageGeneratorPort | undefined
+): Promise<ArticleRevision> {
+  if (revision.state !== "REVIEW_REQUIRED") {
+    throw new Error("REVISION_NOT_REVIEWABLE");
+  }
+  if (!validateRevisionPackageV2(revision)) {
+    throw new Error("REVISION_PACKAGE_INCOMPLETE");
+  }
+  if (revision.media.some((asset) => asset.role === "hero" && Boolean(asset.contentBase64))) {
+    throw new Error("REVISION_MEDIA_ALREADY_READY");
+  }
+
+  const direction: ArtDirection = {
+    title: revision.tr.title,
+    palette: ["#08131f", "#32d3a6"],
+    motifs: ["network", "shield"],
+    externalAssets: [],
+    depictsRealPerson: false,
+    depictsBrandLogo: false
+  };
+  const successorId = mediaRepairRevisionId(revision);
+  let artifacts;
+  if (imageGenerator) {
+    try {
+      const generated = await imageGenerator.generate({
+        title: revision.tr.title,
+        articleType: revision.articleType,
+        section: revision.section,
+        sourceTitles: revision.sources.map((source) => source.title)
+      });
+      artifacts = await renderGeneratedImageVariants(
+        generated,
+        join(dataDir, "media", successorId),
+        revision.tr.slug
+      );
+    } catch {
+      reportCodexLifecycle("IMAGEGEN_FALLBACK_LOCAL");
+    }
+  }
+  artifacts ??= await renderCoverVariants(
+    direction,
+    join(dataDir, "media", successorId),
+    revision.tr.slug
+  );
+  const media = await Promise.all(artifacts.map(async (artifact) => ({
+    role: "hero" as const,
+    path: `media/${successorId}/${artifact.path}`,
+    sha256: artifact.sha256,
+    width: artifact.width,
+    height: artifact.height,
+    contentBase64: (await readFile(artifact.absolutePath)).toString("base64")
+  })));
+  const qualityGates = repairMediaGates(revision);
+  const successor = createEditedRevision(revision, successorId, {
+    media,
+    qualityGates,
+    editorialReviewReportHash: createHash("sha256")
+      .update(canonicalJson({
+        kind: "MEDIA_REPAIR_SUCCESSOR",
+        supersedesRevisionId: revision.id,
+        qualityGates
+      }), "utf8")
+      .digest("hex")
+  });
+  successor.generatedFiles = generatedPackageFiles(successor, mediaRepairTarget(revision));
+  return successor;
 }
 
 function validCandidateUrl(value: unknown): value is string {
@@ -1694,8 +1869,21 @@ export async function collectDraftSourceEvidence(
         ? entries.filter((entry) => entry.url === candidateUrl).slice(0, 1)
         : entries.slice(0, 20);
       for (const entry of selectedEntries) {
+        const id = `${sourceId}:${entry.externalId}`;
+        let evidenceText = entry.summary?.trim() || entry.title;
+        // A selected story deserves its article context rather than just the
+        // feed teaser. Never fan out across an entire feed at draft time.
+        if (transport && candidateUrl && entry.url === candidateUrl) {
+          try {
+            const fetched = await fetchSource(entry.url, transport, { timeoutMs: 8_000, maxBytes: 2_000_000 });
+            evidenceText = sourceEvidenceText(fetched.body) || evidenceText;
+          } catch {
+            // Retain the reviewed local feed excerpt if the article page is
+            // unavailable; the final evidence gate can still block weak work.
+          }
+        }
         evidence.push({
-          id: `${sourceId}:${entry.externalId}`,
+          id,
           sourceId,
           url: entry.url || source.url,
           title: entry.title,
@@ -1705,8 +1893,8 @@ export async function collectDraftSourceEvidence(
           // Feed entries do not retain full publisher bodies. Bind the
           // evidence snapshot to the normalized text we actually pass to the
           // runner instead of using an unverifiable zero hash.
-          contentHash: createHash("sha256").update(boundedEvidenceText(entry.summary ?? entry.title), "utf8").digest("hex"),
-          ...evidenceFields(entry.summary ?? entry.title, sourceId)
+          contentHash: createHash("sha256").update(boundedEvidenceText(evidenceText), "utf8").digest("hex"),
+          ...evidenceFields(evidenceText, id)
         });
       }
     } catch {
@@ -1723,8 +1911,10 @@ export async function collectDraftSourceEvidence(
         const bodyHash = createHash("sha256").update(fetched.body).digest("hex");
         const entries = analysis.entries.length > 0 ? analysis.entries : [{ externalId: fetched.finalUrl, title: analysis.title ?? fetched.finalUrl, url: fetched.finalUrl, summary: "" }];
         for (const entry of entries) {
+          const id = `url:${bodyHash}:${entry.externalId}`;
+          const evidenceText = entry.summary?.trim() || sourceEvidenceText(fetched.body) || entry.title;
           evidence.push({
-            id: `url:${bodyHash}:${entry.externalId}`,
+            id,
             sourceId: `url:${bodyHash}`,
             url: entry.url,
             title: entry.title,
@@ -1732,7 +1922,7 @@ export async function collectDraftSourceEvidence(
             publishedAt: entry.publishedAt ?? null,
             fetchedAt: new Date().toISOString(),
             contentHash: bodyHash,
-            ...evidenceFields(entry.summary ?? entry.title, `url:${bodyHash}`)
+            ...evidenceFields(evidenceText, id)
           });
         }
       } catch {
@@ -1874,6 +2064,7 @@ export async function createPersistentEngineProtocol(
   const queue = new LocalQueueRuntime(repository.getDatabase());
   const sourceTransport =
     options.sourceTransport ?? createNodeFetchTransport();
+  const imageGenerator = options.imageGenerator ?? imageGeneratorFromEnvironment();
   const sourceScanCoordinator = new SourceScanCoordinator(
     sourceRepository,
     queue
@@ -2031,9 +2222,10 @@ export async function createPersistentEngineProtocol(
           reportCodexLifecycle("CODEX_JOB_COMPLETED");
           if (submission.definitionId === "DRAFT.CREATE" && isDraftCodexOutput(output)) {
             const revision = materializeDraftRevision(submission.jobId, submission.payload, output);
-            const visualPolicy = isRecord(submission.payload) && typeof submission.payload.visualPolicy === "string"
-              ? submission.payload.visualPolicy
-              : "NONE";
+            const draftPayload = isRecord(submission.payload) ? submission.payload : {};
+            const visualPolicy = typeof draftPayload.visualPolicy === "string"
+              ? draftPayload.visualPolicy
+              : "GENERATE";
             if (visualPolicy !== "NONE") {
               const direction: ArtDirection = {
                 title: output.tr.title,
@@ -2043,7 +2235,27 @@ export async function createPersistentEngineProtocol(
                 depictsRealPerson: false,
                 depictsBrandLogo: false
               };
-              const artifacts = await renderCoverVariants(direction, join(dataDir, "media", revision.id), revision.tr.slug);
+              let artifacts;
+              if (visualPolicy === "GENERATE" && imageGenerator) {
+                try {
+                  const sourceTitles = Array.isArray(draftPayload.sources)
+                    ? draftPayload.sources.flatMap((value) => isRecord(value) && typeof value.title === "string" ? [value.title] : [])
+                    : [];
+                  const generated = await imageGenerator.generate({
+                    title: output.tr.title,
+                    articleType: typeof draftPayload.articleType === "string" ? draftPayload.articleType : "news",
+                    section: typeof draftPayload.section === "string" ? draftPayload.section : "haberler",
+                    sourceTitles
+                  });
+                  artifacts = await renderGeneratedImageVariants(generated, join(dataDir, "media", revision.id), revision.tr.slug);
+                } catch {
+                  // A configured provider can be unavailable without making a
+                  // sourced draft disappear. The local cover fallback stays
+                  // explicit in diagnostics rather than pretending ImageGen ran.
+                  reportCodexLifecycle("IMAGEGEN_FALLBACK_LOCAL");
+                }
+              }
+              artifacts ??= await renderCoverVariants(direction, join(dataDir, "media", revision.id), revision.tr.slug);
               revision.media = await Promise.all(artifacts.map(async (artifact) => ({
                 role: "hero",
                 path: `media/${revision.id}/${artifact.path}`,
@@ -2139,6 +2351,8 @@ export async function createPersistentEngineProtocol(
     sourceTransport,
     sourceScanCoordinator,
     publicationReady,
+    mediaDataDir: dataDir,
+    ...(imageGenerator ? { imageGenerator } : {}),
     ...(codexCoordinator ? { codexCoordinator } : {})
   };
   const protocol = createEngineProtocol(repository, "ready", protocolOptions);

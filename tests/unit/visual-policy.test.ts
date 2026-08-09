@@ -10,6 +10,7 @@ import {
   buildSafeCoverSvg,
   planRasterVariants,
   renderCoverVariants,
+  renderGeneratedImageVariants,
   validateArtDirection
 } from "../../packages/visuals/src/index.ts";
 
@@ -78,5 +79,22 @@ test("local renderer emits metadata-free WebP files for every required ratio", a
     assert.equal(metadata.height, artifact.height);
     assert.equal(metadata.exif, undefined);
     assert.match(artifact.sha256, /^[a-f0-9]{64}$/u);
+  }
+});
+
+test("generated raster input is normalized into every local publication ratio", async (t) => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "blogbot-generated-visuals-"));
+  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const source = await sharp({
+    create: { width: 1536, height: 1024, channels: 3, background: "#2456a6" }
+  }).png().toBuffer();
+
+  const artifacts = await renderGeneratedImageVariants(source, outputDirectory, "article-imagegen");
+  assert.equal(artifacts.length, 3);
+  for (const artifact of artifacts) {
+    const metadata = await sharp(await readFile(artifact.absolutePath)).metadata();
+    assert.equal(metadata.format, "webp");
+    assert.equal(metadata.width, artifact.width);
+    assert.equal(metadata.height, artifact.height);
   }
 });

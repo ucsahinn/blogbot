@@ -247,13 +247,6 @@ export function createCodexWorkerCoordinator(
           return waiting;
         }
 
-        const completed = await persistence.markCompleted({
-          jobId: running.jobId,
-          expectedVersion: running.version,
-          role: result.role,
-          model: result.model,
-          output: result.output
-        });
         await onCompleted?.({
           submission: {
             jobId: running.jobId,
@@ -261,6 +254,13 @@ export function createCodexWorkerCoordinator(
             definitionId: running.definitionId,
             payload: running.payload
           },
+          role: result.role,
+          model: result.model,
+          output: result.output
+        });
+        const completed = await persistence.markCompleted({
+          jobId: running.jobId,
+          expectedVersion: running.version,
           role: result.role,
           model: result.model,
           output: result.output

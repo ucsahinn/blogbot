@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repair-revision-media"
+description = "Enables the repair_revision_media command without any pre-configured scope."
+commands.allow = ["repair_revision_media"]
+
+[[permission]]
+identifier = "deny-repair-revision-media"
+description = "Denies the repair_revision_media command without any pre-configured scope."
+commands.deny = ["repair_revision_media"]

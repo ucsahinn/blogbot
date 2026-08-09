@@ -7,7 +7,7 @@ fn main() {
         "test_local_engine", "recover_local_workspace", "pick_local_folder", "local_dev_status", "start_local_dev",
         "stop_local_dev", "list_sources", "test_source", "scan_source",
         "scan_all_sources", "get_source_scan_status", "preview_opml", "save_sources", "review_source",
-        "create_instant_draft", "get_review_revision", "approve_revision",
+        "create_instant_draft", "get_review_revision", "repair_revision_media", "approve_revision",
         "approve_high_risk_revision", "enqueue_publication", "materialize_local_preview",
         "preview_publication", "get_operations", "get_engine_diagnostics", "export_diagnostics",
         "get_editorial_workspace", "promote_candidate", "dismiss_candidate", "retry_job",

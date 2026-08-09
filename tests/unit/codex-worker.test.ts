@@ -337,6 +337,28 @@ test("processing a claimed job tells the host when source preparation ends and C
   assert.deepEqual(lifecycle, ["started:job-1", "codex:job-1", "run"]);
 });
 
+test("a post-output materialization failure stays durably retryable instead of leaving the job running", async () => {
+  const store = new MemoryCodexJobStore();
+  const queue = new MemoryCodexQueue();
+  const coordinator = createCodexWorkerCoordinator({
+    persistence: store,
+    queue,
+    taskResolver: taskResolver(validTask),
+    codex: codexPort([{ type: "output.completed", output: { title: "Özgün analiz" } }], []),
+    onCompleted: async () => {
+      throw new Error("revision materialization failed");
+    }
+  });
+  await coordinator.submit(submission);
+
+  const retrying = await coordinator.process(queue.messages[0]!);
+
+  assert.equal(retrying.state, "QUEUED");
+  assert.equal(retrying.lastFailure, "EXECUTION_FAILED");
+  assert.equal(retrying.transientFailureCount, 1);
+  assert.equal(store.byJobId.get(submission.jobId)?.state, "QUEUED");
+});
+
 test("typed Codex limits enter WAITING_CODEX and retry requeues once", async () => {
   const store = new MemoryCodexJobStore();
   const queue = new MemoryCodexQueue();

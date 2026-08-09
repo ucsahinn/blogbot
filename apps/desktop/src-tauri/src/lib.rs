@@ -92,6 +92,7 @@ pub fn run() {
             commands::save_sources,
             commands::create_instant_draft,
             commands::get_review_revision,
+            commands::repair_revision_media,
             commands::approve_revision,
             commands::approve_high_risk_revision,
             commands::enqueue_publication,

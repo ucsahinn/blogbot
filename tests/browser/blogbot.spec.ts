@@ -1227,11 +1227,22 @@ test("revision edit keeps the accepted job visible while the editorial inventory
   await expect(page.getByRole("button", { name: /Düzenleme talebini işliyor/u })).toBeVisible({ timeout: 10_000 });
 });
 
-test("review content makes missing approved hero media explicit instead of showing a synthetic preview", async ({ page }) => {
+test("review content makes missing hero media actionable instead of showing a synthetic preview", async ({ page }) => {
   await page.goto("#editorial-review");
 
-  await expect(page.getByText("Onaylı hero medya yok.")).toHaveCount(2);
+  await expect(page.getByText("Bu taslakta hero medya yok.")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Görseli hazırla" })).toHaveCount(2);
   await expect(page.getByText("Hero medya güvenli önizlemesi")).toHaveCount(0);
+});
+
+test("a short legacy review draft offers one-step comprehensive regeneration", async ({ page }) => {
+  await page.goto("#editorial-review");
+
+  await expect(page.getByText(/Bu taslak .* kelimeyle kısa kaldı/u)).toBeVisible();
+  await page.getByRole("button", { name: "Kapsamlı yeniden oluştur" }).click();
+
+  await expect(page.getByRole("tab", { name: /Taslaklar/u })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: /Kapsamlı yeniden oluşturma işleniyor/u })).toBeVisible();
 });
 
 test("review approval remains hash-bound and requires a selected local target before materialization", async ({ page }) => {

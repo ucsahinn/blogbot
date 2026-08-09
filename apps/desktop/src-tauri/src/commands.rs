@@ -2599,6 +2599,70 @@ pub fn get_review_revision(
     build_review_revision(&materialization)
 }
 
+#[tauri::command]
+pub fn repair_revision_media(
+    revision_id: String,
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    ensure_mutation_allowed(&state)?;
+    if revision_id.trim().is_empty()
+        || revision_id.len() > 128
+        || !revision_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
+    {
+        return Err(CommandError::InvalidInput("geçerli bir revizyon kimliği gerekir".into()));
+    }
+    let expected_version = read_engine_state(&bridge)?
+        .pointer("/snapshot/serverCursor")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
+    let revision_id = revision_id.trim().to_string();
+    let key = stable_source_key(&format!("revision-media-repair:{revision_id}:{expected_version}"));
+    let response = engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": key,
+            "kind": "command",
+            "command": {
+                "version": 1,
+                "requestId": key,
+                "idempotencyKey": key,
+                "expectedVersion": expected_version,
+                "kind": "REVISION.REPAIR_MEDIA",
+                "payload": { "revisionId": revision_id }
+            }
+        }),
+    )?;
+    let value = response
+        .pointer("/result/value")
+        .cloned()
+        .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_SHAPE_INVALID".into()))?;
+    let successor_id = value
+        .pointer("/revision/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_ID_MISSING".into()))?;
+    let revision_hash = value
+        .get("revisionHash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_HASH_MISSING".into()))?;
+    let mutation = json!({
+        "kind": "REVISION.MEDIA_REPAIR",
+        "revisionId": revision_id,
+        "successorRevisionId": successor_id
+    });
+    persist_editorial_state(&bridge, mutation.clone(), None)?;
+    write_lock(&state.editorial_mutations)?.push(mutation);
+    Ok(json!({
+        "revision": {
+            "id": successor_id,
+            "revisionHash": revision_hash
+        }
+    }))
+}
+
 fn build_approval_command(
     revision_id: &str,
     expected_hash: &str,
@@ -3588,12 +3652,15 @@ fn scheduled_operation_items(revisions: &[Value]) -> Vec<Value> {
 }
 
 fn candidate_workflow_state(candidate_id: &str, mutations: &[Value], jobs: &[Value]) -> &'static str {
-    if jobs.iter().rev().any(|job| {
+    if let Some(job) = jobs.iter().rev().find(|job| {
         job.get("kind").and_then(Value::as_str) == Some("DRAFT")
             && job.pointer("/metadata/candidateId").and_then(Value::as_str) == Some(candidate_id)
-            && matches!(job.get("state").and_then(Value::as_str), Some("FAILED" | "DEAD_LETTER"))
     }) {
-        return "RESEARCH_FAILED";
+        match job.get("state").and_then(Value::as_str) {
+            Some("FAILED" | "DEAD_LETTER") => return "RESEARCH_FAILED",
+            Some("SUCCEEDED") => return "PROMOTED",
+            _ => {}
+        }
     }
     mutations
         .iter()
@@ -4159,6 +4226,7 @@ fn revision_edit_payload(
     revision_id: &str,
     instruction: &str,
     base_revision: Value,
+    title: Option<&str>,
 ) -> Result<Value, CommandError> {
     let source_urls = base_revision
         .get("sources")
@@ -4181,6 +4249,7 @@ fn revision_edit_payload(
         "sourceIds": [],
         "urls": source_urls,
         "instruction": instruction,
+        "candidateTitle": title,
         "section": base_revision.get("section").and_then(Value::as_str).unwrap_or("haberler"),
         "articleType": base_revision.get("articleType").and_then(Value::as_str).unwrap_or("news"),
         "baseRevision": base_revision,
@@ -4192,11 +4261,22 @@ fn revision_edit_payload(
 pub fn request_revision_edit(
     revision_id: String,
     instruction: String,
+    title: Option<String>,
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
-    if revision_id.trim().is_empty() || revision_id.len() > 200 || !revision_id.chars().all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '.')) || instruction.trim().len() < 3 || instruction.len() > 20_000 {
+    let title = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if revision_id.trim().is_empty()
+        || revision_id.len() > 200
+        || !revision_id.chars().all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '.'))
+        || instruction.trim().len() < 3
+        || instruction.len() > 20_000
+        || title.is_some_and(|value| value.len() > 160)
+    {
         return Err(CommandError::InvalidInput("revision id and edit instruction are required".into()));
     }
     let version = read_engine_state(&bridge)?
@@ -4209,7 +4289,7 @@ pub fn request_revision_edit(
             other => other,
         })?;
     let base_revision = build_review_revision(&materialized)?;
-    let payload = revision_edit_payload(&revision_id, instruction.trim(), base_revision)?;
+    let payload = revision_edit_payload(&revision_id, instruction.trim(), base_revision, title)?;
     let key = stable_source_key(&format!("revision-edit:{revision_id}:{instruction}"));
     let response = engine_request(&bridge, json!({
         "version": 1,
@@ -4720,6 +4800,23 @@ mod tests {
     }
 
     #[test]
+    fn completed_candidate_draft_is_not_left_in_the_research_queue() {
+        let mutations = [json!({
+            "kind": "CANDIDATE.PROMOTE",
+            "candidateId": "candidate-complete",
+            "state": "RESEARCH_QUEUED"
+        })];
+        let jobs = [json!({
+            "id": "draft-candidate-complete",
+            "kind": "DRAFT",
+            "state": "SUCCEEDED",
+            "metadata": { "candidateId": "candidate-complete" }
+        })];
+
+        assert_eq!(candidate_workflow_state("candidate-complete", &mutations, &jobs), "PROMOTED");
+    }
+
+    #[test]
     fn codex_usage_projects_only_observed_local_draft_activity() {
         let now = 1_785_600_000_000_u128;
         let usage = super::codex_usage_from_jobs(&[
@@ -4934,12 +5031,18 @@ mod tests {
             "tr": { "bodyMarkdown": "Özgün metin" },
             "sources": [{ "url": "https://example.org/evidence" }]
         });
-        let payload = revision_edit_payload("revision-1", "Başlığı ve sonucu netleştir", base.clone()).unwrap();
+        let payload = revision_edit_payload(
+            "revision-1",
+            "Başlığı ve sonucu netleştir",
+            base.clone(),
+            Some("Kapsamlı yeniden oluşturma işleniyor"),
+        ).unwrap();
         assert_eq!(payload["revisionId"], "revision-1");
         assert_eq!(payload["urls"], json!(["https://example.org/evidence"]));
         assert_eq!(payload["section"], "dosyalar");
+        assert_eq!(payload["candidateTitle"], "Kapsamlı yeniden oluşturma işleniyor");
         assert_eq!(payload["baseRevision"], base);
-        assert!(revision_edit_payload("revision-1", "Düzenle", json!({ "sources": [] })).is_err());
+        assert!(revision_edit_payload("revision-1", "Düzenle", json!({ "sources": [] }), None).is_err());
     }
 
     #[test]

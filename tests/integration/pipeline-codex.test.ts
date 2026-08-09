@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -230,11 +230,16 @@ test("production draft schema keeps every closed claim property required", async
 });
 
 test("Windows command wrappers cannot keep a timed-out Codex task running", { skip: process.platform !== "win32" }, async () => {
+  const timeoutCodexHome = await mkdtemp(join(tmpdir(), "blogbot-isolated-codex-home-timeout-"));
   const port = createCodexCliPort({
     command: fileURLToPath(new URL("../fixtures/fake-codex-wrapper.cmd", import.meta.url)),
     commandPrefixArgs: ["--hang"],
-    codexHome: isolatedCodexHome,
-    timeoutMs: 1_000
+    codexHome: timeoutCodexHome,
+    // Node's test runner executes the integration files concurrently on
+    // Windows. Give the fixture enough cold-start time to publish its exact
+    // PID before the intentionally bounded timeout fires; the assertion still
+    // proves that a timed-out child tree cannot survive the runner.
+    timeoutMs: 5_000
   });
   const consume = async () => {
     for await (const _event of port.run({
@@ -249,14 +254,14 @@ test("Windows command wrappers cannot keep a timed-out Codex task running", { sk
   await assert.rejects(
     Promise.race([
       consume(),
-      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("timeout did not release the Codex caller")), 2_000))
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("timeout did not release the Codex caller")), 7_000))
     ]),
     (error: unknown) =>
       error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
   );
 
   const childPid = Number(
-    (await readFile(join(isolatedCodexHome, "fake-codex-child.pid"), "utf8")).trim()
+    (await readFile(join(timeoutCodexHome, "fake-codex-child.pid"), "utf8")).trim()
   );
   assert.ok(Number.isSafeInteger(childPid) && childPid > 0, "fixture must report its exact child PID");
   const deadline = Date.now() + 3_000;

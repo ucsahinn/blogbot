@@ -325,7 +325,7 @@ test("draft.create with NEXT_SLOT considers every enabled slot of the same weekd
 });
 
 test("draft source evidence is bounded, anchored, and marked untrusted", async () => {
-  const body = `<rss><channel><title>Feed</title><item><title>Patch</title><link>https://example.com/patch</link><description>${"A".repeat(5000)}</description></item></channel></rss>`;
+  const body = `<rss><channel><title>Feed</title><item><title>Patch</title><link>https://example.com/patch</link><description>${"A".repeat(15000)}</description></item></channel></rss>`;
   const evidence = await collectDraftSourceEvidence(undefined, [], ["https://example.com/feed"], {
     async resolve() { return ["93.184.216.34"]; },
     async request() {
@@ -336,11 +336,11 @@ test("draft source evidence is bounded, anchored, and marked untrusted", async (
   const item = evidence[0] as Record<string, unknown>;
   assert.equal(item.untrusted, true);
   assert.equal(typeof item.evidenceText, "string");
-  assert.equal(String(item.evidenceText).length, 4096);
+  assert.equal(String(item.evidenceText).length, 12000);
   const anchors = item.evidenceAnchors as Array<{ sourceId: string; start: number; end: number; quoteHash: string }>;
   const anchor = anchors[0];
   assert.ok(anchor);
-  assert.deepEqual(anchors, [{ sourceId: String(item.sourceId), start: 0, end: 4096, quoteHash: anchor.quoteHash }]);
+  assert.deepEqual(anchors, [{ sourceId: String(item.id), start: 0, end: 12000, quoteHash: anchor.quoteHash }]);
   assert.match(anchor.quoteHash, /^[a-f0-9]{64}$/u);
 });
 

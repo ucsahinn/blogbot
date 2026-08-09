@@ -11,7 +11,7 @@ import {
   type DraftCodexOutput
 } from "../../apps/engine/src/codex-draft.ts";
 import { assertRevisionGeneratedFilesMatch } from "../../apps/engine/src/stdio-entrypoint.ts";
-import { validateRevisionPackageV2 } from "../../packages/editorial/src/revision.ts";
+import { validateClaimEvidence, validateRevisionPackageV2 } from "../../packages/editorial/src/revision.ts";
 import { astroGenericAdapter } from "../../packages/site-adapter/src/astro-generic.ts";
 
 const draft: DraftCodexOutput = {
@@ -42,6 +42,62 @@ test("final review is a separate DEEP_REVIEW task with a strict output contract"
   assert.equal(task.taskKind, "FINAL_QUALITY");
   assert.equal(isFinalReviewCodexOutput(review), true);
   assert.equal(isFinalReviewCodexOutput({ ...review, gates: review.gates.slice(1) }), false);
+});
+
+test("draft tasks retain substantial selected-source context without exposing an unbounded body", async () => {
+  const resolver = createDraftCodexTaskResolver();
+  const evidenceText = "Kanıt cümlesi. ".repeat(1_000);
+  const task = await resolver.resolve({
+    jobId: "r:source-context",
+    idempotencyKey: "source-context",
+    definitionId: "DRAFT.CREATE",
+    payload: {
+      sources: [{
+        id: "source-1",
+        title: "Birincil kaynak",
+        url: "https://example.org/source",
+        evidenceText
+      }]
+    },
+    state: "RUNNING",
+    version: 1
+  });
+  const sources = ((task.input as { task?: { sources?: Array<{ excerpt?: string }> } }).task?.sources);
+  assert.equal(sources?.[0]?.excerpt, evidenceText.slice(0, 12_000));
+  assert.equal(sources?.[0]?.excerpt?.length, 12_000);
+});
+
+test("draft tasks reject a teaser when the selected evidence supports a full standard article", async () => {
+  const resolver = createDraftCodexTaskResolver();
+  const task = await resolver.resolve({
+    jobId: "r:substantial-news",
+    idempotencyKey: "substantial-news",
+    definitionId: "DRAFT.CREATE",
+    payload: {
+      articleType: "news",
+      sources: [{
+        id: "source-1",
+        title: "Uzun kanıt",
+        url: "https://example.org/source",
+        evidenceText: "kanıt ".repeat(2_000)
+      }]
+    },
+    state: "RUNNING",
+    version: 1
+  });
+  const teaser = {
+    ...draft,
+    tr: { ...draft.tr, bodyMarkdown: "Türkçe ".repeat(699) },
+    en: { ...draft.en, bodyMarkdown: "English ".repeat(699) }
+  };
+  const fullLength = {
+    ...teaser,
+    tr: { ...teaser.tr, bodyMarkdown: "Türkçe ".repeat(700) },
+    en: { ...teaser.en, bodyMarkdown: "English ".repeat(700) }
+  };
+
+  assert.equal(task.validateOutput(teaser), false);
+  assert.equal(task.validateOutput(fullLength), true);
 });
 
 test("draft output repair fills only derivable metadata before strict validation", () => {
@@ -146,4 +202,42 @@ test("materialization applies the locally configured editorial author", () => {
     "2026-08-02T00:00:00.000Z"
   );
   assert.equal(revision.author, "Yerel Editorya");
+});
+
+test("materialization binds a claim to the immutable source anchor instead of trusting a model hash", () => {
+  const quoteHash = "b".repeat(64);
+  const revision = materializeDraftRevision(
+    "r-anchored-claim",
+    {
+      sources: [{
+        id: "source-1",
+        url: "https://example.org/evidence",
+        title: "Evidence",
+        contentHash: "c".repeat(64),
+        fetchedAt: "2026-08-02T00:00:00.000Z",
+        evidenceAnchors: [{ sourceId: "source-1", start: 0, end: 32, quoteHash }]
+      }]
+    },
+    {
+      ...draft,
+      claims: [{ ...draft.claims[0]!, sourceIds: ["source-1"], quoteHash: "d".repeat(64) }]
+    },
+    "2026-08-02T00:00:00.000Z"
+  );
+
+  assert.deepEqual(revision.sources[0]?.evidenceAnchors, [{ sourceId: "source-1", start: 0, end: 32, quoteHash }]);
+  assert.deepEqual(revision.claims[0]?.evidenceAnchors, [{ sourceId: "source-1", start: 0, end: 32, quoteHash }]);
+  assert.equal(validateClaimEvidence(revision), true);
+});
+
+test("materialization downgrades a verified claim when any requested source cannot be anchored", () => {
+  const revision = materializeDraftRevision(
+    "r-unanchored-claim",
+    { sources: [{ id: "source-1", url: "https://example.org/evidence", title: "Evidence", contentHash: "c".repeat(64), fetchedAt: "2026-08-02T00:00:00.000Z" }] },
+    { ...draft, claims: [{ ...draft.claims[0]!, sourceIds: ["missing-source"], status: "VERIFIED" }] },
+    "2026-08-02T00:00:00.000Z"
+  );
+
+  assert.equal(revision.claims[0]?.status, "NEEDS_SOURCE");
+  assert.deepEqual(revision.claims[0]?.evidenceAnchors, []);
 });

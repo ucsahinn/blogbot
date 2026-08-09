@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import sharp from "sharp";
 
 import type { FetchTransport } from "../../apps/fetcher/src/fetch-source.ts";
 import { createPersistentEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
@@ -195,21 +196,32 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
   const dataDir = join(root, "pgdata");
   t.after(() => rm(root, { recursive: true, force: true }));
   const observedTasks: unknown[] = [];
+  const sourceEvidence = "Güvenilir kanıt metni. ".repeat(1_000);
+  const fullTrBody = "Türkçe ".repeat(700);
+  const fullEnBody = "English ".repeat(700);
+  const generatedImage = await sharp({
+    create: { width: 1536, height: 1024, channels: 3, background: "#2456a6" }
+  }).png().toBuffer();
   const runtime = await createPersistentEngineProtocol(dataDir, {
     startSourceWorker: false,
+    imageGenerator: {
+      async generate() {
+        return generatedImage;
+      }
+    },
     codexPort: {
       async *run(request) {
         observedTasks.push(request.input);
         const finalReview = Object.hasOwn((request.outputSchema.properties as Record<string, unknown> | undefined) ?? {}, "translationParity");
         yield { type: "output.completed", output: finalReview
           ? { translationParity: { status: "MATCHED", detail: "Test paritesi doğrulandı." }, riskLevel: "STANDARD", gates: [{ id: "claims", group: "editorial", state: "PASS", detail: "Kanıt bağlı." }, { id: "contradictions", group: "editorial", state: "PASS", detail: "Çelişki yok." }, { id: "bilingual-parity", group: "editorial", state: "PASS", detail: "Parite eşleşti." }, { id: "markdown-safety", group: "security", state: "PASS", detail: "Markdown güvenli." }, { id: "seo", group: "seo", state: "PASS", detail: "SEO tamam." }, { id: "media", group: "media", state: "PASS", detail: "Medya gerekmiyor." }] }
-          : { translationKey: "terminal-test", author: "Test Editörü", tags: ["test"], tr: { title: "Terminal test haberi", slug: "terminal-test-haberi", description: "Test açıklaması.", bodyMarkdown: "Özgün test metni.", heroImageAlt: "Test görseli" }, en: { title: "Terminal test story", slug: "terminal-test-story", description: "Test description.", bodyMarkdown: "Original test text.", heroImageAlt: "Test visual" }, claims: [{ claimKey: "claim-1", trText: "Doğrulanan test iddiası", enText: "Verified test claim", sourceIds: ["https://news.example/story"], status: "NEEDS_SOURCE", quoteHash: "" }] }
+          : { translationKey: "terminal-test", author: "Test Editörü", tags: ["test"], tr: { title: "Terminal test haberi", slug: "terminal-test-haberi", description: "Test açıklaması.", bodyMarkdown: fullTrBody, heroImageAlt: "Test görseli" }, en: { title: "Terminal test story", slug: "terminal-test-story", description: "Test description.", bodyMarkdown: fullEnBody, heroImageAlt: "Test visual" }, claims: [{ claimKey: "claim-1", trText: "Doğrulanan test iddiası", enText: "Verified test claim", sourceIds: ["https://news.example/story"], status: "NEEDS_SOURCE", quoteHash: "" }] }
         };
       }
     },
     sourceTransport: {
       resolve: async () => ["93.184.216.34"],
-      request: async () => ({ status: 200, headers: { "content-type": "text/plain" }, body: encoder.encode("Güvenilir kanıt metni.") })
+      request: async () => ({ status: 200, headers: { "content-type": "text/html" }, body: encoder.encode(`<article>${sourceEvidence}</article>`) })
     }
   });
   t.after(() => runtime.close());
@@ -238,9 +250,40 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
     state = ((snapshot.snapshot as { jobs: Array<{ id: string; state: string }> }).jobs.find((job) => job.id === "draft-terminal")?.state ?? "MISSING");
   }
   assert.equal(state, "SUCCEEDED");
-  const draftTask = observedTasks.find((task) => typeof task === "object" && task !== null && "task" in task) as { task?: { sources?: Array<Record<string, unknown>> } } | undefined;
+  const draftTask = observedTasks.find((task) => typeof task === "object" && task !== null && "task" in task) as { task?: { sources?: Array<{ excerpt?: string; evidenceText?: unknown }> } } | undefined;
   assert.ok(draftTask?.task);
+  const revisionState = await runtime.handle({ version: 1, id: "terminal-revision-state", kind: "state", afterCursor: 0 });
+  const revisionVersion = (revisionState.snapshot as { serverCursor: number }).serverCursor;
+  const revisionResponse = await runtime.handle({
+    version: 1,
+    id: "terminal-revision-get",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "terminal-revision-get",
+      idempotencyKey: "terminal-revision-get",
+      expectedVersion: revisionVersion,
+      kind: "REVISION.GET",
+      payload: { revisionId: "draft-terminal" }
+    }
+  });
+  assert.equal(revisionResponse.ok, true);
+  const revision = (revisionResponse.result as { value: { revision: { media: Array<{ path: string; contentBase64?: string; width: number; height: number }> } } }).value.revision;
+  assert.deepEqual(
+    revision.media.map((item) => [item.path, item.width, item.height]),
+    [
+      ["media/draft-terminal/terminal-test-haberi-16x9.webp", 1600, 900],
+      ["media/draft-terminal/terminal-test-haberi-4x3.webp", 1200, 900],
+      ["media/draft-terminal/terminal-test-haberi-1x1.webp", 1200, 1200]
+    ]
+  );
+  assert.ok(revision.media.every((item) => typeof item.contentBase64 === "string" && item.contentBase64.length > 0));
   assert.equal("evidenceText" in (draftTask.task.sources?.[0] ?? {}), false, "raw source evidence must not bypass the bounded draft contract");
+  assert.ok(draftTask.task.sources?.[0]?.excerpt?.startsWith("Güvenilir kanıt metni."), "the bounded source evidence must reach the drafting task as an excerpt");
+  assert.equal(
+    draftTask.task.sources?.[0]?.excerpt?.split(/\s+/u).filter(Boolean).length,
+    sourceEvidence.slice(0, 12_000).split(/\s+/u).filter(Boolean).length
+  );
 });
 
 test("a long-running Codex task does not block local workspace reads", async (t) => {

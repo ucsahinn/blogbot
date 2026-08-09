@@ -62,6 +62,16 @@ function isScheduledForFuture(scheduledAt: string): boolean {
   return Number.isFinite(scheduledAtMs) && scheduledAtMs > Date.now();
 }
 
+function wordCount(value: string): number {
+  return value.trim().split(/\s+/u).filter(Boolean).length;
+}
+
+function editorialTargetWords(articleType: ReviewRevision["articleType"]): number {
+  if (articleType === "deep_dive") return 1_200;
+  if (articleType === "analysis" || articleType === "guide") return 900;
+  return 700;
+}
+
 async function sha256(content: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
@@ -142,6 +152,8 @@ export function ReviewWorkspace({
   const [approvingHighRisk, setApprovingHighRisk] = useState(false);
   const [reauthenticated, setReauthenticated] = useState(false);
   const [requestingEdit, setRequestingEdit] = useState(false);
+  const [requestingComprehensiveRewrite, setRequestingComprehensiveRewrite] = useState(false);
+  const [repairingMedia, setRepairingMedia] = useState(false);
   const [enqueueingPublication, setEnqueueingPublication] = useState(false);
   const [previewingPublication, setPreviewingPublication] = useState(false);
   const [lastPreview, setLastPreview] = useState<{ revisionId: string; hash: string } | null>(null);
@@ -187,6 +199,11 @@ export function ReviewWorkspace({
     [revision]
   );
   const acceptedWarnings = revision?.gates.filter((gate) => gate.state === "WARN") ?? [];
+  const comprehensiveTargetWords = revision ? editorialTargetWords(revision.articleType) : 0;
+  const trWordCount = revision ? wordCount(revision.tr.bodyMarkdown) : 0;
+  const needsComprehensiveRewrite = Boolean(
+    revision && revision.state === "REVIEW_REQUIRED" && trWordCount < comprehensiveTargetWords
+  );
   const hasUnacceptableWarning = acceptedWarnings.some((gate) => !acceptableWarningIds.has(gate.id));
   const activeContent = revision?.[locale];
   const previousContent = revision?.previous[locale];
@@ -381,6 +398,57 @@ export function ReviewWorkspace({
     } finally {
       setPreviewingPublication(false);
       setEnqueueingPublication(false);
+    }
+  };
+
+  const requestComprehensiveRewrite = async () => {
+    if (!revision) return;
+    setRequestingComprehensiveRewrite(true);
+    setNotice("");
+    try {
+      const queued = await bridge.requestRevisionEdit({
+        revisionId: revision.id,
+        title: "Kapsamlı yeniden oluşturma işleniyor",
+        instruction: `Kaynak kanıtlarını yeniden inceleyin. Bu kısa taslağı kaynak metnini kopyalamadan, özgün ve ayrıntılı bir ${contentCategoryLabel(revision.section, revision.articleType).toLocaleLowerCase("tr-TR")} olarak yeniden oluşturun. Türkçe gövde en az ${comprehensiveTargetWords} kelime olsun; doğrulanamayan iddiaları eklemeyin ve TR/EN olgu bütünlüğünü koruyun.`
+      });
+      const queuedMessage = "Kapsamlı yeniden oluşturma araştırma kuyruğuna alındı. Yeni revizyon ayrı bir hash ile hazırlanacak.";
+      if (onDraftQueued) {
+        try {
+          await onDraftQueued(queuedMessage, queued.job?.id);
+        } catch {
+          setNotice(`${queuedMessage} Taslak envanteri şu an yenilenemedi; Taslaklar sekmesinden yeniden deneyin.`);
+        }
+      } else {
+        setNotice(queuedMessage);
+      }
+    } catch (reason) {
+      setNotice(userFacingBridgeError(reason, "Kapsamlı yeniden oluşturma kaydedilemedi."));
+    } finally {
+      setRequestingComprehensiveRewrite(false);
+    }
+  };
+
+  const repairMedia = async () => {
+    if (!revision || revision.state !== "REVIEW_REQUIRED") return;
+    setRepairingMedia(true);
+    setNotice("");
+    try {
+      const result = await bridge.repairRevisionMedia(revision.id);
+      try {
+        await onRevisionApproved?.();
+      } catch {
+        // The direct revision read below still opens the newly materialized package.
+      }
+      setLoading(true);
+      setRevision(null);
+      setLastPreview(null);
+      setSelectedId(result.revision.id);
+      setWarningsAcknowledged(false);
+      setNotice("Görsel paketi yeni, onay bekleyen revizyona eklendi. Eski revizyon korunur ve yayınlanamaz.");
+    } catch (reason) {
+      setNotice(userFacingBridgeError(reason, "Görsel paketi hazırlanamadı."));
+    } finally {
+      setRepairingMedia(false);
     }
   };
 
@@ -723,6 +791,17 @@ export function ReviewWorkspace({
               {tab === "content" ? (
                 <div className="article-review-layout dual-review-layout">
                   <div className="dual-locale-grid">
+                    {needsComprehensiveRewrite ? (
+                      <section className="article-no-media article-content-scope" role="note" aria-label="İçerik kapsamı">
+                        <strong>Bu taslak {trWordCount} kelimeyle kısa kaldı.</strong>
+                        <span>Kaynakları yeniden inceleyip, mevcut metni değiştirmeden yeni ve kapsamlı bir inceleme revizyonu oluşturabilirsiniz.</span>
+                        {!readOnly ? (
+                          <button type="button" className="secondary-button" onClick={() => void requestComprehensiveRewrite()} disabled={requestingComprehensiveRewrite}>
+                            {requestingComprehensiveRewrite ? "Kapsamlı yeniden oluşturma işleniyor…" : "Kapsamlı yeniden oluştur"}
+                          </button>
+                        ) : null}
+                      </section>
+                    ) : null}
                     {(["tr", "en"] as const).map((contentLocale) => {
                       const content = revision[contentLocale];
                       return (
@@ -741,8 +820,13 @@ export function ReviewWorkspace({
                             </figure>
                           ) : (
                             <div className="article-no-media" role="note" aria-label="Hero medya durumu">
-                              <strong>Onaylı hero medya yok.</strong>
-                              <span>Medya paketi eklenmeden bu revizyon için görsel doğrulama yapılamaz.</span>
+                              <strong>Bu taslakta hero medya yok.</strong>
+                              <span>Metin değişmeden, onaylanmamış yeni bir revizyona içerikle uyumlu üç görsel oranı ekleyebilirsiniz.</span>
+                              {revision.state === "REVIEW_REQUIRED" && !readOnly ? (
+                                <button type="button" className="secondary-button" onClick={() => void repairMedia()} disabled={repairingMedia}>
+                                  {repairingMedia ? "Görsel paketi hazırlanıyor…" : "Görseli hazırla"}
+                                </button>
+                              ) : null}
                             </div>
                           )}
                           <div className="markdown-preview">

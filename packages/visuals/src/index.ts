@@ -193,6 +193,43 @@ export async function renderCoverVariants(
 
   return artifacts;
 }
+
+/** Converts one generated raster image into the three locally published ratios. */
+export async function renderGeneratedImageVariants(
+  source: Uint8Array,
+  outputDirectory: string,
+  baseName: string
+): Promise<RenderedCoverArtifact[]> {
+  if (!isAbsolute(outputDirectory)) {
+    throw new Error("Visual output directory must be absolute");
+  }
+  if (source.byteLength === 0 || source.byteLength > 20_000_000) {
+    throw new Error("Generated visual bytes are outside the allowed bounds");
+  }
+  const root = resolve(outputDirectory);
+  await mkdir(root, { recursive: true });
+  const artifacts: RenderedCoverArtifact[] = [];
+  const sharp = loadSharp();
+
+  for (const variant of planRasterVariants(baseName)) {
+    const target = resolve(join(root, variant.path));
+    if (!target.startsWith(`${root}\\`) && !target.startsWith(`${root}/`)) {
+      throw new Error("Visual output escaped its target directory");
+    }
+    await sharp(source, { limitInputPixels: 40_000_000, failOn: "error" })
+      .rotate()
+      .resize(variant.width, variant.height, { fit: "cover", position: "attention" })
+      .webp({ quality: 88, effort: 5, smartSubsample: true })
+      .toFile(target);
+    const bytes = await readFile(target);
+    artifacts.push({
+      ...variant,
+      absolutePath: target,
+      sha256: createHash("sha256").update(bytes).digest("hex")
+    });
+  }
+  return artifacts;
+}
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";

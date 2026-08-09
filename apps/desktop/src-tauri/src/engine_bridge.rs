@@ -25,6 +25,22 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
 const MAX_DIAGNOSTIC_LOG_BYTES: u64 = 256 * 1024;
+// `CREATE_NO_WINDOW` applies to every helper process started by the desktop
+// host. In particular, probing a `.cmd` launcher at app start must never flash
+// a Command Prompt behind the Blogbot window.
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn configure_hidden_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
 
 // The engine starts with a deliberately scrubbed environment. On Windows a
 // resolved `codex.cmd` still needs these OS bootstrap values to invoke the
@@ -115,7 +131,9 @@ fn owned_process_tree_kill_args(pid: u32) -> [String; 4] {
 fn terminate_owned_process_tree(child: &mut Child) {
     #[cfg(windows)]
     {
-        let status = Command::new("taskkill.exe")
+        let mut taskkill = Command::new("taskkill.exe");
+        configure_hidden_command(&mut taskkill);
+        let status = taskkill
             .args(owned_process_tree_kill_args(child.id()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -420,11 +438,7 @@ impl EngineBridge {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000);
-        }
+        configure_hidden_command(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| format!("ENGINE_START_FAILED: {error}"))?;
@@ -555,8 +569,9 @@ fn discover_codex_command() -> Option<String> {
     ["codex.exe", "codex.cmd", "codex"]
         .into_iter()
         .find(|candidate| {
-            Command::new(candidate)
-                .arg("--version")
+            let mut probe = Command::new(candidate);
+            configure_hidden_command(&mut probe);
+            probe.arg("--version")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -566,8 +581,9 @@ fn discover_codex_command() -> Option<String> {
         .and_then(|candidate| {
             // The sidecar starts with a scrubbed environment and therefore
             // cannot rely on PATH. Resolve the executable before spawning it.
-            let resolved = Command::new("where.exe")
-                .arg(candidate)
+            let mut where_command = Command::new("where.exe");
+            configure_hidden_command(&mut where_command);
+            let resolved = where_command.arg(candidate)
                 .stdin(Stdio::null())
                 .output()
                 .ok()
@@ -642,7 +658,7 @@ fn discover_engine_node_modules(app: &AppHandle) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_engine_executable, has_pglite_assets, redact_diagnostic_for_persistence, serialize_bounded_request, sidecar_environment_with, should_retry_after_transport_fault, transport_error_for_request, RESPONSE_TIMEOUT};
+    use super::{discover_engine_executable, has_pglite_assets, redact_diagnostic_for_persistence, serialize_bounded_request, sidecar_environment_with, should_retry_after_transport_fault, transport_error_for_request, RESPONSE_TIMEOUT, WINDOWS_CREATE_NO_WINDOW};
     use serde_json::json;
     use std::path::Path;
     use std::time::Duration;
@@ -671,6 +687,11 @@ mod tests {
     #[test]
     fn owned_sidecar_shutdown_targets_only_the_owned_process_tree() {
         assert_eq!(super::owned_process_tree_kill_args(4242), ["/pid", "4242", "/t", "/f"].map(String::from));
+    }
+
+    #[test]
+    fn windows_helper_processes_use_the_no_window_creation_flag() {
+        assert_eq!(WINDOWS_CREATE_NO_WINDOW, 0x0800_0000);
     }
 
     #[test]

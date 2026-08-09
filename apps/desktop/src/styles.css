@@ -5766,6 +5766,24 @@ strong {
   min-width: 0;
 }
 
+.article-content-scope {
+  grid-column: 1 / -1;
+  max-width: none;
+  margin: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.article-content-scope > span {
+  grid-column: 1;
+}
+
+.article-content-scope > button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  white-space: nowrap;
+}
+
 .dual-locale-grid .article-preview {
   padding: 24px;
 }

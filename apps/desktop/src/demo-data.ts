@@ -956,6 +956,7 @@ export function createDemoTransport(): InvokeTransport {
       case "request_revision_edit": {
         const revisionId = String(args?.revisionId ?? "");
         const instruction = String(args?.instruction ?? "").trim();
+        const title = String(args?.title ?? "").trim() || "Düzenleme talebini işliyor";
         if (revisionId !== demoReview.id || instruction.length < 10) {
           throw new BridgeError(
             "COMMAND_FAILED",
@@ -966,7 +967,7 @@ export function createDemoTransport(): InvokeTransport {
         const jobId = `draft-edit-${Date.now()}`;
         editorialWorkspace.drafts.unshift({
           id: jobId,
-          titleTr: "Düzenleme talebini işliyor",
+          titleTr: title,
           titleEn: "Preparing the requested revision",
           section: "analiz",
           completion: 15,

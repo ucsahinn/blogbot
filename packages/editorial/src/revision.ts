@@ -51,6 +51,8 @@ export interface SourceSnapshot {
   title: string;
   fetchedAt: string;
   contentHash: string;
+  /** Immutable excerpts captured when the local engine assembled this revision. */
+  evidenceAnchors?: EvidenceAnchor[];
   /** Optional for legacy readability; absence is treated as PENDING at publish time. */
   trustStatus?: SourcePolicyStatus;
   /** Optional for legacy readability; absence is treated as PENDING at publish time. */
@@ -419,7 +421,7 @@ export function hasRevisionPackageV2Fields(revision: ArticleRevision): boolean {
 export function validateClaimEvidence(
   revision: ArticleRevision
 ): boolean {
-  const sourceIds = new Set(revision.sources.map((source) => source.id));
+  const sourceById = new Map(revision.sources.map((source) => [source.id, source]));
   return revision.claims.every((claim) => {
     if (!claim.claimKey?.trim() || !claim.trText?.trim() || !claim.enText?.trim()) {
       return false;
@@ -428,9 +430,15 @@ export function validateClaimEvidence(
       return false;
     }
     return claim.evidenceAnchors.every((anchor) => {
-      if (!sourceIds.has(anchor.sourceId) || !/^[a-f0-9]{64}$/i.test(anchor.quoteHash)) {
+      const source = sourceById.get(anchor.sourceId);
+      if (!source || !/^[a-f0-9]{64}$/i.test(anchor.quoteHash)) {
         return false;
       }
+      // Newly materialized drafts retain the source snapshot's actual anchor.
+      // A model-supplied hash must never be enough to make a claim publishable.
+      if (source.evidenceAnchors?.length && !source.evidenceAnchors.some((known) =>
+        known.sourceId === anchor.sourceId && known.quoteHash === anchor.quoteHash
+      )) return false;
       if (anchor.start !== undefined && (!Number.isInteger(anchor.start) || anchor.start < 0)) {
         return false;
       }

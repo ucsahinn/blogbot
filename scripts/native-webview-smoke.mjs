@@ -13,6 +13,7 @@ const inspectExistingProfile = process.env.BLOGBOT_NATIVE_PROFILE === "actual";
 const profileObserveMs = Number.parseInt(process.env.BLOGBOT_PROFILE_OBSERVE_MS ?? "0", 10);
 const skipProfileFinalRead = process.env.BLOGBOT_PROFILE_SKIP_FINAL_READ === "1";
 const retryBlockedActualProfile = process.env.BLOGBOT_PROFILE_RETRY_BLOCKED === "1";
+const rewriteFirstShortActualProfile = process.env.BLOGBOT_PROFILE_REWRITE_SHORT === "1";
 const webdriverBaseUrl = "http://127.0.0.1:4444";
 const smokeFeedUrl = process.env.BLOGBOT_SMOKE_FEED_URL ?? "https://www.cshub.com/rss/news";
 const routes = [
@@ -1026,6 +1027,30 @@ async function inspectExistingProfileState(sessionId, localEngine) {
       ? line.match(/(?:ENGINE|CODEX|QUEUE|BRIDGE)_[A-Z_]+/g) ?? []
       : []
   ))].slice(0, 20);
+  // Read only aggregate editorial measures from the user's existing drafts.
+  // Keeping article text, source URLs, and media bytes out of the report lets
+  // the smoke test distinguish a short draft from a legacy no-media revision
+  // without turning a support diagnostic into a content export.
+  const reviewSummaries = await Promise.all(
+    (workspaceResponse.result?.drafts ?? [])
+      .filter((draft) => typeof draft?.id === "string" && draft.reviewable !== false)
+      .slice(0, 12)
+      .map(async (draft) => {
+        const response = await invoke(sessionId, "get_review_revision", { revisionId: draft.id });
+        const countWords = (value) => typeof value === "string"
+          ? value.trim().split(/\s+/u).filter(Boolean).length
+          : 0;
+        const media = Array.isArray(response?.result?.media) ? response.result.media : [];
+        return {
+          id: draft.id,
+          readable: response?.ok === true,
+          trWords: countWords(response?.result?.tr?.bodyMarkdown),
+          enWords: countWords(response?.result?.en?.bodyMarkdown),
+          mediaAssets: media.length,
+          heroAssets: media.filter((asset) => asset?.role === "hero").length
+        };
+      })
+  );
   const renderedEditorial = await execute(sessionId, `
     window.location.hash = '#editorial';
     return new Promise((resolveResult) => setTimeout(() => resolveResult({
@@ -1034,6 +1059,38 @@ async function inspectExistingProfileState(sessionId, localEngine) {
       pendingRows: document.querySelectorAll('[aria-label="Araştırma kuyruğundaki taslak"]').length,
       errorAlerts: document.querySelectorAll('[role="alert"]').length
     }), 500));
+  `);
+  const renderedReviewMedia = await execute(sessionId, `
+    window.location.hash = '#editorial-review';
+    return (async () => {
+      const delay = (milliseconds) => new Promise((resolveResult) => setTimeout(resolveResult, milliseconds));
+      await delay(750);
+      let selectedMediaRevision = false;
+      // The review queue intentionally preserves legacy revisions that may not
+      // have media. Exercise the visible queue until a persisted media package
+      // is selected, rather than treating the default legacy row as proof that
+      // a newly generated hero cannot render.
+      for (const item of [...document.querySelectorAll('.review-queue-item')]) {
+        item.click();
+        await delay(500);
+        if (document.querySelectorAll('.article-hero-media img').length > 0) {
+          selectedMediaRevision = true;
+          break;
+        }
+      }
+      return {
+        heroImages: document.querySelectorAll('.article-hero-media img').length,
+        selectedMediaRevision,
+        availablePersistedHeroPackages: ${JSON.stringify(reviewSummaries.filter((item) => item.mediaAssets > 0 && item.heroAssets > 0).length)},
+        missingHeroNotices: document.querySelectorAll('[aria-label="Hero medya durumu"]').length,
+        mediaRepairButtons: [...document.querySelectorAll('[aria-label="Hero medya durumu"] button')]
+          .filter((button) => button.textContent?.trim() === 'Görseli hazırla').length,
+        shortContentNotices: document.querySelectorAll('[aria-label="İçerik kapsamı"]').length,
+        comprehensiveRewriteButtons: [...document.querySelectorAll('[aria-label="İçerik kapsamı"] button')]
+          .filter((button) => button.textContent?.trim() === 'Kapsamlı yeniden oluştur').length,
+        reviewLoadErrors: document.querySelectorAll('.review-loading[role="alert"]').length
+      };
+    })();
   `);
   return {
     mode: "actual-profile-read-only",
@@ -1059,7 +1116,9 @@ async function inspectExistingProfileState(sessionId, localEngine) {
       bridgeError: diagnosticsResponse?.result?.bridgeError ? "present" : null,
       codes: diagnosticCodes
     },
-    renderedEditorial
+    reviewSummaries,
+    renderedEditorial,
+    renderedReviewMedia
   };
 }
 
@@ -1086,6 +1145,29 @@ async function retryFirstBlockedActualDraft(sessionId) {
     await wait(150);
   }
   fail("actual blocked-draft retry did not acknowledge queueing in the visible UI.");
+}
+
+async function rewriteFirstShortActualDraft(sessionId) {
+  await execute(sessionId, "window.location.hash = '#editorial-review'; return true;");
+  await waitForVisibleHeading(sessionId, "editorial-review");
+  const clicked = await execute(sessionId, `return (() => {
+    const button = [...document.querySelectorAll('[aria-label="İçerik kapsamı"] button')].find((item) =>
+      item.textContent?.trim() === 'Kapsamlı yeniden oluştur' && !item.disabled
+    );
+    if (!button) return false;
+    button.click();
+    return true;
+  })();`);
+  if (!clicked) {
+    fail("actual profile had no enabled comprehensive rewrite action for a short draft.");
+  }
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const queued = await execute(sessionId, `return window.location.hash === '#editorial'
+      && document.body?.innerText?.includes('Kapsamlı yeniden oluşturma işleniyor') === true;`);
+    if (queued) return { clicked: true, destination: "editorial" };
+    await wait(150);
+  }
+  fail("actual short-draft rewrite did not navigate to its queued Editorial Desk row.");
 }
 
 async function main() {
@@ -1159,6 +1241,9 @@ async function main() {
       const retryJourney = retryBlockedActualProfile
         ? await retryFirstBlockedActualDraft(sessionId)
         : undefined;
+      const comprehensiveRewriteJourney = rewriteFirstShortActualProfile
+        ? await rewriteFirstShortActualDraft(sessionId)
+        : undefined;
       if (profileObserveMs > 0) await wait(profileObserveMs);
       const finalProfile = profileObserveMs > 0 && !skipProfileFinalRead
         ? await inspectExistingProfileState(sessionId, localEngine.result)
@@ -1171,6 +1256,7 @@ async function main() {
         skippedFinalRead: skipProfileFinalRead,
         observedForMs: profileObserveMs,
         retryJourney,
+        comprehensiveRewriteJourney,
         nativeReadCommands
       }, null, 2));
       return;
