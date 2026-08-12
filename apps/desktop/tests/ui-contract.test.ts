@@ -137,6 +137,16 @@ test("compact desktop turns the editable weekly calendar into an operable grid i
   assert.match(publishing, /Takvimde bu slotu düzenle/u);
 });
 
+test("weekly cadence configures only future NEXT_SLOT drafts and treats legacy article assignments as non-binding", async () => {
+  const publishing = await readFile(source("screens", "PublishingCenter.tsx"), "utf8");
+
+  assert.match(publishing, /Yeni taslaklar için NEXT_SLOT ritmi/u);
+  assert.match(publishing, /Geçmiş atama:/u);
+  assert.match(publishing, /slot\.articleId \|\| slot\.articleTitle/u);
+  assert.doesNotMatch(publishing, /Paylaşılacak onaylı post/u);
+  assert.doesNotMatch(publishing, /articleId: selectedPost/u);
+});
+
 test("candidate triage uses dense comparable rows and falls back cleanly on narrow screens", async () => {
   const styles = await readFile(source("styles.css"), "utf8");
 
@@ -179,6 +189,35 @@ test("setup keeps unrelated controls hidden until the user selects their task", 
   assert.match(setup, /selectedTask === "diagnostics" \? "Canlı teknik durum"/u);
   assert.match(setup, /selectedTask === "writing"[\s\S]*?connector\.id === "codex"/u);
   assert.doesNotMatch(setup, /Teknik kontroller ve ayrıntılı ayarlar/u);
+});
+
+test("backup restore never implies that the active local workspace was replaced", async () => {
+  const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
+
+  assert.match(setup, /Geri yükleme tamamlandı: \$\{result\.entries\} dosya yeni klasöre çıkarıldı\. Aktif çalışma alanı değiştirilmedi\./u);
+  assert.match(setup, /Yedek dosyaları çıkarır; Blogbot'un aktif çalışma alanını otomatik değiştirmez\./u);
+});
+
+test("automatic local recovery snapshots are selectable without exposing their derived key", async () => {
+  const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
+
+  assert.match(setup, /Yerel kurtarma snapshot'ları/u);
+  assert.match(setup, /listAutomaticBackups()/u);
+  assert.match(setup, /verifyAutomaticBackup/u);
+  assert.match(setup, /previewAutomaticBackupRestore/u);
+  assert.match(setup, /restoreAutomaticBackup/u);
+  assert.doesNotMatch(setup, /automatic.*recoveryKey/iu);
+});
+
+test("diagnostics exposes an explicit bounded encrypted-data integrity check", async () => {
+  const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
+  const bridge = await readFile(source("bridge.ts"), "utf8");
+
+  assert.match(setup, /const verifyLocalIntegrity = async \(\) =>/u);
+  assert.match(setup, /Yerel veri bütünlüğünü doğrula/u);
+  assert.match(setup, /bütünlüğü doğrulanıyor/u);
+  assert.match(bridge, /verifyLocalIntegrity\(\): Promise<\{ verified: true; completedAt: string \}>/u);
+  assert.match(bridge, /verifyLocalIntegrity: \(\) => mutate\("verify_local_integrity"\)/u);
 });
 
 test("main WebView exposes only native-granted filesystem actions and keeps credentials and logs denied", async () => {
@@ -279,6 +318,17 @@ test("production buttons always have an explicit action or form submission behav
 
   assert.ok(buttonCount >= 100, "interactive production surface unexpectedly shrank");
   assert.deepEqual(missing, []);
+});
+
+test("instant create offers only publishable visual policies and explains their real media outcome", async () => {
+  const instantCreate = await readFile(source("screens", "InstantCreate.tsx"), "utf8");
+
+  assert.deepEqual(
+    [...instantCreate.matchAll(/<option value="(GENERATE|LOCAL_RENDERER|NONE)">/gu)].map((match) => match[1]),
+    ["GENERATE", "LOCAL_RENDERER"]
+  );
+  assert.match(instantCreate, /ImageGen kullan\u0131l\u0131r; kullan\u0131lamazsa veya \u00fcretim ba\u015far\u0131s\u0131z olursa g\u00f6rsel eklenmez/u);
+  assert.match(instantCreate, /Yerel olu\u015fturucu d\u0131\u015f g\u00f6rsel \u00fcretimi \u00e7a\u011f\u0131rmaz; metinsiz kapak ve \u00fc\u00e7 yay\u0131n oran\u0131 \u00fcretir/u);
 });
 
 test("Operations exposes a real retry action for a blocked active draft", async () => {

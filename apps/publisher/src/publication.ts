@@ -29,7 +29,31 @@ export class PublisherGuardError extends Error {
 
 export interface PublicationFile {
   path: string;
-  content: string | Uint8Array;
+  content: string | Uint8Array | EngineMediaReference;
+}
+
+/** Hash-bound engine-owned media. It may be retained in a preview, never sent
+ * to a remote publisher before a trusted local resolver has materialized it. */
+export interface EngineMediaReference {
+  kind: "engine-media-ref";
+  revisionId: string;
+  sha256: string;
+  byteSize: number;
+}
+
+export function isEngineMediaReference(content: PublicationFile["content"]): content is EngineMediaReference {
+  return typeof content === "object" && content !== null && !(content instanceof Uint8Array) && content.kind === "engine-media-ref";
+}
+
+export function publicationFileDigest(file: PublicationFile): { sha256: string; bytes: number } {
+  if (isEngineMediaReference(file.content)) {
+    if (!/^[a-f0-9]{64}$/iu.test(file.content.sha256) || !Number.isSafeInteger(file.content.byteSize) || file.content.byteSize < 1) {
+      throw new PublisherGuardError("BUNDLE_FILE_TAMPERED", `invalid engine media reference: ${file.path}`);
+    }
+    return { sha256: file.content.sha256.toLowerCase(), bytes: file.content.byteSize };
+  }
+  const bytes = typeof file.content === "string" ? Buffer.from(file.content, "utf8") : file.content;
+  return { sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength };
 }
 
 export interface PublisherConnectorConfigInput {
@@ -332,12 +356,6 @@ export function assertAllowedContentPath(path: string, policy: PublicationBundle
   }
 }
 
-function fileDigest(content: string | Uint8Array): string {
-  return createHash("sha256")
-    .update(typeof content === "string" ? Buffer.from(content, "utf8") : content)
-    .digest("hex");
-}
-
 function assertApprovedBundle(
   files: readonly PublicationFile[],
   approvedHash: string,
@@ -394,8 +412,8 @@ function assertApprovedBundle(
     if (!file) {
       throw new PublisherGuardError("BUNDLE_FILE_SET_MISMATCH", `manifest file is missing: ${entry.path}`);
     }
-    const byteLength = typeof file.content === "string" ? Buffer.byteLength(file.content, "utf8") : file.content.byteLength;
-    if (entry.bytes !== byteLength || entry.sha256 !== fileDigest(file.content)) {
+    const digest = publicationFileDigest(file);
+    if (entry.bytes !== digest.bytes || entry.sha256 !== digest.sha256) {
       throw new PublisherGuardError("BUNDLE_FILE_TAMPERED", `bundle file differs from manifest: ${entry.path}`);
     }
   }

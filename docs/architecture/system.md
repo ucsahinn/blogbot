@@ -96,17 +96,23 @@ instance must not create a second writer.
 
 ## Effectively-once publishing
 
-1. Editing creates a new immutable revision.
-2. Human approval binds the complete revision package hash.
-3. A publication intent records the revision hash, target repository, base SHA,
-   schedule and idempotency key.
-4. The publisher reconciles an existing branch or PR before creating another.
-5. A changed base SHA, revision, manifest, schedule or approval blocks progress.
-6. Protected CI validates the content and static site.
-7. GitHub Actions transfers the exact verified artifact to the user's selected
-   static hosting target.
-8. Health checks pass before the public `current` symlink changes; failure keeps
-   or restores the previous release.
+1. Editing creates a new immutable revision and revision hash.
+2. Publication materializes one immutable bundle for that revision. Its manifest
+   records the revision hash and the hashes and paths of every generated entry;
+   its validated bundle policy identifies the `adapterId` and `adapterVersion`.
+3. Human approval is bound to the exact immutable revision hash. The preview and
+   publication steps must then use a bundle whose manifest, adapter identity and
+   generated-entry hashes match that approved revision.
+4. A publication intent records the revision hash, bundle/preview hash, adapter
+   identity, target repository, base SHA, schedule and idempotency key.
+5. The publisher reconciles an existing branch or PR before creating another.
+6. A changed revision, bundle manifest, adapter id/version, generated entry,
+   target base SHA, schedule or approval blocks progress and requires a new
+   preview and approval where the revision changed.
+7. Protected CI validates the approved bundle and target site.
+8. GitHub Actions transfers the exact verified artifact to the user's selected
+   static hosting target. Health checks pass before the public `current` symlink
+   changes; failure keeps or restores the previous release.
 
 This is an effectively-once observable-effects contract, not a claim of
 distributed exactly-once execution.
@@ -124,26 +130,21 @@ output. Source material is explicitly untrusted evidence. Tool, file-change,
 MCP, shell and publication attempts are rejected. Auth or quota loss leaves the
 job waiting; paid API fallback is never selected automatically.
 
-## Public section contract
+## Site adapter and bundle contract
 
-| Turkish | English | Internal type | JSON-LD |
-|---|---|---|---|
-| `/haberler/{slug}/` | `/en/news/{slug}/` | `news` | `NewsArticle` |
-| `/analiz/{slug}/` | `/en/analysis/{slug}/` | `analysis` | `Article` |
-| `/dosyalar/{slug}/` | `/en/deep-dives/{slug}/` | `deep_dive` | `Article` |
-| `/rehberler/{slug}/` | `/en/guides/{slug}/` | `guide` | `BlogPosting` |
-| `/teknoloji/{slug}/` | `/en/technology/{slug}/` | `news` | `NewsArticle` |
-| `/ekonomi/{slug}/` | `/en/business/{slug}/` | `news` | `NewsArticle` |
-| `/kultur/{slug}/` | `/en/culture/{slug}/` | `analysis` | `Article` |
-| `/yasam/{slug}/` | `/en/life/{slug}/` | `guide` | `BlogPosting` |
+Site-specific routes, sections, schemas, file paths and deployment behavior are
+owned by the selected adapter, not by the Blogbot core contract. Each adapter is
+identified by a stable `adapterId` and a non-empty `adapterVersion`. The selected
+adapter must fail closed if the configured site, generated paths, or requested
+content cannot satisfy its policy.
 
-Current Turkish URLs do not gain a `/tr` prefix. Any future URL migration
-requires a separate redirect, canonical and cutover approval.
-
-These are the bundled generic Astro sections for a general blog or news site.
-The legacy SiberDergi adapter intentionally accepts only its original four
-sections; choosing a generic-only section with that adapter fails closed before
-any publication artifact is created.
+The publisher accepts only an immutable bundle with a validated manifest and
+bundle policy. The manifest binds the revision id and revision hash to the hash
+and allowed path of every generated entry; the bundle policy binds that bundle
+to the adapter id/version and configured site target. Arbitrary files and routes
+are outside the adapter contract. Changing an adapter id/version, manifest,
+entry path/hash, site target, route, schedule or source revision invalidates the
+prior preview; any changed revision also invalidates its human approval.
 
 ## Superseded runtime
 

@@ -32,9 +32,16 @@ const executable = join(
   binaryDirectory,
   "blogbot-engine-x86_64-pc-windows-msvc.exe"
 );
+const fetcherExecutable = join(
+  binaryDirectory,
+  "blogbot-fetcher-x86_64-pc-windows-msvc.exe"
+);
 const bundle = join(work, "sea-entry.cjs");
 const blob = join(work, "sea-prep.blob");
 const config = join(work, "sea-config.json");
+const fetcherBundle = join(work, "fetcher-sea-entry.cjs");
+const fetcherBlob = join(work, "fetcher-sea-prep.blob");
+const fetcherConfig = join(work, "fetcher-sea-config.json");
 
 await rm(work, { recursive: true, force: true });
 await mkdir(work, { recursive: true });
@@ -62,6 +69,18 @@ await build({
   }
 });
 
+await build({
+  entryPoints: [join(root, "apps", "fetcher", "src", "sea-entrypoint.ts")],
+  outfile: fetcherBundle,
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  target: "node24",
+  sourcemap: false,
+  minify: false,
+  legalComments: "none"
+});
+
 await writeFile(
   config,
   JSON.stringify(
@@ -87,6 +106,12 @@ await run(process.execPath, [
   "--sentinel-fuse",
   "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"
 ]);
+await writeFile(fetcherConfig, JSON.stringify({ main: fetcherBundle, output: fetcherBlob, disableExperimentalSEAWarning: true, useSnapshot: false, useCodeCache: false }, null, 2));
+await run(process.execPath, ["--experimental-sea-config", fetcherConfig]);
+await copyFile(process.execPath, fetcherExecutable);
+await run(process.execPath, [join(root, "node_modules", "postject", "dist", "cli.js"), fetcherExecutable, "NODE_SEA_BLOB", fetcherBlob, "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"]);
+const fetcherSidecarImage = await readFile(fetcherExecutable);
+if (setWindowsGuiSubsystem(fetcherSidecarImage)) await writeFile(fetcherExecutable, fetcherSidecarImage);
 const sidecarImage = await readFile(executable);
 if (setWindowsGuiSubsystem(sidecarImage)) {
   await writeFile(executable, sidecarImage);

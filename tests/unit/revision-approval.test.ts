@@ -15,6 +15,8 @@ import {
 } from "../../packages/editorial/src/revision.ts";
 
 function revision(overrides: Partial<ArticleRevision> = {}): ArticleRevision {
+  const evidenceExcerpt = "Primary source confirms the event occurred.";
+  const quoteHash = createHash("sha256").update(evidenceExcerpt, "utf8").digest("hex");
   return {
     id: "rev-1",
     translationKey: "story-1",
@@ -47,14 +49,12 @@ function revision(overrides: Partial<ArticleRevision> = {}): ArticleRevision {
         claimKey: "claim.identity.event",
         trText: "Olay doğrulandı.",
         enText: "The event was verified.",
-        evidenceAnchors: [
-          {
-            sourceId: "source-1",
-            quoteHash: "a".repeat(64),
-            start: 10,
-            end: 28
-          }
-        ]
+        evidenceAnchors: [{
+          sourceId: "source-1",
+          quoteHash,
+          start: 0,
+          end: evidenceExcerpt.length
+        }]
       }
     ],
     sources: [
@@ -63,7 +63,17 @@ function revision(overrides: Partial<ArticleRevision> = {}): ArticleRevision {
         url: "https://example.com/primary",
         title: "Primary source",
         fetchedAt: "2026-07-29T09:00:00.000Z",
-        contentHash: "sha256:source",
+        contentHash: "a".repeat(64),
+        evidenceExcerpt,
+        evidenceExcerptHash: quoteHash,
+        evidenceAnchors: [
+          {
+            sourceId: "source-1",
+            quoteHash,
+            start: 0,
+            end: evidenceExcerpt.length
+          }
+        ],
         trustStatus: "APPROVED",
         rightsStatus: "APPROVED"
       }
@@ -106,11 +116,26 @@ function v2Revision(
       }
     ],
     qualityGates: [
-      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "1" },
-      { id: "parity", group: "editorial", state: "PASS", detail: "Dil eşitliği doğrulandı.", policyVersion: "1" }
+      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "contradictions", group: "editorial", state: "PASS", detail: "Çelişki denetlendi.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "bilingual-parity", group: "editorial", state: "PASS", detail: "Dil eşitliği doğrulandı.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "markdown-safety", group: "security", state: "PASS", detail: "Markdown güvenli.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "seo", group: "seo", state: "PASS", detail: "SEO denetlendi.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "media", group: "media", state: "PASS", detail: "Medya denetlendi.", policyVersion: "2", reasonCode: "CHECKED" }
     ],
     ...overrides
   });
+}
+
+function v2Gates(
+  replacements: NonNullable<ArticleRevision["qualityGates"]>
+): NonNullable<ArticleRevision["qualityGates"]> {
+  const baseline = v2Revision().qualityGates ?? [];
+  const replacementById = new Map(replacements.map((gate) => [gate.id, gate]));
+  return [
+    ...baseline.map((gate) => replacementById.get(gate.id) ?? gate),
+    ...replacements.filter((gate) => !baseline.some((candidate) => candidate.id === gate.id))
+  ];
 }
 
 function approvalFor(value: ArticleRevision): Approval {
@@ -156,14 +181,7 @@ test("enriched claims require TR/EN parity and anchored snapshot evidence", () =
         claimKey: "claim.identity.event",
         trText: "Olay doğrulandı.",
         enText: "The event was verified.",
-        evidenceAnchors: [
-          {
-            sourceId: "source-1",
-            quoteHash: "a".repeat(64),
-            start: 10,
-            end: 28
-          }
-        ]
+        evidenceAnchors: original.claims[0]!.evidenceAnchors ?? []
       }
     ]
   });
@@ -181,6 +199,15 @@ test("enriched claims require TR/EN parity and anchored snapshot evidence", () =
     }]
   });
   assert.equal(validateClaimEvidence(unknownSource), false);
+
+  const missingSnapshotAnchor = revision({
+    sources: [{
+      ...enriched.sources[0]!,
+      evidenceAnchors: []
+    }],
+    claims: enriched.claims
+  });
+  assert.equal(validateClaimEvidence(missingSnapshotAnchor), false);
 });
 
 test("legacy claims without bilingual anchored evidence fail closed", () => {
@@ -392,6 +419,25 @@ test("complete V2 revision package passes runtime validation", () => {
   assert.equal(validateRevisionPackageV2(v2Revision()), true);
 });
 
+test("V2 revision package requires every typed quality gate exactly once", () => {
+  const validateRevisionPackageV2 = (
+    revisionDomain as unknown as {
+      validateRevisionPackageV2(value: ArticleRevision): boolean;
+    }
+  ).validateRevisionPackageV2;
+  const complete = v2Revision();
+  assert.equal(validateRevisionPackageV2({
+    ...complete,
+    qualityGates: complete.qualityGates!.filter((gate) => gate.id !== "media")
+  }), false);
+  assert.equal(validateRevisionPackageV2({
+    ...complete,
+    qualityGates: complete.qualityGates!.map((gate) =>
+      gate.id === "markdown-safety" ? { ...gate, group: "editorial" as const } : gate
+    )
+  }), false);
+});
+
 test("immutable review revision becomes eligible through its external exact-hash approval", () => {
   const original = v2Revision({ state: "REVIEW_REQUIRED" });
   assert.deepEqual(
@@ -413,10 +459,9 @@ test("immutable review revision becomes eligible through its external exact-hash
 
 test("allowlisted warnings require an exact warning-set acceptance hash", () => {
   const original = v2Revision({
-    qualityGates: [
-      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "1" },
-      { id: "SINGLE_OFFICIAL_SOURCE_EXCEPTION", group: "editorial", state: "WARN", detail: "Tek resmi kaynak istisnası.", policyVersion: "1" }
-    ]
+    qualityGates: v2Gates([
+      { id: "seo", group: "seo", state: "WARN", detail: "Küçük SEO düzeltmesi önerildi.", policyVersion: "2", reasonCode: "SEO_POLISH" }
+    ])
   });
 
   assert.deepEqual(
@@ -449,12 +494,19 @@ test("warning hash is order-independent but changes with warning evidence", () =
 
 test("unallowlisted warnings and unrun gates fail closed", () => {
   for (const [state, id, expected] of [
-    ["WARN", "UNREVIEWED_SECURITY_WARNING", "WARNING_NOT_ALLOWLISTED"],
+    ["WARN", "seo", "WARNING_NOT_ALLOWLISTED"],
     ["NOT_RUN", "seo", "QUALITY_GATES_NOT_READY"],
     ["BLOCK", "claims", "QUALITY_GATES_NOT_READY"]
   ] as const) {
     const original = v2Revision({
-      qualityGates: [{ id, group: "editorial", state, detail: "Kontrol sonucu.", policyVersion: "1" }]
+      qualityGates: v2Gates([{
+        id,
+        group: id === "seo" ? "seo" : "editorial",
+        state,
+        detail: "Kontrol sonucu.",
+        policyVersion: "2",
+        reasonCode: state === "WARN" ? "UNSPECIFIED" : "CHECKED"
+      }])
     });
     assert.deepEqual(
       evaluatePublishEligibility(original, approvalFor(original), {
@@ -464,6 +516,41 @@ test("unallowlisted warnings and unrun gates fail closed", () => {
       { eligible: false, reason: expected }
     );
   }
+});
+
+test("V2 warnings require an explicit gate-specific reason code", () => {
+  const withUnknownReason = v2Revision({
+    qualityGates: v2Gates([{
+      id: "seo", group: "seo", state: "WARN", detail: "İnceleme notu.", policyVersion: "2", reasonCode: "UNSPECIFIED"
+    }])
+  });
+  const acceptedPolish = v2Revision({
+    qualityGates: v2Gates([{
+      id: "seo", group: "seo", state: "WARN", detail: "İnceleme notu.", policyVersion: "2", reasonCode: "SEO_POLISH"
+    }])
+  });
+
+  assert.deepEqual(
+    evaluatePublishEligibility(withUnknownReason, approvalFor(withUnknownReason), {
+      now: new Date("2026-07-30T09:05:00.000Z"), publishingPaused: false
+    }),
+    { eligible: false, reason: "WARNING_NOT_ALLOWLISTED" }
+  );
+  assert.deepEqual(
+    evaluatePublishEligibility(acceptedPolish, approvalFor(acceptedPolish), {
+      now: new Date("2026-07-30T09:05:00.000Z"), publishingPaused: false
+    }),
+    { eligible: true }
+  );
+});
+
+test("V2 warning hashes bind the typed reason without rewriting V1 hashes", () => {
+  const legacy = [{ id: "seo", group: "seo" as const, state: "WARN" as const, detail: "A", policyVersion: "1" }];
+  const v2Polish = [{ ...legacy[0]!, policyVersion: "2", reasonCode: "SEO_POLISH" }];
+  const v2Other = [{ ...legacy[0]!, policyVersion: "2", reasonCode: "DISCLOSED_SOURCE_DISAGREEMENT" }];
+
+  assert.notEqual(computeWarningSetHash(legacy), computeWarningSetHash(v2Polish));
+  assert.notEqual(computeWarningSetHash(v2Polish), computeWarningSetHash(v2Other));
 });
 
 test("V2 revision package rejects missing hashes and unsafe generated paths", () => {

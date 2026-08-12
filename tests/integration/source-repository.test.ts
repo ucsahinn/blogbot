@@ -44,16 +44,57 @@ test("source catalog and feed entries persist across repository restart", async 
   t.after(() => second.close());
 
   assert.deepEqual(await second.getSource("source-1"), source);
-  assert.deepEqual(await second.listEntries("source-1"), [
-    {
-      sourceId: "source-1",
-      externalId: "story-1",
-      title: "Patch released",
-      url: "https://news.example/stories/patch",
-      publishedAt: "2026-07-29T08:00:00.000Z",
-      summary: "Vendor published a security update."
-    }
-  ]);
+  const [entry] = await second.listEntries("source-1");
+  assert.equal(entry?.sourceId, "source-1");
+  assert.equal(entry?.externalId, "story-1");
+  assert.equal(entry?.title, "Patch released");
+  assert.equal(entry?.url, "https://news.example/stories/patch");
+  assert.match(entry?.contentHash ?? "", /^[a-f0-9]{64}$/u);
+  assert.match(entry?.versionId ?? "", /^entry-[a-f0-9]{64}$/u);
+});
+
+test("source entries retain append-only content-addressed versions while latest points to the newest capture", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-repo-versions-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const repository = await PGliteSourceRepository.open(dataDir);
+  t.after(() => repository.close());
+  const source = {
+    id: "source-versions",
+    url: "https://news.example/versions.xml",
+    kind: "RSS" as const,
+    status: "ACTIVE" as const,
+    trustStatus: "PENDING" as const,
+    rightsStatus: "PENDING" as const,
+    language: "en" as const,
+    discoveredFeeds: [],
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:00:00.000Z",
+    version: 1
+  };
+  await repository.saveSource(source);
+
+  await repository.saveEntries(source.id, [{
+    externalId: "story-1",
+    title: "First capture",
+    url: "https://news.example/stories/patch",
+    summary: "Initial publisher text."
+  }]);
+  await repository.saveEntries(source.id, [{
+    externalId: "story-1",
+    title: "Revised capture",
+    url: "https://news.example/stories/patch",
+    summary: "Publisher corrected the source text."
+  }]);
+
+  const versions = await repository.listEntryVersions(source.id, "story-1");
+  const latest = await repository.listEntries(source.id);
+  const resolved = await repository.findEntryByUrl(source.id, "https://news.example/stories/patch");
+  assert.equal(versions.length, 2);
+  assert.equal(new Set(versions.map((entry) => entry.contentHash)).size, 2);
+  assert.equal(latest.length, 1);
+  assert.equal(latest[0]?.title, "Revised capture");
+  assert.equal(resolved?.title, "Revised capture");
+  assert.equal(versions.some((entry) => entry.title === "First capture"), true);
 });
 
 test("bounded source entry reads avoid decrypting the entire feed catalog", async (t) => {
@@ -79,12 +120,15 @@ test("bounded source entry reads avoid decrypting the entire feed catalog", asyn
     externalId: `story-${String(index).padStart(2, "0")}`,
     title: `Story ${index}`,
     url: `https://news.example/stories/${index}`,
-    summary: "Bounded test entry"
+    summary: "Bounded test entry",
+    // Deliberately reverse the lexical ID order: the query must use the
+    // indexed publication time before it applies its bounded limit.
+    publishedAt: `2026-08-${String(8 - index).padStart(2, "0")}T12:00:00.000Z`
   })));
 
   const entries = await repository.listEntriesBounded("source-1", 3);
   assert.equal(entries.length, 3);
-  assert.deepEqual(entries.map((entry) => entry.externalId), ["story-07", "story-06", "story-05"]);
+  assert.deepEqual(entries.map((entry) => entry.externalId), ["story-00", "story-01", "story-02"]);
 });
 
 test("source approval state gates publication but never blocks scanning", async (t) => {
@@ -215,10 +259,12 @@ test("source ciphertext is bound to its row identity", async (t) => {
   );
   await raw.close();
 
-  await assert.rejects(
-    PGliteSourceRepository.open(dataDir),
-    /LOCAL_DATA_DECRYPT_FAILED/
-  );
+  const reopened = await PGliteSourceRepository.open(dataDir);
+  try {
+    await assert.rejects(reopened.verifyEncryptionIntegrity(), /LOCAL_DATA_DECRYPT_FAILED/);
+  } finally {
+    await reopened.close();
+  }
 });
 
 test("completed source encryption migration never accepts injected plaintext", async (t) => {
@@ -248,10 +294,12 @@ test("completed source encryption migration never accepts injected plaintext", a
   );
   await raw.close();
 
-  await assert.rejects(
-    PGliteSourceRepository.open(dataDir),
-    /LOCAL_DATA_ENVELOPE_INVALID/
-  );
+  const reopened = await PGliteSourceRepository.open(dataDir);
+  try {
+    await assert.rejects(reopened.verifyEncryptionIntegrity(), /LOCAL_DATA_ENVELOPE_INVALID/);
+  } finally {
+    await reopened.close();
+  }
 });
 
 test("completed source encryption migration rejects plaintext scan records", async (t) => {
@@ -288,8 +336,10 @@ test("completed source encryption migration rejects plaintext scan records", asy
   );
   await raw.close();
 
-  await assert.rejects(
-    PGliteSourceRepository.open(dataDir),
-    /LOCAL_DATA_ENVELOPE_INVALID/
-  );
+  const reopened = await PGliteSourceRepository.open(dataDir);
+  try {
+    await assert.rejects(reopened.verifyEncryptionIntegrity(), /LOCAL_DATA_ENVELOPE_INVALID/);
+  } finally {
+    await reopened.close();
+  }
 });

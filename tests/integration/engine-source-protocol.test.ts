@@ -214,7 +214,7 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
         observedTasks.push(request.input);
         const finalReview = Object.hasOwn((request.outputSchema.properties as Record<string, unknown> | undefined) ?? {}, "translationParity");
         yield { type: "output.completed", output: finalReview
-          ? { translationParity: { status: "MATCHED", detail: "Test paritesi doğrulandı." }, riskLevel: "STANDARD", gates: [{ id: "claims", group: "editorial", state: "PASS", detail: "Kanıt bağlı." }, { id: "contradictions", group: "editorial", state: "PASS", detail: "Çelişki yok." }, { id: "bilingual-parity", group: "editorial", state: "PASS", detail: "Parite eşleşti." }, { id: "markdown-safety", group: "security", state: "PASS", detail: "Markdown güvenli." }, { id: "seo", group: "seo", state: "PASS", detail: "SEO tamam." }, { id: "media", group: "media", state: "PASS", detail: "Medya gerekmiyor." }] }
+          ? { translationParity: { status: "MATCHED", detail: "Test paritesi doğrulandı." }, riskLevel: "STANDARD", gates: [{ id: "claims", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Kanıt bağlı." }, { id: "contradictions", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Çelişki yok." }, { id: "bilingual-parity", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Parite eşleşti." }, { id: "markdown-safety", group: "security", state: "PASS", reasonCode: "CHECKED", detail: "Markdown güvenli." }, { id: "seo", group: "seo", state: "PASS", reasonCode: "CHECKED", detail: "SEO tamam." }, { id: "media", group: "media", state: "PASS", reasonCode: "CHECKED", detail: "Medya gerekmiyor." }] }
           : { translationKey: "terminal-test", author: "Test Editörü", tags: ["test"], tr: { title: "Terminal test haberi", slug: "terminal-test-haberi", description: "Test açıklaması.", bodyMarkdown: fullTrBody, heroImageAlt: "Test görseli" }, en: { title: "Terminal test story", slug: "terminal-test-story", description: "Test description.", bodyMarkdown: fullEnBody, heroImageAlt: "Test visual" }, claims: [{ claimKey: "claim-1", trText: "Doğrulanan test iddiası", enText: "Verified test claim", sourceIds: ["https://news.example/story"], status: "NEEDS_SOURCE", quoteHash: "" }] }
         };
       }
@@ -268,7 +268,7 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
     }
   });
   assert.equal(revisionResponse.ok, true);
-  const revision = (revisionResponse.result as { value: { revision: { media: Array<{ path: string; contentBase64?: string; width: number; height: number }> } } }).value.revision;
+  const revision = (revisionResponse.result as { value: { revision: { media: Array<{ path: string; contentBase64?: string; byteSize?: number; width: number; height: number }>; sources: Array<{ trustStatus?: string; rightsStatus?: string }> } } }).value.revision;
   assert.deepEqual(
     revision.media.map((item) => [item.path, item.width, item.height]),
     [
@@ -277,9 +277,11 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
       ["media/draft-terminal/terminal-test-haberi-1x1.webp", 1200, 1200]
     ]
   );
-  assert.ok(revision.media.every((item) => typeof item.contentBase64 === "string" && item.contentBase64.length > 0));
+  assert.ok(revision.media.every((item) => item.contentBase64 === undefined && Number.isSafeInteger(item.byteSize) && item.byteSize! > 0));
   assert.equal("evidenceText" in (draftTask.task.sources?.[0] ?? {}), false, "raw source evidence must not bypass the bounded draft contract");
   assert.ok(draftTask.task.sources?.[0]?.excerpt?.startsWith("Güvenilir kanıt metni."), "the bounded source evidence must reach the drafting task as an excerpt");
+  assert.equal(revision.sources[0]?.trustStatus, "PENDING", "unreviewed direct URLs must not acquire implicit trust");
+  assert.equal(revision.sources[0]?.rightsStatus, "PENDING", "unreviewed direct URLs must not acquire implicit rights approval");
   assert.equal(
     draftTask.task.sources?.[0]?.excerpt?.split(/\s+/u).filter(Boolean).length,
     sourceEvidence.slice(0, 12_000).split(/\s+/u).filter(Boolean).length

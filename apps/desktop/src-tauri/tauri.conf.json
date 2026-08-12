@@ -46,7 +46,7 @@
       "icons/256x256.png",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/blogbot-engine"],
+    "externalBin": ["binaries/blogbot-engine", "binaries/blogbot-fetcher"],
     "resources": ["resources/pglite/*", "resources/engine-node_modules/**/*"],
     "targets": ["msi", "nsis"],
     "category": "Productivity",

@@ -92,6 +92,9 @@ export async function fetchSource(
     options.allowedContentTypes ?? defaultAllowedContentTypes
   );
   let currentUrl = assertSafeSourceUrl(inputUrl);
+  // One source fetch has one budget. Redirects are additional trust-boundary
+  // checks, not a reason to grant a fresh full timeout on every hop.
+  const deadlineAtMs = Date.now() + timeoutMs;
 
   for (let redirectCount = 0; ; redirectCount += 1) {
     const parsed = new URL(currentUrl);
@@ -103,7 +106,7 @@ export async function fetchSource(
       approvedAddresses,
       redirect: "manual",
       timeoutMs,
-      deadlineAtMs: Date.now() + timeoutMs,
+      deadlineAtMs,
       maxResponseBytes: maxBytes
     });
 

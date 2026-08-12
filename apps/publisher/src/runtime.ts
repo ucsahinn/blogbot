@@ -30,6 +30,7 @@ export interface PublicationRuntimeResult {
   state: "SUCCEEDED" | "FAILED" | "UNKNOWN";
   resultRef?: string;
   lastError?: string;
+  retryAfterMs?: number;
 }
 
 const unavailable = (reason: string): PublicationRuntimeResult => ({
@@ -60,11 +61,18 @@ export function createConnectorAwarePublicationProcessor(options: PublicationRun
         return unavailable("outbox revision does not match the approved command");
       }
       if (
-        typeof effect.revisionHash !== "string" ||
         effect.revisionHash.length !== 64 ||
         effect.revisionHash.toLowerCase() !== command.approvedRevisionHash.toLowerCase()
       ) {
         return unavailable("outbox revision hash does not match the immutable approved command");
+      }
+      if (
+        effect.targetRepository !== command.targetRepository ||
+        effect.baseBranch !== command.baseBranch ||
+        effect.targetBaseSha !== command.approvedBaseSha ||
+        effect.adapterVersion.split("@", 1)[0] !== command.bundlePolicy.adapterId
+      ) {
+        return unavailable("outbox preview, target, or adapter no longer matches the immutable approved command");
       }
       const result = await reconcileApprovedPublication(command, options.effects);
       return resultToProcessorResult(result);
@@ -72,9 +80,17 @@ export function createConnectorAwarePublicationProcessor(options: PublicationRun
   };
 }
 
-function resultToProcessorResult(result: PublicationReconcileResult): PublicationRuntimeResult {
+export function resultToProcessorResult(result: PublicationReconcileResult): PublicationRuntimeResult {
   if (result.state === "WAITING_FOR_CHECKS") {
-    return { state: "UNKNOWN", resultRef: result.pullRequestKey, lastError: "required checks are still pending" };
+    return { state: "UNKNOWN", resultRef: result.pullRequestKey, lastError: "required checks are still pending", retryAfterMs: 30_000 };
   }
-  return { state: "SUCCEEDED", resultRef: result.deployIntent.key };
+  // Dispatch is an intent, not evidence that the public site received the
+  // deployment. A future verifier may turn this exact effect into success;
+  // until then the durable outbox must not claim completion.
+  return {
+    state: "UNKNOWN",
+    resultRef: result.deployIntent.key,
+    lastError: "deployment dispatch is awaiting independent verification",
+    retryAfterMs: 30_000
+  };
 }

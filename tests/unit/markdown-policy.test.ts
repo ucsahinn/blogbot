@@ -47,3 +47,20 @@ for (const [name, markdown, blocker] of [
     assert.ok(validatePublishableMarkdown(markdown).blockers.includes(blocker));
   });
 }
+
+test("rejects image paths that escape the image directory through dot segments", () => {
+  const result = validatePublishableMarkdown("![kapak](../images/../private.webp)");
+  assert.ok(result.blockers.includes("IMAGE_PATH_OUTSIDE_ALLOWLIST"));
+});
+
+test("invalid numeric entities are handled as unsafe targets instead of throwing", () => {
+  assert.doesNotThrow(() => validatePublishableMarkdown("[kaynak](jav&#x110000;ascript:alert(1))"));
+  const result = validatePublishableMarkdown("[kaynak](jav&#x110000;ascript:alert(1))");
+  assert.ok(result.blockers.includes("UNSAFE_LINK_TARGET"));
+});
+
+test("surrogate numeric entities are handled as unsafe targets instead of throwing", () => {
+  assert.doesNotThrow(() => validatePublishableMarkdown("[kaynak](jav&#xD800;ascript:alert(1))"));
+  const result = validatePublishableMarkdown("[kaynak](jav&#xD800;ascript:alert(1))");
+  assert.ok(result.blockers.includes("UNSAFE_LINK_TARGET"));
+});

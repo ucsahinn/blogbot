@@ -1,9 +1,11 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
+use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
 
 use crate::commands::CommandError;
 
@@ -12,6 +14,7 @@ const MANIFEST_URL: &str =
 const RELEASES_API_URL: &str = "https://api.github.com/repos/ucsahinn/blogbot/releases/latest";
 const RELEASE_HOST: &str = "github.com";
 const RELEASE_PATH_PREFIX: &str = "/ucsahinn/blogbot/releases/download/";
+const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -221,11 +224,28 @@ fn configure_hidden_command(command: &mut Command) {
     }
 }
 
-fn installer_path(version: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "Blogbot-{version}-{}-setup.exe",
-        std::process::id()
-    ))
+fn create_installer_file(version: &str) -> Result<(PathBuf, std::fs::File), CommandError> {
+    let mut random = [0u8; 16];
+    unsafe {
+        if BCryptGenRandom(None, &mut random, BCRYPT_USE_SYSTEM_PREFERRED_RNG).is_err() {
+            return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_TEMP_UNAVAILABLE".into()));
+        }
+    }
+    let entropy = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    for attempt in 0..32u32 {
+        let path = std::env::temp_dir().join(format!(
+            "Blogbot-{version}-{entropy}-{attempt}.setup.exe"
+        ));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_WRITE_FAILED".into())),
+        }
+    }
+    Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_TEMP_UNAVAILABLE".into()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,28 +270,49 @@ pub async fn install_unsigned_update(
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_CLIENT_UNAVAILABLE".into()))?;
-    let bytes = client
+    let mut response = client
         .get(&request.url)
         .send()
         .await
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_UNAVAILABLE".into()))?
         .error_for_status()
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_HTTP_ERROR".into()))?
-        .bytes()
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_HTTP_ERROR".into()))?;
+    if response.content_length().is_some_and(|length| length > MAX_INSTALLER_BYTES) {
+        return Err(CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_TOO_LARGE".into()));
+    }
+    let (path, mut installer_file) = create_installer_file(&request.version)?;
+    let mut digest = Sha256::new();
+    let mut downloaded = 0u64;
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_FAILED".into()))?;
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_FAILED".into()))?
+    {
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if downloaded > MAX_INSTALLER_BYTES {
+            let _ = std::fs::remove_file(&path);
+            return Err(CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_TOO_LARGE".into()));
+        }
+        digest.update(&chunk);
+        if installer_file.write_all(&chunk).is_err() {
+            let _ = std::fs::remove_file(&path);
+            return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_WRITE_FAILED".into()));
+        }
+    }
+    if installer_file.sync_all().is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_WRITE_FAILED".into()));
+    }
+    drop(installer_file);
 
-    let digest = Sha256::digest(&bytes);
-    let actual = format!("{digest:x}");
+    let actual = format!("{:x}", digest.finalize());
     if actual != request.sha256.to_ascii_lowercase() {
+        let _ = std::fs::remove_file(&path);
         return Err(CommandError::UpdateUnavailable(
             "UPDATE_HASH_MISMATCH".into(),
         ));
     }
 
-    let path = installer_path(&request.version);
-    std::fs::write(&path, &bytes)
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_INSTALLER_WRITE_FAILED".into()))?;
     let mut installer = Command::new(&path);
     configure_hidden_command(&mut installer);
     installer.arg("/S");

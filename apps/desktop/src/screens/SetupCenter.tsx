@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { canEnableAutomationMode, connectorDraftFromState, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
 import { buildSetupRequirements } from "../types.ts";
-import type { BlogbotBridge } from "../bridge.ts";
+import type { AutomaticBackupSnapshot, BlogbotBridge } from "../bridge.ts";
 import type {
   OnboardingSettings,
   ConnectorStateSnapshot,
@@ -130,6 +130,9 @@ export function SetupCenter({
   const [backupTargetName, setBackupTargetName] = useState("Blogbot-Geri-Yukleme");
   const [backupRecoveryKey, setBackupRecoveryKey] = useState("");
   const [backupMessage, setBackupMessage] = useState("");
+  const [automaticSnapshots, setAutomaticSnapshots] = useState<AutomaticBackupSnapshot[]>([]);
+  const [selectedAutomaticBackupName, setSelectedAutomaticBackupName] = useState("");
+  const [automaticRestoreConfirmationOpen, setAutomaticRestoreConfirmationOpen] = useState(false);
   const [restoreConfirmationOpen, setRestoreConfirmationOpen] = useState(false);
   const [localDevRunning, setLocalDevRunning] = useState(false);
   const [localDevSupported, setLocalDevSupported] = useState(false);
@@ -143,7 +146,6 @@ export function SetupCenter({
   const guidedMode = selectedTask === "first-start";
   const [guidedStep, setGuidedStep] = useState(0);
   const [guidedOutputStatus, setGuidedOutputStatus] = useState<GuidedStatus>("not-tested");
-  const [engineRecoveryAvailable, setEngineRecoveryAvailable] = useState(false);
   const restoreFolderNameValid = /^[^<>:"/\\|?*]{1,80}$/u.test(backupTargetName.trim())
     && backupTargetName.trim() !== "."
     && backupTargetName.trim() !== "..";
@@ -401,7 +403,6 @@ export function SetupCenter({
     try {
       const result = await bridge.testLocalEngine();
       setConnectionMessage(result.detail);
-      setEngineRecoveryAvailable(false);
       try {
         setStatus(await bridge.getPrerequisiteStatus());
       } catch (reason) {
@@ -410,10 +411,28 @@ export function SetupCenter({
         );
       }
     } catch (reason) {
-      const raw = reason instanceof Error ? reason.message : "";
-      setEngineRecoveryAvailable(raw.includes("ENGINE_RESPONSE_TIMEOUT"));
+      // A timeout can be caused by long-running local maintenance. It must
+      // never expose a one-click action that moves the active data directory.
       setConnectionMessage(
         explainFailure(reason, "Blogbot'un yerel çalışma bileşeni test edilemedi.", "uygulamayı yeniden başlatıp testi tekrarlayın.")
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const verifyLocalIntegrity = async () => {
+    setBusy(true);
+    setConnectionMessage("Yerel şifreli verilerin bütünlüğü doğrulanıyor… Bu işlem veri değiştirmez; büyük arşivlerde birkaç dakika sürebilir.");
+    try {
+      const result = await bridge.verifyLocalIntegrity();
+      setConnectionMessage(`Yerel şifreli veri bütünlüğü doğrulandı. Tamamlanma: ${new Date(result.completedAt).toLocaleString("tr-TR")}.`);
+    } catch (reason) {
+      setConnectionMessage(
+        explainFailure(
+          reason,
+          "Yerel şifreli veri bütünlüğü doğrulanamadı.",
+          "Tanı paketi oluşturup bu kontrol sonucunu destek incelemesine ekleyin."
+        )
       );
     } finally {
       setBusy(false);
@@ -592,27 +611,6 @@ export function SetupCenter({
       setConnectorMessages((current) => ({ ...current, codex: detail }));
     } finally { setBusy(false); }
   };
-  const recoverLocalWorkspace = async () => {
-    setBusy(true);
-    setConnectionMessage("Önceki yerel çalışma alanı korunuyor; yeni alan hazırlanıyor…");
-    try {
-      const result = await bridge.recoverLocalWorkspace();
-      let detail = result.detail;
-      try {
-        setStatus(await bridge.getPrerequisiteStatus());
-      } catch (reason) {
-        detail = `${result.detail} Önkoşul kartları yenilenemedi; Kurulum Merkezi'nden yeniden deneyin. (${explainFailure(reason, "Ayrıntı alınamadı.", "yeniden deneyin.")})`;
-      }
-      setConnectionMessage(detail);
-      setEngineRecoveryAvailable(!result.ready);
-    } catch (reason) {
-      setConnectionMessage(
-        explainFailure(reason, "Yerel çalışma alanı kurtarılamadı.", "tanılama paketini oluşturup destek ekibiyle paylaşın.")
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
   const refreshGitHubLoginStatus = async () => {
     setBusy(true);
     try {
@@ -668,10 +666,52 @@ export function SetupCenter({
     setBusy(true); setBackupMessage("Geri yükleme çalışıyor; yalnızca onaylanan boş klasöre yazılıyor…");
     try {
       const result = await bridge.restoreBackup({ archivePath: backupArchivePath, targetDirectory: backupTargetPath, recoveryKey: backupRecoveryKey });
-      setBackupMessage(`Geri yükleme tamamlandı: ${result.entries} dosya.`);
+      setBackupMessage(`Geri yükleme tamamlandı: ${result.entries} dosya yeni klasöre çıkarıldı. Aktif çalışma alanı değiştirilmedi.`);
     } catch (reason) {
       setBackupMessage(explainFailure(reason, "Geri yükleme yapılamadı.", "hedef klasörün boş ve yazılabilir olduğunu doğrulayın."));
     } finally { setBackupRecoveryKey(""); setBusy(false); }
+  };
+  const refreshAutomaticBackups = async () => {
+    setBusy(true); setBackupMessage("Yerel kurtarma snapshot'ları okunuyor…");
+    try {
+      const result = await bridge.listAutomaticBackups();
+      setAutomaticSnapshots(result.snapshots);
+      setSelectedAutomaticBackupName((current) => result.snapshots.some((snapshot) => snapshot.name === current)
+        ? current
+        : (result.snapshots[0]?.name ?? ""));
+      setBackupMessage(result.snapshots.length
+        ? `${result.snapshots.length} yerel kurtarma snapshot'ı hazır.`
+        : "Henüz yerel kurtarma snapshot'ı yok.");
+    } catch (reason) {
+      setBackupMessage(explainFailure(reason, "Yerel kurtarma snapshot'ları okunamadı.", "yerel sistem durumunu yenileyip tekrar deneyin."));
+    } finally { setBusy(false); }
+  };
+  const verifyAutomaticBackup = async () => {
+    setBusy(true); setBackupMessage("Yerel kurtarma snapshot'ı doğrulanıyor…");
+    try {
+      const result = await bridge.verifyAutomaticBackup({ backupName: selectedAutomaticBackupName });
+      setBackupMessage(result.verified ? `Yerel kurtarma snapshot'ı doğrulandı: ${result.entries?.length ?? 0} dosya.` : "Yerel kurtarma snapshot'ı doğrulanamadı.");
+    } catch (reason) {
+      setBackupMessage(explainFailure(reason, "Yerel kurtarma snapshot'ı doğrulanamadı.", "snapshot listesini yenileyip tekrar deneyin."));
+    } finally { setBusy(false); }
+  };
+  const previewAutomaticBackup = async () => {
+    setBusy(true); setBackupMessage("Yerel kurtarma snapshot'ı için geri yükleme önizlemesi hazırlanıyor…");
+    try {
+      const result = await bridge.previewAutomaticBackupRestore({ backupName: selectedAutomaticBackupName, targetDirectory: backupTargetPath });
+      setBackupMessage(`Geri yükleme önizlemesi hazır: ${result.entries.length} dosya; hiçbir dosya yazılmadı.`);
+    } catch (reason) {
+      setBackupMessage(explainFailure(reason, "Geri yükleme önizlemesi alınamadı.", "boş hedef klasörü ve snapshot seçimini kontrol edin."));
+    } finally { setBusy(false); }
+  };
+  const restoreAutomaticBackup = async () => {
+    setBusy(true); setBackupMessage("Yerel kurtarma snapshot'ı yeni klasöre çıkarılıyor…");
+    try {
+      const result = await bridge.restoreAutomaticBackup({ backupName: selectedAutomaticBackupName, targetDirectory: backupTargetPath });
+      setBackupMessage(`Yerel kurtarma snapshot'ı çıkarıldı: ${result.entries} dosya yeni klasöre yazıldı. Aktif çalışma alanı değiştirilmedi.`);
+    } catch (reason) {
+      setBackupMessage(explainFailure(reason, "Yerel kurtarma snapshot'ı çıkarılamadı.", "boş hedef klasörünü ve snapshot seçimini kontrol edin."));
+    } finally { setBusy(false); }
   };
   const connectorFields: Array<{
     id: SetupConnectorId;
@@ -964,19 +1004,6 @@ export function SetupCenter({
         {connectionMessage ? <p className="form-message" role="status" aria-live="polite">{connectionMessage}</p> : null}
       </section> : null}
 
-      {engineRecoveryAvailable ? (
-        <section className="setup-recovery" role="status" aria-live="polite">
-          <div>
-            <p className="section-kicker">YEREL VERİ KURTARMA</p>
-            <h2>Yerel çalışma alanı kurtarma gerektiriyor</h2>
-            <p>Blogbot motoru mevcut yerel veriyi açarken zaman aşımına uğradı. Kurtarma, önceki çalışma alanını silmez; onu bu bilgisayardaki kurtarma klasörüne taşır ve yeni, boş bir yerel çalışma alanı açar.</p>
-          </div>
-          <button className="button button-primary" type="button" disabled={busy} onClick={() => void recoverLocalWorkspace()}>
-            {busy ? "Kurtarılıyor…" : "Yeni yerel çalışma alanıyla kurtar"}
-          </button>
-        </section>
-      ) : null}
-
       {!guidedMode && connectionMessage ? (
         <p className="form-message" role="status" aria-live="polite">{connectionMessage}</p>
       ) : null}
@@ -996,6 +1023,14 @@ export function SetupCenter({
           onClick={() => void testConnection()}
         >
           {busy ? "Yerel bileşen test ediliyor…" : "Yerel bileşeni test et"}
+        </button>
+        <button
+          className="button button-secondary"
+          type="button"
+          disabled={busy}
+          onClick={() => void verifyLocalIntegrity()}
+        >
+          Yerel veri bütünlüğünü doğrula
         </button>
       </div>
       <div className="setup-overview">
@@ -1209,6 +1244,26 @@ export function SetupCenter({
           <strong>Yedek dosya erişimi Windows seçimiyle sınırlandırılır.</strong> Blogbot yalnızca bu ekrandaki klasör seçiciyle izin verdiğiniz konumları kullanır; elle yazılmış başka yollar native katmanda reddedilir.
         </p>
         <fieldset className="connector-card backup-action-card" aria-describedby="backup-folder-grant" disabled={readOnly}>
+          <legend>Yerel kurtarma snapshot'ları</legend>
+          <p>Bu snapshot'lar yalnız bu Windows kullanıcı profili ve bu bilgisayar için yerel kurtarma amaçlıdır. Bağımsız taşınabilir yedek değildir; anahtar ekrana çıkarılmaz.</p>
+          <div className="button-row">
+            <button className="button button-secondary" type="button" disabled={busy} onClick={() => void refreshAutomaticBackups()}>Snapshot'ları yenile</button>
+            <label className="field compact-field">
+              <span>Snapshot seçin</span>
+              <select value={selectedAutomaticBackupName} onChange={(event) => setSelectedAutomaticBackupName(event.target.value)} disabled={busy || automaticSnapshots.length === 0}>
+                {automaticSnapshots.length === 0 ? <option value="">Snapshot yok</option> : null}
+                {automaticSnapshots.map((snapshot) => <option key={snapshot.name} value={snapshot.name}>{new Date(snapshot.createdAt).toLocaleString("tr-TR")} · {Math.ceil(snapshot.bytes / 1024)} KB</option>)}
+              </select>
+            </label>
+          </div>
+          <div className="button-row">
+            <button className="button button-secondary" type="button" disabled={busy || !selectedAutomaticBackupName} onClick={() => void verifyAutomaticBackup()}>Snapshot'ı doğrula</button>
+            <button className="button button-secondary" type="button" aria-label="Yerel snapshot geri yüklemesini önizle" disabled={busy || !selectedAutomaticBackupName || !backupTargetPath || !restoreFolderNameValid} onClick={() => void previewAutomaticBackup()}>Geri yüklemeyi önizle</button>
+            <button className="button button-danger" type="button" disabled={busy || !selectedAutomaticBackupName || !backupTargetPath || !restoreFolderNameValid} onClick={() => setAutomaticRestoreConfirmationOpen(true)}>Yeni klasöre çıkar</button>
+          </div>
+          <small>Önizleme ve çıkarma için aşağıdaki “Geri yükleme üst klasörü” ile yeni klasör adını kullanın. Aktif çalışma alanı otomatik değiştirilmez.</small>
+        </fieldset>
+        <fieldset className="connector-card backup-action-card" aria-describedby="backup-folder-grant" disabled={readOnly}>
           <legend>Yeni şifreli yedek oluştur</legend>
           <label className="field">
             <span>Kaynak veri klasörü</span>
@@ -1254,10 +1309,10 @@ export function SetupCenter({
           </label>
           <div className="button-row">
             <button className="button button-secondary" type="button" disabled={busy || !backupArchivePath || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => void verifyBackup()}>Yedeği doğrula</button>
-            <button className="button button-secondary" type="button" disabled={busy || !backupArchivePath || !backupTargetPath || !restoreFolderNameValid || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => void previewBackup()}>Geri yüklemeyi önizle</button>
+            <button className="button button-secondary" type="button" aria-label="Şifreli yedek geri yüklemesini önizle" disabled={busy || !backupArchivePath || !backupTargetPath || !restoreFolderNameValid || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => void previewBackup()}>Geri yüklemeyi önizle</button>
             <button className="button button-danger" type="button" disabled={busy || !backupArchivePath || !backupTargetPath || !restoreFolderNameValid || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => setRestoreConfirmationOpen(true)}>Yeni klasöre geri yükle</button>
           </div>
-          <small id="backup-help">Şifre anahtarı yalnızca engine belleğine gönderilir. Önizleme dosya yazmaz; geri yükleme yalnız açık onaydan sonra seçtiğiniz üst klasörün altında henüz var olmayan yeni klasörü oluşturur.</small>
+          <small id="backup-help">Şifre anahtarı yalnızca engine belleğine gönderilir. Önizleme dosya yazmaz; geri yükleme yalnız açık onaydan sonra seçtiğiniz üst klasörün altında henüz var olmayan yeni klasörü oluşturur. Yedek dosyaları çıkarır; Blogbot'un aktif çalışma alanını otomatik değiştirmez.</small>
           {backupMessage ? <p className="form-message" role="status" aria-live="polite">{backupMessage}</p> : null}
         </fieldset>
         </> : null}
@@ -1288,6 +1343,19 @@ export function SetupCenter({
           onConfirm={() => {
             setRestoreConfirmationOpen(false);
             void restoreBackup();
+          }}
+        />
+      ) : null}
+      {automaticRestoreConfirmationOpen ? (
+        <ConfirmationDialog
+          title="Yerel snapshot çıkarılmasını onayla"
+          detail="Seçili yerel snapshot yalnızca yeni ve boş bir klasöre çıkarılacak. Aktif Blogbot çalışma alanı değiştirilmeyecek."
+          confirmLabel="Yeni klasöre çıkar"
+          busy={busy}
+          onCancel={() => setAutomaticRestoreConfirmationOpen(false)}
+          onConfirm={() => {
+            setAutomaticRestoreConfirmationOpen(false);
+            void restoreAutomaticBackup();
           }}
         />
       ) : null}

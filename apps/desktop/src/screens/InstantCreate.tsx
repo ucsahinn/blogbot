@@ -52,7 +52,7 @@ export function InstantCreate({
   const [tone, setTone] = useState<"neutral" | "technical" | "accessible">("neutral");
   const [length, setLength] = useState<"standard" | "deep">("standard");
   const [visualPolicy, setVisualPolicy] =
-    useState<"GENERATE" | "LOCAL_RENDERER" | "NONE">("GENERATE");
+    useState<"GENERATE" | "LOCAL_RENDERER">("GENERATE");
   const [scheduleIntent, setScheduleIntent] =
     useState<"NEXT_SLOT" | "UNSCHEDULED">("NEXT_SLOT");
   const [submission, setSubmission] = useState<InstantDraftSubmission | null>(null);
@@ -428,11 +428,15 @@ export function InstantCreate({
                 </label>
                 <label className="field">
                   <span>Görsel yaklaşımı</span>
-                  <select value={visualPolicy} onChange={(event) => setVisualPolicy(event.target.value as typeof visualPolicy)}>
-                    <option value="GENERATE">Özgün görsel dene</option>
-                    <option value="LOCAL_RENDERER">Yalnız yerel kapak üret</option>
-                    <option value="NONE">Görsel oluşturma</option>
+                  <select value={visualPolicy} aria-describedby="instant-visual-policy-hint" onChange={(event) => setVisualPolicy(event.target.value as typeof visualPolicy)}>
+                    <option value="GENERATE">Özgün görsel üret (ImageGen)</option>
+                    <option value="LOCAL_RENDERER">Yerel, metinsiz kapak üret</option>
                   </select>
+                  <small id="instant-visual-policy-hint">
+                    {visualPolicy === "GENERATE"
+                      ? "ImageGen kullanılır; kullanılamazsa veya üretim başarısız olursa görsel eklenmez ve taslak yayın onayına uygun olmaz."
+                      : "Yerel oluşturucu dış görsel üretimi çağırmaz; metinsiz kapak ve üç yayın oranı üretir."}
+                  </small>
                 </label>
                 <label className="field">
                   <span>Takvim niyeti</span>
@@ -513,7 +517,7 @@ export function InstantCreate({
           </div>
           <div className="brief-row">
             <span>Takvim / görsel</span>
-            <strong>{scheduleIntent === "NEXT_SLOT" ? "İlk uygun slot" : "Takvimsiz"} · {visualPolicy === "NONE" ? "Görselsiz" : "Görselli"}</strong>
+            <strong>{scheduleIntent === "NEXT_SLOT" ? "İlk uygun slot" : "Takvimsiz"} · {visualPolicy === "GENERATE" ? "ImageGen görseli" : "Yerel kapak"}</strong>
           </div>
           <div className="brief-checks">
             <p><span>✓</span> Kaynak metni kopyalanmaz</p>

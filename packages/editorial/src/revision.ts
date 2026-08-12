@@ -51,6 +51,16 @@ export interface SourceSnapshot {
   title: string;
   fetchedAt: string;
   contentHash: string;
+  /**
+   * Bounded, immutable evidence text that was available when this revision
+   * was assembled. It is deliberately stored in the revision hash so a later
+   * source scan, retention run, or restore cannot rewrite claim evidence.
+   */
+  evidenceExcerpt?: string;
+  /** SHA-256 of evidenceExcerpt, retained for cheap independent verification. */
+  evidenceExcerptHash?: string;
+  /** Content-addressed source repository capture that produced this evidence. */
+  evidenceVersionId?: string;
   /** Immutable excerpts captured when the local engine assembled this revision. */
   evidenceAnchors?: EvidenceAnchor[];
   /** Optional for legacy readability; absence is treated as PENDING at publish time. */
@@ -67,8 +77,11 @@ export type SourcePolicyEligibility =
 
 export interface MediaArtifact {
   role: "hero" | "inline";
+  /** Engine-owned relative asset reference. */
   path: string;
   sha256: string;
+  /** Verified size; absent only on legacy records pending migration. */
+  byteSize?: number;
   width: number;
   height: number;
   /** Optional inline payload used by the local publication preview. */
@@ -97,6 +110,8 @@ export interface EditorialGateResult {
   state: EditorialGateState;
   detail: string;
   policyVersion: string;
+  /** Typed, approval-bound explanation for a V2 warning or block. */
+  reasonCode?: string;
 }
 
 export const ACCEPTABLE_EDITORIAL_WARNING_IDS = new Set([
@@ -105,6 +120,11 @@ export const ACCEPTABLE_EDITORIAL_WARNING_IDS = new Set([
   "seo",
   "media"
 ]);
+
+const V2_WARNING_REASONS: Readonly<Record<string, ReadonlySet<string>>> = {
+  contradictions: new Set(["DISCLOSED_SOURCE_DISAGREEMENT"]),
+  seo: new Set(["SEO_POLISH"])
+};
 
 export interface ArticleRevision {
   id: string;
@@ -172,6 +192,16 @@ export interface ApprovalBundle {
   editorial: Approval;
   highRisk: HighRiskApproval | null;
 }
+
+/** The complete, typed review set that every immutable V2 package must bind. */
+const REQUIRED_V2_QUALITY_GATES = {
+  claims: "editorial",
+  contradictions: "editorial",
+  "bilingual-parity": "editorial",
+  "markdown-safety": "security",
+  seo: "seo",
+  media: "media"
+} as const;
 
 export interface RevisionLineageEntry {
   id: string;
@@ -283,7 +313,14 @@ export function computeWarningSetHash(
 ): string {
   const warnings = gates
     .filter((gate) => gate.state === "WARN")
-    .map(({ id, group, state, detail, policyVersion }) => ({ id, group, state, detail, policyVersion }))
+    .map(({ id, group, state, detail, policyVersion, reasonCode }) => ({
+      id,
+      group,
+      state,
+      detail,
+      policyVersion,
+      ...(reasonCode ? { reasonCode } : {})
+    }))
     .sort((left, right) => left.id.localeCompare(right.id));
   return createHash("sha256").update(canonicalJson(warnings), "utf8").digest("hex");
 }
@@ -297,7 +334,12 @@ export function validateApprovalGates(
     return "QUALITY_GATES_NOT_READY";
   }
   const warnings = gates.filter((gate) => gate.state === "WARN");
-  if (warnings.some((gate) => !ACCEPTABLE_EDITORIAL_WARNING_IDS.has(gate.id))) {
+  if (warnings.some((gate) => {
+    if (gate.policyVersion === "2") {
+      return !V2_WARNING_REASONS[gate.id]?.has(gate.reasonCode ?? "");
+    }
+    return gate.policyVersion !== "1" || !ACCEPTABLE_EDITORIAL_WARNING_IDS.has(gate.id);
+  })) {
     return "WARNING_NOT_ALLOWLISTED";
   }
   if (!warningSetHash || computeWarningSetHash(gates) !== warningSetHash) {
@@ -402,6 +444,11 @@ export function validateRevisionPackageV2(
     ) return false;
     gateIds.add(gate.id);
   }
+  if (gateIds.size !== Object.keys(REQUIRED_V2_QUALITY_GATES).length) return false;
+  for (const [id, group] of Object.entries(REQUIRED_V2_QUALITY_GATES)) {
+    const gate = revision.qualityGates.find((candidate) => candidate.id === id);
+    if (!gate || gate.group !== group) return false;
+  }
   return true;
 }
 
@@ -437,18 +484,30 @@ export function validateClaimEvidence(
       if (!source || !/^[a-f0-9]{64}$/i.test(anchor.quoteHash)) {
         return false;
       }
+      const hasImmutableExcerpt = source.evidenceExcerpt !== undefined || source.evidenceExcerptHash !== undefined;
+      if (hasImmutableExcerpt && (
+        !source.evidenceExcerpt ||
+        source.evidenceExcerpt.length > 12_000 ||
+        !source.evidenceExcerptHash ||
+        !SHA256_PATTERN.test(source.evidenceExcerptHash) ||
+        createHash("sha256").update(source.evidenceExcerpt, "utf8").digest("hex") !== source.evidenceExcerptHash
+      )) return false;
       // Newly materialized drafts retain the source snapshot's actual anchor.
       // A model-supplied hash must never be enough to make a claim publishable.
-      if (source.evidenceAnchors?.length && !source.evidenceAnchors.some((known) =>
+      if (!source.evidenceAnchors?.length || !source.evidenceAnchors.some((known) =>
         known.sourceId === anchor.sourceId && known.quoteHash === anchor.quoteHash
       )) return false;
-      if (anchor.start !== undefined && (!Number.isInteger(anchor.start) || anchor.start < 0)) {
+      if (anchor.start === undefined || anchor.end === undefined || !Number.isInteger(anchor.start) || anchor.start < 0) {
         return false;
       }
-      if (anchor.end !== undefined && (!Number.isInteger(anchor.end) || anchor.end < 0)) {
+      if (!Number.isInteger(anchor.end) || anchor.end < anchor.start) {
         return false;
       }
-      return anchor.start === undefined || anchor.end === undefined || anchor.end >= anchor.start;
+      if (!hasImmutableExcerpt) return true;
+      if (anchor.end > source.evidenceExcerpt!.length) return false;
+      return createHash("sha256")
+        .update(source.evidenceExcerpt!.slice(anchor.start, anchor.end), "utf8")
+        .digest("hex") === anchor.quoteHash;
     });
   });
 }

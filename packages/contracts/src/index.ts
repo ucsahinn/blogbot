@@ -578,6 +578,10 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
           "title",
           "fetchedAt",
           "contentHash",
+          "evidenceAnchors",
+          ...(source.evidenceExcerpt === undefined ? [] : ["evidenceExcerpt"]),
+          ...(source.evidenceExcerptHash === undefined ? [] : ["evidenceExcerptHash"]),
+          ...(source.evidenceVersionId === undefined ? [] : ["evidenceVersionId"]),
           ...(source.trustStatus === undefined ? [] : ["trustStatus"]),
           ...(source.rightsStatus === undefined ? [] : ["rightsStatus"])
         ]) &&
@@ -590,6 +594,31 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
         Number.isFinite(Date.parse(source.fetchedAt)) &&
         typeof source.contentHash === "string" &&
         /^[a-f0-9]{64}$/iu.test(source.contentHash) &&
+        (source.evidenceExcerpt === undefined ||
+          (typeof source.evidenceExcerpt === "string" && source.evidenceExcerpt.length > 0 && source.evidenceExcerpt.length <= 12_000)) &&
+        (source.evidenceExcerptHash === undefined ||
+          (typeof source.evidenceExcerptHash === "string" && /^[a-f0-9]{64}$/iu.test(source.evidenceExcerptHash))) &&
+        (source.evidenceVersionId === undefined ||
+          (typeof source.evidenceVersionId === "string" && /^entry-[a-f0-9]{64}$/iu.test(source.evidenceVersionId))) &&
+        Array.isArray(source.evidenceAnchors) &&
+        source.evidenceAnchors.length > 0 &&
+        source.evidenceAnchors.length <= 100 &&
+        source.evidenceAnchors.every(
+          (anchor) =>
+            isRecord(anchor) &&
+            hasExactKeys(anchor, [
+              "sourceId",
+              "quoteHash",
+              ...(anchor.start === undefined ? [] : ["start"]),
+              ...(anchor.end === undefined ? [] : ["end"])
+            ]) &&
+            anchor.sourceId === source.id &&
+            typeof anchor.quoteHash === "string" &&
+            /^[a-f0-9]{64}$/iu.test(anchor.quoteHash) &&
+            (anchor.start === undefined || (Number.isSafeInteger(anchor.start) && anchor.start >= 0)) &&
+            (anchor.end === undefined || (Number.isSafeInteger(anchor.end) && anchor.end >= 0)) &&
+            (anchor.start === undefined || anchor.end === undefined || anchor.end >= anchor.start)
+        ) &&
         (source.trustStatus === undefined ||
           source.trustStatus === "PENDING" ||
           source.trustStatus === "APPROVED" ||

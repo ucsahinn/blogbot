@@ -1,4 +1,5 @@
 import type { BackendRepository } from "../../../packages/database/src/backend-repository.ts";
+import { publicationIntentBinding } from "./publication-intent.ts";
 import { deriveAutomationCapabilities } from "../../../packages/editorial/src/automation.ts";
 import {
   computeRevisionHash,
@@ -71,20 +72,34 @@ export class PublicationScheduler {
     if (this.tickInFlight) return { enqueued: [], skipped: [] };
     this.tickInFlight = true;
     try {
-      const snapshot = (await this.backend.sync(0)).snapshot;
-      const existingPublicationKeys = new Set(snapshot.outbox.map((effect) => effect.idempotencyKey));
-      const capabilities = deriveAutomationCapabilities(snapshot.automation);
       const result: PublicationSchedulerResult = { enqueued: [], skipped: [] };
       const now = this.now();
-      for (const revision of snapshot.revisions) {
-        if (Date.parse(revision.scheduledAt) > now.getTime()) continue;
-        const approval = snapshot.approvals.find((item) => item.revisionId === revision.id);
-        const highRisk = snapshot.highRiskApprovals.find((item) => item.revisionId === revision.id) ?? null;
+      const indexedRead = Boolean(this.backend.listDueRevisionIds && this.backend.listRevisionLineage);
+      const snapshot = indexedRead ? undefined : (await this.backend.sync(0)).snapshot;
+      const existingPublicationKeys = new Set((indexedRead
+        ? await this.backend.listOutbox()
+        : snapshot!.outbox).map((effect) => effect.idempotencyKey));
+      const capabilities = deriveAutomationCapabilities(indexedRead
+        ? await this.backend.getAutomation()
+        : snapshot!.automation);
+      const lineage = indexedRead
+        ? await this.backend.listRevisionLineage!()
+        : snapshot!.revisions;
+      const revisions = indexedRead
+        ? await Promise.all((await this.backend.listDueRevisionIds!(now.getTime(), 100)).map((id) => this.backend.getRevision(id)))
+        : snapshot!.revisions.filter((revision) => Date.parse(revision.scheduledAt) <= now.getTime());
+      for (const revision of revisions) {
+        const approval = indexedRead
+          ? await this.backend.getApproval(revision.id)
+          : snapshot!.approvals.find((item) => item.revisionId === revision.id) ?? null;
+        const highRisk = indexedRead
+          ? (await this.backend.getHighRiskApproval?.(revision.id)) ?? null
+          : snapshot!.highRiskApprovals.find((item) => item.revisionId === revision.id) ?? null;
         const approvalBundle: ApprovalBundle | null = approval ? { editorial: approval, highRisk } : null;
         const eligibility = evaluatePublishEligibility(revision, approvalBundle, {
           now,
           publishingPaused: !capabilities.canPublishApproved,
-          revisionLineage: snapshot.revisions
+          revisionLineage: lineage
         });
         if (!eligibility.eligible) {
           result.skipped.push({ revisionId: revision.id, reason: eligibility.reason });
@@ -102,7 +117,12 @@ export class PublicationScheduler {
           continue;
         }
         const key = `scheduler:publication:${revision.id}:${revisionHash}`;
-        const effect = await this.backend.runIdempotent(key, revisionHash, (transaction) => transaction.enqueuePublication(revision.id, revisionHash));
+        const binding = publicationIntentBinding(revision, previewRecord);
+        const effect = await this.backend.runIdempotent(
+          key,
+          `${revisionHash}:${binding.previewHash}`,
+          (transaction) => transaction.enqueuePublication(revision.id, revisionHash, binding)
+        );
         if (!existingPublicationKeys.has(effect.idempotencyKey)) {
           result.enqueued.push(revision.id);
           existingPublicationKeys.add(effect.idempotencyKey);

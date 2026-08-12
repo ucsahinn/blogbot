@@ -397,17 +397,15 @@ test("weekly calendar lets every day use a preset or an explicit custom publishi
   await expect(page.getByText("Pazartesi için haftalık yayın slotu güncellendi.")).toBeVisible();
 });
 
-test("weekly calendar suggests a modest SEO cadence and lets an approved post be selected", async ({ page }) => {
+test("weekly calendar suggests a modest SEO cadence without assigning approved posts", async ({ page }) => {
   await page.goto("#publishing");
   await page.getByRole("button", { name: "Dengeli SEO saatlerini öner" }).click();
   await expect(page.getByText("3 dengeli SEO slotu yerel takvime uygulandı.")).toBeVisible();
 
-  await page.getByRole("button", { name: "Cumartesi · 1. slot: Takvimde bu slotu düzenle" }).click();
-  const saturday = page.getByRole("article", { name: "Cumartesi · 1. slot yayın slotu" });
-  await expect(saturday.getByRole("combobox", { name: "Cumartesi paylaşılacak onaylı post" })).toBeVisible();
-  await saturday.getByRole("combobox", { name: "Cumartesi paylaşılacak onaylı post" }).selectOption("approved-incident");
-  await saturday.getByRole("button", { name: "Slotu kaydet" }).click();
-  await expect(saturday.locator("p").filter({ hasText: "Ekipler için uygulama kontrol listesi" })).toBeVisible();
+  await page.getByRole("button", { name: "Perşembe · 1. slot: Takvimde bu slotu düzenle" }).click();
+  const thursday = page.getByRole("article", { name: "Perşembe · 1. slot yayın slotu" });
+  await expect(thursday.getByText(/Geçmiş atama: Ekipler için uygulama kontrol listesi\. Bu bilgi yeni planlama yapmaz\./u)).toBeVisible();
+  await expect(thursday.getByRole("combobox", { name: "Perşembe paylaşılacak onaylı post" })).toHaveCount(0);
 });
 
 test("weekly slot controls stay inside their cards at supported widths", async ({ page }) => {
@@ -822,25 +820,22 @@ test("guided setup back control returns to the previous focused step", async ({ 
   await expect(page.getByRole("progressbar", { name: "İlk başlangıç ilerlemesi" })).toHaveAttribute("aria-valuenow", "1");
 });
 
-test("guided setup offers an explicit data-preserving recovery after an engine timeout", async ({ page }) => {
+test("guided setup never offers destructive workspace recovery after an engine timeout", async ({ page }) => {
   await page.goto("?state=engine-timeout#setup");
   await page.getByRole("button", { name: "Tanılama ve onarım" }).click();
   await page.getByRole("button", { name: "Yerel bileşeni test et" }).click();
 
-  await expect(page.getByRole("heading", { name: "Yerel çalışma alanı kurtarma gerektiriyor" })).toBeVisible();
-  await page.getByRole("button", { name: "Yeni yerel çalışma alanıyla kurtar" }).click();
-  await expect(page.getByRole("status")).toContainText("Yeni yerel çalışma alanı hazır");
+  await expect(page.getByRole("button", { name: "Yeni yerel çalışma alanıyla kurtar" })).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText("yerel çalışma bileşeni");
 });
 
-test("a successful local workspace recovery stays truthful when its prerequisite refresh is unavailable", async ({ page }) => {
+test("engine timeout keeps diagnostics available without offering workspace replacement", async ({ page }) => {
   await page.goto("?state=recovery-postsuccess-refresh-failure#setup");
   await page.getByRole("button", { name: "Tanılama ve onarım" }).click();
   await page.getByRole("button", { name: "Yerel bileşeni test et" }).click();
-  await page.getByRole("button", { name: "Yeni yerel çalışma alanıyla kurtar" }).click();
 
-  await expect(page.getByRole("status")).toContainText("Yeni yerel çalışma alanı hazır");
-  await expect(page.getByRole("status")).toContainText("Önkoşul kartları yenilenemedi");
-  await expect(page.getByRole("status")).not.toContainText("Yerel çalışma alanı kurtarılamadı");
+  await expect(page.getByRole("button", { name: "Tanı paketi oluştur" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Yeni yerel çalışma alanıyla kurtar" })).toHaveCount(0);
 });
 
 test("instant create validation identifies and focuses the first invalid field", async ({ page }) => {
@@ -891,7 +886,7 @@ test("backup setup guides the user through picker-backed create, verify, preview
   await expect(page.getByText("Yedek doğrulandı: 0 dosya.", { exact: true })).toBeVisible();
 
   await page.getByLabel(/Yedekleme şifresi/u).fill("yerel-yedek-anahtari-123");
-  await page.getByRole("button", { name: "Geri yüklemeyi önizle" }).click();
+  await page.getByRole("button", { name: "Şifreli yedek geri yüklemesini önizle" }).click();
   await expect(page.getByText("Geri yükleme önizlemesi hazır: 0 dosya; hiçbir dosya yazılmadı.", { exact: true })).toBeVisible();
 
   await page.getByLabel(/Yedekleme şifresi/u).fill("yerel-yedek-anahtari-123");
@@ -899,7 +894,7 @@ test("backup setup guides the user through picker-backed create, verify, preview
   const restoreConfirmation = page.getByRole("alertdialog", { name: "Geri yüklemeyi onayla" });
   await expect(restoreConfirmation).toContainText("Yalnızca boş ve yeni bir klasöre geri yükleme yapılacak.");
   await restoreConfirmation.getByRole("button", { name: "Geri yüklemeyi başlat" }).click();
-  await expect(page.getByText("Geri yükleme tamamlandı: 0 dosya.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Geri yükleme tamamlandı: 0 dosya yeni klasöre çıkarıldı. Aktif çalışma alanı değiştirilmedi.", { exact: true })).toBeVisible();
 });
 
 test("scanning sources makes queued research visible on the editorial desk before review is available", async ({ page }) => {

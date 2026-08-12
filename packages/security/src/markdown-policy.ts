@@ -11,12 +11,21 @@ function stripCode(markdown: string): string {
 }
 
 function decodeBasicEntities(value: string): string {
+  const codePoint = (digits: string, radix: number): string => {
+    const value = Number.parseInt(digits, radix);
+    return Number.isInteger(value)
+      && value >= 0
+      && value <= 0x10ffff
+      && (value < 0xd800 || value > 0xdfff)
+      ? String.fromCodePoint(value)
+      : "\uFFFD";
+  };
   return value
     .replace(/&#x([a-f0-9]+);?/gi, (_match, digits: string) =>
-      String.fromCodePoint(Number.parseInt(digits, 16))
+      codePoint(digits, 16)
     )
     .replace(/&#([0-9]+);?/g, (_match, digits: string) =>
-      String.fromCodePoint(Number.parseInt(digits, 10))
+      codePoint(digits, 10)
     )
     .replaceAll("&colon;", ":")
     .replaceAll("&tab;", "\t")
@@ -59,6 +68,12 @@ function validateImageTarget(target: string, blockers: Set<string>): void {
     return;
   }
   const withoutQuery = normalized.split(/[?#]/, 1)[0] ?? normalized;
+  // The renderer only owns the image directory. Do not let a relative path
+  // navigate out of it after a filesystem or URL implementation normalizes it.
+  if (withoutQuery.split("/").some((part, index) => part === ".." || (part === "." && index > 0))) {
+    blockers.add("IMAGE_PATH_OUTSIDE_ALLOWLIST");
+    return;
+  }
   if (!/\.(?:png|webp|avif)$/.test(withoutQuery)) {
     blockers.add("UNSAFE_IMAGE_FORMAT");
   }

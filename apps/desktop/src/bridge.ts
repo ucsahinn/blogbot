@@ -47,6 +47,12 @@ export interface BackupRestorePreview {
   }>;
 }
 
+export interface AutomaticBackupSnapshot {
+  name: string;
+  bytes: number;
+  createdAt: string;
+}
+
 export class BridgeError extends Error {
   readonly code: "OFFLINE_READ_ONLY" | "BRIDGE_UNAVAILABLE" | "COMMAND_FAILED";
 
@@ -67,6 +73,7 @@ export interface BlogbotBridge {
   getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
   getPrerequisiteStatus(): Promise<PrerequisiteSnapshot>;
   testLocalEngine(): Promise<LocalEngineTestResult>;
+  verifyLocalIntegrity(): Promise<{ verified: true; completedAt: string }>;
   recoverLocalWorkspace(): Promise<{ ready: boolean; detail: string }>;
   pickLocalFolder(): Promise<string | null>;
   localDevStatus(): Promise<{ running: boolean; supported: boolean }>;
@@ -131,6 +138,7 @@ export interface BlogbotBridge {
     request: InstantCreateCommand
   ): Promise<InstantDraftSubmission>;
   getReviewRevision(revisionId: string): Promise<ReviewRevision>;
+  readRevisionMedia(input: { revisionId: string; sha256: string }): Promise<{ contentBase64: string; mimeType: string }>;
   approveRevision(input: {
     revisionId: string;
     expectedHash: string;
@@ -190,6 +198,10 @@ export interface BlogbotBridge {
     outputPath: string;
     recoveryKey: string;
   }): Promise<BackupCreateResult>;
+  listAutomaticBackups(): Promise<{ snapshots: AutomaticBackupSnapshot[] }>;
+  verifyAutomaticBackup(input: { backupName: string }): Promise<BackupVerifyResult>;
+  previewAutomaticBackupRestore(input: { backupName: string; targetDirectory: string }): Promise<BackupRestorePreview>;
+  restoreAutomaticBackup(input: { backupName: string; targetDirectory: string }): Promise<{ restored: true; targetDirectory: string; entries: number }>;
 }
 
 function resultAs<T>(value: unknown): T {
@@ -307,6 +319,7 @@ export function createInvokeBridge(
     getBootstrapSnapshot: () => read("get_bootstrap_snapshot"),
     getPrerequisiteStatus: () => read("get_prerequisite_status"),
     testLocalEngine: () => read("test_local_engine"),
+    verifyLocalIntegrity: () => mutate("verify_local_integrity"),
     recoverLocalWorkspace: () => read("recover_local_workspace"),
     pickLocalFolder: () => read("pick_local_folder"),
     localDevStatus: () => read("local_dev_status"),
@@ -348,6 +361,7 @@ export function createInvokeBridge(
       mutate("create_instant_draft", { request }),
     getReviewRevision: (revisionId) =>
       read("get_review_revision", { revisionId }),
+    readRevisionMedia: (input) => read("read_revision_media", input),
     approveRevision: (input) => mutate("approve_revision", input),
     approveHighRiskRevision: (input) => mutate("approve_high_risk_revision", { request: input }),
     enqueuePublication: (input) => mutate("enqueue_publication", input),
@@ -374,6 +388,10 @@ export function createInvokeBridge(
     ,previewBackupRestore: (input) => read("backup_restore_preview", input)
     ,restoreBackup: (input) => mutate("backup_restore_apply", input)
     ,createBackup: (input) => mutate("backup_create", input)
+    ,listAutomaticBackups: () => read("automatic_backup_list")
+    ,verifyAutomaticBackup: (input) => read("automatic_backup_verify", input)
+    ,previewAutomaticBackupRestore: (input) => read("automatic_backup_restore_preview", input)
+    ,restoreAutomaticBackup: (input) => mutate("automatic_backup_restore_apply", input)
   };
 }
 
@@ -499,7 +517,7 @@ export function createCoalescingBridge(
     "scanSource", "scanAllSources", "saveSources", "reviewSource",
     "createInstantDraft", "approveRevision", "approveHighRiskRevision",
     "enqueuePublication", "materializeLocalPreview", "completeOnboarding",
-    "setRuntimePause", "restoreBackup", "createBackup"
+    "setRuntimePause", "restoreBackup", "createBackup", "restoreAutomaticBackup"
   ]);
   return new Proxy(coalesced, {
     get(target, property, receiver) {

@@ -15,10 +15,15 @@ import {
   BackendStoreError,
   type BackendChange,
   type BackendJob,
+  type DashboardReadOptions,
   type DashboardSyncResult,
+  type RevisionListReadOptions,
+  type RevisionListSnapshot,
+  type RevisionLineageIndexEntry,
   type BackendRepository,
   type BackendRepositoryTransaction,
   type OutboxEffect,
+  type PublicationIntentBinding,
   type SyncResult
 } from "./backend-repository.ts";
 import { JsonProtector } from "./encrypted-json.ts";
@@ -155,6 +160,22 @@ CREATE TABLE IF NOT EXISTS blogbot_local_state (
   value jsonb NOT NULL
 );
 `
+  },
+  {
+    version: 5,
+    name: "revision-list-index",
+    sql: `
+CREATE TABLE IF NOT EXISTS blogbot_revision_list_index (
+  revision_id text PRIMARY KEY,
+  scheduled_at_unix_ms bigint NOT NULL,
+  supersedes_revision_id text,
+  value jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS blogbot_revision_list_due_idx
+  ON blogbot_revision_list_index (scheduled_at_unix_ms, revision_id);
+CREATE INDEX IF NOT EXISTS blogbot_revision_list_parent_idx
+  ON blogbot_revision_list_index (supersedes_revision_id);
+`
   }
 ] as const;
 
@@ -228,6 +249,7 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
         )
       ]
     );
+    await writeRevisionListIndex(this.client, this.protector, revision);
     await this.recordChange("REVISION_SUBMITTED", revision.id);
     return structuredClone(revision);
   }
@@ -337,9 +359,10 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
 
   async enqueuePublication(
     revisionId: string,
-    revisionHash: string
+    revisionHash: string,
+    binding: PublicationIntentBinding
   ): Promise<OutboxEffect> {
-    const idempotencyKey = `publish:${revisionId}:${revisionHash}`;
+    const idempotencyKey = `publish:${revisionId}:${revisionHash}:${binding.previewHash}`;
     const existing = await this.client.query<JsonRow>(
       "SELECT id AS key, value FROM blogbot_outbox WHERE idempotency_key = $1",
       [idempotencyKey]
@@ -357,6 +380,7 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
       type: "PUBLISH_REVISION",
       aggregateId: revisionId,
       revisionHash,
+      ...structuredClone(binding),
       idempotencyKey,
       state: "PENDING",
       attempts: 0
@@ -375,6 +399,10 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
         )
       ]
     );
+    // Creation and later state transitions must be equally visible to the
+    // incremental desktop sync feed; otherwise a freshly queued publication
+    // can be invisible until an unrelated mutation happens.
+    await this.recordChange("EFFECT_UPDATED", effect.id);
     return structuredClone(effect);
   }
 
@@ -500,6 +528,30 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
     await this.recordChange("LOCAL_STATE_UPDATED", key);
   }
 
+  async getHighRiskApproval(revisionId: string): Promise<HighRiskApproval | null> {
+    const result = await this.client.query<JsonRow>(
+      "SELECT value FROM blogbot_high_risk_approvals WHERE revision_id = $1",
+      [revisionId]
+    );
+    return result.rows[0]
+      ? this.protector.open<HighRiskApproval>(
+        result.rows[0].value,
+        backendContext("blogbot_high_risk_approvals", revisionId)
+      )
+      : null;
+  }
+
+  async setMaintenanceState(key: string, value: unknown): Promise<void> {
+    if (!key.startsWith("maintenance.")) {
+      throw new BackendStoreError("INVALID_MAINTENANCE_KEY", "Maintenance state keys must start with maintenance.");
+    }
+    await this.client.query(
+      `INSERT INTO blogbot_local_state (key, value) VALUES ($1, $2::jsonb)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [key, JSON.stringify(this.protector.seal(value, backendContext("blogbot_local_state", key)))]
+    );
+  }
+
   protected async recordChange(
     kind: BackendChange["kind"],
     entityId: string
@@ -545,7 +597,13 @@ export class PGliteBackendRepository
     await applyLocalMigrations(database);
     const protector = JsonProtector.fromEnvironment();
     await encryptLegacyBackendRows(database, protector);
+    await backfillRevisionListIndex(database, protector);
     return new PGliteBackendRepository(database, protector);
+  }
+
+  /** Explicit, potentially expensive full encrypted-row integrity check. */
+  async verifyEncryptionIntegrity(): Promise<void> {
+    await encryptLegacyBackendRows(this.database, this.protector, true);
   }
 
   async close(): Promise<void> {
@@ -562,10 +620,40 @@ export class PGliteBackendRepository
     );
   }
 
-  async syncDashboard(afterCursor: number): Promise<DashboardSyncResult> {
+  async syncDashboard(afterCursor: number, options: DashboardReadOptions = {}): Promise<DashboardSyncResult> {
     return this.database.transaction((transaction) =>
-      readDashboardSync(transaction, this.protector, afterCursor)
+      readDashboardSync(transaction, this.protector, afterCursor, options)
     );
+  }
+
+  async listRevisionSnapshot(): Promise<RevisionListSnapshot> {
+    return this.database.transaction((transaction) => readRevisionListSnapshot(transaction, this.protector));
+  }
+
+  async listRevisionSummarySnapshot(options: RevisionListReadOptions = {}): Promise<RevisionListSnapshot> {
+    return this.database.transaction((transaction) => readRevisionSummarySnapshot(transaction, this.protector, options));
+  }
+
+  async listDueRevisionIds(nowUnixMs: number, limit = 100): Promise<string[]> {
+    const result = await this.database.query<{ revision_id: string }>(
+      `SELECT revision_id FROM blogbot_revision_list_index
+        WHERE scheduled_at_unix_ms <= $1
+        ORDER BY scheduled_at_unix_ms, revision_id
+        LIMIT $2`,
+      [nowUnixMs, Math.min(Math.max(1, limit), 200)]
+    );
+    return result.rows.map((row) => row.revision_id);
+  }
+
+  async listRevisionLineage(): Promise<RevisionLineageIndexEntry[]> {
+    const result = await this.database.query<{
+      revision_id: string;
+      supersedes_revision_id: string | null;
+    }>("SELECT revision_id, supersedes_revision_id FROM blogbot_revision_list_index");
+    return result.rows.map((row) => ({
+      id: row.revision_id,
+      ...(row.supersedes_revision_id ? { supersedesRevisionId: row.supersedes_revision_id } : {})
+    }));
   }
 
   async runIdempotent<T>(
@@ -629,8 +717,9 @@ export class PGliteBackendRepository
 }
 
 async function encryptLegacyBackendRows(
-  database: PGlite,
-  protector: JsonProtector
+  database: PGliteDatabasePort,
+  protector: JsonProtector,
+  verifyCompleted = false
 ): Promise<void> {
   await database.transaction(async (transaction) => {
     const migration = await transaction.query<{ version: number }>(
@@ -642,6 +731,10 @@ async function encryptLegacyBackendRows(
         `LOCAL_ENCRYPTION_MIGRATION_UNSUPPORTED: backend version ${appliedVersion}`
       );
     }
+    // A completed migration is the startup sentinel. Re-opening every
+    // encrypted row on every launch turns normal startup into an O(n)
+    // corruption scan; operators can request that scan explicitly instead.
+    if (appliedVersion === 2 && !verifyCompleted) return;
     const automation = await transaction.query<JsonRow>(
       "SELECT value FROM blogbot_automation WHERE singleton_id = 1"
     );
@@ -673,6 +766,7 @@ async function encryptLegacyBackendRows(
       { name: "blogbot_revisions", key: "id" },
       { name: "blogbot_approvals", key: "revision_id" },
       { name: "blogbot_high_risk_approvals", key: "revision_id" },
+      { name: "blogbot_revision_list_index", key: "revision_id" },
       { name: "blogbot_outbox", key: "id" },
       { name: "blogbot_jobs", key: "id" },
       { name: "blogbot_codex_jobs", key: "id" }
@@ -883,32 +977,173 @@ async function readSyncSnapshot(
   };
 }
 
+async function readRevisionListSnapshot(
+  client: PGliteQueryPort,
+  protector: JsonProtector
+): Promise<RevisionListSnapshot> {
+  const [revisions, approvals, highRiskApprovals] = await Promise.all([
+    client.query<JsonRow>("SELECT id AS key, value FROM blogbot_revisions ORDER BY id"),
+    client.query<JsonRow>("SELECT revision_id AS key, value FROM blogbot_approvals ORDER BY revision_id"),
+    client.query<JsonRow>("SELECT revision_id AS key, value FROM blogbot_high_risk_approvals ORDER BY revision_id")
+  ]);
+  return {
+    revisions: revisions.rows.map((row) => protector.open<ArticleRevision>(row.value, backendContext("blogbot_revisions", requiredKey(row)))),
+    approvals: approvals.rows.map((row) => protector.open<Approval>(row.value, backendContext("blogbot_approvals", requiredKey(row)))),
+    highRiskApprovals: highRiskApprovals.rows.map((row) => protector.open<HighRiskApproval>(row.value, backendContext("blogbot_high_risk_approvals", requiredKey(row))))
+  };
+}
+
+function revisionListSummary(revision: ArticleRevision): ArticleRevision {
+  return {
+    id: revision.id,
+    ...(revision.supersedesRevisionId ? { supersedesRevisionId: revision.supersedesRevisionId } : {}),
+    state: revision.state,
+    tr: { title: revision.tr.title, slug: revision.tr.slug },
+    section: revision.section,
+    articleType: revision.articleType,
+    ...(revision.riskLevel ? { riskLevel: revision.riskLevel } : {}),
+    scheduledAt: revision.scheduledAt,
+    // A summary needs claim/source policy state but never source excerpts,
+    // translated bodies, generated files, or base64 media payloads.
+    sources: revision.sources.map(({ evidenceExcerpt: _excerpt, ...source }) => structuredClone(source)),
+    claims: structuredClone(revision.claims)
+  } as unknown as ArticleRevision;
+}
+
+async function writeRevisionListIndex(
+  client: PGliteQueryPort,
+  protector: JsonProtector,
+  revision: ArticleRevision
+): Promise<void> {
+  const scheduledAtUnixMs = Date.parse(revision.scheduledAt);
+  if (!Number.isFinite(scheduledAtUnixMs)) {
+    throw new Error("REVISION_SCHEDULE_INVALID");
+  }
+  await client.query(
+    `INSERT INTO blogbot_revision_list_index
+      (revision_id, scheduled_at_unix_ms, supersedes_revision_id, value)
+     VALUES ($1, $2, $3, $4::jsonb)
+     ON CONFLICT (revision_id) DO UPDATE SET
+       scheduled_at_unix_ms = EXCLUDED.scheduled_at_unix_ms,
+       supersedes_revision_id = EXCLUDED.supersedes_revision_id,
+       value = EXCLUDED.value`,
+    [
+      revision.id,
+      scheduledAtUnixMs,
+      revision.supersedesRevisionId ?? null,
+      JSON.stringify(protector.seal(
+        revisionListSummary(revision),
+        backendContext("blogbot_revision_list_index", revision.id)
+      ))
+    ]
+  );
+}
+
+async function backfillRevisionListIndex(
+  database: PGliteDatabasePort,
+  protector: JsonProtector
+): Promise<void> {
+  const missing = await database.query<JsonRow>(
+    `SELECT id AS key, value FROM blogbot_revisions revision
+      WHERE NOT EXISTS (
+        SELECT 1 FROM blogbot_revision_list_index idx WHERE idx.revision_id = revision.id
+      )`
+  );
+  if (missing.rows.length === 0) return;
+  await database.transaction(async (transaction) => {
+    for (const row of missing.rows) {
+      const id = requiredKey(row);
+      const revision = protector.open<ArticleRevision>(
+        row.value,
+        backendContext("blogbot_revisions", id)
+      );
+      await writeRevisionListIndex(transaction, protector, revision);
+    }
+  });
+}
+
+async function readRevisionSummarySnapshot(
+  client: PGliteQueryPort,
+  protector: JsonProtector,
+  options: RevisionListReadOptions
+): Promise<RevisionListSnapshot> {
+  const limit = Math.min(Math.max(1, options.limit ?? 100), 200);
+  const rows = await client.query<{ revision_id: string; value: unknown }>(
+    `SELECT revision_id, value FROM blogbot_revision_list_index
+      ORDER BY scheduled_at_unix_ms DESC, revision_id DESC
+      LIMIT $1`,
+    [limit]
+  );
+  const revisions = rows.rows.map((row) => protector.open<ArticleRevision>(
+    row.value,
+    backendContext("blogbot_revision_list_index", row.revision_id)
+  ));
+  const approvals = await Promise.all(revisions.map(async (revision) => {
+    const result = await client.query<JsonRow>(
+      "SELECT value FROM blogbot_approvals WHERE revision_id = $1",
+      [revision.id]
+    );
+    return result.rows[0]
+      ? protector.open<Approval>(result.rows[0].value, backendContext("blogbot_approvals", revision.id))
+      : null;
+  }));
+  const highRiskApprovals = await Promise.all(revisions.map(async (revision) => {
+    const result = await client.query<JsonRow>(
+      "SELECT value FROM blogbot_high_risk_approvals WHERE revision_id = $1",
+      [revision.id]
+    );
+    return result.rows[0]
+      ? protector.open<HighRiskApproval>(result.rows[0].value, backendContext("blogbot_high_risk_approvals", revision.id))
+      : null;
+  }));
+  return {
+    revisions,
+    approvals: approvals.filter((value): value is Approval => value !== null),
+    highRiskApprovals: highRiskApprovals.filter((value): value is HighRiskApproval => value !== null)
+  };
+}
+
 async function readDashboardSync(
   client: PGliteQueryPort,
   protector: JsonProtector,
-  afterCursor: number
+  afterCursor: number,
+  options: DashboardReadOptions = {}
 ): Promise<DashboardSyncResult> {
   const automation = await client.query<JsonRow>(
     "SELECT value FROM blogbot_automation WHERE singleton_id = 1"
   );
-  const outbox = await client.query<JsonRow>(
-    "SELECT id AS key, value FROM blogbot_outbox ORDER BY id"
-  );
-  const jobs = await client.query<JsonRow>(
-    "SELECT id AS key, value FROM blogbot_jobs ORDER BY id"
-  );
-  const changes = await client.query<ChangeRow>(
-    `SELECT cursor, kind, entity_id
-       FROM blogbot_changes
-      WHERE cursor > $1
-      ORDER BY cursor`,
-    [afterCursor]
-  );
-  const cursor = await client.query<{ cursor: string | number }>(
-    "SELECT COALESCE(MAX(cursor), 0) AS cursor FROM blogbot_changes"
-  );
+  const outbox = options.outboxLimit === undefined
+    ? await client.query<JsonRow>("SELECT id AS key, value FROM blogbot_outbox ORDER BY id")
+    : await client.query<JsonRow>(
+      "SELECT key, value FROM (SELECT id AS key, value FROM blogbot_outbox ORDER BY id DESC LIMIT $1) recent ORDER BY key",
+      [options.outboxLimit]
+    );
+  const jobs = options.jobLimit === undefined
+    ? await client.query<JsonRow>("SELECT id AS key, value FROM blogbot_jobs ORDER BY id")
+    : await client.query<JsonRow>(
+      "SELECT key, value FROM (SELECT id AS key, value FROM blogbot_jobs ORDER BY id DESC LIMIT $1) recent ORDER BY key",
+      [options.jobLimit]
+    );
+  const changes = options.changeLimit === undefined
+    ? await client.query<ChangeRow>(
+      "SELECT cursor, kind, entity_id FROM blogbot_changes WHERE cursor > $1 ORDER BY cursor",
+      [afterCursor]
+    )
+    : await client.query<ChangeRow>(
+      `SELECT cursor, kind, entity_id
+         FROM blogbot_changes
+        WHERE cursor > $1
+        ORDER BY cursor
+        LIMIT $2`,
+      [afterCursor, options.changeLimit]
+    );
+  const mappedChanges = changes.rows.map((row) => ({
+    cursor: Number(row.cursor),
+    kind: row.kind,
+    entityId: row.entity_id
+  }));
   return {
-    serverCursor: Number(cursor.rows[0]?.cursor ?? 0),
+    serverCursor: mappedChanges.at(-1)?.cursor ?? afterCursor,
     automation: protector.open<AutomationSettings>(
       automation.rows[0]?.value,
       backendContext("blogbot_automation", "1")
@@ -921,11 +1156,7 @@ async function readDashboardSync(
       row.value,
       backendContext("blogbot_jobs", requiredKey(row))
     )),
-    changes: changes.rows.map((row) => ({
-      cursor: Number(row.cursor),
-      kind: row.kind,
-      entityId: row.entity_id
-    }))
+    changes: mappedChanges
   };
 }
 

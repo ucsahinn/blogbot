@@ -31,10 +31,20 @@ export interface OutboxEffect {
   type: "PUBLISH_REVISION";
   aggregateId: string;
   /** Exact revision hash captured when the publication intent was enqueued. */
-  revisionHash?: string;
+  revisionHash: string;
+  /** The reviewed preview that produced this exact publication intent. */
+  previewHash: string;
+  /** Immutable publication target captured from the approved revision. */
+  targetRepository: string;
+  baseBranch: string;
+  targetBaseSha: string;
+  /** Exact adapter identity, for example `astro-generic@2.0.0`. */
+  adapterVersion: string;
   idempotencyKey: string;
   state: OutboxEffectState;
   attempts: number;
+  /** Durable retry deadline for a recoverable external publication effect. */
+  nextAttemptAt?: string;
   resultRef?: string;
   lastError?: string;
   /** Set only after the external publisher reports a verified effect. */
@@ -88,13 +98,38 @@ export interface DashboardSyncResult {
   changes: BackendChange[];
 }
 
+export interface DashboardReadOptions {
+  changeLimit?: number;
+  /** Latest operational entries only; historical detail is fetched on demand. */
+  outboxLimit?: number;
+  /** Latest operational entries only; historical detail is fetched on demand. */
+  jobLimit?: number;
+}
+
+/** Bounded editorial-list read; excludes jobs, outbox, and audit history. */
+export interface RevisionListSnapshot {
+  revisions: ArticleRevision[];
+  approvals: Approval[];
+  highRiskApprovals: HighRiskApproval[];
+}
+
+export interface RevisionListReadOptions {
+  limit?: number;
+}
+
+export interface RevisionLineageIndexEntry {
+  id: string;
+  supersedesRevisionId?: string;
+}
+
 export class BackendStoreError extends Error {
   constructor(
     readonly code:
       | "IMMUTABLE_REVISION"
       | "REVISION_NOT_FOUND"
       | "IDEMPOTENCY_KEY_REUSED"
-      | "REVISION_ALREADY_APPROVED",
+      | "REVISION_ALREADY_APPROVED"
+      | "INVALID_MAINTENANCE_KEY",
     message: string
   ) {
     super(message);
@@ -109,11 +144,13 @@ export interface BackendRepositoryTransaction {
   insertRevision(revision: ArticleRevision): Promise<ArticleRevision>;
   getRevision(revisionId: string): Promise<ArticleRevision>;
   getApproval(revisionId: string): Promise<Approval | null>;
+  getHighRiskApproval?(revisionId: string): Promise<HighRiskApproval | null>;
   saveApproval(approval: Approval): Promise<Approval>;
   saveHighRiskApproval(approval: HighRiskApproval): Promise<HighRiskApproval>;
   enqueuePublication(
     revisionId: string,
-    revisionHash: string
+    revisionHash: string,
+    binding: PublicationIntentBinding
   ): Promise<OutboxEffect>;
   listOutbox(): Promise<OutboxEffect[]>;
   updateOutbox(effect: OutboxEffect): Promise<OutboxEffect>;
@@ -123,6 +160,11 @@ export interface BackendRepositoryTransaction {
   listJobs(): Promise<BackendJob[]>;
   getLocalState(key: string): Promise<unknown | undefined>;
   setLocalState(key: string, value: unknown): Promise<void>;
+  /**
+   * Internal operational health ledger. It is intentionally outside the
+   * editorial cursor so a background probe cannot invalidate a user edit.
+   */
+  setMaintenanceState(key: string, value: unknown): Promise<void>;
 }
 
 export interface BackendRepository extends BackendRepositoryTransaction {
@@ -136,5 +178,23 @@ export interface BackendRepository extends BackendRepositoryTransaction {
   ): Promise<T>;
   sync(afterCursor: number): Promise<SyncResult>;
   /** Optional while compatibility stores migrate to the lightweight read. */
-  syncDashboard?(afterCursor: number): Promise<DashboardSyncResult>;
+  syncDashboard?(afterCursor: number, options?: DashboardReadOptions): Promise<DashboardSyncResult>;
+  /** Optional while compatibility stores migrate away from full snapshots. */
+  listRevisionSnapshot?(): Promise<RevisionListSnapshot>;
+  listRevisionSummarySnapshot?(options?: RevisionListReadOptions): Promise<RevisionListSnapshot>;
+  listDueRevisionIds?(nowUnixMs: number, limit?: number): Promise<string[]>;
+  listRevisionLineage?(): Promise<RevisionLineageIndexEntry[]>;
+}
+
+/**
+ * Every durable publication effect must keep the complete user-reviewed
+ * destination tuple. A revision hash alone cannot prove that a recovered
+ * outbox row still represents the preview the operator approved.
+ */
+export interface PublicationIntentBinding {
+  previewHash: string;
+  targetRepository: string;
+  baseBranch: string;
+  targetBaseSha: string;
+  adapterVersion: string;
 }

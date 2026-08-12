@@ -358,10 +358,20 @@ async function verifyCandidateJourney(sessionId, source) {
   }
   const scan = await scanSourceThroughVisibleUI(sessionId, source);
 
-  const beforePromotion = await invoke(sessionId, "get_editorial_workspace");
-  const candidate = beforePromotion?.result?.candidates?.find(
-    (item) => item?.sourceId === sourceId && item?.state === "NEW"
-  );
+  // Candidate inventory is intentionally cached briefly to keep desktop
+  // polling bounded. A just-completed scan may therefore race one stale
+  // workspace projection; wait for the cache to refresh instead of treating
+  // a completed scan as an immediately visible candidate.
+  let beforePromotion;
+  let candidate;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    beforePromotion = await invoke(sessionId, "get_editorial_workspace");
+    candidate = beforePromotion?.result?.candidates?.find(
+      (item) => item?.sourceId === sourceId && item?.state === "NEW"
+    );
+    if (candidate?.id) break;
+    await wait(150);
+  }
   if (!candidate?.id || candidate.confidence !== 85) {
     fail(`candidate journey scan completed without a promotable candidate: ${JSON.stringify({ scan, candidates: beforePromotion?.result?.candidates })}`);
   }

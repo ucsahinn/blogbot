@@ -79,12 +79,21 @@ function unwrapCdata(value: string): string {
 }
 
 function decodeEntities(value: string): string {
+  const codePoint = (digits: string, radix: number): string => {
+    const value = Number.parseInt(digits, radix);
+    return Number.isInteger(value)
+      && value >= 0
+      && value <= 0x10ffff
+      && (value < 0xd800 || value > 0xdfff)
+      ? String.fromCodePoint(value)
+      : "\uFFFD";
+  };
   return value
     .replace(/&#x([0-9a-f]+);/gi, (_match, hex: string) =>
-      String.fromCodePoint(Number.parseInt(hex, 16))
+      codePoint(hex, 16)
     )
     .replace(/&#([0-9]+);/g, (_match, decimal: string) =>
-      String.fromCodePoint(Number.parseInt(decimal, 10))
+      codePoint(decimal, 10)
     )
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")

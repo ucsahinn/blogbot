@@ -5,11 +5,11 @@ permissions = [
   "allow-test-setup-connector", "allow-save-setup-connector", "allow-get-connector-state",
   "allow-github-device-flow-status", "allow-github-validate-repository", "allow-github-preview-pull-request",
   "allow-test-codex-runtime", "allow-start-codex-login",
-  "allow-test-local-engine", "allow-recover-local-workspace", "allow-pick-local-folder", "allow-local-dev-status",
+  "allow-test-local-engine", "allow-verify-local-integrity", "allow-recover-local-workspace", "allow-pick-local-folder", "allow-local-dev-status",
   "allow-start-local-dev", "allow-stop-local-dev",
   "allow-list-sources", "allow-test-source",
   "allow-scan-source", "allow-scan-all-sources", "allow-get-source-scan-status", "allow-preview-opml",
-  "allow-save-sources", "allow-review-source", "allow-create-instant-draft", "allow-get-review-revision", "allow-approve-revision",
+  "allow-save-sources", "allow-review-source", "allow-create-instant-draft", "allow-get-review-revision", "allow-read-revision-media", "allow-approve-revision",
   "allow-approve-high-risk-revision", "allow-enqueue-publication", "allow-materialize-local-preview",
   "allow-preview-publication", "allow-get-operations", "allow-get-engine-diagnostics", "allow-export-diagnostics",
   "allow-get-editorial-workspace", "allow-promote-candidate", "allow-dismiss-candidate", "allow-retry-job",
@@ -17,5 +17,7 @@ permissions = [
   "allow-complete-onboarding", "allow-set-runtime-pause", "allow-secure-store-status",
   "allow-send-test-notification", "allow-autostart-status", "allow-set-autostart",
   "allow-backup-create", "allow-backup-verify", "allow-backup-restore-preview", "allow-backup-restore-apply",
+  "allow-automatic-backup-list", "allow-automatic-backup-verify",
+  "allow-automatic-backup-restore-preview", "allow-automatic-backup-restore-apply",
   "allow-check-unsigned-update", "allow-install-unsigned-update", "allow-open-project-page"
 ]

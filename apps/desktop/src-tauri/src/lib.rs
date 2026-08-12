@@ -3,6 +3,7 @@ mod engine_bridge;
 mod github_broker;
 mod notifications;
 mod secure_store;
+mod secure_preview_fs;
 mod tray;
 mod unsigned_updater;
 
@@ -77,6 +78,7 @@ pub fn run() {
             commands::test_codex_runtime,
             commands::start_codex_login,
             commands::test_local_engine,
+            commands::verify_local_integrity,
             commands::recover_local_workspace,
             commands::pick_local_folder,
             commands::local_dev_status,
@@ -92,6 +94,7 @@ pub fn run() {
             commands::save_sources,
             commands::create_instant_draft,
             commands::get_review_revision,
+            commands::read_revision_media,
             commands::repair_revision_media,
             commands::approve_revision,
             commands::approve_high_risk_revision,
@@ -118,6 +121,10 @@ pub fn run() {
             ,commands::backup_create
             ,commands::backup_restore_preview
             ,commands::backup_restore_apply
+            ,commands::automatic_backup_list
+            ,commands::automatic_backup_verify
+            ,commands::automatic_backup_restore_preview
+            ,commands::automatic_backup_restore_apply
             ,commands::check_unsigned_update
             ,commands::install_unsigned_update
         ])

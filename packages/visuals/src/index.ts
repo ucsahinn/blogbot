@@ -32,6 +32,7 @@ export interface RasterVariant {
 export interface RenderedCoverArtifact extends RasterVariant {
   absolutePath: string;
   sha256: string;
+  byteSize?: number;
 }
 
 const allowedMotifs = new Set<CoverMotif>([

@@ -7,7 +7,7 @@ import test from "node:test";
 import { LocalQueueRuntime } from "../../apps/engine/src/local-queue.ts";
 import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
 
-test("pg-boss on PGlite keeps one durable job for the same idempotency key", async () => {
+test("local PGlite queue keeps one durable job for the same idempotency key", async () => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-queue-"));
   const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
 
@@ -46,7 +46,7 @@ test("pg-boss on PGlite keeps one durable job for the same idempotency key", asy
   await repository.close();
 });
 
-test("pg-boss on PGlite delivers a newly enqueued job to its local worker", async () => {
+test("local PGlite queue delivers a newly enqueued job to its local worker", async () => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-queue-worker-"));
   const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
   const runtime = new LocalQueueRuntime(repository.getDatabase());
@@ -76,7 +76,7 @@ test("pg-boss on PGlite delivers a newly enqueued job to its local worker", asyn
   await repository.close();
 });
 
-test("pg-boss on PGlite delivers a durable job queued before the worker registers", async () => {
+test("local PGlite queue delivers a durable job queued before the worker registers", async () => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-queue-recovery-"));
   const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
   const producer = new LocalQueueRuntime(repository.getDatabase());
@@ -113,7 +113,7 @@ test("pg-boss on PGlite delivers a durable job queued before the worker register
   await repository.close();
 });
 
-test("pg-boss on PGlite recovers an active Codex job after an interrupted local engine", async () => {
+test("local PGlite queue recovers an active Codex job after an interrupted local engine", async () => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-queue-active-recovery-"));
   const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
   const producer = new LocalQueueRuntime(repository.getDatabase());
@@ -126,18 +126,14 @@ test("pg-boss on PGlite recovers an active Codex job after an interrupted local 
     { jobId: "draft-active", idempotencyKey: "draft-active", generation: 1 },
     "codex:draft-active:1"
   );
-  const producerBoss = producer as unknown as {
-    boss: {
-      fetch(name: string): Promise<Array<{ id: string }>>;
-      stop(input: { graceful: boolean }): Promise<void>;
-    };
-  };
-  const claimed = await producerBoss.boss.fetch("blogbot.codex");
-  assert.equal(claimed[0]?.id, id);
-  await producerBoss.boss.stop({ graceful: false });
+  await producer.stop();
 
   consumer = new LocalQueueRuntime(repository.getDatabase());
   await consumer.start();
+  await repository.getDatabase().query(
+    "UPDATE blogbot_local_queue_jobs SET state = 'active' WHERE id = $1",
+    [id]
+  );
   assert.equal(await consumer.recoverInterrupted("blogbot.codex", id), true);
   const recoveredJob = await consumer.getJob("blogbot.codex", id);
   assert.equal(recoveredJob?.state, "created");

@@ -177,14 +177,12 @@ test("SOURCE.SCAN persists successful feed entries and exposes partial batch fai
   assert.equal(scanned.lastTest?.entryCount, 1);
   assert.equal(scanned.trustStatus, "PENDING");
   assert.equal(scanned.rightsStatus, "PENDING");
-  assert.deepEqual(await repository.listEntries("source-a"), [
-    {
-      sourceId: "source-a",
-      externalId: "story-1",
-      title: "Patch released",
-      url: "https://a.example/stories/patch"
-    }
+  const entries = await repository.listEntries("source-a");
+  assert.deepEqual(entries.map(({ sourceId, externalId, title, url }) => ({ sourceId, externalId, title, url })), [
+    { sourceId: "source-a", externalId: "story-1", title: "Patch released", url: "https://a.example/stories/patch" }
   ]);
+  assert.match(entries[0]?.versionId ?? "", /^entry-[a-f0-9]{64}$/u);
+  assert.match(entries[0]?.contentHash ?? "", /^[a-f0-9]{64}$/u);
   assert.equal(failed.version, 1);
   assert.equal(failed.lastTest, undefined);
   assert.deepEqual(await repository.getSourceCapabilities("source-a"), {

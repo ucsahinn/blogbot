@@ -65,6 +65,7 @@ test("pins each request to the public DNS answers validated for that redirect ho
       }
     ]
   );
+  assert.equal(requests[0]?.deadlineAtMs, requests[1]?.deadlineAtMs, "redirects share one source-fetch deadline");
   assert.equal(result.finalUrl, "https://news.example/article");
   assert.equal(result.contentType, "text/html");
   assert.equal(new TextDecoder().decode(result.body), "<main>original reporting</main>");

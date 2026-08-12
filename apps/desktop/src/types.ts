@@ -169,6 +169,7 @@ export interface GateView {
   state: "PASS" | "WARN" | "BLOCK" | "NOT_RUN";
   group: "editorial" | "seo" | "security" | "media";
   policyVersion: string;
+  reasonCode?: string;
 }
 
 export interface MediaView {
@@ -178,6 +179,9 @@ export interface MediaView {
   width: number;
   height: number;
   sha256: string;
+  /** Immutable, engine-verified asset length. New revisions never inline raster bytes. */
+  byteSize?: number;
+  /** Present only while opening a legacy revision created before asset references. */
   contentBase64?: string;
   altTr: string;
   altEn: string;

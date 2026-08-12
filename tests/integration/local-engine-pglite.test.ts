@@ -80,6 +80,60 @@ test("PGlite engine persists state and idempotent responses across restart", asy
   await secondRepository.close();
 });
 
+test("PGlite dashboard paging never advances the cursor beyond delivered changes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-pglite-dashboard-page-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  t.after(() => repository.close());
+
+  for (let index = 0; index < 5; index += 1) {
+    await repository.setAutomation({
+      mode: "INGEST_ONLY",
+      onboardingComplete: index > 0,
+      ingestionPaused: false,
+      publishingPaused: true,
+      timezone: "Europe/Istanbul",
+      scanIntervalMinutes: 30 + index
+    });
+  }
+
+  const first = await repository.syncDashboard(0, { changeLimit: 2 });
+  assert.deepEqual(first.changes.map((change) => change.cursor), [1, 2]);
+  assert.equal(first.serverCursor, 2);
+
+  const second = await repository.syncDashboard(first.serverCursor, { changeLimit: 2 });
+  assert.deepEqual(second.changes.map((change) => change.cursor), [3, 4]);
+  assert.equal(second.serverCursor, 4);
+});
+
+test("completed backend encryption migration defers deep ciphertext validation until requested", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-pglite-deep-verify-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, "pgdata");
+  const first = await PGliteBackendRepository.open(dataDir);
+  await first.setAutomation({
+    mode: "INGEST_ONLY", onboardingComplete: true, ingestionPaused: false,
+    publishingPaused: true, timezone: "Europe/Istanbul", scanIntervalMinutes: 30
+  });
+  await first.close();
+
+  const raw = (await import("@electric-sql/pglite")).PGlite;
+  const database = new raw(dataDir);
+  await database.waitReady;
+  await database.query(
+    "UPDATE blogbot_automation SET value = $1::jsonb WHERE singleton_id = 1",
+    [JSON.stringify({ mode: "INGEST_ONLY" })]
+  );
+  await database.close();
+
+  const reopened = await PGliteBackendRepository.open(dataDir);
+  try {
+    await assert.rejects(reopened.verifyEncryptionIntegrity(), /LOCAL_DATA_ENVELOPE_INVALID/);
+  } finally {
+    await reopened.close();
+  }
+});
+
 test("backup.create writes an encrypted archive from an explicit local file allowlist", async () => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-backup-create-"));
   const source = join(root, "source");
@@ -171,6 +225,27 @@ test("normal and high-risk approvals persist as separate immutable records", asy
   await reopened.close();
 });
 
+test("enqueueing a PGlite publication emits an incremental outbox change", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-pglite-outbox-change-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  t.after(() => repository.close());
+
+  const effect = await repository.enqueuePublication("revision-outbox-change", "a".repeat(64), {
+    previewHash: "b".repeat(64),
+    targetRepository: "owner/site",
+    baseBranch: "main",
+    targetBaseSha: "c".repeat(40),
+    adapterVersion: "astro-generic@2.0.0"
+  });
+  const snapshot = await repository.sync(0);
+
+  assert.deepEqual(snapshot.changes.map((change) => ({
+    kind: change.kind,
+    entityId: change.entityId
+  })), [{ kind: "EFFECT_UPDATED", entityId: effect.id }]);
+});
+
 test("local database records immutable migration versions and hashes", async () => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-migrations-"));
   const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
@@ -192,7 +267,8 @@ test("local database records immutable migration versions and hashes", async () 
       { version: 1, name: "local-engine-core", hashIsSha256: true },
       { version: 2, name: "high-risk-approvals", hashIsSha256: true },
       { version: 3, name: "codex-jobs", hashIsSha256: true },
-      { version: 4, name: "local-state", hashIsSha256: true }
+      { version: 4, name: "local-state", hashIsSha256: true },
+      { version: 5, name: "revision-list-index", hashIsSha256: true }
     ]
   );
   await repository.close();

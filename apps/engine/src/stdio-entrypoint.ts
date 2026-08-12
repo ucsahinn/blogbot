@@ -10,8 +10,9 @@ import {
   type FetchTransport
 } from "../../fetcher/src/fetch-source.ts";
 import { createNodeFetchTransport } from "../../fetcher/src/node-transport.ts";
+import { createFetcherSidecarTransport } from "./fetcher-sidecar-transport.ts";
 import { validateEngineCommandV1 } from "../../../packages/contracts/src/index.ts";
-import type { BackendJob, BackendRepository } from "../../../packages/database/src/backend-repository.ts";
+import type { BackendJob, BackendRepository, BackendRepositoryTransaction } from "../../../packages/database/src/backend-repository.ts";
 import { InMemoryBackendStore } from "../../../packages/database/src/in-memory-backend-store.ts";
 import { PGliteBackendRepository } from "../../../packages/database/src/pglite-backend-repository.ts";
 import {
@@ -60,6 +61,7 @@ import { buildPublicationPreview } from "./publication-preview.ts";
 import { PGliteCodexJobStore, PGliteCodexQueueAdapter, registerCodexQueueWorker } from "./pglite-codex-job-store.ts";
 import { startPublicationOutboxWorker, type PublicationEffectProcessor, type PublicationOutboxWorker } from "./publication-outbox-worker.ts";
 import { PublicationScheduler } from "./publication-scheduler.ts";
+import { publicationIntentBinding } from "./publication-intent.ts";
 import { renderCoverVariants, renderGeneratedImageVariants, type ArtDirection } from "../../../packages/visuals/src/index.ts";
 import { imageGeneratorFromEnvironment, type ImageGeneratorPort } from "./imagegen-provider.ts";
 import type { PublicationBundlePolicy } from "../../publisher/src/publication.ts";
@@ -71,18 +73,38 @@ const MAX_LINE_BYTES = 1_000_000;
 // intended for local application state, not unbounded disk imaging.
 const MAX_BACKUP_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MAX_AUTOMATIC_BACKUP_FILES = 256;
-const MAX_AUTOMATIC_BACKUP_BYTES = 512 * 1024 * 1024;
+const PUBLICATION_PREVIEW_TTL_MS = 24 * 60 * 60 * 1_000;
+// Backup data is JSON/base64 encoded and then authenticated/encrypted. Keep
+// raw input under half the archive limit so every successfully created backup
+// remains readable by this build's verify/restore path.
+const MAX_BACKUP_INPUT_BYTES = 128 * 1024 * 1024;
 // Candidate triage is a projection, not a full archive browser. Reading and
 // decrypting an unbounded feed catalog on every desktop refresh was the main
 // source of multi-second freezes on large local workspaces.
 const MAX_CANDIDATE_ENTRIES_PER_SOURCE = 250;
 
+/** Exact bundles are only restart-recovery state, never permanent media storage. */
+export function isPublicationPreviewCurrent(value: unknown, nowUnixMs = Date.now()): boolean {
+  return typeof value === "object" && value !== null
+    && Number.isSafeInteger((value as Record<string, unknown>).expiresAtUnixMs)
+    && Number((value as Record<string, unknown>).expiresAtUnixMs) > nowUnixMs;
+}
+
 async function readDashboardSync(
   repository: BackendRepository,
-  afterCursor: number
+  afterCursor: number,
+  changeLimit?: number,
+  outboxLimit?: number,
+  jobLimit?: number
 ): Promise<DashboardSyncResult> {
   if (repository.syncDashboard) {
-    return repository.syncDashboard(afterCursor);
+    return changeLimit === undefined
+      ? repository.syncDashboard(afterCursor)
+      : repository.syncDashboard(afterCursor, {
+        changeLimit,
+        ...(outboxLimit === undefined ? {} : { outboxLimit }),
+        ...(jobLimit === undefined ? {} : { jobLimit })
+      });
   }
   const sync = await repository.sync(afterCursor);
   return {
@@ -91,6 +113,30 @@ async function readDashboardSync(
     outbox: sync.snapshot.outbox,
     jobs: sync.snapshot.jobs,
     changes: sync.changes
+  };
+}
+
+function dashboardJobSummary(job: BackendJob): Record<string, unknown> {
+  const metadata = job.metadata ?? {};
+  const boundedMetadata: Record<string, unknown> = {};
+  for (const key of ["candidateId", "candidateTitle", "instruction", "section", "progressStage", "codexWaitReason", "scheduledAt"] as const) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim()) boundedMetadata[key] = value.trim().slice(0, 500);
+  }
+  for (const key of ["recoveryCount", "completedAtUnixMs", "lastQueuedAtUnixMs", "createdAtUnixMs"] as const) {
+    const value = metadata[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) boundedMetadata[key] = value;
+  }
+  const errorCode = typeof job.lastError === "string"
+    ? job.lastError.match(/[A-Z][A-Z0-9_]{2,}/u)?.[0]
+    : undefined;
+  return {
+    id: job.id,
+    kind: job.kind,
+    state: job.state,
+    attempts: job.attempts,
+    ...(errorCode ? { lastError: errorCode } : {}),
+    ...(Object.keys(boundedMetadata).length > 0 ? { metadata: boundedMetadata } : {})
   };
 }
 
@@ -142,6 +188,16 @@ function publicationContentBytes(content: unknown): Buffer {
   throw new Error("APPROVAL_BOUND_FILE_CONTENT_INVALID");
 }
 
+/** A media reference is immutable only when it points to this exact revision. */
+function engineMediaReference(content: unknown, revisionId: string): { sha256: string; size: number } | null {
+  if (!isRecord(content) || content.kind !== "engine-media-ref" || content.revisionId !== revisionId) return null;
+  const sha256 = typeof content.sha256 === "string" ? content.sha256 : "";
+  const size = content.byteSize;
+  return /^[a-f0-9]{64}$/iu.test(sha256) && Number.isSafeInteger(size) && Number(size) > 0
+    ? { sha256: sha256.toLowerCase(), size: Number(size) }
+    : null;
+}
+
 export function assertRevisionGeneratedFilesMatch(
   revision: Pick<ArticleRevision, "id" | "adapterVersion" | "generatedFiles">,
   payload: unknown
@@ -164,11 +220,16 @@ export function assertRevisionGeneratedFilesMatch(
       continue;
     }
     if (actual.has(candidate.path)) throw new Error("APPROVAL_BOUND_FILE_SET_MISMATCH");
-    const bytes = publicationContentBytes(candidate.content);
-    actual.set(candidate.path, {
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      size: bytes.byteLength
-    });
+    const reference = engineMediaReference(candidate.content, revision.id);
+    if (reference) {
+      actual.set(candidate.path, reference);
+    } else {
+      const bytes = publicationContentBytes(candidate.content);
+      actual.set(candidate.path, {
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.byteLength
+      });
+    }
   }
   if (manifestCount !== 1 || actual.size !== revision.generatedFiles.length) {
     throw new Error("APPROVAL_BOUND_FILE_SET_MISMATCH");
@@ -224,7 +285,7 @@ async function collectAutomaticBackupPaths(root: string): Promise<string[]> {
       if (!entry.isFile()) continue;
       const info = await stat(next);
       totalBytes += info.size;
-      if (output.length >= MAX_AUTOMATIC_BACKUP_FILES || totalBytes > MAX_AUTOMATIC_BACKUP_BYTES) {
+      if (output.length >= MAX_AUTOMATIC_BACKUP_FILES || totalBytes > MAX_BACKUP_INPUT_BYTES) {
         throw new Error("AUTOMATIC_BACKUP_LIMIT_EXCEEDED");
       }
       output.push(nextRelative);
@@ -232,6 +293,54 @@ async function collectAutomaticBackupPaths(root: string): Promise<string[]> {
   }
   await walk(root, "");
   return output;
+}
+
+type MaintenanceCode = "SOURCE_RETENTION_UNAVAILABLE" | "AUTOMATIC_BACKUP_UNAVAILABLE";
+
+async function runBackgroundMaintenance(
+  repository: BackendRepository,
+  key: "maintenance.source-retention" | "maintenance.automatic-backup",
+  code: MaintenanceCode,
+  work: () => Promise<unknown>
+): Promise<void> {
+  const attemptedAt = new Date().toISOString();
+  try {
+    await repository.setMaintenanceState(key, { attemptedAt, state: "RUNNING" });
+  } catch {
+    // Runtime shutdown may close PGlite while a fire-and-forget maintenance
+    // probe is starting. Health bookkeeping must never revive that failure.
+    reportBackgroundTaskFault(code);
+    return;
+  }
+  try {
+    const result = await work();
+    if (isRecord(result) && result.ok === false) throw new Error(code);
+    try {
+      await repository.setMaintenanceState(key, { attemptedAt, succeededAt: new Date().toISOString(), state: "SUCCEEDED" });
+    } catch {
+      // The completed result is not changed by a concurrent engine shutdown.
+    }
+  } catch {
+    try {
+      await repository.setMaintenanceState(key, { attemptedAt, state: "FAILED", code });
+    } catch {
+      // PGlite may already be closed. Do not leak an unhandled rejection.
+    }
+    reportBackgroundTaskFault(code);
+  }
+}
+
+async function assertBoundedBackupInput(root: string, relativePaths: readonly string[]): Promise<void> {
+  let totalBytes = 0;
+  for (const relativePath of relativePaths) {
+    if (!relativePath || relativePath.includes("..") || relativePath.startsWith("/") || relativePath.startsWith("\\")) {
+      throw new Error("BACKUP_INPUT_PATH_INVALID");
+    }
+    const info = await lstat(join(root, relativePath));
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("BACKUP_INPUT_FILE_INVALID");
+    totalBytes += info.size;
+    if (totalBytes > MAX_BACKUP_INPUT_BYTES) throw new Error("BACKUP_INPUT_LIMIT_EXCEEDED");
+  }
 }
 
 function automaticBackupRecoveryKey(): string {
@@ -251,6 +360,37 @@ async function applyAutomaticBackupRetention(directory: string): Promise<void> {
   }
   const plan = planBackupRetention(records, { daily: 14, weekly: 8 });
   for (const item of plan.remove) await unlink(join(directory, item.id));
+}
+
+interface AutomaticBackupRecord {
+  name: string;
+  bytes: number;
+  createdAt: string;
+}
+
+async function listAutomaticBackups(directory: string): Promise<AutomaticBackupRecord[]> {
+  try {
+    const entries = await readdir(directory, { withFileTypes: true, encoding: "utf8" });
+    const records: AutomaticBackupRecord[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || entry.isSymbolicLink() || !/^automatic-[A-Za-z0-9-]+\.backup$/u.test(entry.name)) continue;
+      const info = await stat(join(directory, entry.name));
+      records.push({ name: entry.name, bytes: info.size, createdAt: info.mtime.toISOString() });
+    }
+    return records.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function resolveAutomaticBackupPath(directory: string, name: unknown): Promise<string> {
+  if (typeof name !== "string" || !/^automatic-[A-Za-z0-9-]+\.backup$/u.test(name)) {
+    throw new Error("AUTOMATIC_BACKUP_NAME_INVALID");
+  }
+  const record = (await listAutomaticBackups(directory)).find((entry) => entry.name === name);
+  if (!record) throw new Error("AUTOMATIC_BACKUP_NOT_FOUND");
+  return join(directory, record.name);
 }
 
 function createCandidateKey(sourceId: string, externalId: string): string {
@@ -276,19 +416,59 @@ export interface EngineProtocolRuntime {
   close(): Promise<void>;
 }
 
+export interface AutomaticBackupConsistencyGate {
+  runExclusive<T>(work: () => Promise<T>): Promise<T>;
+  exec(query: string): Promise<unknown>;
+}
+
+/**
+ * PGlite owns a live multi-file data directory.  A filesystem walk must never
+ * race its writes: hold PGlite's query gate, force a checkpoint, then archive
+ * the stable on-disk state before allowing another query to proceed.
+ */
+export async function createConsistentAutomaticBackup(
+  database: AutomaticBackupConsistencyGate,
+  dataDir: string
+): Promise<EngineResponse> {
+  return database.runExclusive(async () => {
+    await database.exec("CHECKPOINT");
+    return handleBackupRequest({
+      version: 1,
+      id: `automatic-backup-${Date.now()}`,
+      kind: "backup.auto",
+      payload: {}
+    }, dataDir);
+  });
+}
+
 export async function handleBackupRequest(
   input: Record<string, unknown>,
   dataDir: string
 ): Promise<EngineResponse> {
   const id = typeof input.id === "string" ? input.id : "unknown";
-  const kind = input.kind === "backup.create" || input.kind === "backup.auto" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore"
+  const kind = input.kind === "backup.create" || input.kind === "backup.auto" || input.kind === "backup.auto.list" || input.kind === "backup.auto.verify" || input.kind === "backup.auto.restore.preview" || input.kind === "backup.auto.restore" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore"
     ? input.kind
     : null;
   if (!kind) return { version: 1, id, ok: false, kind: "error", code: "INVALID_REQUEST", message: "backup request kind is not supported" };
   const payload = isRecord(input.payload) ? input.payload : {};
-  const archivePath = typeof payload.archivePath === "string" ? payload.archivePath : "";
   const automatic = kind === "backup.auto";
+  const automaticAccess = kind === "backup.auto.list" || kind === "backup.auto.verify" || kind === "backup.auto.restore.preview" || kind === "backup.auto.restore";
   const automaticDirectory = join(dataDir, "backups");
+  if (kind === "backup.auto.list") {
+    try {
+      return { version: 1, id, ok: true, kind, snapshots: await listAutomaticBackups(automaticDirectory) };
+    } catch (error) {
+      return { version: 1, id, ok: false, kind: "error", code: "BACKUP_INVALID", message: error instanceof Error ? error.message : "automatic backup discovery failed" };
+    }
+  }
+  let archivePath = typeof payload.archivePath === "string" ? payload.archivePath : "";
+  if (automaticAccess) {
+    try {
+      archivePath = await resolveAutomaticBackupPath(automaticDirectory, payload.backupName);
+    } catch (error) {
+      return { version: 1, id, ok: false, kind: "error", code: "BACKUP_INVALID", message: error instanceof Error ? error.message : "automatic backup selection failed" };
+    }
+  }
   const outputPath = automatic
     ? join(automaticDirectory, `automatic-${new Date().toISOString().replace(/[:.]/gu, "-")}.backup`)
     : typeof payload.outputPath === "string" ? payload.outputPath : "";
@@ -304,7 +484,7 @@ export async function handleBackupRequest(
     return { version: 1, id, ok: false, kind: "error", code: "BACKUP_INVALID", message: error instanceof Error ? error.message : "automatic backup file discovery failed" };
   }
   let recoveryKey = typeof payload.recoveryKey === "string" ? payload.recoveryKey : "";
-  if (automatic) {
+  if (automatic || automaticAccess) {
     try { recoveryKey = automaticBackupRecoveryKey(); }
     catch (error) { return { version: 1, id, ok: false, kind: "error", code: "BACKUP_INVALID", message: error instanceof Error ? error.message : "automatic backup key unavailable" }; }
   }
@@ -314,11 +494,12 @@ export async function handleBackupRequest(
   if ((kind === "backup.create" || automatic) && (!outputPath || !sourceDirectory || relativePaths.length === 0 || relativePaths.length > MAX_AUTOMATIC_BACKUP_FILES)) {
     return { version: 1, id, ok: false, kind: "error", code: "INVALID_REQUEST", message: "backup output, source directory, recovery key, and bounded file allowlist are required" };
   }
-  if (kind !== "backup.create" && !automatic && (!archivePath || !recoveryKey || ((kind === "backup.restore.preview" || kind === "backup.restore") && !payload.targetDirectory))) {
+  if (kind !== "backup.create" && !automatic && (!archivePath || !recoveryKey || ((kind === "backup.restore.preview" || kind === "backup.restore" || kind === "backup.auto.restore.preview" || kind === "backup.auto.restore") && !payload.targetDirectory))) {
     return { version: 1, id, ok: false, kind: "error", code: "INVALID_REQUEST", message: "archive path, recovery key, and restore target are required" };
   }
   try {
     if (kind === "backup.create" || automatic) {
+      await assertBoundedBackupInput(sourceDirectory, relativePaths);
       const archive = await createPortableBackup({
         sourceDirectory,
         relativePaths,
@@ -339,6 +520,9 @@ export async function handleBackupRequest(
         // A missing output is the expected path; the atomic rename below owns creation.
       }
       await mkdir(outputDirectory, { recursive: true });
+      if (archive.byteLength > MAX_BACKUP_ARCHIVE_BYTES) {
+        return { version: 1, id, ok: false, kind: "error", code: "BACKUP_INVALID", message: "backup archive exceeds the local verification size limit" };
+      }
       const temporaryPath = `${outputPath}.tmp-${process.pid}-${Date.now()}`;
       await writeFile(temporaryPath, archive, { flag: "wx" });
       await rename(temporaryPath, outputPath);
@@ -380,7 +564,7 @@ export async function handleBackupRequest(
       recoveryKey,
       targetDirectory
     });
-    if (kind === "backup.restore") {
+    if (kind === "backup.restore" || kind === "backup.auto.restore") {
       await applyPortableRestorePlan(plan);
       return {
         version: 1,
@@ -435,6 +619,14 @@ export interface EngineProtocolOptions {
   imageGenerator?: ImageGeneratorPort;
   /** True only when the host injected a processor that can reconcile the durable outbox. */
   publicationReady?: boolean;
+  /**
+   * Test-fixture seam only. Production protocol callers must persist revisions
+   * through the internal draft/final-review materializer, never a caller
+   * supplied REVISION.SAVE package.
+   */
+  allowUnsafeRevisionSaveForTests?: boolean;
+  /** Explicit full encrypted-row verifier; intentionally absent from cheap reads. */
+  verifyEncryptionIntegrity?: () => Promise<void>;
 }
 
 export interface PersistentEngineProtocolOptions {
@@ -452,6 +644,8 @@ export interface PersistentEngineProtocolOptions {
   /** Enabled by default so due approved work is recovered after restart. */
   startPublicationScheduler?: boolean;
   publicationSchedulerPollMs?: number;
+  /** Test-fixture seam; never enabled by the stdio production host. */
+  allowUnsafeRevisionSaveForTests?: boolean;
 }
 
 export function createEngineProtocol(
@@ -489,6 +683,10 @@ export function createEngineProtocol(
     }
 
     if (input.kind === "doctor") {
+      const maintenance = {
+        sourceRetention: (await repository.getLocalState("maintenance.source-retention")) ?? null,
+        automaticBackup: (await repository.getLocalState("maintenance.automatic-backup")) ?? null
+      };
       return {
         version: 1,
         id: input.id,
@@ -499,6 +697,7 @@ export function createEngineProtocol(
           : "DEGRADED",
         persistence: repository.persistence,
         queue: queueStatus,
+        maintenance,
         capabilities: [
           "AUTOMATION.SET",
           ...(options.sourceRepository ? ["SOURCE.LIST"] : []),
@@ -507,7 +706,7 @@ export function createEngineProtocol(
           ...(options.sourceRepository ? ["SOURCE.REVIEW"] : []),
           ...(options.sourceScanCoordinator ? ["SOURCE.SCAN"] : []),
           ...(options.sourceRepository ? ["CANDIDATE.LIST"] : []),
-          "REVISION.SAVE",
+          ...(options.allowUnsafeRevisionSaveForTests ? ["REVISION.SAVE"] : []),
           "REVISION.LIST",
           "REVISION.GET",
           ...(options.mediaDataDir ? ["REVISION.REPAIR_MEDIA"] : []),
@@ -519,12 +718,39 @@ export function createEngineProtocol(
           "BACKUP.VERIFY",
           "DRAFT.CREATE",
           "JOB.RETRY",
-          ...(options.codexCoordinator ? ["CODEX.RUNNER"] : [])
+          ...(options.codexCoordinator ? ["CODEX.RUNNER"] : []),
+          ...(options.verifyEncryptionIntegrity ? ["MAINTENANCE.INTEGRITY_VERIFY"] : [])
         ],
         detail: repository.persistence === "pglite" && queueStatus === "ready"
           ? "Local engine storage and durable queue are ready."
           : "Engine protocol is available; durable local storage is not configured."
       };
+    }
+
+    if (input.kind === "maintenance.integrity.verify") {
+      if (!options.verifyEncryptionIntegrity) {
+        return sourceProtocolError(input.id, "command", "INTEGRITY_VERIFY_UNAVAILABLE", "Local integrity verifier is not configured");
+      }
+      const attemptedAt = new Date().toISOString();
+      try {
+        await repository.setMaintenanceState("maintenance.integrity-verify", { attemptedAt, state: "RUNNING" });
+        await options.verifyEncryptionIntegrity();
+        const completedAt = new Date().toISOString();
+        await repository.setMaintenanceState("maintenance.integrity-verify", { attemptedAt, completedAt, state: "SUCCEEDED" });
+        return { version: 1, id: input.id, ok: true, kind: "maintenance.integrity.verify", verified: true, completedAt };
+      } catch (error) {
+        try {
+          await repository.setMaintenanceState("maintenance.integrity-verify", { attemptedAt, state: "FAILED", code: "LOCAL_INTEGRITY_VERIFY_FAILED" });
+        } catch {
+          // Reporting a completed failure must not create an unhandled rejection.
+        }
+        return sourceProtocolError(
+          input.id,
+          "command",
+          "LOCAL_INTEGRITY_VERIFY_FAILED",
+          error instanceof Error ? error.message : "Local encrypted data could not be verified"
+        );
+      }
     }
 
     if (input.kind === "source.list") {
@@ -603,6 +829,13 @@ export function createEngineProtocol(
           const existing = candidateByStory.get(storyKey);
           if (existing) {
             existing.sourceCount = Number(existing.sourceCount ?? 1) + 1;
+            const sourceIds = Array.isArray(existing.sourceIds) ? existing.sourceIds : [];
+            if (!sourceIds.includes(source.id) && sourceIds.length < 12) sourceIds.push(source.id);
+            existing.sourceIds = sourceIds;
+            const sourceUrls = Array.isArray(existing.sourceUrls) ? existing.sourceUrls : [];
+            const sourceUrl = String(entry.url).slice(0, 320);
+            if (sourceUrl && !sourceUrls.includes(sourceUrl) && sourceUrls.length < 12) sourceUrls.push(sourceUrl);
+            existing.sourceUrls = sourceUrls;
             existing.duplicateScore = Math.min(100, Number(existing.duplicateScore ?? 0) + 35);
             existing.confidence = Math.max(Number(existing.confidence ?? 0), source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? 85 : 60);
             continue;
@@ -620,6 +853,10 @@ export function createEngineProtocol(
             discoveredAt: entry.publishedAt ?? new Date(0).toISOString(),
             sourceId: source.id,
             sourceUrl: String(entry.url).slice(0, 320),
+            // Preserve bounded corroborating provenance instead of turning a
+            // multi-source story into a misleading counter plus one source.
+            sourceIds: [source.id],
+            sourceUrls: [String(entry.url).slice(0, 320)],
             scoreReasons: [
               source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? "Güven ve kullanım hakkı doğrulandı" : "Kaynak incelemesi bekliyor",
               entry.publishedAt ? "Güncel yayın zamanı bulundu" : "Yayın zamanı yok"
@@ -636,8 +873,9 @@ export function createEngineProtocol(
       // Candidate inventory is polled by the desktop shell. Keep this a
       // bounded triage projection so a large feed catalog never freezes the
       // bridge; the selected candidate is re-read when research starts.
-      const candidates = [...candidateByStory.values()].slice(0, 50);
-      candidates.sort((left, right) => String(right.discoveredAt).localeCompare(String(left.discoveredAt)));
+      const candidates = [...candidateByStory.values()]
+        .sort((left, right) => String(right.discoveredAt).localeCompare(String(left.discoveredAt)))
+        .slice(0, 50);
       candidateCache = { expiresAt: Date.now() + 2_000, candidates };
       return {
         version: 1,
@@ -783,7 +1021,8 @@ export function createEngineProtocol(
               // This state is encrypted by the backend repository and contains
               // no credentials; enqueue still requires the matching hash.
               payload: previewPayload,
-              createdAt: preview.plan.generatedAt
+              createdAt: preview.plan.generatedAt,
+              expiresAtUnixMs: Date.now() + PUBLICATION_PREVIEW_TTL_MS
             });
             return preview;
           }
@@ -835,10 +1074,11 @@ export function createEngineProtocol(
             const gateStatus = validateApprovalGates(revision, approval.warningSetHash);
             if (gateStatus !== "READY") throw new Error(gateStatus);
             const preview = await transaction.getLocalState(`publication.preview:${revisionId}`);
-            if (!isRecord(preview) || preview.revisionHash !== revisionHash || preview.previewHash !== previewHash) {
+            if (!isRecord(preview) || preview.revisionHash !== revisionHash || preview.previewHash !== previewHash || !isPublicationPreviewCurrent(preview)) {
               throw new Error("NO_VALID_PUBLICATION_PREVIEW");
             }
-            return transaction.enqueuePublication(revisionId, revisionHash);
+            const binding = publicationIntentBinding(revision, preview);
+            return transaction.enqueuePublication(revisionId, revisionHash, binding);
           }
         );
         return { version: 1, id: input.id, ok: true, kind: "publication.enqueue", value: result };
@@ -955,7 +1195,6 @@ export function createEngineProtocol(
       Number.isSafeInteger(input.afterCursor) &&
       input.afterCursor >= 0
     ) {
-      const sync = await readDashboardSync(repository, input.afterCursor);
       // A desktop refresh needs a current projection, not the full durable
       // audit history.  Keeping the optional tail bounded prevents a long
       // lived local workspace from exceeding the NDJSON bridge limit and
@@ -969,9 +1208,8 @@ export function createEngineProtocol(
       const changeLimit = requestedChangeLimit === undefined
         ? undefined
         : Math.min(requestedChangeLimit, 200);
-      const changes = changeLimit === undefined
-        ? sync.changes
-        : sync.changes.slice(-changeLimit);
+      const sync = await readDashboardSync(repository, input.afterCursor, changeLimit, 100, 100);
+      const changes = changeLimit === 0 ? [] : sync.changes;
       return {
         version: 1,
         id: input.id,
@@ -984,14 +1222,7 @@ export function createEngineProtocol(
           // dashboard projection: completed Codex records can contain large
           // prompts/outputs and must be fetched only by an explicit detail
           // command, never on every workspace refresh.
-          jobs: sync.jobs.map((job) => ({
-            id: job.id,
-            kind: job.kind,
-            state: job.state,
-            attempts: job.attempts,
-            ...(job.lastError ? { lastError: job.lastError } : {}),
-            ...(job.metadata ? { metadata: job.metadata } : {})
-          })),
+          jobs: sync.jobs.map(dashboardJobSummary),
           outbox: sync.outbox,
           changes
         }
@@ -1138,6 +1369,14 @@ export function createEngineProtocol(
     ) {
       const command = validation.command;
       try {
+        if (command.kind === "REVISION.SAVE" && !options.allowUnsafeRevisionSaveForTests) {
+          return revisionCommandFailure(
+            input.id,
+            "REVISION_SAVE_INTERNAL_ONLY",
+            "REVISION.SAVE is disabled for external callers; revisions are persisted only by the internal draft and final-review materializer.",
+            false
+          );
+        }
         const currentVersion = await repository.getVersion();
         if (currentVersion !== command.expectedVersion) {
           return revisionCommandFailure(
@@ -1212,9 +1451,13 @@ export function createEngineProtocol(
           return revisionCommandSuccess(input.id, command, result, await repository.getVersion());
         }
 
-        const snapshot = (await repository.sync(0)).snapshot;
         const summaryOnly = command.kind === "REVISION.LIST" &&
           isRecord(command.payload) && command.payload.summaryOnly === true;
+        const snapshot = summaryOnly && repository.listRevisionSummarySnapshot
+          ? await repository.listRevisionSummarySnapshot({ limit: 100 })
+          : summaryOnly && repository.listRevisionSnapshot
+            ? await repository.listRevisionSnapshot()
+          : (await repository.sync(0)).snapshot;
         const materialize = (revision: ArticleRevision) => ({
           revision: summaryOnly ? {
             id: revision.id,
@@ -1515,8 +1758,6 @@ async function handleLocalWorkflowCommand(
     return revisionCommandFailure(envelopeId, "INVALID_COMMAND", "Workflow command metadata is invalid", false);
   }
   try {
-    const resolvedSchedule = kind === "DRAFT.CREATE" ? await resolveNextSlot(repository, payload) : undefined;
-    const effectivePayload = resolvedSchedule ? { ...payload, scheduledAt: resolvedSchedule } : payload;
     const result = await repository.runIdempotent(
       `engine:${idempotencyKey}`,
       canonicalJson({ kind, payload, expectedVersion }),
@@ -1524,6 +1765,9 @@ async function handleLocalWorkflowCommand(
         const current = await transaction.getVersion();
         if (current !== expectedVersion) throw new Error(`VERSION_CONFLICT:${expectedVersion}:${current}`);
         if (kind === "DRAFT.CREATE") {
+          // Slot selection belongs inside the idempotent write. Replays return
+          // the already-created job metadata rather than resolving a new time.
+          const resolvedSchedule = await resolveNextSlot(transaction, payload);
           const draftId = typeof payload.draftId === "string" ? payload.draftId : "";
           if (!draftId) throw new Error("INVALID_DRAFT_ID");
           const urls = Array.isArray(payload.urls)
@@ -1580,6 +1824,11 @@ async function handleLocalWorkflowCommand(
         return transaction.saveJob({ ...retryableJob, state: "QUEUED", attempts: job.attempts + 1 });
       }
     );
+    const createdDraft = kind === "DRAFT.CREATE" ? result as BackendJob : undefined;
+    const persistedSchedule = isRecord(createdDraft?.metadata) && typeof createdDraft.metadata.scheduledAt === "string"
+      ? createdDraft.metadata.scheduledAt
+      : undefined;
+    const effectivePayload = persistedSchedule ? { ...payload, scheduledAt: persistedSchedule } : payload;
     let codex: unknown = null;
     if (kind === "DRAFT.CREATE" && options.codexCoordinator) {
       const draftId = typeof payload.draftId === "string" ? payload.draftId : "";
@@ -1618,8 +1867,9 @@ async function handleLocalWorkflowCommand(
   }
 }
 
+
 async function resolveNextSlot(
-  repository: BackendRepository,
+  repository: Pick<BackendRepositoryTransaction, "getLocalState" | "listJobs">,
   payload: Record<string, unknown>
 ): Promise<string | undefined> {
   if (payload.scheduleIntent !== "NEXT_SLOT" || typeof payload.scheduledAt === "string") return undefined;
@@ -1632,6 +1882,12 @@ async function resolveNextSlot(
     "slot-fri": 5, "slot-sat": 6, "slot-sun": 0
   };
   const now = new Date();
+  const reserved = new Set(
+    (await repository.listJobs()).flatMap((job) => {
+      const scheduledAt = job.metadata?.scheduledAt;
+      return typeof scheduledAt === "string" && Number.isFinite(Date.parse(scheduledAt)) ? [scheduledAt] : [];
+    })
+  );
   const candidates: Date[] = [];
   for (const [slotId, raw] of Object.entries(schedule)) {
     if (!isRecord(raw) || raw.enabled === false) continue;
@@ -1650,7 +1906,9 @@ async function resolveNextSlot(
     candidates.push(candidate);
   }
   candidates.sort((a, b) => a.getTime() - b.getTime());
-  return candidates[0]?.toISOString();
+  const next = candidates.map((candidate) => candidate.toISOString()).find((candidate) => !reserved.has(candidate));
+  if (!next && candidates.length > 0) throw new Error("SCHEDULE_SLOT_UNAVAILABLE");
+  return next;
 }
 
 function revisionCommandSuccess(
@@ -1727,6 +1985,19 @@ export function fallbackDraftSourceEvidence(value: unknown): Array<Record<string
     const title = typeof raw.title === "string" && raw.title.trim() ? raw.title : "";
     const fetchedAt = typeof raw.fetchedAt === "string" && Number.isFinite(Date.parse(raw.fetchedAt)) ? raw.fetchedAt : "";
     const contentHash = typeof raw.contentHash === "string" && /^[a-f0-9]{64}$/iu.test(raw.contentHash) ? raw.contentHash : "";
+    const evidenceExcerpt = typeof raw.evidenceExcerpt === "string" && raw.evidenceExcerpt.trim()
+      ? raw.evidenceExcerpt.slice(0, 12_000)
+      : typeof raw.evidenceText === "string" && raw.evidenceText.trim()
+        ? raw.evidenceText.slice(0, 12_000)
+        : "";
+    const evidenceExcerptHash = typeof raw.evidenceExcerptHash === "string" && /^[a-f0-9]{64}$/iu.test(raw.evidenceExcerptHash)
+      ? raw.evidenceExcerptHash
+      : evidenceExcerpt
+        ? createHash("sha256").update(evidenceExcerpt, "utf8").digest("hex")
+        : "";
+    const evidenceVersionId = typeof raw.evidenceVersionId === "string" && /^entry-[a-f0-9]{64}$/iu.test(raw.evidenceVersionId)
+      ? raw.evidenceVersionId
+      : "";
     const evidenceAnchors = Array.isArray(raw.evidenceAnchors)
       ? raw.evidenceAnchors.flatMap((anchor) => {
         if (!isRecord(anchor) || anchor.sourceId !== id || typeof anchor.quoteHash !== "string" || !/^[a-f0-9]{64}$/iu.test(anchor.quoteHash)) return [];
@@ -1736,7 +2007,7 @@ export function fallbackDraftSourceEvidence(value: unknown): Array<Record<string
       })
       : [];
     return id && url && title && fetchedAt && contentHash && evidenceAnchors.length > 0
-      ? [{ id, url, title, fetchedAt, contentHash, evidenceAnchors }]
+      ? [{ id, url, title, fetchedAt, contentHash, ...(evidenceExcerpt ? { evidenceText: evidenceExcerpt } : {}), ...(evidenceExcerptHash ? { evidenceExcerptHash } : {}), ...(evidenceVersionId ? { evidenceVersionId } : {}), evidenceAnchors }]
       : [];
   }).slice(0, 20);
 }
@@ -1784,7 +2055,8 @@ function repairMediaGates(revision: ArticleRevision) {
     group: "media" as const,
     state: "PASS" as const,
     detail: "Hero medya paketi üç yayın oranında yerel olarak doğrulandı.",
-    policyVersion: "1"
+    policyVersion: "2",
+    reasonCode: "CHECKED"
   };
   const existing = revision.qualityGates ?? [];
   const replacesMediaGate = existing.some((gate) => gate.id === "media");
@@ -1805,7 +2077,9 @@ async function createMediaRepairSuccessor(
   if (!validateRevisionPackageV2(revision)) {
     throw new Error("REVISION_PACKAGE_INCOMPLETE");
   }
-  if (revision.media.some((asset) => asset.role === "hero" && Boolean(asset.contentBase64))) {
+  if (revision.media.some((asset) => asset.role === "hero" &&
+    /^[a-f0-9]{64}$/iu.test(asset.sha256) &&
+    Number.isSafeInteger(asset.byteSize) && asset.byteSize! > 0)) {
     throw new Error("REVISION_MEDIA_ALREADY_READY");
   }
 
@@ -1835,6 +2109,7 @@ async function createMediaRepairSuccessor(
     } catch {
       reportCodexLifecycle("IMAGEGEN_FALLBACK_LOCAL");
     }
+
   }
   artifacts ??= await renderCoverVariants(
     direction,
@@ -1847,7 +2122,7 @@ async function createMediaRepairSuccessor(
     sha256: artifact.sha256,
     width: artifact.width,
     height: artifact.height,
-    contentBase64: (await readFile(artifact.absolutePath)).toString("base64")
+    byteSize: (await stat(artifact.absolutePath)).size,
   })));
   const qualityGates = repairMediaGates(revision);
   const successor = createEditedRevision(revision, successorId, {
@@ -1911,10 +2186,16 @@ export async function collectDraftSourceEvidence(
     if (!repository) break;
     try {
       const source = await repository.getSource(sourceId);
-      const entries = await repository.listEntries(sourceId);
-      const selectedEntries = candidateUrl
-        ? entries.filter((entry) => entry.url === candidateUrl).slice(0, 1)
-        : entries.slice(0, 20);
+      const selected = candidateUrl && repository.findEntryByUrl
+        ? await repository.findEntryByUrl(sourceId, candidateUrl)
+        : undefined;
+      const selectedEntries = selected
+        ? [selected]
+        : candidateUrl
+          ? (await repository.listEntriesBounded(sourceId, 20))
+            .filter((entry) => entry.url === candidateUrl)
+            .slice(0, 1)
+          : await repository.listEntriesBounded(sourceId, 20);
       for (const entry of selectedEntries) {
         const id = `${sourceId}:${entry.externalId}`;
         let evidenceText = entry.summary?.trim() || entry.title;
@@ -1937,10 +2218,16 @@ export async function collectDraftSourceEvidence(
           summary: entry.summary ?? "",
           publishedAt: entry.publishedAt ?? null,
           fetchedAt: source.updatedAt,
+          // The review decisions belong to the immutable evidence handed to
+          // the draft runner. A later edit to the mutable source catalog must
+          // not silently change what this revision can publish.
+          trustStatus: source.trustStatus,
+          rightsStatus: source.rightsStatus,
           // Feed entries do not retain full publisher bodies. Bind the
           // evidence snapshot to the normalized text we actually pass to the
           // runner instead of using an unverifiable zero hash.
           contentHash: createHash("sha256").update(boundedEvidenceText(evidenceText), "utf8").digest("hex"),
+          ...(entry.versionId ? { evidenceVersionId: entry.versionId } : {}),
           ...evidenceFields(evidenceText, id)
         });
       }
@@ -1969,6 +2256,11 @@ export async function collectDraftSourceEvidence(
             publishedAt: entry.publishedAt ?? null,
             fetchedAt: new Date().toISOString(),
             contentHash: bodyHash,
+            // Direct URLs have no reviewed local source record. Preserve that
+            // fact so a generated revision remains review-required instead of
+            // inheriting an implicit approval.
+            trustStatus: "PENDING",
+            rightsStatus: "PENDING",
             ...evidenceFields(evidenceText, id)
           });
         }
@@ -1979,6 +2271,61 @@ export async function collectDraftSourceEvidence(
     }
   }
   return evidence;
+}
+
+/**
+ * Feed entries are mutable retention data, while revision snapshots are not.
+ * Keep every catalog feed that contributed immutable evidence until no saved
+ * revision refers to one of its captured entries.
+ */
+export function protectedCatalogSourceIds(
+  revisions: readonly ArticleRevision[],
+  catalogSourceIds: readonly string[]
+): string[] {
+  const snapshotSourceIds = revisions.flatMap((revision) => revision.sources.map((source) => source.id));
+  return catalogSourceIds.filter((catalogSourceId) =>
+    snapshotSourceIds.some((snapshotSourceId) =>
+      snapshotSourceId === catalogSourceId || snapshotSourceId.startsWith(`${catalogSourceId}:`)
+    )
+  );
+}
+
+/**
+ * New revisions name the exact immutable source-entry version that supported
+ * them. Legacy revisions have no such identity, so their whole catalog source
+ * remains protected rather than risking evidence loss during migration.
+ */
+export function protectedCatalogEvidenceReferences(
+  revisions: readonly ArticleRevision[],
+  catalogSourceIds: readonly string[]
+): string[] {
+  const exactVersionIds = revisions.flatMap((revision) =>
+    revision.sources.flatMap((source) =>
+      typeof source.evidenceVersionId === "string" && /^entry-[a-f0-9]{64}$/u.test(source.evidenceVersionId)
+        ? [source.evidenceVersionId]
+        : []
+    )
+  );
+  const legacySourceIds = protectedCatalogSourceIds(
+    revisions.map((revision) => ({
+      ...revision,
+      sources: revision.sources.filter((source) => !source.evidenceVersionId)
+    })),
+    catalogSourceIds
+  );
+  return [...new Set([...exactVersionIds, ...legacySourceIds])];
+}
+
+async function purgeExpiredSourceEvidence(
+  repository: BackendRepository,
+  sourceRepository: SourceRepository,
+  beforeIso: string
+): Promise<number> {
+  const [snapshot, sources] = await Promise.all([repository.sync(0), sourceRepository.listSources()]);
+  return sourceRepository.purgeExpiredEntries(
+    beforeIso,
+    protectedCatalogEvidenceReferences(snapshot.snapshot.revisions, sources.map((source) => source.id))
+  );
 }
 
 /** Resolves legacy candidate jobs to the one feed entry the editor selected.
@@ -2137,8 +2484,12 @@ export async function createPersistentEngineProtocol(
     repository.getDatabase()
   );
   const queue = new LocalQueueRuntime(repository.getDatabase());
-  const sourceTransport =
-    options.sourceTransport ?? createNodeFetchTransport();
+  const fetcherBinary = process.env.BLOGBOT_FETCHER_BIN;
+  const sourceTransport = options.sourceTransport ?? (
+    fetcherBinary
+      ? createFetcherSidecarTransport(fetcherBinary)
+      : createNodeFetchTransport()
+  );
   const imageGenerator = options.imageGenerator ?? imageGeneratorFromEnvironment();
   const sourceScanCoordinator = new SourceScanCoordinator(
     sourceRepository,
@@ -2155,23 +2506,21 @@ export async function createPersistentEngineProtocol(
   // Keep the advertised capability independent from worker startup scope so
   // every later doctor request reports the same injected host capability.
   const publicationReady = Boolean(options.publicationProcessor);
-  const sourceRetentionTimer = setInterval(() => {
-    const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString();
-    void sourceRepository.purgeExpiredEntries(cutoff).catch(() => reportBackgroundTaskFault("SOURCE_RETENTION_UNAVAILABLE"));
-  }, 24 * 60 * 60 * 1_000);
-  sourceRetentionTimer.unref?.();
-  void sourceRepository
-    .purgeExpiredEntries(new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString())
-    .catch(() => reportBackgroundTaskFault("SOURCE_RETENTION_UNAVAILABLE"));
-  const automaticBackupTimer = setInterval(() => {
-    void handleBackupRequest({ version: 1, id: `automatic-backup-${Date.now()}`, kind: "backup.auto", payload: {} }, dataDir)
-      .catch(() => reportBackgroundTaskFault("AUTOMATIC_BACKUP_UNAVAILABLE"));
-  }, 24 * 60 * 60 * 1_000);
-  automaticBackupTimer.unref?.();
-  // A restart is the first opportunity after an offline period; take one
-  // snapshot immediately, then continue on the daily interval.
-  void handleBackupRequest({ version: 1, id: `automatic-backup-start-${Date.now()}`, kind: "backup.auto", payload: {} }, dataDir)
-    .catch(() => reportBackgroundTaskFault("AUTOMATIC_BACKUP_UNAVAILABLE"));
+  const runSourceRetention = () => runBackgroundMaintenance(
+    repository,
+    "maintenance.source-retention",
+    "SOURCE_RETENTION_UNAVAILABLE",
+    () => purgeExpiredSourceEvidence(repository, sourceRepository, new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString())
+  );
+  let sourceRetentionTimer: ReturnType<typeof setInterval> | undefined;
+  const runAutomaticBackup = () => runBackgroundMaintenance(
+    repository,
+    "maintenance.automatic-backup",
+    "AUTOMATIC_BACKUP_UNAVAILABLE",
+    () => createConsistentAutomaticBackup(repository.getDatabase(), dataDir)
+  );
+  let automaticBackupTimer: ReturnType<typeof setInterval> | undefined;
+  let initialAutomaticBackupTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     await queue.start();
     await sourceScanCoordinator.recover();
@@ -2292,7 +2641,7 @@ export async function createPersistentEngineProtocol(
                 sha256: artifact.sha256,
                 width: artifact.width,
                 height: artifact.height,
-                contentBase64: (await readFile(artifact.absolutePath)).toString("base64")
+                byteSize: (await stat(artifact.absolutePath)).size,
               })));
             }
             const job = await repository.getJob(submission.jobId);
@@ -2359,7 +2708,11 @@ export async function createPersistentEngineProtocol(
     if (effectivePublicationProcessor) {
       publicationOutboxWorker = startPublicationOutboxWorker(repository, effectivePublicationProcessor);
     }
-    if (options.startPublicationScheduler === true) {
+    // A scheduler without a processor can only create durable effects that no
+    // bundled runtime is able to reconcile. Keep recovery fail-closed: due
+    // work remains scheduled until the host supplies the same processor that
+    // drains the outbox.
+    if (options.startPublicationScheduler === true && effectivePublicationProcessor) {
       publicationScheduler = new PublicationScheduler(
         repository,
         () => new Date(),
@@ -2367,9 +2720,23 @@ export async function createPersistentEngineProtocol(
       );
       publicationScheduler.start();
     }
+    // Do not let maintenance race PGlite migrations, queue setup, or worker
+    // registration. The old eager fire-and-forget startup could leave source
+    // scans waiting behind retention/backup work before the engine became
+    // ready. Bootstrap first; maintenance remains best-effort and unref'd.
+    sourceRetentionTimer = setInterval(() => { void runSourceRetention(); }, 24 * 60 * 60 * 1_000);
+    sourceRetentionTimer.unref?.();
+    automaticBackupTimer = setInterval(() => { void runAutomaticBackup(); }, 24 * 60 * 60 * 1_000);
+    automaticBackupTimer.unref?.();
+    // Do not compete with the first interactive read or a fast application
+    // close. The recurring tasks are durable maintenance, not a startup gate.
+    // Snapshot shortly after a stable session starts, then daily thereafter.
+    initialAutomaticBackupTimer = setTimeout(() => { void runAutomaticBackup(); }, 2 * 60 * 1_000);
+    initialAutomaticBackupTimer.unref?.();
   } catch (error) {
-    clearInterval(automaticBackupTimer);
-    clearInterval(sourceRetentionTimer);
+    if (automaticBackupTimer) clearInterval(automaticBackupTimer);
+    if (sourceRetentionTimer) clearInterval(sourceRetentionTimer);
+    if (initialAutomaticBackupTimer) clearTimeout(initialAutomaticBackupTimer);
     publicationOutboxWorker?.stop();
     publicationScheduler?.stop();
     await queue.stop();
@@ -2381,6 +2748,11 @@ export async function createPersistentEngineProtocol(
     sourceTransport,
     sourceScanCoordinator,
     publicationReady,
+    allowUnsafeRevisionSaveForTests: options.allowUnsafeRevisionSaveForTests === true,
+    verifyEncryptionIntegrity: async () => {
+      await repository.verifyEncryptionIntegrity();
+      await sourceRepository.verifyEncryptionIntegrity();
+    },
     mediaDataDir: dataDir,
     ...(imageGenerator ? { imageGenerator } : {}),
     ...(codexCoordinator ? { codexCoordinator } : {})
@@ -2388,15 +2760,44 @@ export async function createPersistentEngineProtocol(
   const protocol = createEngineProtocol(repository, "ready", protocolOptions);
   return {
     handle: async (input: unknown) => {
-      if (isRecord(input) && (input.kind === "backup.create" || input.kind === "backup.auto" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore")) {
+      if (isRecord(input) && input.kind === "media.read") {
+        const id = typeof input.id === "string" ? input.id : "media-read";
+        const revisionId = typeof input.revisionId === "string" ? input.revisionId : "";
+        const sha256 = typeof input.sha256 === "string" ? input.sha256.toLowerCase() : "";
+        const offset = Number.isSafeInteger(input.offset) ? Number(input.offset) : -1;
+        const length = Number.isSafeInteger(input.length) ? Number(input.length) : -1;
+        if (!/^[A-Za-z0-9-]{1,128}$/u.test(revisionId) || !/^[a-f0-9]{64}$/u.test(sha256) || offset < 0 || length < 1 || length > 64 * 1024) {
+          return sourceProtocolError(id, "command", "INVALID_MEDIA_READ", "Media read metadata is invalid");
+        }
+        try {
+          const revision = await repository.getRevision(revisionId);
+          const asset = revision.media.find((item) => item.sha256.toLowerCase() === sha256);
+          if (!asset || !asset.path.startsWith(`media/${revisionId}/`) || asset.path.split(/[\\/]/u).some((segment) => !segment || segment === "." || segment === "..")) {
+            throw new Error("MEDIA_ASSET_NOT_FOUND");
+          }
+          const bytes = await readFile(join(dataDir, asset.path));
+          if (createHash("sha256").update(bytes).digest("hex") !== sha256 || (typeof asset.byteSize === "number" && asset.byteSize !== bytes.byteLength)) {
+            throw new Error("MEDIA_ASSET_INTEGRITY_FAILURE");
+          }
+          const chunk = bytes.subarray(offset, Math.min(bytes.byteLength, offset + length));
+          return { version: 1, id, ok: true, kind: "media.read", value: { offset, totalBytes: bytes.byteLength, contentBase64: chunk.toString("base64"), eof: offset + chunk.byteLength >= bytes.byteLength } };
+        } catch (error) {
+          return sourceProtocolError(id, "command", error instanceof Error ? error.message : "MEDIA_READ_FAILED", "Media asset could not be read");
+        }
+      }
+      if (isRecord(input) && input.kind === "backup.auto") {
+        return createConsistentAutomaticBackup(repository.getDatabase(), dataDir);
+      }
+      if (isRecord(input) && (input.kind === "backup.create" || input.kind === "backup.auto.list" || input.kind === "backup.auto.verify" || input.kind === "backup.auto.restore.preview" || input.kind === "backup.auto.restore" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore")) {
         return handleBackupRequest(input, dataDir);
       }
       return protocol(input);
     },
     close: async () => {
       try {
-        clearInterval(automaticBackupTimer);
-        clearInterval(sourceRetentionTimer);
+        if (automaticBackupTimer) clearInterval(automaticBackupTimer);
+        if (sourceRetentionTimer) clearInterval(sourceRetentionTimer);
+        if (initialAutomaticBackupTimer) clearTimeout(initialAutomaticBackupTimer);
         publicationOutboxWorker?.stop();
         publicationScheduler?.stop();
       sourceScanScheduler.stop();
@@ -2506,6 +2907,35 @@ export function codexRecoveryJobId(job: BackendJob): string {
     : job.id;
 }
 
+/**
+ * Requests in this allowlist have no durable side effect. They may pass a
+ * long-running mutation in the stdio dispatcher so the desktop can keep
+ * rendering status while publication, backup, or Codex work is underway.
+ */
+export function isParallelReadRequest(input: unknown): boolean {
+  if (!isRecord(input)) return false;
+  if ([
+    "doctor",
+    "state",
+    "source.list",
+    "source.test",
+    "source.scan.status",
+    "candidate.list",
+    "backup.auto.list",
+    "backup.auto.verify",
+    "backup.verify",
+    "backup.restore.preview",
+    "backup.auto.restore.preview"
+  ].includes(typeof input.kind === "string" ? input.kind : "")) {
+    return true;
+  }
+  return input.kind === "command" && isRecord(input.command) && [
+    "REVISION.LIST",
+    "REVISION.GET",
+    "CANDIDATE.LIST"
+  ].includes(typeof input.command.kind === "string" ? input.command.kind : "");
+}
+
 export async function runStdioEngine(
   input: NodeJS.ReadableStream = process.stdin,
   output: NodeJS.WritableStream = process.stdout,
@@ -2522,6 +2952,32 @@ export async function runStdioEngine(
     // unhandled EPIPE bring down Node with a visible console traceback.
     outputBroken = true;
   });
+  let mutationTail = Promise.resolve();
+  const inFlight = new Set<Promise<void>>();
+  const writeEngineResult = async (parsed: unknown): Promise<void> => {
+    try {
+      if (!writeResponse(output, await runtime.handle(parsed))) outputBroken = true;
+    } catch (error) {
+      if (!writeResponse(output, {
+        version: 1,
+        id: isRecord(parsed) && typeof parsed.id === "string" ? parsed.id : "unknown",
+        ok: false,
+        kind: "error",
+        code: "ENGINE_FAILURE",
+        message: error instanceof Error ? error.message : "engine failure"
+      })) outputBroken = true;
+    }
+  };
+  const dispatch = (parsed: unknown): void => {
+    const execution = isParallelReadRequest(parsed)
+      ? writeEngineResult(parsed)
+      : mutationTail.then(() => writeEngineResult(parsed));
+    if (!isParallelReadRequest(parsed)) {
+      mutationTail = execution.catch(() => undefined);
+    }
+    const tracked = execution.finally(() => inFlight.delete(tracked));
+    inFlight.add(tracked);
+  };
   try {
     for await (const line of readBoundedLines(input)) {
       if (outputBroken) break;
@@ -2553,20 +3009,10 @@ export async function runStdioEngine(
         continue;
       }
 
-      try {
-        if (!writeResponse(output, await runtime.handle(parsed))) break;
-      } catch (error) {
-        if (!writeResponse(output, {
-          version: 1,
-          id: isRecord(parsed) && typeof parsed.id === "string" ? parsed.id : "unknown",
-          ok: false,
-          kind: "error",
-          code: "ENGINE_FAILURE",
-          message: error instanceof Error ? error.message : "engine failure"
-        })) break;
-      }
+      dispatch(parsed);
     }
   } finally {
+    await Promise.allSettled(inFlight);
     await runtime.close();
   }
 }

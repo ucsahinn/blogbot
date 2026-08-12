@@ -108,6 +108,14 @@ test("XML documents with DTD or entity declarations are rejected", () => {
   );
 });
 
+test("RSS numeric surrogate entities are replaced without crashing the parser", () => {
+  assert.doesNotThrow(() => analyzeSourceDocument({
+    finalUrl: "https://news.example/feed.xml",
+    contentType: "application/rss+xml",
+    body: encoder.encode("<rss><channel><title>Safe &#xD800; title</title></channel></rss>")
+  }));
+});
+
 test("feed entry count is capped before entries leave the parser", () => {
   const items = Array.from(
     { length: 4 },

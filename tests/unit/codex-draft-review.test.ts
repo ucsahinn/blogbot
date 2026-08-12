@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -28,12 +29,12 @@ const review = {
   translationParity: { status: "MATCHED" as const, detail: "İddialar iki dilde eşleşiyor." },
   riskLevel: "STANDARD" as const,
   gates: [
-    { id: "claims", group: "editorial" as const, state: "PASS" as const, detail: "İddialar kanıta bağlı." },
-    { id: "contradictions", group: "editorial" as const, state: "PASS" as const, detail: "Çelişki bulunmadı." },
-    { id: "bilingual-parity", group: "editorial" as const, state: "PASS" as const, detail: "Parite doğrulandı." },
-    { id: "markdown-safety", group: "security" as const, state: "PASS" as const, detail: "Markdown güvenli." },
-    { id: "seo", group: "seo" as const, state: "PASS" as const, detail: "Başlık ve açıklamalar uygun." },
-    { id: "media", group: "media" as const, state: "PASS" as const, detail: "Medya gerekmiyor." }
+    { id: "claims", group: "editorial" as const, state: "PASS" as const, reasonCode: "CHECKED", detail: "İddialar kanıta bağlı." },
+    { id: "contradictions", group: "editorial" as const, state: "PASS" as const, reasonCode: "CHECKED", detail: "Çelişki bulunmadı." },
+    { id: "bilingual-parity", group: "editorial" as const, state: "PASS" as const, reasonCode: "CHECKED", detail: "Parite doğrulandı." },
+    { id: "markdown-safety", group: "security" as const, state: "PASS" as const, reasonCode: "CHECKED", detail: "Markdown güvenli." },
+    { id: "seo", group: "seo" as const, state: "PASS" as const, reasonCode: "CHECKED", detail: "Başlık ve açıklamalar uygun." },
+    { id: "media", group: "media" as const, state: "PASS" as const, reasonCode: "CHECKED", detail: "Medya gerekmiyor." }
   ]
 };
 
@@ -160,7 +161,7 @@ test("review completion creates an immutable V2 local package from checks that a
   assert.equal(revision.qualityGates.some((gate) => gate.state === "NOT_RUN"), false);
 });
 
-test("final review keeps model-reported editorial polish findings as an acknowledgeable warning", () => {
+test("final review permits only an explicitly coded SEO polish warning", () => {
   const quoteHash = "b".repeat(64);
   const base = materializeDraftRevision("r-review-warning", {
     sources: [{
@@ -176,7 +177,7 @@ test("final review keeps model-reported editorial polish findings as an acknowle
   const modelReportedBlock = {
     ...review,
     gates: review.gates.map((gate) => gate.id === "seo"
-      ? { ...gate, state: "BLOCK" as const, detail: "İç bağlantı önerisi eklenebilir." }
+      ? { ...gate, state: "WARN" as const, reasonCode: "SEO_POLISH", detail: "İç bağlantı önerisi eklenebilir." }
       : gate)
   };
 
@@ -186,9 +187,33 @@ test("final review keeps model-reported editorial polish findings as an acknowle
     id: "seo",
     group: "seo",
     state: "WARN",
+    reasonCode: "SEO_POLISH",
     detail: "İç bağlantı önerisi eklenebilir.",
-    policyVersion: "1"
+    policyVersion: "2"
   });
+});
+
+test("final review never silently downgrades a structural SEO block", () => {
+  const base = materializeDraftRevision("r-review-seo-block", {
+    sources: [{
+      id: "s1",
+      url: "https://example.org/evidence",
+      title: "Evidence",
+      contentHash: "c".repeat(64),
+      fetchedAt: "2026-08-09T00:00:00.000Z",
+      evidenceAnchors: [{ sourceId: "s1", quoteHash: "b".repeat(64) }]
+    }]
+  }, draft, "2026-08-09T00:00:00.000Z");
+  const modelReportedBlock = {
+    ...review,
+    gates: review.gates.map((gate) => gate.id === "seo"
+      ? { ...gate, state: "BLOCK" as const, reasonCode: "SEO_STRUCTURAL_DEFECT", detail: "Başlık yapısı eksik." }
+      : gate)
+  };
+
+  const revision = finalizeReviewedRevision(base, modelReportedBlock, undefined);
+
+  assert.equal(revision.qualityGates.find((gate) => gate.id === "seo")?.state, "BLOCK");
 });
 
 test("final review never downgrades a missing hero image into an acknowledgeable warning", () => {
@@ -209,7 +234,8 @@ test("final review never downgrades a missing hero image into an acknowledgeable
     group: "media",
     state: "BLOCK",
     detail: "Zorunlu hero görseli üretilemedi veya yerel olarak doğrulanamadı.",
-    policyVersion: "1"
+    policyVersion: "2",
+    reasonCode: "HERO_MEDIA_REQUIRED"
   });
 });
 
@@ -333,7 +359,8 @@ test("materialization keeps pending source policy decisions fail-closed", () => 
 });
 
 test("materialization binds a claim to the immutable source anchor instead of trusting a model hash", () => {
-  const quoteHash = "b".repeat(64);
+  const evidenceText = "Exact immutable source evidence.";
+  const quoteHash = createHash("sha256").update(evidenceText, "utf8").digest("hex");
   const revision = materializeDraftRevision(
     "r-anchored-claim",
     {
@@ -343,7 +370,8 @@ test("materialization binds a claim to the immutable source anchor instead of tr
         title: "Evidence",
         contentHash: "c".repeat(64),
         fetchedAt: "2026-08-02T00:00:00.000Z",
-        evidenceAnchors: [{ sourceId: "source-1", start: 0, end: 32, quoteHash }]
+        evidenceText,
+        evidenceAnchors: [{ sourceId: "source-1", start: 0, end: evidenceText.length, quoteHash }]
       }]
     },
     {
@@ -353,9 +381,38 @@ test("materialization binds a claim to the immutable source anchor instead of tr
     "2026-08-02T00:00:00.000Z"
   );
 
-  assert.deepEqual(revision.sources[0]?.evidenceAnchors, [{ sourceId: "source-1", start: 0, end: 32, quoteHash }]);
-  assert.deepEqual(revision.claims[0]?.evidenceAnchors, [{ sourceId: "source-1", start: 0, end: 32, quoteHash }]);
+  assert.deepEqual(revision.sources[0]?.evidenceAnchors, [{ sourceId: "source-1", start: 0, end: evidenceText.length, quoteHash }]);
+  assert.deepEqual(revision.claims[0]?.evidenceAnchors, [{ sourceId: "source-1", start: 0, end: evidenceText.length, quoteHash }]);
   assert.equal(validateClaimEvidence(revision), true);
+});
+
+test("materialization retains the exact bounded evidence excerpt in the immutable revision package", () => {
+  const evidenceText = "Yerel kaynak kaydı, bu iddiayı açıkça doğrular.";
+  const quoteHash = createHash("sha256").update(evidenceText, "utf8").digest("hex");
+  const revision = materializeDraftRevision(
+    "r-immutable-evidence",
+    {
+      sources: [{
+        id: "source-immutable",
+        url: "https://example.org/evidence",
+        title: "Evidence",
+        contentHash: "c".repeat(64),
+        fetchedAt: "2026-08-02T00:00:00.000Z",
+        evidenceText,
+        evidenceAnchors: [{ sourceId: "source-immutable", start: 0, end: evidenceText.length, quoteHash }]
+      }]
+    },
+    { ...draft, claims: [{ ...draft.claims[0]!, sourceIds: ["source-immutable"] }] },
+    "2026-08-02T00:00:00.000Z"
+  );
+
+  assert.equal(revision.sources[0]?.evidenceExcerpt, evidenceText);
+  assert.equal(revision.sources[0]?.evidenceExcerptHash, quoteHash);
+  assert.equal(validateClaimEvidence(revision), true);
+  assert.equal(validateClaimEvidence({
+    ...revision,
+    sources: [{ ...revision.sources[0]!, evidenceExcerpt: `${evidenceText} değiştirildi` }]
+  }), false);
 });
 
 test("materialization downgrades a verified claim when any requested source cannot be anchored", () => {

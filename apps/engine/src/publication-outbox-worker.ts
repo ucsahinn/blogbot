@@ -5,6 +5,8 @@ export interface PublicationEffectProcessor {
     state: "SUCCEEDED" | "FAILED" | "UNKNOWN";
     resultRef?: string;
     lastError?: string;
+    /** Explicit connector retry advice; bounded by the local worker policy. */
+    retryAfterMs?: number;
   }>;
 }
 
@@ -19,10 +21,28 @@ export interface PublicationOutboxWorkerOptions {
    * detail because it can reach local support diagnostics.
    */
   onFault?(error: Error): void;
+  /** Base duration for exponential retry backoff. Defaults to five seconds. */
+  retryBaseMs?: number;
 }
 
 const MAX_TRANSIENT_PUBLICATION_ATTEMPTS = 3;
 const SAFE_OUTBOX_FAULT = "OUTBOX_STORAGE_UNAVAILABLE";
+const DEFAULT_RETRY_BASE_MS = 5_000;
+const MAX_RETRY_DELAY_MS = 5 * 60_000;
+
+function retryDelayMs(attempt: number, requested: number | undefined, baseMs: number): number {
+  if (Number.isSafeInteger(requested) && requested! >= 0) {
+    return Math.min(requested!, MAX_RETRY_DELAY_MS);
+  }
+  return Math.min(baseMs * (2 ** Math.max(0, attempt - 1)), MAX_RETRY_DELAY_MS);
+}
+
+function isRetryDue(effect: OutboxEffect, nowMs: number): boolean {
+  if (effect.state === "PENDING" || effect.state === "IN_PROGRESS") return true;
+  if (effect.state !== "UNKNOWN" || !effect.nextAttemptAt) return effect.state === "UNKNOWN";
+  const deadlineMs = Date.parse(effect.nextAttemptAt);
+  return !Number.isFinite(deadlineMs) || deadlineMs <= nowMs;
+}
 
 /**
  * Reconciles durable publication intents without ever creating a second
@@ -38,6 +58,9 @@ export function startPublicationOutboxWorker(
 ): PublicationOutboxWorker {
   let running = true;
   let active = false;
+  const retryBaseMs = Number.isSafeInteger(options.retryBaseMs) && options.retryBaseMs! >= 0
+    ? options.retryBaseMs!
+    : DEFAULT_RETRY_BASE_MS;
   const reportFault = () => {
     const safeError = new Error(SAFE_OUTBOX_FAULT);
     try {
@@ -59,27 +82,40 @@ export function startPublicationOutboxWorker(
       const effects = await repository.listOutbox();
       // IN_PROGRESS is reclaimable after a process crash because the worker
       // is single-writer and the external processor is idempotency-keyed.
-      for (const effect of effects.filter((item) => item.state === "PENDING" || item.state === "UNKNOWN" || item.state === "IN_PROGRESS")) {
+      const nowMs = Date.now();
+      for (const effect of effects.filter((item) => isRetryDue(item, nowMs))) {
         if (!running) break;
         const claimed = await repository.updateOutbox({ ...effect, state: "IN_PROGRESS", attempts: effect.attempts + 1 });
         try {
           const result = await processor.process(claimed);
+          const { nextAttemptAt: _previousRetryDeadline, ...withoutPreviousRetryDeadline } = claimed;
+          const terminalUnknown = result.state === "UNKNOWN" && claimed.attempts >= MAX_TRANSIENT_PUBLICATION_ATTEMPTS;
+          const nextAttemptAt = result.state === "UNKNOWN" && !terminalUnknown
+            ? new Date(Date.now() + retryDelayMs(claimed.attempts, result.retryAfterMs, retryBaseMs)).toISOString()
+            : undefined;
           await repository.updateOutbox({
-            ...claimed,
-            state: result.state,
+            ...withoutPreviousRetryDeadline,
+            state: terminalUnknown ? "FAILED" : result.state,
+            ...(nextAttemptAt ? { nextAttemptAt } : {}),
             ...(result.resultRef ? { resultRef: result.resultRef } : {}),
             ...(result.lastError ? { lastError: result.lastError } : {}),
             ...(result.state === "SUCCEEDED" ? { completedAt: new Date().toISOString() } : {})
           });
         } catch (error) {
+          const { nextAttemptAt: _previousRetryDeadline, ...withoutPreviousRetryDeadline } = claimed;
+          const terminalFailure = claimed.attempts >= MAX_TRANSIENT_PUBLICATION_ATTEMPTS;
+          const nextAttemptAt = terminalFailure
+            ? undefined
+            : new Date(Date.now() + retryDelayMs(claimed.attempts, undefined, retryBaseMs)).toISOString();
           await repository.updateOutbox({
-            ...claimed,
+            ...withoutPreviousRetryDeadline,
             // A process crash or transient connector outage must be visible
             // and reclaimable after restart. The idempotency key prevents the
             // retry from creating a duplicate external effect. Bound retries
             // so a persistent programming or configuration error becomes an
             // explicit terminal failure instead of an endless tight loop.
-            state: claimed.attempts >= MAX_TRANSIENT_PUBLICATION_ATTEMPTS ? "FAILED" : "UNKNOWN",
+            state: terminalFailure ? "FAILED" : "UNKNOWN",
+            ...(nextAttemptAt ? { nextAttemptAt } : {}),
             lastError: error instanceof Error ? error.message.slice(0, 512) : "Publication processor failed"
           });
         }

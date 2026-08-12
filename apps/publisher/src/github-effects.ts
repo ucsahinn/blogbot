@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { isEngineMediaReference } from "./publication.ts";
 import type {
   DeployIntent,
   PublicationEffectsPort,
@@ -11,6 +12,8 @@ export interface GitHubPublicationConfig {
   repository: string;
   baseBranch: string;
   deployWorkflow?: string;
+  /** Exact branch-protection check contexts that must pass before merge. */
+  requiredChecks?: readonly string[];
 }
 
 export interface GitHubEffectsStore {
@@ -40,6 +43,13 @@ function assertConfig(config: GitHubPublicationConfig): void {
   if (config.deployWorkflow && !/^[A-Za-z0-9_.-]+\.ya?ml$/u.test(config.deployWorkflow)) {
     throw new Error("GitHub deploy workflow is invalid");
   }
+  if (config.requiredChecks && (
+    config.requiredChecks.length === 0 ||
+    config.requiredChecks.some((name) => typeof name !== "string" || !name.trim() || name.length > 200) ||
+    new Set(config.requiredChecks.map((name) => name.trim())).size !== config.requiredChecks.length
+  )) {
+    throw new Error("GitHub required check policy is invalid");
+  }
 }
 
 function branchName(key: string): string {
@@ -63,27 +73,36 @@ const failedCheckConclusions = new Set(["failure", "cancelled", "timed_out", "ac
  * not infer success from an empty response: a repository with no checks is
  * deliberately kept pending until its required workflow is configured.
  */
-function aggregateRequiredChecks(statusBody: unknown, checksBody: unknown): RequiredChecksState {
+function aggregateRequiredChecks(statusBody: unknown, checksBody: unknown, requiredNames: readonly string[] | undefined): RequiredChecksState {
+  if (!requiredNames?.length) return "PENDING";
+  const required = new Set(requiredNames.map((name) => name.trim()));
   const statusesValue = object(statusBody).statuses;
   const checkRunsValue = object(checksBody).check_runs;
   const statuses: unknown[] = Array.isArray(statusesValue) ? statusesValue : [];
   const checkRuns: unknown[] = Array.isArray(checkRunsValue) ? checkRunsValue : [];
-  if (statuses.length === 0 && checkRuns.length === 0) return "PENDING";
+  const seen = new Set<string>();
 
   for (const item of statuses) {
-    const state = string(object(item).state)?.toLowerCase();
+    const itemObject = object(item);
+    const name = string(itemObject.context);
+    if (!name || !required.has(name)) continue;
+    seen.add(name);
+    const state = string(itemObject.state)?.toLowerCase();
     if (state === "failure" || state === "error") return "FAILED";
     if (state !== "success") return "PENDING";
   }
   for (const item of checkRuns) {
     const itemObject = object(item);
+    const name = string(itemObject.name);
+    if (!name || !required.has(name)) continue;
+    seen.add(name);
     const status = string(itemObject.status)?.toLowerCase();
     const conclusion = string(itemObject.conclusion)?.toLowerCase();
     if (status !== "completed") return "PENDING";
     if (!conclusion || failedCheckConclusions.has(conclusion)) return "FAILED";
     if (!successfulCheckConclusions.has(conclusion)) return "PENDING";
   }
-  return "PASSED";
+  return required.size === seen.size ? "PASSED" : "PENDING";
 }
 
 export class GitHubPublicationEffects implements PublicationEffectsPort {
@@ -109,7 +128,10 @@ export class GitHubPublicationEffects implements PublicationEffectsPort {
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
     });
-    const parsed = await response.json();
+    // GitHub's workflow-dispatch endpoint deliberately returns 204 No
+    // Content. Parsing it as JSON turns a successful dispatch into a local
+    // transport failure before the intent can be persisted.
+    const parsed = response.status === 204 ? null : await response.json();
     return { response, body: parsed };
   }
 
@@ -128,7 +150,7 @@ export class GitHubPublicationEffects implements PublicationEffectsPort {
     if (!checksResult.response.ok) {
       throw new Error(`GitHub check-runs lookup failed (${checksResult.response.status})`);
     }
-    return aggregateRequiredChecks(statusResult.body, checksResult.body);
+    return aggregateRequiredChecks(statusResult.body, checksResult.body, this.config.requiredChecks);
   }
 
   /** Read-only snapshot used to bind a local approval to the current base. */
@@ -157,9 +179,21 @@ export class GitHubPublicationEffects implements PublicationEffectsPort {
     if (input.expectedBaseSha && input.expectedBaseSha !== baseSha) throw new Error("GitHub base branch changed after approval");
     const branch = branchName(input.key);
     const ref = await this.request(this.path("/git/refs"), "POST", { ref: `refs/heads/${branch}`, sha: baseSha });
-    if (!ref.response.ok && ref.response.status !== 422) throw new Error(`GitHub branch creation failed (${ref.response.status})`);
+    // A 422 is normally an existing branch, but it can also represent a
+    // malformed ref or a prior partial write. Treating it as success lets a
+    // retry silently append files to an unknown branch. The durable outbox
+    // remains retryable, while the operator can inspect or remove the branch.
+    if (!ref.response.ok) {
+      if (ref.response.status === 422) {
+        throw new Error("GitHub publication branch already exists; refusing to continue an unverified partial publication");
+      }
+      throw new Error(`GitHub branch creation failed (${ref.response.status})`);
+    }
     for (const file of input.files) {
       if (!file.path || file.path.includes("..") || file.path.startsWith("/")) throw new Error("unsafe publication path");
+      if (isEngineMediaReference(file.content)) {
+        throw new Error("engine media reference must be materialized before GitHub publication");
+      }
       const encoded = typeof file.content === "string" ? Buffer.from(file.content, "utf8").toString("base64") : Buffer.from(file.content).toString("base64");
       const current = await this.request(this.path(`/contents/${file.path}?ref=${encodeURIComponent(branch)}`));
       const existingSha = current.response.ok ? string(object(current.body).sha) ?? undefined : undefined;

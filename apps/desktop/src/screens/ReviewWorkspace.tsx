@@ -50,6 +50,14 @@ const tabLabels: Array<{ id: ReviewTab; label: string }> = [
 
 const acceptableWarningIds = new Set(["SINGLE_OFFICIAL_SOURCE_EXCEPTION", "contradictions", "seo", "media"]);
 
+function isAcceptableWarning(gate: GateView): boolean {
+  if (gate.policyVersion === "2") {
+    return (gate.id === "seo" && gate.reasonCode === "SEO_POLISH") ||
+      (gate.id === "contradictions" && gate.reasonCode === "DISCLOSED_SOURCE_DISAGREEMENT");
+  }
+  return gate.policyVersion === "1" && acceptableWarningIds.has(gate.id);
+}
+
 function gateSummary(gates: GateView[]) {
   return {
     passed: gates.filter((gate) => gate.state === "PASS").length,
@@ -97,6 +105,7 @@ async function warningSetHash(gates: GateView[]): Promise<string> {
       group: gate.group,
       id: gate.id,
       policyVersion: gate.policyVersion,
+      ...(gate.reasonCode ? { reasonCode: gate.reasonCode } : {}),
       state: gate.state
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -158,6 +167,7 @@ export function ReviewWorkspace({
   const [query, setQuery] = useState("");
   const [queueFilter, setQueueFilter] = useState<"pending" | "approved">("pending");
   const [revision, setRevision] = useState<ReviewRevision | null>(null);
+  const [heroDataUrl, setHeroDataUrl] = useState<string | null>(null);
   const [locale, setLocale] = useState<Locale>("tr");
   const [tab, setTab] = useState<ReviewTab>("content");
   const [loading, setLoading] = useState(snapshot.queue.length > 0);
@@ -207,6 +217,23 @@ export function ReviewWorkspace({
     };
   }, [bridge, selectedId]);
 
+  useEffect(() => {
+    const hero = revision?.media.find((media) => media.role === "hero");
+    let alive = true;
+    const loadHero = async (): Promise<string | null> => {
+      if (!hero) return null;
+      if (hero.contentBase64) return `data:image/webp;base64,${hero.contentBase64}`;
+      if (!Number.isSafeInteger(hero.byteSize) || hero.byteSize! < 1 || !/^[a-f0-9]{64}$/iu.test(hero.sha256)) return null;
+      const asset = await bridge.readRevisionMedia({ revisionId: revision!.id, sha256: hero.sha256 });
+      return `data:${asset.mimeType};base64,${asset.contentBase64}`;
+    };
+    void loadHero().then(
+      (dataUrl) => { if (alive) setHeroDataUrl(dataUrl); },
+      () => { if (alive) setHeroDataUrl(null); }
+    );
+    return () => { alive = false; };
+  }, [bridge, revision]);
+
   const summary = useMemo(
     () => gateSummary(revision?.gates ?? []),
     [revision]
@@ -221,7 +248,7 @@ export function ReviewWorkspace({
   const needsComprehensiveRewrite = Boolean(
     revision && revision.state === "REVIEW_REQUIRED" && trWordCount < comprehensiveTargetWords
   );
-  const hasUnacceptableWarning = acceptedWarnings.some((gate) => !acceptableWarningIds.has(gate.id));
+  const hasUnacceptableWarning = acceptedWarnings.some((gate) => !isAcceptableWarning(gate));
   const claimsBlocked = Boolean(revision?.gates.some((gate) => gate.id === "claims" && gate.state === "BLOCK"));
   const activeContent = revision?.[locale];
   const previousContent = revision?.previous[locale];
@@ -259,7 +286,7 @@ export function ReviewWorkspace({
       revision.claims.length > 0 &&
       revision.sources.length > 0 &&
       revision.gates.every((gate) => gate.state !== "BLOCK" && gate.state !== "NOT_RUN") &&
-      revision.gates.every((gate) => gate.state !== "WARN" || acceptableWarningIds.has(gate.id)) &&
+      revision.gates.every((gate) => gate.state !== "WARN" || isAcceptableWarning(gate)) &&
       (revision.gates.every((gate) => gate.state !== "WARN") || warningsAcknowledged) &&
       revision.claims.every((claim) => claim.status === "VERIFIED")
   );
@@ -851,10 +878,10 @@ export function ReviewWorkspace({
                           <div className="article-meta"><span>{sectionLabel(revision.section)}</span><span>8 dk okuma</span><span>{revision.author}</span></div>
                           <h1>{content.title}</h1>
                           <p className="article-description">{content.description}</p>
-                          {heroMedia?.contentBase64 ? (
+                          {heroMedia && heroDataUrl ? (
                             <figure className="article-hero-media">
                               <img
-                                src={`data:image/webp;base64,${heroMedia.contentBase64}`}
+                                src={heroDataUrl}
                                 alt={contentLocale === "tr" ? heroMedia.altTr : heroMedia.altEn}
                               />
                               <figcaption>{heroMedia.filename} · {heroMedia.width} × {heroMedia.height} · {heroMedia.sha256.slice(0, 16)}…</figcaption>

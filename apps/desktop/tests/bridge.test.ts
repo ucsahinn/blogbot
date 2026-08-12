@@ -450,6 +450,16 @@ test("backup bridge exposes preview-first commands without persisting recovery k
     outputPath: "C:/backups/new.blogbot",
     recoveryKey: "test-recovery-key"
   });
+  await bridge.listAutomaticBackups();
+  await bridge.verifyAutomaticBackup({ backupName: "automatic-2026-08-11T00-00-00-000Z.backup" });
+  await bridge.previewAutomaticBackupRestore({
+    backupName: "automatic-2026-08-11T00-00-00-000Z.backup",
+    targetDirectory: "C:/restore-auto"
+  });
+  await bridge.restoreAutomaticBackup({
+    backupName: "automatic-2026-08-11T00-00-00-000Z.backup",
+    targetDirectory: "C:/restore-auto"
+  });
 
   assert.deepEqual(calls, [
     { command: "backup_verify", args: { archivePath: "C:/backups/latest.blogbot", recoveryKey: "test-recovery-key" } },
@@ -464,6 +474,16 @@ test("backup bridge exposes preview-first commands without persisting recovery k
     {
       command: "backup_create",
       args: { sourceDirectory: "C:/Blogbot/data", relativePaths: ["state.json"], outputPath: "C:/backups/new.blogbot", recoveryKey: "test-recovery-key" }
+    },
+    { command: "automatic_backup_list", args: undefined },
+    { command: "automatic_backup_verify", args: { backupName: "automatic-2026-08-11T00-00-00-000Z.backup" } },
+    {
+      command: "automatic_backup_restore_preview",
+      args: { backupName: "automatic-2026-08-11T00-00-00-000Z.backup", targetDirectory: "C:/restore-auto" }
+    },
+    {
+      command: "automatic_backup_restore_apply",
+      args: { backupName: "automatic-2026-08-11T00-00-00-000Z.backup", targetDirectory: "C:/restore-auto" }
     }
   ]);
 });

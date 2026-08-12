@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "../../../packages/editorial/src/revision.ts";
 import {
   buildPublisherDryRunPlan,
+  publicationFileDigest,
   type ApprovedPublicationCommand,
   type PublicationBundlePolicy,
   type PublicationFile,
@@ -35,8 +36,7 @@ export interface PublicationPreview {
 }
 
 function fileDigest(file: PublicationFile): { path: string; sha256: string; bytes: number } {
-  const bytes = typeof file.content === "string" ? Buffer.from(file.content, "utf8") : Buffer.from(file.content);
-  return { path: file.path, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength };
+  return { path: file.path, ...publicationFileDigest(file) };
 }
 
 /**

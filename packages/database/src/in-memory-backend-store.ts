@@ -10,10 +10,14 @@ import {
   type BackendChange,
   type BackendChangeKind,
   type BackendJob,
+  type DashboardReadOptions,
   type DashboardSyncResult,
+  type RevisionListSnapshot,
+  type RevisionLineageIndexEntry,
   type BackendRepository,
   type BackendRepositoryTransaction,
   type OutboxEffect,
+  type PublicationIntentBinding,
   type SyncResult
 } from "./backend-repository.ts";
 
@@ -151,16 +155,51 @@ export class InMemoryBackendStore implements BackendRepository {
     };
   }
 
-  async syncDashboard(afterCursor: number): Promise<DashboardSyncResult> {
+  async syncDashboard(afterCursor: number, options: DashboardReadOptions = {}): Promise<DashboardSyncResult> {
+    const changes = this.state.changes
+      .filter((change) => change.cursor > afterCursor)
+      .slice(0, options.changeLimit === undefined ? undefined : options.changeLimit)
+      .map((change) => structuredClone(change));
+    const outbox = await this.listOutbox();
+    const jobs = await this.listJobs();
     return {
-      serverCursor: this.state.cursor,
+      // A bounded incremental page may not advance the consumer past events
+      // it has not received. The next poll resumes at the final delivered
+      // cursor rather than the global head.
+      serverCursor: changes.at(-1)?.cursor ?? afterCursor,
       automation: structuredClone(this.state.automation),
-      outbox: await this.listOutbox(),
-      jobs: await this.listJobs(),
-      changes: this.state.changes
-        .filter((change) => change.cursor > afterCursor)
-        .map((change) => structuredClone(change))
+      outbox: outbox.slice(Math.max(0, outbox.length - (options.outboxLimit ?? Number.MAX_SAFE_INTEGER))),
+      jobs: jobs.slice(Math.max(0, jobs.length - (options.jobLimit ?? Number.MAX_SAFE_INTEGER))),
+      changes
     };
+  }
+
+  async listRevisionSnapshot(): Promise<RevisionListSnapshot> {
+    return {
+      revisions: structuredClone([...this.state.revisions.values()]),
+      approvals: structuredClone([...this.state.approvals.values()]),
+      highRiskApprovals: structuredClone([...this.state.highRiskApprovals.values()])
+    };
+  }
+
+  async listDueRevisionIds(nowUnixMs: number, limit = 100): Promise<string[]> {
+    return [...this.state.revisions.values()]
+      .filter((revision) => Date.parse(revision.scheduledAt) <= nowUnixMs)
+      .sort((left, right) => Date.parse(left.scheduledAt) - Date.parse(right.scheduledAt) || left.id.localeCompare(right.id))
+      .slice(0, Math.min(Math.max(1, limit), 200))
+      .map((revision) => revision.id);
+  }
+
+  async listRevisionLineage(): Promise<RevisionLineageIndexEntry[]> {
+    return [...this.state.revisions.values()].map((revision) => ({
+      id: revision.id,
+      ...(revision.supersedesRevisionId ? { supersedesRevisionId: revision.supersedesRevisionId } : {})
+    }));
+  }
+
+  async getHighRiskApproval(revisionId: string): Promise<HighRiskApproval | null> {
+    const approval = this.state.highRiskApprovals.get(revisionId);
+    return approval ? structuredClone(approval) : null;
   }
 
   async getVersion(): Promise<number> {
@@ -248,9 +287,10 @@ export class InMemoryBackendStore implements BackendRepository {
 
   async enqueuePublication(
     revisionId: string,
-    revisionHash: string
+    revisionHash: string,
+    binding: PublicationIntentBinding
   ): Promise<OutboxEffect> {
-    const idempotencyKey = `publish:${revisionId}:${revisionHash}`;
+    const idempotencyKey = `publish:${revisionId}:${revisionHash}:${binding.previewHash}`;
     const existing = [...this.state.outbox.values()].find(
       (effect) => effect.idempotencyKey === idempotencyKey
     );
@@ -263,6 +303,7 @@ export class InMemoryBackendStore implements BackendRepository {
       type: "PUBLISH_REVISION",
       aggregateId: revisionId,
       revisionHash,
+      ...structuredClone(binding),
       idempotencyKey,
       state: "PENDING",
       attempts: 0
@@ -328,6 +369,13 @@ export class InMemoryBackendStore implements BackendRepository {
   async setLocalState(key: string, value: unknown): Promise<void> {
     this.state.localState.set(key, structuredClone(value));
     this.recordChange("LOCAL_STATE_UPDATED", key);
+  }
+
+  async setMaintenanceState(key: string, value: unknown): Promise<void> {
+    if (!key.startsWith("maintenance.")) {
+      throw new BackendStoreError("INVALID_MAINTENANCE_KEY", "Maintenance state keys must start with maintenance.");
+    }
+    this.state.localState.set(key, structuredClone(value));
   }
 
   private recordChange(kind: BackendChangeKind, entityId: string): void {

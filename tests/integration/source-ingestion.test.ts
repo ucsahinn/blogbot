@@ -46,14 +46,12 @@ test("source test fetches through the guarded boundary and persists detected fee
   assert.equal(result.source.rightsStatus, "PENDING");
   assert.equal(result.entriesAdded, 1);
   assert.equal(plans[0]?.redirect, "manual");
-  assert.deepEqual(await repository.listEntries("source-1"), [
-    {
-      sourceId: "source-1",
-      externalId: "story-1",
-      title: "Patch released",
-      url: "https://news.example/stories/patch"
-    }
+  const entries = await repository.listEntries("source-1");
+  assert.deepEqual(entries.map(({ sourceId, externalId, title, url }) => ({ sourceId, externalId, title, url })), [
+    { sourceId: "source-1", externalId: "story-1", title: "Patch released", url: "https://news.example/stories/patch" }
   ]);
+  assert.match(entries[0]?.versionId ?? "", /^entry-[a-f0-9]{64}$/u);
+  assert.match(entries[0]?.contentHash ?? "", /^[a-f0-9]{64}$/u);
 });
 
 test("site test persists only policy-safe discovered feed URLs", async (t) => {

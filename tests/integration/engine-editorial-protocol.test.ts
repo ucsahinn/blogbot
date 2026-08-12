@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createPersistentEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
+import { createPersistentEngineProtocol as createProductionEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
 import {
   computeRevisionHash,
   computeWarningSetHash,
@@ -65,6 +65,7 @@ function revision(
         title: "Primary report",
         fetchedAt: "2026-07-30T08:00:00.000Z",
         contentHash: "b".repeat(64),
+        evidenceAnchors: [{ sourceId: "source-1", quoteHash: "a".repeat(64), start: 10, end: 40 }],
         trustStatus: "APPROVED",
         rightsStatus: "APPROVED"
       }
@@ -104,8 +105,12 @@ function revision(
       }
     ],
     qualityGates: [
-      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "1" },
-      { id: "parity", group: "editorial", state: "PASS", detail: "Dil eşitliği doğrulandı.", policyVersion: "1" }
+      { id: "claims", group: "editorial", state: "PASS", detail: "Kanıt doğrulandı.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "contradictions", group: "editorial", state: "PASS", detail: "Çelişki denetlendi.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "bilingual-parity", group: "editorial", state: "PASS", detail: "Dil eşitliği doğrulandı.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "markdown-safety", group: "security", state: "PASS", detail: "Markdown güvenli.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "seo", group: "seo", state: "PASS", detail: "SEO denetlendi.", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "media", group: "media", state: "PASS", detail: "Medya denetlendi.", policyVersion: "2", reasonCode: "CHECKED" }
     ],
     ...overrides
   };
@@ -136,6 +141,38 @@ function valueOf<T>(response: Record<string, unknown>): T {
   assert.equal(response.ok, true);
   return (response.result as { value: T }).value;
 }
+
+/** Fixtures may seed immutable revisions without exposing that mutation in production. */
+function createPersistentEngineProtocol(
+  dataDir: string,
+  options: Parameters<typeof createProductionEngineProtocol>[1] = {}
+) {
+  return createProductionEngineProtocol(dataDir, {
+    ...options,
+    allowUnsafeRevisionSaveForTests: true
+  });
+}
+
+test("production protocol rejects caller-supplied revision packages", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-editorial-save-closed-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = await createProductionEngineProtocol(join(root, "pgdata"), { startSourceWorker: false });
+  t.after(() => runtime.close());
+
+  const response = await runtime.handle(command("REVISION.SAVE", { revision: revision() }, 0, "external-save"));
+  assert.equal(response.ok, false);
+  assert.equal((response.result as { error: { code: string } }).error.code, "REVISION_SAVE_INTERNAL_ONLY");
+});
+
+test("background maintenance does not advance the editorial optimistic-version cursor", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-editorial-maintenance-cursor-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtime = await createProductionEngineProtocol(join(root, "pgdata"), { startSourceWorker: false });
+  t.after(() => runtime.close());
+
+  const response = await runtime.handle(command("REVISION.LIST", { summaryOnly: true }, 0, "list-with-maintenance"));
+  assert.equal(response.ok, true, JSON.stringify(response));
+});
 
 test("revision save, list, and get are versioned, exact-hash bound, and durable", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-editorial-protocol-"));
@@ -237,8 +274,34 @@ test("a missing-media draft gets an immutable successor with local hero variants
     value.revision.media.map((asset) => [asset.width, asset.height]),
     [[1600, 900], [1200, 900], [1200, 1200]]
   );
-  assert.ok(value.revision.media.every((asset) => Boolean(asset.contentBase64)));
+  assert.ok(value.revision.media.every((asset) => asset.contentBase64 === undefined));
+  assert.ok(value.revision.media.every((asset) => Number.isSafeInteger(asset.byteSize) && asset.byteSize! > 0));
   assert.ok(value.revision.generatedFiles.some((file) => file.path.includes("images/")));
+
+  const asset = value.revision.media[0]!;
+  const mediaRead = await runtime.handle({
+    version: 1,
+    id: "media-read-first-chunk",
+    kind: "media.read",
+    revisionId: value.revision.id,
+    sha256: asset.sha256,
+    offset: 0,
+    length: 64 * 1024
+  });
+  assert.equal(mediaRead.ok, true, JSON.stringify(mediaRead));
+  const mediaValue = (mediaRead as unknown as { value: { contentBase64: string; totalBytes: number } }).value;
+  assert.ok(mediaValue.contentBase64.length > 0);
+  assert.equal(mediaValue.totalBytes, asset.byteSize);
+  const rejectedRead = await runtime.handle({
+    version: 1,
+    id: "media-read-invalid",
+    kind: "media.read",
+    revisionId: value.revision.id,
+    sha256: "f".repeat(64),
+    offset: 0,
+    length: 64 * 1024 + 1
+  });
+  assert.equal(rejectedRead.ok, false);
 
   const originalLoaded = valueOf<{ revision: RevisionPackageV2 }>(
     await runtime.handle(command("REVISION.GET", { revisionId: original.id }, 2, "media-repair-original"))

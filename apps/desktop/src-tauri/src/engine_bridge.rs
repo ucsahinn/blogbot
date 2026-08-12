@@ -4,7 +4,11 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::fs::{OpenOptions, create_dir_all};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{mpsc, Mutex};
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, Arc, Mutex,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -23,6 +27,7 @@ const MAX_REQUEST_BYTES: usize = 1_000_000;
 // bounded local operations.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAINTENANCE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
 const MAX_DIAGNOSTIC_LOG_BYTES: u64 = 256 * 1024;
 // `CREATE_NO_WINDOW` applies to every helper process started by the desktop
@@ -120,6 +125,42 @@ fn should_retry_after_transport_fault(error: &str) -> bool {
     .any(|prefix| error.starts_with(prefix))
 }
 
+/// A lost response after a mutation is not proof that the engine did not
+/// perform its side effect. Retry only protocol-level read requests; mutation
+/// commands must surface UNKNOWN/diagnostics and rely on their durable ledger.
+fn is_safe_read_retry(request: &Value) -> bool {
+    match request.get("kind").and_then(Value::as_str) {
+        Some("doctor") | Some("state") => true,
+        Some("command") => matches!(
+            request
+                .get("command")
+                .and_then(Value::as_object)
+                .and_then(|command| command.get("kind"))
+                .and_then(Value::as_str),
+            Some("REVISION.LIST") | Some("REVISION.GET") | Some("CANDIDATE.LIST")
+        ),
+        _ => false,
+    }
+}
+
+/// Backup operations have explicit archive/file bounds in the engine but can
+/// legitimately exceed a normal interactive round trip. Keep all other work
+/// on the short timeout so a stalled sidecar is still recovered promptly.
+fn response_timeout_for_request(request: &Value, ready: bool) -> Duration {
+    if !ready {
+        return STARTUP_RESPONSE_TIMEOUT;
+    }
+    match request.get("kind").and_then(Value::as_str) {
+        Some("backup.create")
+        | Some("backup.auto")
+        | Some("backup.verify")
+        | Some("backup.restore.preview")
+        | Some("backup.restore")
+        | Some("maintenance.integrity.verify") => MAINTENANCE_RESPONSE_TIMEOUT,
+        _ => RESPONSE_TIMEOUT,
+    }
+}
+
 fn transport_error_for_request(error: &str, request_id: &str) -> String {
     format!("{error} request={request_id}")
 }
@@ -148,6 +189,7 @@ fn terminate_owned_process_tree(child: &mut Child) {
 
 pub struct EngineBridge {
     executable: Option<PathBuf>,
+    fetcher_executable: Option<PathBuf>,
     assets: Option<PathBuf>,
     node_modules: Option<PathBuf>,
     codex_command: Option<String>,
@@ -155,16 +197,69 @@ pub struct EngineBridge {
     data_key_hex: Option<String>,
     diagnostic_log: Option<PathBuf>,
     process: Mutex<Option<EngineProcess>>,
+    request_sequence: AtomicU64,
     last_error: Mutex<Option<String>>,
 }
 
 struct EngineProcess {
     child: Child,
     stdin: Option<ChildStdin>,
-    responses: mpsc::Receiver<Result<String, String>>,
+    pending: Arc<PendingResponses>,
+    protocol_fault: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     stderr_reader: Option<JoinHandle<()>>,
     ready: bool,
+}
+
+#[derive(Default)]
+struct PendingResponses {
+    senders: Mutex<HashMap<String, mpsc::Sender<Result<String, String>>>>,
+}
+
+impl PendingResponses {
+    fn register(&self, request_id: &str) -> Result<mpsc::Receiver<Result<String, String>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        let mut senders = self
+            .senders
+            .lock()
+            .map_err(|_| "ENGINE_PENDING_STATE_UNAVAILABLE".to_string())?;
+        if senders.insert(request_id.to_string(), sender).is_some() {
+            return Err("ENGINE_REQUEST_ID_COLLISION".to_string());
+        }
+        Ok(receiver)
+    }
+
+    fn cancel(&self, request_id: &str) {
+        if let Ok(mut senders) = self.senders.lock() {
+            senders.remove(request_id);
+        }
+    }
+
+    fn resolve_line(&self, line: &str) -> Result<bool, String> {
+        let response = serde_json::from_str::<Value>(line)
+            .map_err(|error| format!("ENGINE_RESPONSE_INVALID: {error}"))?;
+        let request_id = response
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "ENGINE_RESPONSE_ID_MISSING".to_string())?;
+        let sender = self
+            .senders
+            .lock()
+            .ok()
+            .and_then(|mut senders| senders.remove(request_id));
+        Ok(sender.is_some_and(|sender| sender.send(Ok(line.to_string())).is_ok()))
+    }
+
+    fn fail_all(&self, error: &str) {
+        let senders = self
+            .senders
+            .lock()
+            .map(|mut values| std::mem::take(&mut *values))
+            .unwrap_or_default();
+        for sender in senders.into_values() {
+            let _ = sender.send(Err(error.to_string()));
+        }
+    }
 }
 
 impl Drop for EngineProcess {
@@ -196,6 +291,7 @@ impl Drop for EngineProcess {
 impl EngineBridge {
     pub fn discover(app: &AppHandle) -> Self {
         let executable = discover_engine_executable();
+        let fetcher_executable = discover_fetcher_executable();
         let assets = discover_pglite_assets(app);
         let node_modules = discover_engine_node_modules(app);
         let codex_command = discover_codex_command();
@@ -209,6 +305,7 @@ impl EngineBridge {
         let data_key = secure_store::load_or_create_data_key(app);
         let bridge = Self {
             executable,
+            fetcher_executable,
             assets,
             node_modules,
             codex_command,
@@ -216,6 +313,7 @@ impl EngineBridge {
             data_key_hex: data_key.as_ref().ok().cloned(),
             diagnostic_log: app.path().app_data_dir().ok().map(|directory| directory.join("logs").join("engine.stderr.log")),
             process: Mutex::new(None),
+            request_sequence: AtomicU64::new(1),
             last_error: Mutex::new(data_key.err()),
         };
         if let Err(error) = bridge.ensure_started() {
@@ -255,13 +353,14 @@ impl EngineBridge {
         let mut result = self.request_with_restart(request.clone(), true);
         // A write/read/response fault invalidates the owned sidecar process
         // and request_with_restart drops it. The next request can therefore
-        // start a clean process. Retry exactly once here: all mutation
-        // envelopes carry durable idempotency keys, while reads are safe to
-        // repeat. Never retry domain or validation failures.
+        // start a clean process. A lost mutation response is intentionally not
+        // replayed: the operator gets a durable status/diagnostic instead.
+        // Only explicitly classified reads may restart once.
         if result
             .as_ref()
             .err()
             .is_some_and(|error| should_retry_after_transport_fault(error))
+            && is_safe_read_retry(&request)
         {
             result = self.request_with_restart(request, false);
         }
@@ -304,9 +403,22 @@ impl EngineBridge {
 
     fn request_with_restart(
         &self,
-        request: Value,
+        mut request: Value,
         allow_preflight_restart: bool,
     ) -> Result<Value, String> {
+        let original_id = request
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "ENGINE_REQUEST_ID_MISSING".to_string())?
+            .to_string();
+        let suffix = format!(".bridge-{}", self.request_sequence.fetch_add(1, Ordering::Relaxed));
+        let transport_id = format!(
+            "{}{}",
+            original_id.chars().take(200usize.saturating_sub(suffix.len())).collect::<String>(),
+            suffix
+        );
+        request["id"] = Value::String(transport_id.clone());
+        let serialized = serialize_bounded_request(&request)?;
         self.ensure_started()?;
         let mut guard = self
             .process
@@ -316,6 +428,14 @@ impl EngineBridge {
             .as_mut()
             .ok_or_else(|| "ENGINE_NOT_RUNNING".to_string())?;
 
+        if process.protocol_fault.load(Ordering::Acquire) {
+            *guard = None;
+            drop(guard);
+            if !allow_preflight_restart {
+                return Err("ENGINE_PROTOCOL_FAULT".to_string());
+            }
+            return self.request_with_restart(request, false);
+        }
         if process
             .child
             .try_wait()
@@ -331,12 +451,8 @@ impl EngineBridge {
             return self.request_with_restart(request, false);
         }
 
-        let serialized = serialize_bounded_request(&request)?;
-        let expected_id = request
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "ENGINE_REQUEST_ID_MISSING".to_string())?
-            .to_string();
+        let response_receiver = process.pending.register(&transport_id)?;
+        let process_id = process.child.id();
         if let Err(error) = process
             .stdin
             .as_mut()
@@ -357,49 +473,44 @@ impl EngineBridge {
                     .flush()
             })
         {
+            process.pending.cancel(&transport_id);
             *guard = None;
             return Err(format!("ENGINE_WRITE_FAILED: {error}"));
         }
 
-        let timeout = if process.ready {
-            RESPONSE_TIMEOUT
-        } else {
-            STARTUP_RESPONSE_TIMEOUT
-        };
-        let line = match process.responses.recv_timeout(timeout) {
+        let timeout = response_timeout_for_request(&request, process.ready);
+        drop(guard);
+        let line = match response_receiver.recv_timeout(timeout) {
             Ok(Ok(line)) => line,
             Ok(Err(error)) => {
-                *guard = None;
                 return Err(transport_error_for_request(
                     &format!("ENGINE_READ_FAILED: {error}"),
-                    &expected_id,
+                    &transport_id,
                 ));
             }
             Err(error) => {
-                *guard = None;
+                if let Ok(mut process) = self.process.lock() {
+                    if process.as_ref().is_some_and(|value| value.child.id() == process_id) {
+                        *process = None;
+                    }
+                }
                 return Err(format!("ENGINE_RESPONSE_TIMEOUT: {error}"));
             }
         };
-        if line.is_empty() {
-            *guard = None;
-            return Err("ENGINE_CLOSED_PIPE".to_string());
-        }
-        if line.len() > MAX_RESPONSE_BYTES {
-            *guard = None;
-            return Err(transport_error_for_request("ENGINE_RESPONSE_TOO_LARGE", &expected_id));
-        }
         let response: Value = match serde_json::from_str(&line) {
             Ok(response) => response,
             Err(error) => {
-                *guard = None;
                 return Err(format!("ENGINE_RESPONSE_INVALID: {error}"));
             }
         };
-        if response.get("id").and_then(Value::as_str) != Some(expected_id.as_str()) {
-            *guard = None;
+        if response.get("id").and_then(Value::as_str) != Some(transport_id.as_str()) {
             return Err("ENGINE_RESPONSE_ID_MISMATCH".to_string());
         }
-        process.ready = true;
+        if let Ok(mut process) = self.process.lock() {
+            if let Some(process) = process.as_mut().filter(|value| value.child.id() == process_id) {
+                process.ready = true;
+            }
+        }
         Ok(response)
     }
 
@@ -427,12 +538,17 @@ impl EngineBridge {
             .data_key_hex
             .as_ref()
             .ok_or_else(|| "LOCAL_DATA_KEY_UNAVAILABLE".to_string())?;
+        let fetcher_executable = self
+            .fetcher_executable
+            .as_ref()
+            .ok_or_else(|| "FETCHER_SIDECAR_MISSING".to_string())?;
         let mut command = Command::new(executable);
         command.env_clear();
         command
             .envs(sidecar_environment())
             .env("BLOGBOT_PGLITE_ASSETS", assets)
             .env("BLOGBOT_ENGINE_MODULES", node_modules)
+            .env("BLOGBOT_FETCHER_BIN", fetcher_executable)
             .env("BLOGBOT_DATA_KEY_HEX", data_key_hex)
             .envs(self.codex_environment())
             .stdin(Stdio::piped())
@@ -478,7 +594,10 @@ impl EngineBridge {
                 }
             })
             .map_err(|error| format!("ENGINE_STDERR_READER_START_FAILED: {error}"))?;
-        let (responses, receiver) = mpsc::channel();
+        let pending = Arc::new(PendingResponses::default());
+        let reader_pending = Arc::clone(&pending);
+        let protocol_fault = Arc::new(AtomicBool::new(false));
+        let reader_protocol_fault = Arc::clone(&protocol_fault);
         let reader = thread::Builder::new()
             .name("blogbot-engine-stdout".to_string())
             .spawn(move || {
@@ -506,17 +625,36 @@ impl EngineBridge {
                         }
                         Err(error) => Err(error.to_string()),
                     };
-                    let stop = result.is_err();
-                    if responses.send(result).is_err() || stop {
-                        break;
+                    match result {
+                        Ok(line) => match reader_pending.resolve_line(&line) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                            // A timed-out request can leave a late response behind.
+                            // Bridge-generated IDs prevent it being delivered to a
+                            // newer caller, so it is safe to discard here.
+                            }
+                            Err(error) => {
+                                reader_protocol_fault.store(true, Ordering::Release);
+                                reader_pending.fail_all(&error);
+                                break;
+                            }
+                        },
+                        Err(error) => {
+                            reader_protocol_fault.store(true, Ordering::Release);
+                            reader_pending.fail_all(&error);
+                            break;
+                        }
                     }
                 }
+                reader_protocol_fault.store(true, Ordering::Release);
+                reader_pending.fail_all("ENGINE_CLOSED_PIPE");
             })
             .map_err(|error| format!("ENGINE_READER_START_FAILED: {error}"))?;
         *guard = Some(EngineProcess {
             child,
             stdin: Some(stdin),
-            responses: receiver,
+            pending,
+            protocol_fault,
             reader: Some(reader),
             stderr_reader: Some(stderr_reader),
             ready: false,
@@ -614,6 +752,21 @@ fn discover_engine_executable() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
+fn discover_fetcher_executable() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("BLOGBOT_FETCHER_BIN").map(PathBuf::from) {
+        if path.is_file() { return Some(path); }
+    }
+    let mut candidates = Vec::new();
+    if let Ok(current) = env::current_exe() {
+        if let Some(directory) = current.parent() {
+            candidates.push(directory.join("blogbot-fetcher.exe"));
+            candidates.push(directory.join("blogbot-fetcher-x86_64-pc-windows-msvc.exe"));
+        }
+    }
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries").join("blogbot-fetcher-x86_64-pc-windows-msvc.exe"));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
 fn discover_pglite_assets(app: &AppHandle) -> Option<PathBuf> {
     if let Some(path) = env::var_os("BLOGBOT_PGLITE_ASSETS").map(PathBuf::from) {
         if has_pglite_assets(&path) {
@@ -658,7 +811,7 @@ fn discover_engine_node_modules(app: &AppHandle) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_engine_executable, has_pglite_assets, redact_diagnostic_for_persistence, serialize_bounded_request, sidecar_environment_with, should_retry_after_transport_fault, transport_error_for_request, RESPONSE_TIMEOUT, WINDOWS_CREATE_NO_WINDOW};
+    use super::{discover_engine_executable, has_pglite_assets, is_safe_read_retry, redact_diagnostic_for_persistence, response_timeout_for_request, serialize_bounded_request, sidecar_environment_with, should_retry_after_transport_fault, transport_error_for_request, PendingResponses, MAINTENANCE_RESPONSE_TIMEOUT, RESPONSE_TIMEOUT, STARTUP_RESPONSE_TIMEOUT, WINDOWS_CREATE_NO_WINDOW};
     use serde_json::json;
     use std::path::Path;
     use std::time::Duration;
@@ -695,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_sidecar_transport_faults_get_one_safe_restart_retry() {
+    fn transport_fault_classifier_distinguishes_safe_reads_from_mutations() {
         for error in [
             "ENGINE_WRITE_FAILED: broken pipe",
             "ENGINE_READ_FAILED: connection reset",
@@ -708,6 +861,18 @@ mod tests {
         }
         assert!(!should_retry_after_transport_fault("ENGINE_REQUEST_TOO_LARGE"));
         assert!(!should_retry_after_transport_fault("ENGINE_REQUEST_ID_MISSING"));
+        assert!(is_safe_read_retry(&json!({ "kind": "state" })));
+        assert!(is_safe_read_retry(&json!({ "kind": "command", "command": { "kind": "REVISION.GET" } })));
+        assert!(!is_safe_read_retry(&json!({ "kind": "publication.enqueue" })));
+        assert!(!is_safe_read_retry(&json!({ "kind": "command", "command": { "kind": "APPROVAL.GRANT" } })));
+    }
+
+    #[test]
+    fn bounded_backup_requests_get_a_longer_timeout_without_expanding_normal_requests() {
+        assert_eq!(response_timeout_for_request(&json!({ "kind": "backup.verify" }), true), MAINTENANCE_RESPONSE_TIMEOUT);
+        assert_eq!(response_timeout_for_request(&json!({ "kind": "maintenance.integrity.verify" }), true), MAINTENANCE_RESPONSE_TIMEOUT);
+        assert_eq!(response_timeout_for_request(&json!({ "kind": "state" }), true), RESPONSE_TIMEOUT);
+        assert_eq!(response_timeout_for_request(&json!({ "kind": "backup.restore" }), false), STARTUP_RESPONSE_TIMEOUT);
     }
 
     #[test]
@@ -716,6 +881,21 @@ mod tests {
             transport_error_for_request("ENGINE_RESPONSE_TOO_LARGE", "desktop-workspace-42"),
             "ENGINE_RESPONSE_TOO_LARGE request=desktop-workspace-42"
         );
+    }
+
+    #[test]
+    fn pending_responses_are_routed_by_request_id_without_cross_talking() {
+        let pending = PendingResponses::default();
+        let first = pending.register("desktop-read-1").expect("first pending response");
+        let second = pending.register("desktop-read-2").expect("second pending response");
+
+        assert!(pending.resolve_line(r#"{"id":"desktop-read-2","ok":true}"#).unwrap());
+        assert_eq!(second.recv_timeout(Duration::from_millis(50)).unwrap().unwrap(), r#"{"id":"desktop-read-2","ok":true}"#);
+        assert!(first.try_recv().is_err());
+
+        assert!(pending.resolve_line(r#"{"id":"desktop-read-1","ok":true}"#).unwrap());
+        assert_eq!(first.recv_timeout(Duration::from_millis(50)).unwrap().unwrap(), r#"{"id":"desktop-read-1","ok":true}"#);
+        assert!(!pending.resolve_line(r#"{"id":"late-response","ok":true}"#).unwrap());
     }
 
     #[test]

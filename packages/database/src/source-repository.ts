@@ -51,6 +51,10 @@ export interface StoredSourceEntry extends SourceFeedEntry {
   sourceId: string;
   /** Immutable capture time used by the local evidence retention policy. */
   capturedAt?: string;
+  /** Content-addressed immutable version of this source entry. */
+  contentHash?: string;
+  /** Stable opaque key for audit references to this exact captured version. */
+  versionId?: string;
 }
 
 export type SourceScanState =
@@ -142,6 +146,10 @@ export interface SourceRepository {
   listEntries(sourceId: string): Promise<StoredSourceEntry[]>;
   /** Read only the newest bounded slice needed for candidate triage. */
   listEntriesBounded(sourceId: string, limit: number): Promise<StoredSourceEntry[]>;
+  /** Read immutable historical captures for an exact external source identity. */
+  listEntryVersions(sourceId: string, externalId: string): Promise<StoredSourceEntry[]>;
+  /** Indexed lookup for the one selected candidate URL used during drafting. */
+  findEntryByUrl?(sourceId: string, url: string): Promise<StoredSourceEntry | undefined>;
   purgeExpiredEntries(beforeIso: string, protectedSourceIds?: readonly string[]): Promise<number>;
   getSourceCapabilities(sourceId: string): Promise<SourceCapabilities>;
   prepareScanBatch(
@@ -168,6 +176,7 @@ export interface SourceRepository {
 interface JsonRow {
   id?: string;
   external_id?: string;
+  content_hash?: string;
   value: unknown;
 }
 
@@ -182,8 +191,50 @@ CREATE TABLE IF NOT EXISTS blogbot_sources (
 CREATE TABLE IF NOT EXISTS blogbot_source_entries (
   source_id text NOT NULL REFERENCES blogbot_sources(id) ON DELETE CASCADE,
   external_id text NOT NULL,
+  sort_at timestamptz NOT NULL DEFAULT now(),
   value jsonb NOT NULL,
   PRIMARY KEY (source_id, external_id)
+);
+
+ALTER TABLE blogbot_source_entries
+  ADD COLUMN IF NOT EXISTS sort_at timestamptz NOT NULL DEFAULT now();
+
+CREATE INDEX IF NOT EXISTS blogbot_source_entries_recent_idx
+  ON blogbot_source_entries (source_id, sort_at DESC, external_id DESC);
+
+CREATE TABLE IF NOT EXISTS blogbot_source_entry_versions (
+  source_id text NOT NULL REFERENCES blogbot_sources(id) ON DELETE CASCADE,
+  external_id text NOT NULL,
+  content_hash text NOT NULL,
+  entry_url text NOT NULL,
+  sort_at timestamptz NOT NULL,
+  captured_at timestamptz NOT NULL,
+  value jsonb NOT NULL,
+  PRIMARY KEY (source_id, external_id, content_hash)
+);
+
+ALTER TABLE blogbot_source_entry_versions
+  ADD COLUMN IF NOT EXISTS entry_url text;
+
+CREATE INDEX IF NOT EXISTS blogbot_source_entry_versions_recent_idx
+  ON blogbot_source_entry_versions (source_id, sort_at DESC, external_id DESC, content_hash DESC);
+
+CREATE INDEX IF NOT EXISTS blogbot_source_entry_versions_url_idx
+  ON blogbot_source_entry_versions (source_id, entry_url, sort_at DESC, content_hash DESC);
+
+CREATE TABLE IF NOT EXISTS blogbot_source_entry_latest (
+  source_id text NOT NULL,
+  external_id text NOT NULL,
+  content_hash text NOT NULL,
+  PRIMARY KEY (source_id, external_id),
+  FOREIGN KEY (source_id, external_id, content_hash)
+    REFERENCES blogbot_source_entry_versions (source_id, external_id, content_hash)
+    ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS blogbot_source_schema_migrations (
+  scope text PRIMARY KEY,
+  version integer NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS blogbot_source_idempotency (
@@ -229,6 +280,7 @@ export class PGliteSourceRepository implements SourceRepository {
     await database.exec(SOURCE_SCHEMA_SQL);
     const protector = JsonProtector.fromEnvironment();
     await encryptLegacySourceRows(database, protector);
+    await migrateSourceEntryVersions(database, protector);
     return new PGliteSourceRepository(database, protector);
   }
 
@@ -236,7 +288,14 @@ export class PGliteSourceRepository implements SourceRepository {
     await database.exec(SOURCE_SCHEMA_SQL);
     const protector = JsonProtector.fromEnvironment();
     await encryptLegacySourceRows(database, protector);
+    await migrateSourceEntryVersions(database, protector);
     return new PGliteSourceRepository(database, protector);
+  }
+
+  /** Explicit, potentially expensive full encrypted-row integrity check. */
+  async verifyEncryptionIntegrity(): Promise<void> {
+    await encryptLegacySourceRows(this.database, this.protector, true);
+    await verifySourceEntryVersions(this.database, this.protector);
   }
 
   async close(): Promise<void> {
@@ -464,31 +523,51 @@ export class PGliteSourceRepository implements SourceRepository {
     let inserted = 0;
     await this.database.transaction(async (transaction) => {
       for (const entry of entries) {
-        const existing = await transaction.query<{ external_id: string }>(
-          `SELECT external_id
-             FROM blogbot_source_entries
-            WHERE source_id = $1 AND external_id = $2`,
-          [sourceId, entry.externalId]
+        const capturedAt = new Date().toISOString();
+        const contentHash = sourceEntryVersionContentHash(sourceId, entry);
+        const existing = await transaction.query<{ content_hash: string }>(
+          `SELECT content_hash
+             FROM blogbot_source_entry_versions
+            WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
+          [sourceId, entry.externalId, contentHash]
         );
         if (!existing.rows[0]) {
           inserted += 1;
         }
-        const stored: StoredSourceEntry = { sourceId, capturedAt: new Date().toISOString(), ...entry };
+        const sortAt = normalizedEntrySortAt(entry.publishedAt, capturedAt);
+        const stored: StoredSourceEntry = {
+          sourceId,
+          capturedAt,
+          contentHash,
+          versionId: sourceEntryVersionId(sourceId, entry.externalId, contentHash),
+          ...entry
+        };
         await transaction.query(
-          `INSERT INTO blogbot_source_entries (source_id, external_id, value)
-           VALUES ($1, $2, $3::jsonb)
-           ON CONFLICT (source_id, external_id)
-           DO UPDATE SET value = EXCLUDED.value`,
+          `INSERT INTO blogbot_source_entry_versions (
+             source_id, external_id, content_hash, entry_url, sort_at, captured_at, value
+           ) VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::jsonb)
+           ON CONFLICT (source_id, external_id, content_hash) DO NOTHING`,
           [
             sourceId,
             entry.externalId,
+            contentHash,
+            entry.url,
+            sortAt,
+            capturedAt,
             JSON.stringify(
               this.protector.seal(
                 stored,
-                sourceEntryContext(sourceId, entry.externalId)
+                sourceEntryVersionContext(sourceId, entry.externalId, contentHash)
               )
             )
           ]
+        );
+        await transaction.query(
+          `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (source_id, external_id)
+           DO UPDATE SET content_hash = EXCLUDED.content_hash`,
+          [sourceId, entry.externalId, contentHash]
         );
       }
     });
@@ -497,43 +576,84 @@ export class PGliteSourceRepository implements SourceRepository {
 
   async listEntries(sourceId: string): Promise<StoredSourceEntry[]> {
     const result = await this.database.query<JsonRow>(
-      `SELECT external_id, value
-         FROM blogbot_source_entries
-        WHERE source_id = $1
+      `SELECT versions.external_id, versions.content_hash, versions.value
+         FROM blogbot_source_entry_versions AS versions
+         JOIN blogbot_source_entry_latest AS latest
+           ON latest.source_id = versions.source_id
+          AND latest.external_id = versions.external_id
+          AND latest.content_hash = versions.content_hash
+        WHERE versions.source_id = $1
         ORDER BY external_id`,
       [sourceId]
     );
-    return result.rows.map(({ external_id, value }) => this.openSourceEntryRow(sourceId, external_id, value));
+    return result.rows.map(({ external_id, content_hash, value }) => this.openSourceEntryRow(sourceId, external_id, content_hash, value));
   }
 
   async listEntriesBounded(sourceId: string, limit: number): Promise<StoredSourceEntry[]> {
     const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
     const result = await this.database.query<JsonRow>(
-      `SELECT external_id, value
-         FROM blogbot_source_entries
-        WHERE source_id = $1
-        ORDER BY external_id DESC
+      `SELECT versions.external_id, versions.content_hash, versions.value
+         FROM blogbot_source_entry_versions AS versions
+         JOIN blogbot_source_entry_latest AS latest
+           ON latest.source_id = versions.source_id
+          AND latest.external_id = versions.external_id
+          AND latest.content_hash = versions.content_hash
+        WHERE versions.source_id = $1
+        ORDER BY versions.sort_at DESC, versions.external_id DESC, versions.content_hash DESC
         LIMIT $2`,
       [sourceId, safeLimit]
     );
-    return result.rows.map(({ external_id, value }) => this.openSourceEntryRow(sourceId, external_id, value));
+    return result.rows.map(({ external_id, content_hash, value }) => this.openSourceEntryRow(sourceId, external_id, content_hash, value));
   }
 
-  private openSourceEntryRow(sourceId: string, external_id: string | undefined, value: unknown): StoredSourceEntry {
-      if (!external_id) {
+  async listEntryVersions(sourceId: string, externalId: string): Promise<StoredSourceEntry[]> {
+    const result = await this.database.query<JsonRow>(
+      `SELECT external_id, content_hash, value
+         FROM blogbot_source_entry_versions
+        WHERE source_id = $1 AND external_id = $2
+        ORDER BY content_hash`,
+      [sourceId, externalId]
+    );
+    return result.rows.map(({ external_id, content_hash, value }) =>
+      this.openSourceEntryRow(sourceId, external_id, content_hash, value)
+    );
+  }
+
+  async findEntryByUrl(sourceId: string, url: string): Promise<StoredSourceEntry | undefined> {
+    const result = await this.database.query<JsonRow>(
+      `SELECT versions.external_id, versions.content_hash, versions.value
+         FROM blogbot_source_entry_versions AS versions
+         JOIN blogbot_source_entry_latest AS latest
+           ON latest.source_id = versions.source_id
+          AND latest.external_id = versions.external_id
+          AND latest.content_hash = versions.content_hash
+        WHERE versions.source_id = $1 AND versions.entry_url = $2
+        ORDER BY versions.sort_at DESC, versions.content_hash DESC
+        LIMIT 1`,
+      [sourceId, url]
+    );
+    const row = result.rows[0];
+    return row ? this.openSourceEntryRow(sourceId, row.external_id, row.content_hash, row.value) : undefined;
+  }
+
+  private openSourceEntryRow(sourceId: string, external_id: string | undefined, content_hash: string | undefined, value: unknown): StoredSourceEntry {
+      if (!external_id || !content_hash || !/^[a-f0-9]{64}$/u.test(content_hash)) {
         throw new Error("LOCAL_DATA_IDENTITY_MISSING");
       }
       const entry = this.protector.open<StoredSourceEntry>(
         value,
-        sourceEntryContext(sourceId, external_id)
+        sourceEntryVersionContext(sourceId, external_id, content_hash)
       );
-      if (entry.sourceId !== sourceId) {
+      if (
+        entry.sourceId !== sourceId ||
+        entry.externalId !== external_id ||
+        entry.contentHash !== content_hash ||
+        entry.versionId !== sourceEntryVersionId(sourceId, external_id, content_hash) ||
+        sourceEntryVersionContentHash(sourceId, entry) !== content_hash
+      ) {
         throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
       }
-      // Capture timestamps are retention metadata, not editorial source data.
-      // Keep the historical public shape stable while retaining the sealed value.
-      const { capturedAt: _capturedAt, ...publicEntry } = entry;
-      return publicEntry;
+      return entry;
   }
 
   async purgeExpiredEntries(
@@ -543,27 +663,30 @@ export class PGliteSourceRepository implements SourceRepository {
     const cutoff = Date.parse(beforeIso);
     if (!Number.isFinite(cutoff)) throw new Error("INVALID_RETENTION_CUTOFF");
     const protectedIds = new Set(protectedSourceIds);
-    const result = await this.database.query<{ source_id?: string; external_id?: string; value: unknown }>(
-      `SELECT source_id, external_id, value FROM blogbot_source_entries`
+    const result = await this.database.query<{ source_id?: string; external_id?: string; content_hash?: string; value: unknown }>(
+      `SELECT source_id, external_id, content_hash, value FROM blogbot_source_entry_versions`
     );
-    const expired: Array<[string, string]> = [];
+    const expired: Array<[string, string, string]> = [];
     for (const row of result.rows) {
       const sourceId = row.source_id;
       const externalId = row.external_id;
-      if (!sourceId || !externalId || protectedIds.has(sourceId)) continue;
+      const contentHash = row.content_hash;
+      if (!sourceId || !externalId || !contentHash || protectedIds.has(sourceId)) continue;
       const entry = this.protector.open<StoredSourceEntry>(
         row.value,
-        sourceEntryContext(sourceId, externalId)
+        sourceEntryVersionContext(sourceId, externalId, contentHash)
       );
       const captured = Date.parse(entry.capturedAt ?? "");
-      if (Number.isFinite(captured) && captured < cutoff) expired.push([sourceId, externalId]);
+      if (entry.versionId && protectedIds.has(entry.versionId)) continue;
+      if (Number.isFinite(captured) && captured < cutoff) expired.push([sourceId, externalId, contentHash]);
     }
     if (expired.length === 0) return 0;
     await this.database.transaction(async (transaction) => {
-      for (const [sourceId, externalId] of expired) {
+      for (const [sourceId, externalId, contentHash] of expired) {
         await transaction.query(
-          `DELETE FROM blogbot_source_entries WHERE source_id = $1 AND external_id = $2`,
-          [sourceId, externalId]
+          `DELETE FROM blogbot_source_entry_versions
+            WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
+          [sourceId, externalId, contentHash]
         );
       }
     });
@@ -801,31 +924,51 @@ export class PGliteSourceRepository implements SourceRepository {
 
       let entriesAdded = 0;
       for (const entry of input.entries) {
-        const existing = await transaction.query<{ external_id: string }>(
-          `SELECT external_id
-             FROM blogbot_source_entries
-            WHERE source_id = $1 AND external_id = $2`,
-          [source.id, entry.externalId]
+        const contentHash = sourceEntryVersionContentHash(source.id, entry);
+        const existing = await transaction.query<{ content_hash: string }>(
+          `SELECT content_hash
+             FROM blogbot_source_entry_versions
+            WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
+          [source.id, entry.externalId, contentHash]
         );
         if (!existing.rows[0]) {
           entriesAdded += 1;
         }
-        const stored: StoredSourceEntry = { sourceId: source.id, capturedAt: input.completedAt, ...entry };
+        const capturedAt = input.completedAt;
+        const sortAt = normalizedEntrySortAt(entry.publishedAt, capturedAt);
+        const stored: StoredSourceEntry = {
+          sourceId: source.id,
+          capturedAt,
+          contentHash,
+          versionId: sourceEntryVersionId(source.id, entry.externalId, contentHash),
+          ...entry
+        };
         await transaction.query(
-          `INSERT INTO blogbot_source_entries (source_id, external_id, value)
-           VALUES ($1, $2, $3::jsonb)
-           ON CONFLICT (source_id, external_id)
-           DO UPDATE SET value = EXCLUDED.value`,
+          `INSERT INTO blogbot_source_entry_versions (
+             source_id, external_id, content_hash, entry_url, sort_at, captured_at, value
+           ) VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::jsonb)
+           ON CONFLICT (source_id, external_id, content_hash) DO NOTHING`,
           [
             source.id,
             entry.externalId,
+            contentHash,
+            entry.url,
+            sortAt,
+            capturedAt,
             JSON.stringify(
               this.protector.seal(
                 stored,
-                sourceEntryContext(source.id, entry.externalId)
+                sourceEntryVersionContext(source.id, entry.externalId, contentHash)
               )
             )
           ]
+        );
+        await transaction.query(
+          `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (source_id, external_id)
+           DO UPDATE SET content_hash = EXCLUDED.content_hash`,
+          [source.id, entry.externalId, contentHash]
         );
       }
       const completed: LocalSourceScan = {
@@ -961,7 +1104,8 @@ export class PGliteSourceRepository implements SourceRepository {
 
 async function encryptLegacySourceRows(
   database: PGlite,
-  protector: JsonProtector
+  protector: JsonProtector,
+  verifyCompleted = false
 ): Promise<void> {
   await database.transaction(async (transaction) => {
     const migration = await transaction.query<{ version: number }>(
@@ -973,6 +1117,10 @@ async function encryptLegacySourceRows(
         `LOCAL_ENCRYPTION_MIGRATION_UNSUPPORTED: sources version ${appliedVersion}`
       );
     }
+    // Normal startup trusts the completed migration sentinel. A full decrypt
+    // sweep remains available through verifyEncryptionIntegrity() for an
+    // operator-initiated diagnostics pass.
+    if (appliedVersion === 2 && !verifyCompleted) return;
     const sources = await transaction.query<{ id: string; value: unknown }>(
       "SELECT id, value FROM blogbot_sources"
     );
@@ -1115,6 +1263,141 @@ async function encryptLegacySourceRows(
   });
 }
 
+/**
+ * Converts the pre-v3 mutable `(source_id, external_id)` cache into an
+ * append-only content-addressed ledger. The migration is atomic: a failed
+ * conversion leaves the old rows untouched, and a completed conversion removes
+ * the duplicate mutable cache so backup size does not silently double.
+ */
+async function migrateSourceEntryVersions(
+  database: PGlite,
+  protector: JsonProtector
+): Promise<void> {
+  await database.transaction(async (transaction) => {
+    const marker = await transaction.query<{ version: number }>(
+      "SELECT version FROM blogbot_source_schema_migrations WHERE scope = 'source_entry_versions'"
+    );
+    const appliedVersion = marker.rows[0]?.version;
+    if (appliedVersion !== undefined && appliedVersion !== 1 && appliedVersion !== 2) {
+      throw new Error(`LOCAL_SOURCE_SCHEMA_MIGRATION_UNSUPPORTED: source_entry_versions version ${appliedVersion}`);
+    }
+    if (appliedVersion === 2) return;
+
+    if (appliedVersion === 1) {
+      const versions = await transaction.query<{
+        source_id: string;
+        external_id: string;
+        content_hash: string;
+        value: unknown;
+      }>("SELECT source_id, external_id, content_hash, value FROM blogbot_source_entry_versions WHERE entry_url IS NULL");
+      for (const row of versions.rows) {
+        const entry = protector.open<StoredSourceEntry>(
+          row.value,
+          sourceEntryVersionContext(row.source_id, row.external_id, row.content_hash)
+        );
+        if (entry.sourceId !== row.source_id || entry.externalId !== row.external_id || entry.contentHash !== row.content_hash) {
+          throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+        }
+        await transaction.query(
+          `UPDATE blogbot_source_entry_versions
+              SET entry_url = $4
+            WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
+          [row.source_id, row.external_id, row.content_hash, entry.url]
+        );
+      }
+      await transaction.query(
+        "UPDATE blogbot_source_schema_migrations SET version = 2 WHERE scope = 'source_entry_versions'"
+      );
+      return;
+    }
+
+    const entries = await transaction.query<{
+      source_id: string;
+      external_id: string;
+      sort_at?: string;
+      value: unknown;
+    }>("SELECT source_id, external_id, sort_at, value FROM blogbot_source_entries");
+    for (const row of entries.rows) {
+      const legacy = protector.open<StoredSourceEntry>(
+        row.value,
+        sourceEntryContext(row.source_id, row.external_id)
+      );
+      if (legacy.sourceId !== row.source_id || legacy.externalId !== row.external_id) {
+        throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+      }
+      const contentHash = sourceEntryVersionContentHash(row.source_id, legacy);
+      const capturedAt = legacy.capturedAt && Number.isFinite(Date.parse(legacy.capturedAt))
+        ? legacy.capturedAt
+        : row.sort_at && Number.isFinite(Date.parse(row.sort_at))
+          ? row.sort_at
+          : new Date(0).toISOString();
+      const sortAt = normalizedEntrySortAt(legacy.publishedAt, capturedAt);
+      const stored: StoredSourceEntry = {
+        ...legacy,
+        sourceId: row.source_id,
+        capturedAt,
+        contentHash,
+        versionId: sourceEntryVersionId(row.source_id, row.external_id, contentHash)
+      };
+      await transaction.query(
+        `INSERT INTO blogbot_source_entry_versions (
+           source_id, external_id, content_hash, entry_url, sort_at, captured_at, value
+         ) VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::jsonb)
+         ON CONFLICT (source_id, external_id, content_hash) DO NOTHING`,
+        [
+          row.source_id,
+          row.external_id,
+          contentHash,
+          legacy.url,
+          sortAt,
+          capturedAt,
+          JSON.stringify(protector.seal(stored, sourceEntryVersionContext(row.source_id, row.external_id, contentHash)))
+        ]
+      );
+      await transaction.query(
+        `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (source_id, external_id)
+         DO UPDATE SET content_hash = EXCLUDED.content_hash`,
+        [row.source_id, row.external_id, contentHash]
+      );
+    }
+    if (entries.rows.length > 0) {
+      await transaction.query("DELETE FROM blogbot_source_entries");
+    }
+    await transaction.query(
+      "INSERT INTO blogbot_source_schema_migrations (scope, version) VALUES ('source_entry_versions', 2)"
+    );
+  });
+}
+
+async function verifySourceEntryVersions(database: PGlite, protector: JsonProtector): Promise<void> {
+  const entries = await database.query<{
+    source_id: string;
+    external_id: string;
+    content_hash: string;
+    value: unknown;
+  }>("SELECT source_id, external_id, content_hash, value FROM blogbot_source_entry_versions");
+  for (const row of entries.rows) {
+    const entry = protector.open<StoredSourceEntry>(
+      row.value,
+      sourceEntryVersionContext(row.source_id, row.external_id, row.content_hash)
+    );
+    if (
+      entry.sourceId !== row.source_id ||
+      entry.externalId !== row.external_id ||
+      entry.contentHash !== row.content_hash ||
+      entry.versionId !== sourceEntryVersionId(row.source_id, row.external_id, row.content_hash) ||
+      sourceEntryVersionContentHash(row.source_id, entry) !== row.content_hash
+    ) throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+  }
+}
+
+function normalizedEntrySortAt(publishedAt: string | undefined, fallbackIso: string): string {
+  if (publishedAt && Number.isFinite(Date.parse(publishedAt))) return new Date(publishedAt).toISOString();
+  return fallbackIso;
+}
+
 function sourceContext(id: string) {
   return { table: "blogbot_sources", key: id, field: "value" };
 }
@@ -1123,6 +1406,37 @@ function sourceEntryContext(sourceId: string, externalId: string) {
   return {
     table: "blogbot_source_entries",
     key: `${sourceId}\u0000${externalId}`,
+    field: "value"
+  };
+}
+
+function sourceEntryVersionContentHash(sourceId: string, entry: SourceFeedEntry): string {
+  return createHash("sha256")
+    .update(canonicalJson({
+      sourceId,
+      externalId: entry.externalId,
+      title: entry.title,
+      url: entry.url,
+      ...(entry.summary === undefined ? {} : { summary: entry.summary }),
+      ...(entry.publishedAt === undefined ? {} : { publishedAt: entry.publishedAt })
+    }), "utf8")
+    .digest("hex");
+}
+
+function sourceEntryVersionId(sourceId: string, externalId: string, contentHash: string): string {
+  return `entry-${createHash("sha256")
+    .update(sourceId, "utf8")
+    .update("\u0000", "utf8")
+    .update(externalId, "utf8")
+    .update("\u0000", "utf8")
+    .update(contentHash, "utf8")
+    .digest("hex")}`;
+}
+
+function sourceEntryVersionContext(sourceId: string, externalId: string, contentHash: string) {
+  return {
+    table: "blogbot_source_entry_versions",
+    key: `${sourceId}\u0000${externalId}\u0000${contentHash}`,
     field: "value"
   };
 }

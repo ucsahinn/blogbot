@@ -16,7 +16,6 @@ interface SlotDraft {
   enabled: boolean;
   choice: ScheduleTimeChoice;
   customTime: string;
-  articleId: string | null;
 }
 
 const HOURS = Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, "0"));
@@ -75,8 +74,7 @@ export function PublishingCenter({
     slotDrafts[slot.id] ?? {
       enabled: slot.enabled,
       choice: scheduleTimeChoice(slot.time),
-      customTime: slot.time,
-      articleId: slot.articleId
+      customTime: slot.time
     };
 
   const slotActionUnavailableReason = (slotId: string): string =>
@@ -116,15 +114,10 @@ export function PublishingCenter({
     setMessage("");
     try {
       const time = resolveScheduleTime(draft.choice, draft.customTime);
-      const selectedPost = draft.articleId
-        ? workspace.drafts.find((item) => item.id === draft.articleId && item.state === "APPROVED")
-        : null;
       await bridge.updateScheduleSlot({
         slotId: slot.id,
         enabled: draft.enabled,
-        time,
-        articleId: selectedPost?.id ?? null,
-        articleTitle: selectedPost?.titleTr ?? null
+        time
       });
       setSlotDrafts((current) => {
         const { [slot.id]: _saved, ...rest } = current;
@@ -172,7 +165,7 @@ export function PublishingCenter({
         <div>
           <p className="section-kicker">{siteMode === "PUBLISH" ? "TAKVİM VE YAYIN" : "TAKVİM VE ÇIKTI"}</p>
           <h1>{siteMode === "PUBLISH" ? "Haftalık ritim, hazır yayınlar ve geçmiş." : "Haftalık ritim, hazır çıktılar ve geçmiş."}</h1>
-          <p>Her gün için beşe kadar yayın saati açın. Süresi geçen içerik kendiliğinden işleme alınmaz.</p>
+          <p>Her gün için beşe kadar yayın saati açın. Yeni taslaklar için NEXT_SLOT ritmi budur; onaylı bir içerik bu takvimden atanmaz veya planlanmaz.</p>
           {readOnly ? (
             <p className="inline-notice" role="status" aria-live="polite">
               Takvim ayarları yerel çalışma alanı yeniden bağlanana kadar salt okunur.
@@ -203,9 +196,8 @@ export function PublishingCenter({
             {workspace.weeklySlots.map((slot) => {
               const actionReason = slotActionUnavailableReason(slot.id);
               const actionReasonId = `slot-action-unavailable-${slot.id}`;
-              const approvedPosts = workspace.drafts.filter((item) => item.state === "APPROVED");
-              const selectedTitle = getSlotDraft(slot).articleId
-                ? approvedPosts.find((item) => item.id === getSlotDraft(slot).articleId)?.titleTr ?? slot.articleTitle
+              const legacyAssignment = slot.articleId || slot.articleTitle
+                ? `Geçmiş atama: ${slot.articleTitle ?? slot.articleId}. Bu bilgi yeni planlama yapmaz.`
                 : null;
               const activeSlot = activeSlotId || workspace.weeklySlots[0]?.id;
               if (slot.id !== activeSlot) {
@@ -220,7 +212,7 @@ export function PublishingCenter({
                   >
                     <span><strong>{slotLabel(slot)}</strong><em>{getSlotDraft(slot).enabled ? resolveScheduleTime(getSlotDraft(slot).choice, getSlotDraft(slot).customTime) : "Kapalı"}</em></span>
                     <span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span>
-                    <small>{selectedTitle ?? (approvedPosts.length === 0 ? "Onaylı post bekleniyor" : "Post atanmadı")}</small>
+                    <small>{legacyAssignment ?? "Yeni taslaklar ilk uygun etkin slota göre ilerler."}</small>
                   </button>
                 );
               }
@@ -267,20 +259,7 @@ export function PublishingCenter({
                     <output aria-label={`${slot.dayLabel} seçilen özel yayın saati`}>{getSlotDraft(slot).customTime}</output>
                   </fieldset>
                 ) : null}
-                <label className="slot-time-field">
-                  <span>Paylaşılacak onaylı post</span>
-                  <select
-                    aria-label={`${slot.dayLabel} paylaşılacak onaylı post`}
-                    value={getSlotDraft(slot).articleId ?? ""}
-                    disabled={readOnly || busyId === slot.id || approvedPosts.length === 0}
-                    aria-describedby={actionReason ? actionReasonId : undefined}
-                    onChange={(event) => updateSlotDraft(slot.id, { articleId: event.target.value || null })}
-                  >
-                    <option value="">Post seçilmedi</option>
-                    {approvedPosts.map((post) => <option key={post.id} value={post.id}>{post.titleTr}</option>)}
-                  </select>
-                </label>
-                <p>{selectedTitle ?? (approvedPosts.length === 0 ? "Atanabilecek onaylı post yok" : "Henüz onaylı post atanmadı")}</p>
+                {legacyAssignment ? <p>{legacyAssignment}</p> : null}
                 <label className="toggle-label">
                   <input
                     type="checkbox"

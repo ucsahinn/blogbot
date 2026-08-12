@@ -12,6 +12,28 @@ const envelope = (command: Record<string, unknown>) => ({
   command
 });
 
+test("revision summary list never falls back to a full engine snapshot", async () => {
+  class SummaryOnlyRepository extends InMemoryBackendStore {
+    summaryReads = 0;
+    override async sync(): Promise<never> {
+      throw new Error("FULL_SYNC_MUST_NOT_RUN_FOR_REVISION_SUMMARY");
+    }
+    override async listRevisionSnapshot() {
+      this.summaryReads += 1;
+      return { revisions: [], approvals: [], highRiskApprovals: [] };
+    }
+  }
+  const repository = new SummaryOnlyRepository();
+  const handle = createEngineProtocol(repository);
+  const response = await handle(envelope({
+    version: 1, requestId: "revision-summary-only", idempotencyKey: "revision-summary-only",
+    expectedVersion: 0, kind: "REVISION.LIST", payload: { summaryOnly: true }
+  }));
+
+  assert.equal(response.ok, true);
+  assert.equal(repository.summaryReads, 1);
+});
+
 test("draft.create persists a WAITING_CODEX local job when no runner is configured", async () => {
   const repository = new InMemoryBackendStore();
   const handle = createEngineProtocol(repository);
@@ -481,6 +503,31 @@ test("draft.create with NEXT_SLOT considers every enabled slot of the same weekd
   assert.ok(Date.parse(String(job.metadata?.scheduledAt)) > Date.now());
 });
 
+test("NEXT_SLOT reserves an already assigned time and chooses the next available slot", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.setLocalState("desktop.editorial", {
+    schedule: { slots: {
+      "slot-mon-1": { slotId: "slot-mon-1", enabled: true, time: "09:00" },
+      "slot-mon-2": { slotId: "slot-mon-2", enabled: true, time: "18:00" }
+    } }
+  });
+  const handle = createEngineProtocol(repository);
+  const create = async (id: string) => handle(envelope({
+    version: 1,
+    requestId: id,
+    idempotencyKey: id,
+    expectedVersion: await repository.getVersion(),
+    kind: "DRAFT.CREATE",
+    payload: { draftId: id, instruction: "Aynı yayın slotu iki kez kullanılmamalı", sourceIds: ["source-1"], urls: [], section: "haberler", articleType: "news", scheduleIntent: "NEXT_SLOT" }
+  }));
+
+  assert.equal((await create("draft-next-slot-reserved-1")).ok, true);
+  assert.equal((await create("draft-next-slot-reserved-2")).ok, true);
+  const first = await repository.getJob("draft-next-slot-reserved-1");
+  const second = await repository.getJob("draft-next-slot-reserved-2");
+  assert.notEqual(first.metadata?.scheduledAt, second.metadata?.scheduledAt);
+});
+
 test("draft source evidence is bounded, anchored, and marked untrusted", async () => {
   const body = `<rss><channel><title>Feed</title><item><title>Patch</title><link>https://example.com/patch</link><description>${"A".repeat(15000)}</description></item></channel></rss>`;
   const evidence = await collectDraftSourceEvidence(undefined, [], ["https://example.com/feed"], {
@@ -506,7 +553,7 @@ test("candidate research uses only the selected feed entry instead of the whole 
     async getSource() {
       return { id: "source-1", url: "https://news.example/feed.xml", updatedAt: "2026-08-07T00:00:00.000Z" };
     },
-    async listEntries() {
+    async listEntriesBounded() {
       return [
         { externalId: "other", url: "https://news.example/stories/other", title: "Other story", summary: "Other summary" },
         { externalId: "selected", url: "https://news.example/stories/selected", title: "Selected story", summary: "Selected summary" }

@@ -4,8 +4,10 @@ use std::process::{Child, Command, Stdio};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 use thiserror::Error;
@@ -538,12 +540,16 @@ pub fn recover_local_workspace(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
+    // A response timeout is not evidence that the encrypted PGlite tree is
+    // corrupt. Moving it would turn an availability incident into a silent
+    // empty-workspace data-loss incident. Destructive adoption is reserved
+    // for a future, explicit corruption verifier.
     let can_recover = bridge
         .last_error()
-        .is_some_and(|error| error.contains("ENGINE_RESPONSE_TIMEOUT"));
+        .is_some_and(|error| error.contains("ENGINE_DATA_CORRUPTION_CONFIRMED"));
     if !can_recover {
         return Err(CommandError::InvalidInput(
-            "Yerel çalışma alanı kurtarma işlemi yalnız zaman aşımı tanısı sonrasında kullanılabilir.".into(),
+            "Zaman aşımı veri bozulması kanıtı değildir; yerel çalışma alanı taşınmadı. Uygulamayı yeniden başlatın ve tanılama paketi oluşturun.".into(),
         ));
     }
 
@@ -1272,10 +1278,104 @@ pub fn save_setup_connector(
     }))
 }
 
+const CONNECTOR_SITE_CATALOG_MIGRATION_KEY: &str = "migration:connector-site-catalog:v1";
+
+fn safe_legacy_site_connector(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let repository_path = object.get("repositoryPath")?.as_str()?.trim();
+    let mode = object.get("mode").and_then(Value::as_str).unwrap_or("LOCAL_ONLY").trim();
+    if !is_local_path(repository_path) || !valid_site_work_mode(mode) {
+        return None;
+    }
+    let public_site_url = object.get("publicSiteUrl").and_then(Value::as_str).unwrap_or("").trim();
+    if !public_site_url.is_empty() && !(public_site_url.starts_with("https://") || public_site_url.starts_with("http://")) {
+        return None;
+    }
+    Some(json!({
+        "repositoryPath": repository_path,
+        "publicSiteUrl": public_site_url,
+        "mode": mode
+    }))
+}
+
+#[tauri::command]
+pub fn verify_local_integrity(
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    let response = engine_request(&bridge, json!({
+        "version": 1,
+        "id": format!("desktop-integrity-verify-{}", std::process::id()),
+        "kind": "maintenance.integrity.verify"
+    }))?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(CommandError::EngineUnavailable(
+            response.pointer("/message").and_then(Value::as_str)
+                .or_else(|| response.pointer("/error/message").and_then(Value::as_str))
+                .unwrap_or("LOCAL_INTEGRITY_VERIFY_FAILED")
+                .to_string()
+        ));
+    }
+    Ok(response)
+}
+
+fn migrate_legacy_site_connector_catalog(
+    connectors: &mut Value,
+    checks: &mut Value,
+    legacy_site: Option<&Value>,
+) -> Result<Value, CommandError> {
+    let connectors_object = connectors.as_object_mut()
+        .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_SNAPSHOT_CORRUPT".into()))?;
+    let checks_object = checks.as_object_mut()
+        .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_SNAPSHOT_CORRUPT".into()))?;
+    let catalog_site = connectors_object.get("site").cloned();
+    let legacy_site = legacy_site.and_then(safe_legacy_site_connector);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+
+    match (catalog_site, legacy_site) {
+        (_, None) => Ok(json!({ "state": "NO_LEGACY_SITE_RECORD", "completedAtUnixMs": now })),
+        (None, Some(legacy)) => {
+            connectors_object.insert("site".into(), legacy);
+            checks_object.insert("site".into(), json!({
+                "ready": false,
+                "state": "MIGRATED_REVALIDATION_REQUIRED",
+                "migrationState": "MIGRATED_REVALIDATION_REQUIRED",
+                "checkedAtUnixMs": now
+            }));
+            Ok(json!({ "state": "MIGRATED_REVALIDATION_REQUIRED", "completedAtUnixMs": now }))
+        }
+        (Some(current), Some(legacy)) if safe_legacy_site_connector(&current).as_ref() == Some(&legacy) =>
+            Ok(json!({ "state": "ALREADY_EQUIVALENT", "completedAtUnixMs": now })),
+        (Some(_), Some(_)) => {
+            checks_object.insert("site".into(), json!({
+                "ready": false,
+                "state": "MIGRATION_CONFLICT_REVIEW_REQUIRED",
+                "migrationState": "MIGRATION_CONFLICT_REVIEW_REQUIRED",
+                "checkedAtUnixMs": now
+            }));
+            Ok(json!({ "state": "MIGRATION_CONFLICT_REVIEW_REQUIRED", "completedAtUnixMs": now }))
+        }
+    }
+}
+
+fn migrate_legacy_site_connector_if_needed(bridge: &EngineBridge) -> Result<Option<Value>, CommandError> {
+    if read_engine_local_state_result(bridge, CONNECTOR_SITE_CATALOG_MIGRATION_KEY)?.is_some() {
+        return Ok(None);
+    }
+    let mut connectors = read_engine_local_state_result(bridge, "desktop.connectors")?.unwrap_or_else(|| json!({}));
+    let mut checks = read_engine_local_state_result(bridge, "desktop.connectorChecks")?.unwrap_or_else(|| json!({}));
+    let legacy_site = read_engine_local_state_result(bridge, "connector.site")?;
+    let marker = migrate_legacy_site_connector_catalog(&mut connectors, &mut checks, legacy_site.as_ref())?;
+    write_engine_local_state(bridge, "desktop.connectors", connectors)?;
+    write_engine_local_state(bridge, "desktop.connectorChecks", checks)?;
+    write_engine_local_state(bridge, CONNECTOR_SITE_CATALOG_MIGRATION_KEY, marker.clone())?;
+    Ok(Some(marker))
+}
+
 #[tauri::command]
 pub fn get_connector_state(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
+    let migration = migrate_legacy_site_connector_if_needed(&bridge)?;
     let connectors_state = read_engine_local_state_result(&bridge, "desktop.connectors")?;
     let checks_state = read_engine_local_state_result(&bridge, "desktop.connectorChecks")?;
     let source_state = if connectors_state.is_none() && checks_state.is_none() { "ABSENT" } else { "AVAILABLE" };
@@ -1344,6 +1444,7 @@ pub fn get_connector_state(
             "adapterVersion": site_check.and_then(|value| value.pointer("/adapterDryRun/adapterVersion")).cloned().unwrap_or(Value::Null)
         },
         "checks": checks,
+        "migration": migration,
         "localReadiness": local_readiness,
         "externalReadiness": external_readiness
     }))
@@ -2405,6 +2506,7 @@ fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
                         "width": asset.get("width").cloned().unwrap_or(json!(0)),
                         "height": asset.get("height").cloned().unwrap_or(json!(0)),
                         "sha256": asset.get("sha256").cloned().unwrap_or(Value::Null),
+                        "byteSize": asset.get("byteSize").cloned().unwrap_or(Value::Null),
                         "contentBase64": asset.get("contentBase64").cloned().unwrap_or(Value::Null),
                         "altTr": tr.get("heroImageAlt").cloned().unwrap_or(Value::Null),
                         "altEn": en.get("heroImageAlt").cloned().unwrap_or(Value::Null)
@@ -2444,7 +2546,8 @@ fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
                         "detail": gate.get("detail").cloned().unwrap_or(json!("Kontrol ayrıntısı sağlanmadı.")),
                         "state": gate.get("state").cloned().unwrap_or(json!("NOT_RUN")),
                         "group": gate.get("group").cloned().unwrap_or(json!("editorial")),
-                        "policyVersion": gate.get("policyVersion").cloned().unwrap_or(json!("unknown"))
+                        "policyVersion": gate.get("policyVersion").cloned().unwrap_or(json!("unknown")),
+                        "reasonCode": gate.get("reasonCode").cloned().unwrap_or(Value::Null)
                     })
                 })
                 .collect::<Vec<_>>()
@@ -2507,7 +2610,9 @@ pub fn create_instant_draft(
     let urgency = request_choice(&request, "urgency", &["normal", "urgent"], "normal")?;
     let tone = request_choice(&request, "tone", &["neutral", "technical", "accessible"], "neutral")?;
     let length = request_choice(&request, "length", &["standard", "deep"], "standard")?;
-    let visual_policy = request_choice(&request, "visualPolicy", &["GENERATE", "LOCAL_RENDERER", "NONE"], "GENERATE")?;
+    // New draft creation always has an explicit hero-media path. Existing
+    // no-media revisions remain recoverable through the dedicated repair flow.
+    let visual_policy = request_choice(&request, "visualPolicy", &["GENERATE", "LOCAL_RENDERER"], "GENERATE")?;
     let schedule_intent = request_choice(&request, "scheduleIntent", &["NEXT_SLOT", "UNSCHEDULED"], "UNSCHEDULED")?;
     let editorial_preferences = read_engine_local_state(&bridge, "desktop.editorial")
         .and_then(|value| value.get("preferences").cloned())
@@ -2590,6 +2695,40 @@ pub fn get_review_revision(
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
     let materialization = read_revision_at_version(&bridge, expected_version, &revision_id)?;
     build_review_revision(&materialization)
+}
+
+/// Reads one engine-owned image only for the active review surface. The bytes
+/// are verified before they cross into the WebView and are never persisted in
+/// the publication preview state.
+#[tauri::command]
+pub fn read_revision_media(
+    revision_id: String,
+    sha256: String,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    if revision_id.is_empty()
+        || revision_id.len() > 128
+        || !revision_id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-')
+        || sha256.len() != 64
+        || !sha256.chars().all(|value| value.is_ascii_hexdigit())
+    {
+        return Err(CommandError::InvalidInput("geçerli revizyon medya kimliği gerekir".into()));
+    }
+    let revision = read_revision_at_version(
+        &bridge,
+        read_engine_state(&bridge)?.pointer("/snapshot/serverCursor").and_then(Value::as_u64)
+            .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?,
+        &revision_id,
+    )?;
+    let media = revision.get("media").and_then(Value::as_array).and_then(|items| items.iter().find(|asset| {
+        asset.get("sha256").and_then(Value::as_str).is_some_and(|value| value.eq_ignore_ascii_case(&sha256))
+    })).ok_or_else(|| CommandError::InvalidInput("revizyon medyası bulunamadı".into()))?;
+    let byte_size = media.get("byteSize").and_then(Value::as_u64)
+        .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_SIZE_MISSING".into()))?;
+    let bytes = read_engine_media_bytes(&bridge, &revision_id, &sha256.to_ascii_lowercase(), byte_size)?;
+    let path = media.get("path").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
+    let mime_type = if path.ends_with(".png") { "image/png" } else if path.ends_with(".jpg") || path.ends_with(".jpeg") { "image/jpeg" } else { "image/webp" };
+    Ok(json!({ "contentBase64": base64::engine::general_purpose::STANDARD.encode(bytes), "mimeType": mime_type }))
 }
 
 #[tauri::command]
@@ -2950,15 +3089,145 @@ pub fn enqueue_publication(
     response.get("value").cloned().ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_ENQUEUE_SHAPE_INVALID".into()))
 }
 
+#[cfg(test)]
 struct PreviewMaterializationFile {
     destination: PathBuf,
-    content: String,
+    content: Vec<u8>,
     backup: Option<PathBuf>,
 }
 
+fn preview_file_bytes(file: &Value) -> Result<Vec<u8>, CommandError> {
+    let content = file.get("content").ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_MISSING".into()))?;
+    if let Some(text) = content.as_str() {
+        return Ok(text.as_bytes().to_vec());
+    }
+    let values: Vec<&Value> = if let Some(values) = content.as_array() {
+        values.iter().collect()
+    } else if let Some(object) = content.as_object() {
+        let mut indexed = object.iter().map(|(index, value)| {
+            index.parse::<usize>()
+                .map(|index| (index, value))
+                .map_err(|_| CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into()))
+        }).collect::<Result<Vec<_>, _>>()?;
+        indexed.sort_by_key(|(index, _)| *index);
+        if indexed.iter().enumerate().any(|(expected, (actual, _))| expected != *actual) {
+            return Err(CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into()));
+        }
+        indexed.into_iter().map(|(_, value)| value).collect()
+    } else {
+        return Err(CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into()));
+    };
+    values.into_iter().map(|value| {
+        value.as_u64()
+            .filter(|value| *value <= u8::MAX as u64)
+            .map(|value| value as u8)
+            .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into()))
+    }).collect()
+}
+
+/// `symlink_metadata` alone is insufficient on Windows: directory junctions
+/// are reparse points but are not always reported as symbolic links. Reject
+/// both forms before a local preview can touch an untrusted path.
+#[cfg(test)]
+fn is_reparse_point(path: &Path) -> std::io::Result<bool> {
+    #[cfg(windows)]
+    {
+        use std::iter::once;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{GetFileAttributesW, FILE_ATTRIBUTE_REPARSE_POINT, INVALID_FILE_ATTRIBUTES};
+
+        let wide = path.as_os_str().encode_wide().chain(once(0)).collect::<Vec<_>>();
+        // SAFETY: the buffer is NUL-terminated and lives for the duration of
+        // the synchronous Win32 call.
+        let attributes = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+        if attributes == INVALID_FILE_ATTRIBUTES {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
+const ENGINE_MEDIA_CHUNK_BYTES: u64 = 64 * 1024;
+const ENGINE_MEDIA_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+fn preview_file_media_reference(content: &Value, revision_id: &str) -> Result<Option<(String, u64)>, CommandError> {
+    if content.get("kind").and_then(Value::as_str) != Some("engine-media-ref") {
+        return Ok(None);
+    }
+    let reference_revision = content.get("revisionId").and_then(Value::as_str).unwrap_or_default();
+    let sha256 = content.get("sha256").and_then(Value::as_str).unwrap_or_default();
+    let byte_size = content.get("byteSize").and_then(Value::as_u64).unwrap_or_default();
+    if reference_revision != revision_id
+        || sha256.len() != 64
+        || !sha256.chars().all(|value| value.is_ascii_hexdigit())
+        || byte_size == 0
+        || byte_size > ENGINE_MEDIA_MAX_BYTES
+    {
+        return Err(CommandError::EngineUnavailable("PUBLICATION_MEDIA_REFERENCE_INVALID".into()));
+    }
+    Ok(Some((sha256.to_ascii_lowercase(), byte_size)))
+}
+
+fn read_engine_media_bytes(
+    bridge: &EngineBridge,
+    revision_id: &str,
+    sha256: &str,
+    expected_size: u64,
+) -> Result<Vec<u8>, CommandError> {
+    let mut output = Vec::with_capacity(expected_size as usize);
+    let mut offset = 0u64;
+    loop {
+        let response = engine_request(bridge, json!({
+            "version": 1,
+            "id": format!("desktop-media-read:{revision_id}:{sha256}:{offset}"),
+            "kind": "media.read",
+            "revisionId": revision_id,
+            "sha256": sha256,
+            "offset": offset,
+            "length": ENGINE_MEDIA_CHUNK_BYTES
+        }))?;
+        let value = response.get("value").ok_or_else(|| CommandError::EngineUnavailable("MEDIA_READ_SHAPE_INVALID".into()))?;
+        let returned_offset = value.get("offset").and_then(Value::as_u64);
+        let total = value.get("totalBytes").and_then(Value::as_u64);
+        let encoded = value.get("contentBase64").and_then(Value::as_str);
+        let eof = value.get("eof").and_then(Value::as_bool);
+        if returned_offset != Some(offset) || total != Some(expected_size) || eof.is_none() {
+            return Err(CommandError::EngineUnavailable("MEDIA_READ_SHAPE_INVALID".into()));
+        }
+        let chunk = base64::engine::general_purpose::STANDARD
+            .decode(encoded.unwrap_or_default())
+            .map_err(|_| CommandError::EngineUnavailable("MEDIA_READ_ENCODING_INVALID".into()))?;
+        if chunk.is_empty() && eof != Some(true) {
+            return Err(CommandError::EngineUnavailable("MEDIA_READ_STALLED".into()));
+        }
+        output.extend_from_slice(&chunk);
+        offset = offset.checked_add(chunk.len() as u64)
+            .ok_or_else(|| CommandError::EngineUnavailable("MEDIA_READ_SIZE_INVALID".into()))?;
+        if offset > expected_size {
+            return Err(CommandError::EngineUnavailable("MEDIA_READ_SIZE_INVALID".into()));
+        }
+        if eof == Some(true) { break; }
+    }
+    if output.len() as u64 != expected_size {
+        return Err(CommandError::EngineUnavailable("MEDIA_READ_SIZE_INVALID".into()));
+    }
+    let actual = format!("{:x}", Sha256::digest(&output));
+    if actual != sha256 {
+        return Err(CommandError::EngineUnavailable("MEDIA_READ_INTEGRITY_FAILURE".into()));
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
 fn materialize_preview_bundle_with<F>(
     root: &Path,
-    files: &[(String, String)],
+    files: &[(String, Vec<u8>)],
     backup_root: &Path,
     mut write_file: F,
 ) -> Result<usize, CommandError>
@@ -2978,7 +3247,7 @@ where
         while let Some(path) = ancestor {
             if path == root { break; }
             if let Ok(metadata) = std::fs::symlink_metadata(path) {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() || is_reparse_point(path).unwrap_or(true) {
                     return Err(CommandError::InvalidInput("hedef klasörde güvenli olmayan bir yol var".into()));
                 }
             }
@@ -2987,7 +3256,7 @@ where
         let backup = if destination.exists() {
             let metadata = std::fs::symlink_metadata(&destination)
                 .map_err(|_| CommandError::InvalidInput("hedef dosya doğrulanamadı".into()))?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
+            if metadata.file_type().is_symlink() || !metadata.is_file() || is_reparse_point(&destination).unwrap_or(true) {
                 return Err(CommandError::InvalidInput("hedefteki dosya güvenli değil".into()));
             }
             Some(backup_root.join(relative))
@@ -3020,7 +3289,7 @@ where
         // Register before invoking the writer: a replacement can fail after
         // removing the old destination but before its rename completes.
         applied.push((file.destination.clone(), file.backup.clone()));
-        if write_file(&file.destination, file.content.as_bytes()).is_err() {
+        if write_file(&file.destination, &file.content).is_err() {
             rollback_preview_bundle(&applied);
             return Err(CommandError::EngineUnavailable("yerel önizleme yazımı geri alındı".into()));
         }
@@ -3028,6 +3297,7 @@ where
     Ok(validated.len())
 }
 
+#[cfg(test)]
 fn rollback_preview_bundle(applied: &[(PathBuf, Option<PathBuf>)]) {
     for (destination, backup) in applied.iter().rev() {
         let _ = std::fs::remove_file(destination);
@@ -3035,17 +3305,6 @@ fn rollback_preview_bundle(applied: &[(PathBuf, Option<PathBuf>)]) {
             let _ = std::fs::copy(backup, destination);
         }
     }
-}
-
-fn atomically_write_preview_file(destination: &Path, content: &[u8]) -> std::io::Result<()> {
-    let temp = destination.with_extension("blogbot.tmp");
-    let result = (|| {
-        std::fs::write(&temp, content)?;
-        if destination.exists() { std::fs::remove_file(destination)?; }
-        std::fs::rename(&temp, destination)
-    })();
-    if result.is_err() { let _ = std::fs::remove_file(&temp); }
-    result
 }
 
 /// Writes only the exact, already approved preview bundle into the user's
@@ -3084,8 +3343,13 @@ pub fn materialize_local_preview(
     }
     let state_value = read_engine_local_state(&bridge, &format!("publication.preview:{revision_id}"))
         .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_PREVIEW_MISSING".into()))?;
+    let preview_now_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     if state_value.get("revisionHash").and_then(Value::as_str) != Some(revision_hash.as_str())
         || state_value.get("previewHash").and_then(Value::as_str) != Some(preview_hash.as_str())
+        || !state_value.get("expiresAtUnixMs").and_then(Value::as_u64).is_some_and(|expires_at| u128::from(expires_at) > preview_now_unix_ms)
     {
         return Err(CommandError::InvalidInput("önizleme artık onaylı revizyonla eşleşmiyor".into()));
     }
@@ -3126,11 +3390,21 @@ pub fn materialize_local_preview(
     let files = state_value.pointer("/payload/files").and_then(Value::as_array)
         .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILES_MISSING".into()))?;
     let backup_root = root.join(".blogbot").join("backups").join(&preview_hash[..12]);
-    let bundle = files.iter().map(|file| (
-        file.get("path").and_then(Value::as_str).unwrap_or_default().to_owned(),
-        file.get("content").and_then(Value::as_str).unwrap_or_default().to_owned(),
-    )).collect::<Vec<_>>();
-    let written = materialize_preview_bundle_with(&root, &bundle, &backup_root, atomically_write_preview_file)?;
+    let bundle = files.iter().map(|file| {
+        let path = file.get("path").and_then(Value::as_str)
+            .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILE_PATH_INVALID".into()))?
+            .to_owned();
+        let content = file.get("content")
+            .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_MISSING".into()))?;
+        let bytes = match preview_file_media_reference(content, &revision_id)? {
+            Some((sha256, byte_size)) => read_engine_media_bytes(&bridge, &revision_id, &sha256, byte_size)?,
+            None => preview_file_bytes(file)?
+        };
+        Ok((path, bytes))
+    }).collect::<Result<Vec<_>, CommandError>>()?;
+    let backup_prefix = format!(".blogbot/backups/{}", &preview_hash[..12]);
+    let written = crate::secure_preview_fs::materialize(&root, &bundle, &backup_prefix)
+        .map_err(|_| CommandError::EngineUnavailable("yerel önizleme yazımı geri alındı".into()))?;
     Ok(json!({"written": written, "targetDirectory": root, "backupDirectory": if written > 0 { Some(backup_root) } else { None::<std::path::PathBuf> }}))
 }
 
@@ -3575,16 +3849,23 @@ fn workspace_failures(jobs: &[Value]) -> Vec<Value> {
     jobs
         .iter()
         .filter(|job| matches!(job.get("state").and_then(Value::as_str), Some("FAILED" | "DEAD_LETTER")))
-        .map(|job| json!({
+        .map(|job| {
+            let retry_mode = if job.get("state").and_then(Value::as_str) == Some("DEAD_LETTER") {
+                "MANUAL"
+            } else {
+                "SAFE"
+            };
+            json!({
             "id": job.get("id").cloned().unwrap_or(Value::Null),
             "title": "Yerel iş",
             "jobType": job.get("kind").cloned().unwrap_or(json!("UNKNOWN")),
             "message": sanitize_operation_error(job.get("lastError").and_then(Value::as_str).unwrap_or("İş başarısız oldu.")),
             "attempts": job.get("attempts").cloned().unwrap_or(json!(0)),
             "lastAttemptAt": Value::Null,
-            "retryMode": "SAFE",
+            "retryMode": retry_mode,
             "state": "ACTION_REQUIRED"
-        }))
+            })
+        })
         .collect()
 }
 
@@ -3985,17 +4266,24 @@ pub fn get_editorial_workspace(
 }
 
 fn candidate_draft_payload(candidate_id: &str, candidate: &Value) -> Result<Value, CommandError> {
-    let source_id = candidate
-        .get("sourceId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
+    let source_ids = candidate
+        .get("sourceIds")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).filter(|value| !value.trim().is_empty()).take(12).collect::<Vec<_>>())
+        .filter(|values| !values.is_empty())
+        .or_else(|| candidate.get("sourceId").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).map(|value| vec![value]))
         .ok_or_else(|| CommandError::EngineUnavailable("CANDIDATE_SOURCE_MISSING".into()))?;
+    let urls = candidate
+        .get("sourceUrls")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).filter(|url| is_http_url(url)).take(12).collect::<Vec<_>>())
+        .unwrap_or_default();
     Ok(json!({
         "draftId": format!("draft-candidate-{candidate_id}"),
         "candidateId": candidate_id,
         "candidateTitle": candidate.get("title").and_then(Value::as_str).unwrap_or("Araştırma bekleyen içerik"),
-        "sourceIds": [source_id],
-        "urls": [],
+        "sourceIds": source_ids,
+        "urls": urls,
         "candidateUrl": candidate.get("sourceUrl").and_then(Value::as_str).filter(|url| is_http_url(url)),
         "instruction": "Bu adayı kaynak kanıtlarıyla araştır ve insan incelemesine hazırla.",
         "section": candidate.get("section").and_then(Value::as_str).unwrap_or("haberler"),
@@ -4339,28 +4627,17 @@ pub fn update_schedule_slot(
     }
     let slot_id = slot_id.trim().to_string();
     let time = time.trim().to_string();
-    let article_id = article_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let article_title = article_title
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    if article_id.as_ref().is_some_and(|value| value.len() > 200 || !value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.')))
-        || article_title.as_ref().is_some_and(|value| value.len() > 240)
-    {
-        return Err(CommandError::InvalidInput("optional approved article assignment is invalid".into()));
+    if article_id.as_deref().is_some_and(|value| !value.trim().is_empty())
+        || article_title.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+        return Err(CommandError::InvalidInput(
+            "weekly cadence cannot assign an approved article; create a new NEXT_SLOT draft instead".into(),
+        ));
     }
     let mutation = json!({
         "kind": "SCHEDULE.SLOT",
         "slotId": slot_id,
         "enabled": enabled,
-        "time": time,
-        "articleId": article_id,
-        "articleTitle": article_title
+        "time": time
     });
     let mut schedule_state = read_engine_local_state(&bridge, "desktop.editorial")
         .unwrap_or_else(|| json!({}));
@@ -4374,13 +4651,23 @@ pub fn update_schedule_slot(
         .ok_or_else(|| CommandError::EngineUnavailable("SCHEDULE_STATE_INVALID".into()))?
         .entry("slots")
         .or_insert_with(|| json!({}));
-    slots_object
+    let slots_object = slots_object
         .as_object_mut()
-        .ok_or_else(|| CommandError::EngineUnavailable("SCHEDULE_SLOTS_INVALID".into()))?
-        .insert(slot_id.clone(), mutation.clone());
+        .ok_or_else(|| CommandError::EngineUnavailable("SCHEDULE_SLOTS_INVALID".into()))?;
+    // Preserve historical assignments for display only. They never schedule
+    // or approve a revision, and a cadence edit must not silently erase them.
+    let legacy_assignment = slots_object.get(&slot_id).and_then(Value::as_object).map(|slot| (
+        slot.get("articleId").cloned(), slot.get("articleTitle").cloned()
+    ));
+    let mut persisted = mutation.clone();
+    if let (Some((article_id, article_title)), Some(object)) = (legacy_assignment, persisted.as_object_mut()) {
+        if let Some(article_id) = article_id { object.insert("articleId".into(), article_id); }
+        if let Some(article_title) = article_title { object.insert("articleTitle".into(), article_title); }
+    }
+    slots_object.insert(slot_id.clone(), persisted);
     persist_editorial_state(&bridge, mutation.clone(), Some(("schedule", schedule_state.get("schedule").cloned().unwrap_or_else(|| json!({"slots": {}})))))?;
     write_lock(&state.editorial_mutations)?.push(mutation);
-    Ok(json!({ "ok": true, "slotId": slot_id, "enabled": enabled, "time": time, "articleId": article_id, "articleTitle": article_title }))
+    Ok(json!({ "ok": true, "slotId": slot_id, "enabled": enabled, "time": time }))
 }
 
 #[tauri::command]
@@ -4657,6 +4944,83 @@ pub fn backup_restore_apply(
     }))
 }
 
+fn valid_automatic_backup_name(value: &str) -> bool {
+    let name = value.trim();
+    name.starts_with("automatic-")
+        && name.ends_with(".backup")
+        && name.len() <= 160
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '.')
+}
+
+#[tauri::command]
+pub fn automatic_backup_list(
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    engine_request(&bridge, json!({
+        "version": 1,
+        "id": format!("desktop-automatic-backup-list-{}", std::process::id()),
+        "kind": "backup.auto.list",
+        "payload": {}
+    }))
+}
+
+#[tauri::command]
+pub fn automatic_backup_verify(
+    backup_name: String,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    if !valid_automatic_backup_name(&backup_name) {
+        return Err(CommandError::InvalidInput("automatic backup selection is invalid".into()));
+    }
+    engine_request(&bridge, json!({
+        "version": 1,
+        "id": format!("desktop-automatic-backup-verify-{}", std::process::id()),
+        "kind": "backup.auto.verify",
+        "payload": { "backupName": backup_name.trim() }
+    }))
+}
+
+#[tauri::command]
+pub fn automatic_backup_restore_preview(
+    backup_name: String,
+    target_directory: String,
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    if !valid_automatic_backup_name(&backup_name) || target_directory.trim().is_empty() {
+        return Err(CommandError::InvalidInput("automatic backup selection and restore target are required".into()));
+    }
+    let target_directory = require_granted_restore_target(&state, &target_directory)?;
+    engine_request(&bridge, json!({
+        "version": 1,
+        "id": format!("desktop-automatic-backup-preview-{}", std::process::id()),
+        "kind": "backup.auto.restore.preview",
+        "payload": { "backupName": backup_name.trim(), "targetDirectory": target_directory }
+    }))
+}
+
+#[tauri::command]
+pub fn automatic_backup_restore_apply(
+    backup_name: String,
+    target_directory: String,
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    ensure_mutation_allowed(&state)?;
+    if !valid_automatic_backup_name(&backup_name) || target_directory.trim().is_empty() {
+        return Err(CommandError::InvalidInput("automatic backup selection and restore target are required".into()));
+    }
+    let target_directory = require_granted_restore_target(&state, &target_directory)?;
+    engine_request(&bridge, json!({
+        "version": 1,
+        "id": format!("desktop-automatic-backup-restore-{}", std::process::id()),
+        "kind": "backup.auto.restore",
+        "payload": { "backupName": backup_name.trim(), "targetDirectory": target_directory }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -4665,7 +5029,7 @@ mod tests {
 
     use super::{
         append_pending_draft_jobs, build_approval_command, build_high_risk_approval_command, build_review_revision, build_revision_queue, build_source_scan_command, dashboard_pipeline_counts,
-        authorize_connector_directory, authorize_high_risk_consent, authorize_native_confirmation, candidate_draft_payload, candidate_workflow_state, configured_site_origin, doctor_runtime_mode, editorial_operation_events, ensure_mutation_allowed, ensure_trusted_local_dev, has_publication_capability, github_preview_payload, is_local_path, is_path_within_grant, local_dev_environment_with, materialize_preview_bundle_with, publication_observability, register_folder_grant, request_choice, require_granted_directory, require_granted_restore_target, retry_version_conflicted_draft, revision_edit_payload, scheduled_operation_items, valid_github_segment, valid_github_workflow, valid_site_work_mode, valid_hhmm, valid_recovery_key, valid_schedule_slot, validate_folder_selection, validate_local_dev_project, write_lock, CommandError, DesktopState, RuntimeMode,
+        authorize_connector_directory, authorize_high_risk_consent, authorize_native_confirmation, candidate_draft_payload, candidate_workflow_state, configured_site_origin, doctor_runtime_mode, editorial_operation_events, ensure_mutation_allowed, ensure_trusted_local_dev, has_publication_capability, github_preview_payload, is_local_path, is_path_within_grant, is_reparse_point, local_dev_environment_with, materialize_preview_bundle_with, migrate_legacy_site_connector_catalog, preview_file_bytes, preview_file_media_reference, publication_observability, register_folder_grant, request_choice, require_granted_directory, require_granted_restore_target, retry_version_conflicted_draft, revision_edit_payload, scheduled_operation_items, valid_github_segment, valid_github_workflow, valid_site_work_mode, valid_hhmm, valid_recovery_key, valid_schedule_slot, validate_folder_selection, validate_local_dev_project, write_lock, CommandError, DesktopState, RuntimeMode,
         workspace_engine_state,
     };
 
@@ -4720,6 +5084,39 @@ mod tests {
             request_choice(&json!({}), "tone", &["neutral", "technical", "accessible"], "neutral").unwrap(),
             "neutral"
         );
+        assert!(matches!(
+            request_choice(&json!({ "visualPolicy": "NONE" }), "visualPolicy", &["GENERATE", "LOCAL_RENDERER"], "GENERATE"),
+            Err(CommandError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_site_connector_migrates_once_and_requires_revalidation() {
+        let mut connectors = json!({});
+        let mut checks = json!({});
+        let marker = migrate_legacy_site_connector_catalog(&mut connectors, &mut checks, Some(&json!({
+            "repositoryPath": r"C:\Blogbot\Site", "publicSiteUrl": "https://example.org", "mode": "PUBLISH"
+        }))).unwrap();
+
+        assert_eq!(marker["state"], "MIGRATED_REVALIDATION_REQUIRED");
+        assert_eq!(connectors["site"]["repositoryPath"], r"C:\Blogbot\Site");
+        assert_eq!(checks["site"]["ready"], false);
+        assert_eq!(checks["site"]["migrationState"], "MIGRATED_REVALIDATION_REQUIRED");
+    }
+
+    #[test]
+    fn conflicting_legacy_site_connector_keeps_catalog_and_fails_closed() {
+        let mut connectors = json!({ "site": {
+            "repositoryPath": r"C:\Catalog\Site", "publicSiteUrl": "", "mode": "LOCAL_ONLY"
+        }});
+        let mut checks = json!({ "site": { "ready": true, "state": "DRY_RUN_READY" } });
+        let marker = migrate_legacy_site_connector_catalog(&mut connectors, &mut checks, Some(&json!({
+            "repositoryPath": r"C:\Legacy\Site", "publicSiteUrl": "", "mode": "LOCAL_ONLY"
+        }))).unwrap();
+
+        assert_eq!(marker["state"], "MIGRATION_CONFLICT_REVIEW_REQUIRED");
+        assert_eq!(connectors["site"]["repositoryPath"], r"C:\Catalog\Site");
+        assert_eq!(checks["site"]["ready"], false);
     }
 
     #[test]
@@ -4784,6 +5181,25 @@ mod tests {
 
         assert_eq!(payload["candidateUrl"], "https://news.example/stories/selected");
         assert_eq!(payload["urls"], json!([]));
+    }
+
+    #[test]
+    fn candidate_promotion_preserves_bounded_corroborating_sources() {
+        let payload = candidate_draft_payload(
+            "candidate-story-2",
+            &json!({
+                "sourceId": "source-primary",
+                "sourceIds": ["source-primary", "source-independent"],
+                "sourceUrl": "https://primary.example/story",
+                "sourceUrls": ["https://primary.example/story", "https://independent.example/story"],
+                "title": "Birden fazla kaynakla doğrulanan haber"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(payload["sourceIds"], json!(["source-primary", "source-independent"]));
+        assert_eq!(payload["urls"], json!(["https://primary.example/story", "https://independent.example/story"]));
+        assert_eq!(payload["candidateUrl"], "https://primary.example/story");
     }
 
     #[test]
@@ -5240,8 +5656,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("existing.md"), "old content").unwrap();
         let files = vec![
-            ("existing.md".to_string(), "new content".to_string()),
-            ("new.md".to_string(), "new file".to_string()),
+            ("existing.md".to_string(), b"new content".to_vec()),
+            ("new.md".to_string(), b"new file".to_vec()),
         ];
         let mut writes = 0;
         let result = materialize_preview_bundle_with(&root, &files, &backup, |destination, content| {
@@ -5256,6 +5672,40 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("existing.md")).unwrap(), "old content");
         assert!(!root.join("new.md").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn regular_preview_paths_are_not_windows_reparse_points() {
+        let path = std::env::temp_dir().join(format!("blogbot-preview-reparse-{}", std::process::id()));
+        std::fs::write(&path, "regular file").unwrap();
+        assert!(!is_reparse_point(&path).unwrap());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn preview_file_bytes_preserves_json_binary_content() {
+        assert_eq!(
+            preview_file_bytes(&json!({ "content": [0, 1, 2, 255] })).unwrap(),
+            vec![0, 1, 2, 255]
+        );
+        assert_eq!(
+            preview_file_bytes(&json!({ "content": { "0": 82, "1": 73, "2": 70, "3": 70 } })).unwrap(),
+            b"RIFF".to_vec()
+        );
+        assert!(preview_file_bytes(&json!({ "content": { "0": 82, "2": 70 } })).is_err());
+    }
+
+    #[test]
+    fn preview_file_media_reference_requires_exact_revision_and_integrity_metadata() {
+        let reference = json!({
+            "kind": "engine-media-ref",
+            "revisionId": "revision-1",
+            "sha256": "a".repeat(64),
+            "byteSize": 512
+        });
+        assert_eq!(preview_file_media_reference(&reference, "revision-1").unwrap(), Some(("a".repeat(64), 512)));
+        assert!(preview_file_media_reference(&reference, "revision-2").is_err());
+        assert!(preview_file_media_reference(&json!({ "kind": "engine-media-ref", "revisionId": "revision-1", "sha256": "bad", "byteSize": 0 }), "revision-1").is_err());
     }
 
     #[test]
@@ -5342,6 +5792,19 @@ mod tests {
         let message = failures[0]["message"].as_str().unwrap_or_default();
         assert!(message.contains("güvenlik nedeniyle"));
         assert!(!message.contains("Bearer"));
+    }
+
+    #[test]
+    fn editorial_workspace_marks_dead_letter_jobs_for_manual_review() {
+        let failures = super::workspace_failures(&[json!({
+            "id": "job-dead-letter",
+            "kind": "PUBLISH",
+            "state": "DEAD_LETTER",
+            "lastError": "Persistent publication failure",
+            "attempts": 3
+        })]);
+
+        assert_eq!(failures[0]["retryMode"], "MANUAL");
     }
 
     #[test]

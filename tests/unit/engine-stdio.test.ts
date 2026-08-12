@@ -9,14 +9,40 @@ import { join } from "node:path";
 import {
   createEngineProtocol,
   assertRevisionGeneratedFilesMatch,
+  createConsistentAutomaticBackup,
+  isPublicationPreviewCurrent,
   handleBackupRequest,
+  protectedCatalogEvidenceReferences,
+  protectedCatalogSourceIds,
   reportBackgroundTaskFault,
   reportCodexLifecycle,
-  readBoundedLines
+  readBoundedLines,
+  isParallelReadRequest
 } from "../../apps/engine/src/stdio-entrypoint.ts";
 import { buildPublicationPreview } from "../../apps/engine/src/publication-preview.ts";
 import { createPortableBackup } from "../../packages/backup/src/portable-backup.ts";
 import { InMemoryBackendStore } from "../../packages/database/src/in-memory-backend-store.ts";
+
+test("source retention protects catalog feeds referenced by immutable revision evidence", () => {
+  const revisions = [{
+    sources: [{ id: "official-feed:entry-42" }, { id: "url:unmanaged" }]
+  }] as never;
+  assert.deepEqual(
+    protectedCatalogSourceIds(revisions, ["official-feed", "unrelated-feed"]),
+    ["official-feed"]
+  );
+});
+
+test("source retention protects exact captured evidence versions without pinning a whole catalog source", () => {
+  const versionId = `entry-${"a".repeat(64)}`;
+  assert.deepEqual(
+    protectedCatalogEvidenceReferences([
+      { sources: [{ id: "source-1:story-1", evidenceVersionId: versionId }] },
+      { sources: [{ id: "source-2:legacy" }] }
+    ] as never, ["source-1", "source-2"]),
+    [versionId, "source-2"]
+  );
+});
 
 test("engine rejects GitHub credential requests so credentials stay outside PGlite", async () => {
   const repository = new InMemoryBackendStore();
@@ -247,6 +273,12 @@ test("engine protocol returns a versioned local state snapshot", async () => {
   assert.deepEqual(snapshot.changes, []);
 });
 
+test("publication preview payload expires before it can be reused", () => {
+  assert.equal(isPublicationPreviewCurrent({ expiresAtUnixMs: 10_001 }, 10_000), true);
+  assert.equal(isPublicationPreviewCurrent({ expiresAtUnixMs: 10_000 }, 10_000), false);
+  assert.equal(isPublicationPreviewCurrent({ previewHash: "missing-expiry" }, 10_000), false);
+});
+
 test("desktop state projection uses the lightweight repository read instead of the full revision sync", async () => {
   class DashboardProjectionRepository extends InMemoryBackendStore {
     dashboardReads = 0;
@@ -314,7 +346,100 @@ test("state projection bounds stale history for desktop polling", async () => {
 
   assert.equal(result.ok, true);
   const changes = (result.snapshot as { changes?: Array<{ cursor?: number }> }).changes ?? [];
-  assert.deepEqual(changes.map((change) => change.cursor), [4, 5]);
+  assert.deepEqual(changes.map((change) => change.cursor), [1, 2]);
+  assert.equal((result.snapshot as { serverCursor?: number }).serverCursor, 2);
+
+  const next = await handle({
+    version: 1,
+    id: "state-bounded-history-next",
+    kind: "state",
+    afterCursor: 2,
+    changeLimit: 2
+  });
+  assert.deepEqual(
+    ((next.snapshot as { changes?: Array<{ cursor?: number }> }).changes ?? []).map((change) => change.cursor),
+    [3, 4]
+  );
+});
+
+test("explicit encrypted-data integrity verification is opt-in and does not advance the editorial cursor", async () => {
+  const repository = new InMemoryBackendStore();
+  let checks = 0;
+  const handle = createEngineProtocol(repository, "memory", {
+    verifyEncryptionIntegrity: async () => { checks += 1; }
+  });
+
+  const doctor = await handle({ version: 1, id: "doctor-integrity", kind: "doctor" });
+  const result = await handle({ version: 1, id: "integrity-1", kind: "maintenance.integrity.verify" });
+
+  assert.equal((doctor.capabilities as string[]).includes("MAINTENANCE.INTEGRITY_VERIFY"), true);
+  assert.equal(result.ok, true);
+  assert.equal(result.verified, true);
+  const completedAt = typeof result.completedAt === "string"
+    ? result.completedAt
+    : assert.fail("integrity verification must return its completion time");
+  assert.equal(checks, 1);
+  assert.equal(await repository.getVersion(), 0);
+  const persisted = await repository.getLocalState("maintenance.integrity-verify") as {
+    attemptedAt?: string;
+    completedAt?: string;
+    state?: string;
+  };
+  assert.equal(persisted.state, "SUCCEEDED");
+  assert.equal(persisted.completedAt, completedAt);
+  assert.equal(typeof persisted.attemptedAt, "string");
+  assert.ok(
+    Date.parse(persisted.attemptedAt!) <= Date.parse(completedAt),
+    "integrity verification cannot complete before it is recorded as attempted"
+  );
+});
+
+test("integrity verification reports a local failure without leaking data", async () => {
+  const handle = createEngineProtocol(new InMemoryBackendStore(), "memory", {
+    verifyEncryptionIntegrity: async () => { throw new Error("tampered encrypted row"); }
+  });
+
+  const result = await handle({ version: 1, id: "integrity-failure", kind: "maintenance.integrity.verify" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "LOCAL_INTEGRITY_VERIFY_FAILED");
+  assert.equal(result.message, "tampered encrypted row");
+});
+
+test("state projection treats a zero change limit as no history", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.setAutomation({
+    mode: "INGEST_ONLY", onboardingComplete: true, ingestionPaused: false,
+    publishingPaused: true, timezone: "Europe/Istanbul", scanIntervalMinutes: 30
+  });
+  const handle = createEngineProtocol(repository, "memory");
+  const result = await handle({ version: 1, id: "state-no-history", kind: "state", afterCursor: 0, changeLimit: 0 });
+
+  assert.deepEqual((result.snapshot as { changes?: unknown[] }).changes, []);
+});
+
+test("state projection returns a bounded, redacted job summary", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "job-summary", kind: "DRAFT", state: "FAILED", attempts: 1,
+    lastError: "CODEX_RUNNER_UNAVAILABLE diagnostic-with-user-content",
+    metadata: {
+      candidateTitle: "Visible title", progressStage: "DRAFTING",
+      instruction: "x".repeat(1_000), sourceUrl: "https://private.example/source",
+      codexDiagnosticDetail: "must not cross state boundary"
+    }
+  });
+  const handle = createEngineProtocol(repository, "memory");
+  const result = await handle({ version: 1, id: "state-job-summary", kind: "state", afterCursor: 0 });
+  const job = ((result.snapshot as { jobs?: Array<Record<string, unknown>> }).jobs ?? [])[0] ?? {};
+  const metadata = job.metadata as Record<string, unknown>;
+
+  assert.equal(job.lastError, "CODEX_RUNNER_UNAVAILABLE");
+  assert.equal(metadata.candidateTitle, "Visible title");
+  assert.equal(metadata.progressStage, "DRAFTING");
+  assert.equal(String(metadata.instruction).length, 500);
+  assert.equal(metadata.sourceUrl, undefined);
+  assert.equal(metadata.codexDiagnosticDetail, undefined);
 });
 
 test("engine protocol rejects malformed requests without throwing", async () => {
@@ -416,4 +541,78 @@ test("engine backup restore writes only into a new target after verification", a
   assert.equal(result.ok, true);
   assert.equal(result.restored, true);
   assert.equal(await (await import("node:fs/promises")).readFile(join(target, "state.json"), "utf8"), "{}\n");
+});
+
+test("stdio dispatcher keeps read-only requests out of the mutation queue", () => {
+  assert.equal(isParallelReadRequest({ version: 1, id: "state", kind: "state" }), true);
+  assert.equal(isParallelReadRequest({ version: 1, id: "revision-list", kind: "command", command: { kind: "REVISION.LIST" } }), true);
+  assert.equal(isParallelReadRequest({ version: 1, id: "publish", kind: "publication.enqueue" }), false);
+  assert.equal(isParallelReadRequest({ version: 1, id: "approve", kind: "command", command: { kind: "APPROVAL.GRANT" } }), false);
+});
+
+test("automatic snapshots can be listed, verified, and previewed without exposing their derived key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-auto-backup-access-"));
+  const previousKey = process.env.BLOGBOT_DATA_KEY_HEX;
+  process.env.BLOGBOT_DATA_KEY_HEX = "42".repeat(32);
+  try {
+    await writeFile(join(root, "state.json"), "{}\n", "utf8");
+    const created = await handleBackupRequest({ version: 1, id: "auto-create", kind: "backup.auto", payload: {} }, root);
+    assert.equal(created.ok, true);
+
+    const listed = await handleBackupRequest({ version: 1, id: "auto-list", kind: "backup.auto.list", payload: {} }, root);
+    assert.equal(listed.ok, true);
+    const snapshots = listed.snapshots as Array<{ name: string }>;
+    assert.equal(snapshots.length, 1);
+    const snapshot = snapshots[0];
+    assert.ok(snapshot);
+    assert.match(snapshot.name, /^automatic-.+\.backup$/u);
+
+    const verified = await handleBackupRequest({
+      version: 1,
+      id: "auto-verify",
+      kind: "backup.auto.verify",
+      payload: { backupName: snapshot.name }
+    }, root);
+    assert.equal(verified.ok, true);
+    assert.equal(verified.verified, true);
+
+    const preview = await handleBackupRequest({
+      version: 1,
+      id: "auto-preview",
+      kind: "backup.auto.restore.preview",
+      payload: { backupName: snapshot.name, targetDirectory: join(root, "restored") }
+    }, root);
+    assert.equal(preview.ok, true);
+    assert.equal(preview.verified, true);
+  } finally {
+    if (previousKey === undefined) delete process.env.BLOGBOT_DATA_KEY_HEX;
+    else process.env.BLOGBOT_DATA_KEY_HEX = previousKey;
+    await (await import("node:fs/promises")).rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic snapshot checkpoints and excludes concurrent PGlite queries before reading live data", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-auto-backup-checkpoint-"));
+  const previousKey = process.env.BLOGBOT_DATA_KEY_HEX;
+  process.env.BLOGBOT_DATA_KEY_HEX = "43".repeat(32);
+  const events: string[] = [];
+  try {
+    await writeFile(join(root, "state.json"), "{}\n", "utf8");
+    const result = await createConsistentAutomaticBackup({
+      runExclusive: async <T>(work: () => Promise<T>) => {
+        events.push("exclusive:start");
+        const result = await work();
+        events.push("exclusive:end");
+        return result;
+      },
+      exec: async (query: string) => { events.push(query); return []; }
+    }, root);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(events, ["exclusive:start", "CHECKPOINT", "exclusive:end"]);
+  } finally {
+    if (previousKey === undefined) delete process.env.BLOGBOT_DATA_KEY_HEX;
+    else process.env.BLOGBOT_DATA_KEY_HEX = previousKey;
+    await (await import("node:fs/promises")).rm(root, { recursive: true, force: true });
+  }
 });
