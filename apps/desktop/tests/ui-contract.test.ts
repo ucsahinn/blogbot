@@ -15,10 +15,28 @@ test("desktop boot and fatal states expose truthful assistive-technology status"
   const app = await readFile(source("App.tsx"), "utf8");
 
   assert.match(app, /className="boot-state"\s+aria-busy="true"/u);
-  assert.match(app, /<h1>Blogbot güvenli çalışma alanı hazırlanıyor<\/h1>/u);
+  assert.match(app, /<h1>Boby güvenli çalışma alanı hazırlanıyor<\/h1>/u);
   assert.match(app, /aria-live="polite"/u);
   assert.match(app, /aria-busy="true"/u);
   assert.match(app, /className="fatal-state">\s*<div role="alert"/u);
+});
+
+test("Boby is a persistent local editor guide with a keyboard-accessible conversation panel", async () => {
+  const app = await readFile(source("App.tsx"), "utf8");
+  const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
+
+  assert.match(app, /BobyAssistant/u);
+  assert.match(shell, /onOpenBoby/u);
+});
+
+test("notifications use local feedback sounds without speech synthesis", async () => {
+  const settings = await readFile(source("screens", "SettingsCenter.tsx"), "utf8");
+  const boby = await readFile(source("components", "BobyAssistant.tsx"), "utf8");
+
+  assert.match(settings, /playFeedbackSound\("notification"\)/u);
+  assert.match(boby, /playFeedbackSound\("boby-open"\)/u);
+  assert.match(boby, /playFeedbackSound\("boby-reply"\)/u);
+  assert.doesNotMatch(boby, /speechSynthesis/u);
 });
 
 test("setup center keeps the legacy guide route while opening the focused first-start wizard", async () => {
@@ -90,7 +108,7 @@ test("collapsed and mobile navigation retain names and setup/settings entry poin
 test("about control exposes the verified project identity and GitHub source", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
 
-  assert.match(shell, /aria-label="Blogbot hakkında"/u);
+  assert.match(shell, /aria-label="Boby hakkında"/u);
   assert.match(shell, /aria-expanded=\{aboutOpen\}/u);
   assert.match(shell, /https:\/\/github\.com\/ucsahinn\/blogbot/u);
   assert.match(shell, /target="_blank"/u);

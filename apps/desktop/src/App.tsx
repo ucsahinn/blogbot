@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { AppShell, type PageId } from "./components/AppShell.tsx";
+import { BobyAssistant } from "./components/BobyAssistant.tsx";
 import { canMutateLocally, hasRuntimeCapability } from "./app-model.ts";
 import { createCoalescingBridge, userFacingBridgeError, type BlogbotBridge } from "./bridge.ts";
 import { createRuntimeBridge } from "./runtime-bridge.ts";
@@ -63,6 +64,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   const [syncError, setSyncError] = useState("");
   const [editorialNotice, setEditorialNotice] = useState("");
   const [pendingEditorialDraft, setPendingEditorialDraft] = useState<{ id: string; title?: string } | undefined>();
+  const [bobyOpen, setBobyOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -113,7 +115,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
       .catch((reason) => {
         if (alive) {
           setError(
-            userFacingBridgeError(reason, "Blogbot çalışma alanı açılamadı.")
+            userFacingBridgeError(reason, "Boby çalışma alanı açılamadı.")
           );
         }
       });
@@ -171,7 +173,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
           <h1>Çalışma alanı açılamadı.</h1>
           <p>{error}</p>
           <small>
-            Blogbot'un yerel çalışma bileşeni başlatılamadı. Uygulamayı yeniden başlatın veya Kurulum
+            Boby'nin yerel çalışma bileşeni başlatılamadı. Uygulamayı yeniden başlatın veya Kurulum
             Merkezi'ndeki "Önkoşul testi"ni çalıştırın.
           </small>
         </div>
@@ -183,7 +185,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
     return (
       <main className="boot-state" aria-busy="true">
         <span className="brand-mark boot-mark" aria-hidden="true">B</span>
-        <h1>Blogbot güvenli çalışma alanı hazırlanıyor</h1>
+        <h1>Boby güvenli çalışma alanı hazırlanıyor</h1>
         <p role="status" aria-live="polite" aria-busy="true">Yerel köprü ve şifreli önbellek doğrulanıyor…</p>
       </main>
     );
@@ -212,6 +214,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   };
 
   return (
+    <>
     <AppShell
         activePage={activePage}
         snapshot={snapshot}
@@ -219,6 +222,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         onNavigate={navigate}
         onOpenSetup={() => navigate("setup")}
         onOpenSettings={() => navigate("settings")}
+        onOpenBoby={() => setBobyOpen(true)}
         onExportDiagnostics={() => bridge.exportDiagnostics()}
         syncError={syncError}
       >
@@ -314,5 +318,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
           />
         ) : null}
       </AppShell>
+      <BobyAssistant key={`${activePage}-${bobyOpen}`} activePage={activePage} snapshot={snapshot} workspace={workspace} open={bobyOpen} onClose={() => setBobyOpen(false)} onNavigate={navigate} />
+    </>
   );
 }

@@ -51,6 +51,7 @@ interface AppShellProps {
   onNavigate: (page: PageId) => void;
   onOpenSetup: () => void;
   onOpenSettings: () => void;
+  onOpenBoby: () => void;
   onExportDiagnostics: () => Promise<{ path: string; directory: string; bytes: number; included: string[]; opened: boolean }>;
   bridge: BlogbotBridge;
   syncError?: string;
@@ -63,6 +64,7 @@ export function AppShell({
   onNavigate,
   onOpenSetup,
   onOpenSettings,
+  onOpenBoby,
   onExportDiagnostics,
   bridge,
   syncError = ""
@@ -97,7 +99,7 @@ export function AppShell({
 
   const checkForUpdate = async () => {
     if (!window.__TAURI_INTERNALS__) {
-      setUpdateMessage("Güncelleme denetimi yalnız paketlenmiş Blogbot uygulamasında yapılır.");
+      setUpdateMessage("Güncelleme denetimi yalnız paketlenmiş Boby uygulamasında yapılır.");
       return;
     }
     setUpdateBusy(true);
@@ -106,11 +108,11 @@ export function AppShell({
     try {
       const update = await bridge.checkUnsignedUpdate();
       if (!update) {
-        setUpdateMessage("Bu bilgisayardaki Blogbot güncel.");
+        setUpdateMessage("Bu bilgisayardaki Boby güncel.");
         return;
       }
       setPendingUpdate(update);
-      setUpdateMessage(`Blogbot ${update.version} hazır. İndirmeyi ve kurulumu siz başlatın.`);
+      setUpdateMessage(`Boby ${update.version} hazır. İndirmeyi ve kurulumu siz başlatın.`);
     } catch (reason) {
       setUpdateMessage(userFacingUpdateError(reason));
     } finally {
@@ -179,7 +181,7 @@ export function AppShell({
             B
           </span>
           <span>
-            <strong>Blogbot</strong>
+            <strong>Boby</strong>
             <small>Yerel yayın sistemi</small>
           </span>
         </div>
@@ -233,11 +235,11 @@ export function AppShell({
           {diagnosticBusy ? "Tanı paketi hazırlanıyor…" : "Tanı paketi oluştur"}
         </button>
         {diagnosticMessage ? <small className="sidebar-feedback" role="status" aria-live="polite">{diagnosticMessage}</small> : null}
-        <section className="about-control" aria-label="Blogbot bilgileri">
+        <section className="about-control" aria-label="Boby bilgileri">
           <button
             className="about-toggle"
             type="button"
-            aria-label="Blogbot hakkında"
+            aria-label="Boby hakkında"
             aria-expanded={aboutOpen}
             aria-controls="blogbot-about-card"
             onClick={() => setAboutOpen((open) => !open)}
@@ -258,7 +260,7 @@ export function AppShell({
                 ) : null}
               </div>
               {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
-              <strong>Blogbot · yerel yayın uygulaması</strong>
+              <strong>Boby · yerel yayın uygulaması</strong>
               <span>Sürüm {desktopPackage.version} · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
               <a
                 className="about-project-link"
@@ -310,6 +312,10 @@ export function AppShell({
       </aside>
 
       <main className="workspace" id="main-workspace" tabIndex={-1}>{children}</main>
+      <button type="button" className="boby-launcher" aria-label="Editör Boby'yi aç" onClick={onOpenBoby}>
+        <span aria-hidden="true">B</span>
+        <strong>Editör Boby</strong>
+      </button>
       {syncError ? (
         <div className="sync-error-banner" role="status" aria-live="polite">
           <strong>Yerel görünüm güncellenemedi.</strong>

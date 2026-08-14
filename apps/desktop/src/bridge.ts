@@ -236,7 +236,7 @@ export function userFacingBridgeError(
   const code = raw.toUpperCase();
   if (!raw) return fallback;
   if (code.includes("ENGINE_NATIVE_MODULES_MISSING")) {
-    return "Blogbot'un paketlenmiş yerel engine bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun.";
+    return "Boby'nin paketlenmiş yerel engine bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun.";
   }
   if (code.includes("ENGINE_RESPONSE_TIMEOUT")) {
     return "Yerel çalışma bileşeni zamanında yanıt vermedi. Operasyonlar’dan yerel durumu yenileyin; sorun sürerse tanılama paketi oluşturun.";
@@ -288,7 +288,7 @@ export function userFacingUpdateError(reason: unknown): string {
   if (/(?:timeout|timed out|connect|network|dns|http|endpoint)/u.test(raw)) {
     return "Güncelleme kaynağına ulaşılamadı. İnternet bağlantınızı kontrol edip yeniden deneyin.";
   }
-  return "Güncelleme denetlenemedi. Blogbot imzasız GitHub release akışını kullanır; indirilen kurulum yalnızca HTTPS kaynağı ve SHA-256 özeti doğrulanırsa başlatılır. Bağlantıyı kontrol edip yeniden deneyin.";
+  return "Güncelleme denetlenemedi. Boby imzasız GitHub release akışını kullanır; indirilen kurulum yalnızca HTTPS kaynağı ve SHA-256 özeti doğrulanırsa başlatılır. Bağlantıyı kontrol edip yeniden deneyin.";
 }
 
 export function userFacingPublicationQueueError(reason: unknown): string {

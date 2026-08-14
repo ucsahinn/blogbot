@@ -73,6 +73,18 @@ test("all primary routes render without browser runtime errors", async ({ page }
   }
 });
 
+test("Editor Boby gives local contextual help and routes the editor to the named workspace", async ({ page }) => {
+  await page.goto("#dashboard");
+  await page.getByRole("button", { name: "Editör Boby'yi aç" }).click();
+  const boby = page.getByRole("dialog", { name: "Editör Boby" });
+  await expect(boby).toContainText("Konuşmalar cihazında kalır");
+  await boby.getByRole("button", { name: "Kaynak ekle" }).click();
+  await expect(boby).toContainText("Kaynak eklemek için İçerik Akışı");
+  await boby.getByRole("button", { name: "Kaynakları aç" }).click();
+  await expect(page).toHaveURL(/#content$/u);
+  await expect(page.getByRole("heading", { name: "Kaynaklardan yayın fikrine tek çalışma alanı" })).toBeVisible();
+});
+
 test("primary navigation exposes exactly the five stable workspaces", async ({ page }) => {
   const destinations = [
     ["Genel Bakış", "#dashboard", "Yayın akışı kontrol altında."],
@@ -363,7 +375,7 @@ test("settings save, cancel and defaults expose truthful state", async ({ page }
   await expect(page.getByRole("status")).toContainText("Windows test bildirimi gönderildi.");
   const autostart = page.getByRole("checkbox", { name: /Windows ile başlat/u });
   await autostart.check();
-  await expect(page.getByRole("status")).toContainText("Blogbot Windows oturum açılışında başlatılacak.");
+  await expect(page.getByRole("status")).toContainText("Boby Windows oturum açılışında başlatılacak.");
   await autostart.uncheck();
   await expect(page.getByRole("status")).toContainText("Windows başlangıcında otomatik açılma kapatıldı.");
   await page.goto("#instant");
@@ -371,7 +383,7 @@ test("settings save, cancel and defaults expose truthful state", async ({ page }
   await page.goto("#settings");
   await page.getByRole("button", { name: "Varsayılana dön" }).click();
   await expect(page.getByText("Varsayılanlar forma yüklendi; kalıcı olması için kaydedin.")).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Varsayılan yazar" })).toHaveValue("Blogbot Editorya");
+  await expect(page.getByRole("textbox", { name: "Varsayılan yazar" })).toHaveValue("Boby Editorya");
 });
 
 test("saved source-reference preference keeps review evidence visible beside the article", async ({ page }) => {
@@ -1659,7 +1671,7 @@ test("unconfigured GitHub broker never offers a misleading login action", async 
 test("about panel shows the project signature and keeps update checks explicit", async ({ page }) => {
   await page.goto("#dashboard");
 
-  const about = page.getByRole("button", { name: "Blogbot hakkında" });
+  const about = page.getByRole("button", { name: "Boby hakkında" });
   await expect(about).toHaveAttribute("aria-expanded", "false");
   await about.click();
   await expect(about).toHaveAttribute("aria-expanded", "true");
@@ -1670,7 +1682,7 @@ test("about panel shows the project signature and keeps update checks explicit",
 
   await page.getByRole("button", { name: "Güncellemeleri denetle" }).click();
   await expect(page.getByRole("status")).toContainText(
-    "Güncelleme denetimi yalnız paketlenmiş Blogbot uygulamasında yapılır."
+    "Güncelleme denetimi yalnız paketlenmiş Boby uygulamasında yapılır."
   );
   await expect(page.getByRole("button", { name: /indir ve kur/u })).toHaveCount(0);
 });
