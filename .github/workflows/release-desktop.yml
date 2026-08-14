@@ -51,22 +51,23 @@ jobs:
           RELEASE_NOTES: ${{ inputs.notes }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          $bundle = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
-          if ($null -eq $bundle) { throw "UPDATER_ARCHIVE_MISSING" }
-          $sha256 = (Get-FileHash -LiteralPath $bundle.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bundle = Join-Path 'apps/desktop/src-tauri/target/release/bundle/nsis' "Blogbot_$($env:RELEASE_VERSION)_x64-setup.exe"
+          if (-not (Test-Path -LiteralPath $bundle -PathType Leaf)) { throw "UPDATER_ARCHIVE_MISSING" }
+          $bundle = (Resolve-Path -LiteralPath $bundle).Path
+          $sha256 = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
           $manifest = [ordered]@{
             version = $env:RELEASE_VERSION
             notes = $env:RELEASE_NOTES
             pub_date = (Get-Date).ToUniversalTime().ToString('o')
             platforms = @{
               'windows-x86_64' = @{
-                url = "https://github.com/$($env:REPOSITORY)/releases/download/v$($env:RELEASE_VERSION)/$($bundle.Name)"
+                url = "https://github.com/$($env:REPOSITORY)/releases/download/v$($env:RELEASE_VERSION)/$([IO.Path]::GetFileName($bundle))"
                 sha256 = $sha256
               }
             }
           }
           $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath latest.json -Encoding utf8NoBOM
-          "archive=$($bundle.FullName)" >> $env:GITHUB_OUTPUT
+          "archive=$bundle" >> $env:GITHUB_OUTPUT
       - name: Publish unsigned release
         shell: pwsh
         env:

@@ -177,6 +177,12 @@ test("source flow explains one simple editorial path instead of treating checks 
   assert.match(flow, /Yayın yalnızca hazır taslağı inceledikten sonra başlar/u);
 });
 
+test("source catalog does not poll the local engine while the screen is idle", async () => {
+  const sourceCenter = await readFile(source("screens", "SourceCenter.tsx"), "utf8");
+
+  assert.doesNotMatch(sourceCenter, /window\.setInterval\(\(\) => void refreshSources/u);
+});
+
 test("Codex operations distinguishes measured local work from unavailable token and quota data", async () => {
   const operations = await readFile(source("screens", "OperationsHub.tsx"), "utf8");
 

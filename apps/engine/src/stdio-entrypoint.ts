@@ -20,6 +20,7 @@ import { PGliteBackendRepository } from "../../../packages/database/src/pglite-b
 import {
   PGliteSourceRepository,
   SourceRepositoryError,
+  sourceCapabilitiesFor,
   type SourceRepository
 } from "../../../packages/database/src/source-repository.ts";
 import {
@@ -84,7 +85,7 @@ const MAX_BACKUP_INPUT_BYTES = 128 * 1024 * 1024;
 // Candidate triage is a projection, not a full archive browser. Reading and
 // decrypting an unbounded feed catalog on every desktop refresh was the main
 // source of multi-second freezes on large local workspaces.
-const MAX_CANDIDATE_ENTRIES_PER_SOURCE = 250;
+const MAX_CANDIDATE_ENTRIES = 500;
 
 async function applyRestoreThroughNativeWriter(plan: Awaited<ReturnType<typeof planPortableRestore>>): Promise<void> {
   const executable = process.env.BLOGBOT_SECURE_RESTORE_BIN?.trim();
@@ -973,8 +974,10 @@ export function createEngineProtocol(
             return {
               ...source,
               lastItemAt,
-              capabilities:
-                await options.sourceRepository!.getSourceCapabilities(source.id)
+              // `source` is already the decrypted catalog record. Re-loading it
+              // per row doubles PGlite work during a desktop refresh and can
+              // stall the sidecar on a large local workspace.
+              capabilities: sourceCapabilitiesFor(source)
             };
           })
         )
@@ -1004,10 +1007,13 @@ export function createEngineProtocol(
       const candidateByStory = new Map<string, Record<string, unknown>>();
       const storyTokens = new Map<string, Set<string>>();
       const storyIndex = new Map<string, Set<string>>();
-      for (const source of sources) {
-        if (source.status !== "ACTIVE") continue;
-        const entries = await options.sourceRepository.listEntriesBounded(source.id, MAX_CANDIDATE_ENTRIES_PER_SOURCE);
-        for (const entry of entries) {
+      const activeSources = new Map(
+        sources.filter((source) => source.status === "ACTIVE").map((source) => [source.id, source])
+      );
+      const entries = await options.sourceRepository.listRecentEntriesBounded(MAX_CANDIDATE_ENTRIES);
+      for (const entry of entries) {
+        const source = activeSources.get(entry.sourceId);
+        if (!source) continue;
           const candidateId = `candidate-${createCandidateKey(source.id, entry.externalId)}`;
           const title = String(entry.title);
           const titleTokens = candidateTokens(title);
@@ -1059,7 +1065,6 @@ export function createEngineProtocol(
             stories.add(storyKey);
             storyIndex.set(token, stories);
           }
-        }
       }
       // Candidate inventory is polled by the desktop shell. Keep this a
       // bounded triage projection so a large feed catalog never freezes the

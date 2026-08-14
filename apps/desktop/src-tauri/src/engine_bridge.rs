@@ -29,9 +29,16 @@ const MAX_REQUEST_BYTES: usize = 1_000_000;
 // progressing. Keep the bound finite, but leave enough headroom for those
 // bounded local operations.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+// Catalog projections are rendered while navigating. They must fail fast so a
+// stalled PGlite read cannot hold the desktop on a loading screen for the full
+// general sidecar timeout.
+const CATALOG_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 const STARTUP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAINTENANCE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
+// The desktop owns the sidecar process tree. After a transport timeout it is
+// safer to terminate that owned tree promptly than to leave navigation blocked
+// while an unresponsive Node process consumes the old shutdown grace period.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(1);
 const MAX_DIAGNOSTIC_LOG_BYTES: u64 = 256 * 1024;
 // `CREATE_NO_WINDOW` applies to every helper process started by the desktop
 // host. In particular, probing a `.cmd` launcher at app start must never flash
@@ -171,6 +178,7 @@ fn response_timeout_for_request(request: &Value, ready: bool) -> Duration {
         return STARTUP_RESPONSE_TIMEOUT;
     }
     match request.get("kind").and_then(Value::as_str) {
+        Some("source.list") | Some("candidate.list") => CATALOG_RESPONSE_TIMEOUT,
         Some("backup.create")
         | Some("backup.auto")
         | Some("backup.verify")
@@ -945,7 +953,7 @@ mod tests {
         redact_diagnostic_for_persistence, response_timeout_for_request, serialize_bounded_request,
         should_retry_after_transport_fault, sidecar_environment_with, transport_error_for_request,
         PendingResponses, MAINTENANCE_RESPONSE_TIMEOUT, RESPONSE_TIMEOUT, STARTUP_RESPONSE_TIMEOUT,
-        WINDOWS_CREATE_NO_WINDOW,
+        SHUTDOWN_DEADLINE, WINDOWS_CREATE_NO_WINDOW,
     };
     use serde_json::json;
     use std::path::Path;
@@ -1033,6 +1041,23 @@ mod tests {
             response_timeout_for_request(&json!({ "kind": "backup.restore" }), false),
             STARTUP_RESPONSE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn local_catalog_reads_fail_fast_instead_of_holding_navigation_for_the_general_timeout() {
+        assert_eq!(
+            response_timeout_for_request(&json!({ "kind": "source.list" }), true),
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            response_timeout_for_request(&json!({ "kind": "candidate.list" }), true),
+            Duration::from_secs(8)
+        );
+    }
+
+    #[test]
+    fn unresponsive_owned_sidecar_shutdown_is_bounded_to_one_second() {
+        assert!(SHUTDOWN_DEADLINE <= Duration::from_secs(1));
     }
 
     #[test]

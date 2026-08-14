@@ -139,10 +139,8 @@ export function SourceCenter({
 
   useEffect(() => {
     const initialRefresh = window.setTimeout(() => void refreshSources({ silent: true }), 0);
-    const interval = window.setInterval(() => void refreshSources({ silent: true }), 30_000);
     return () => {
       window.clearTimeout(initialRefresh);
-      window.clearInterval(interval);
     };
   }, [refreshSources]);
 

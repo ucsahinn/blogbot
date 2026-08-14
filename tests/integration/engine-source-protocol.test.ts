@@ -6,11 +6,98 @@ import test from "node:test";
 import sharp from "sharp";
 
 import type { FetchTransport } from "../../apps/fetcher/src/fetch-source.ts";
-import { createPersistentEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
+import { createEngineProtocol, createPersistentEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
 import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
-import { PGliteSourceRepository } from "../../packages/database/src/source-repository.ts";
+import { PGliteSourceRepository, type SourceRepository } from "../../packages/database/src/source-repository.ts";
 
 const encoder = new TextEncoder();
+
+test("source.list derives capabilities from its already loaded source records", async () => {
+  const sourceRepository = {
+    async listSources() {
+      return [{
+        id: "source-catalog-1",
+        url: "https://news.example/catalog.xml",
+        kind: "RSS",
+        status: "ACTIVE",
+        trustStatus: "APPROVED",
+        rightsStatus: "APPROVED",
+        language: "en",
+        discoveredFeeds: [],
+        createdAt: "2026-08-14T10:00:00.000Z",
+        updatedAt: "2026-08-14T10:00:00.000Z",
+        version: 1
+      }];
+    },
+    async listEntriesBounded() {
+      return [];
+    },
+    async getSourceCapabilities() {
+      throw new Error("SOURCE_CAPABILITIES_MUST_NOT_RELOAD_THE_CATALOG_RECORD");
+    }
+  } as unknown as SourceRepository;
+  const handle = createEngineProtocol(undefined, "memory", { sourceRepository });
+
+  const response = await handle({ version: 1, id: "source-list-loaded-record", kind: "source.list" });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.kind, "source.list");
+  assert.deepEqual(response.sources, [{
+    id: "source-catalog-1",
+    url: "https://news.example/catalog.xml",
+    kind: "RSS",
+    status: "ACTIVE",
+    trustStatus: "APPROVED",
+    rightsStatus: "APPROVED",
+    language: "en",
+    discoveredFeeds: [],
+    createdAt: "2026-08-14T10:00:00.000Z",
+    updatedAt: "2026-08-14T10:00:00.000Z",
+    version: 1,
+    lastItemAt: null,
+    capabilities: { canScan: true, canPublish: true, blockers: [] }
+  }]);
+});
+
+test("candidate.list reads one globally bounded recent-entry slice instead of traversing every source feed", async () => {
+  const sourceRepository = {
+    async listSources() {
+      return [{
+        id: "source-candidate-catalog",
+        url: "https://news.example/catalog.xml",
+        kind: "RSS",
+        status: "ACTIVE",
+        trustStatus: "APPROVED",
+        rightsStatus: "APPROVED",
+        language: "en",
+        discoveredFeeds: [],
+        createdAt: "2026-08-14T10:00:00.000Z",
+        updatedAt: "2026-08-14T10:00:00.000Z",
+        version: 1
+      }];
+    },
+    async listRecentEntriesBounded() {
+      return [{
+        sourceId: "source-candidate-catalog",
+        externalId: "story-1",
+        title: "Recent patch release",
+        summary: "A recent vendor patch release.",
+        url: "https://news.example/stories/patch",
+        publishedAt: "2026-08-14T11:00:00.000Z"
+      }];
+    },
+    async listEntriesBounded() {
+      throw new Error("CANDIDATE_LIST_MUST_NOT_TRAVERSE_EACH_SOURCE_FEED");
+    }
+  } as unknown as SourceRepository;
+  const handle = createEngineProtocol(undefined, "memory", { sourceRepository });
+
+  const response = await handle({ version: 1, id: "candidate-list-recent-slice", kind: "candidate.list" });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.kind, "candidate.list");
+  assert.equal((response.candidates as Array<{ title?: string }>)[0]?.title, "Recent patch release");
+});
 
 test("persistent engine lists local sources with trust and rights blockers", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-source-protocol-list-"));

@@ -146,6 +146,8 @@ export interface SourceRepository {
   listEntries(sourceId: string): Promise<StoredSourceEntry[]>;
   /** Read only the newest bounded slice needed for candidate triage. */
   listEntriesBounded(sourceId: string, limit: number): Promise<StoredSourceEntry[]>;
+  /** Read the newest entries across the catalog for the desktop candidate projection. */
+  listRecentEntriesBounded(limit: number): Promise<StoredSourceEntry[]>;
   /** Read immutable historical captures for an exact external source identity. */
   listEntryVersions(sourceId: string, externalId: string): Promise<StoredSourceEntry[]>;
   /** Indexed lookup for the one selected candidate URL used during drafting. */
@@ -175,6 +177,7 @@ export interface SourceRepository {
 
 interface JsonRow {
   id?: string;
+  source_id?: string;
   external_id?: string;
   content_hash?: string;
   value: unknown;
@@ -218,6 +221,9 @@ ALTER TABLE blogbot_source_entry_versions
 
 CREATE INDEX IF NOT EXISTS blogbot_source_entry_versions_recent_idx
   ON blogbot_source_entry_versions (source_id, sort_at DESC, external_id DESC, content_hash DESC);
+
+CREATE INDEX IF NOT EXISTS blogbot_source_entry_versions_global_recent_idx
+  ON blogbot_source_entry_versions (sort_at DESC, source_id, external_id DESC, content_hash DESC);
 
 CREATE INDEX IF NOT EXISTS blogbot_source_entry_versions_url_idx
   ON blogbot_source_entry_versions (source_id, entry_url, sort_at DESC, content_hash DESC);
@@ -606,6 +612,25 @@ export class PGliteSourceRepository implements SourceRepository {
     return result.rows.map(({ external_id, content_hash, value }) => this.openSourceEntryRow(sourceId, external_id, content_hash, value));
   }
 
+  async listRecentEntriesBounded(limit: number): Promise<StoredSourceEntry[]> {
+    const safeLimit = Math.max(1, Math.min(1_000, Math.trunc(limit)));
+    const result = await this.database.query<JsonRow>(
+      `SELECT versions.source_id, versions.external_id, versions.content_hash, versions.value
+         FROM blogbot_source_entry_versions AS versions
+         JOIN blogbot_source_entry_latest AS latest
+           ON latest.source_id = versions.source_id
+          AND latest.external_id = versions.external_id
+          AND latest.content_hash = versions.content_hash
+        ORDER BY versions.sort_at DESC, versions.source_id, versions.external_id DESC, versions.content_hash DESC
+        LIMIT $1`,
+      [safeLimit]
+    );
+    return result.rows.map(({ source_id, external_id, content_hash, value }) => {
+      if (!source_id) throw new Error("LOCAL_DATA_IDENTITY_MISSING");
+      return this.openSourceEntryRow(source_id, external_id, content_hash, value);
+    });
+  }
+
   async listEntryVersions(sourceId: string, externalId: string): Promise<StoredSourceEntry[]> {
     const result = await this.database.query<JsonRow>(
       `SELECT external_id, content_hash, value
@@ -694,7 +719,7 @@ export class PGliteSourceRepository implements SourceRepository {
   }
 
   async getSourceCapabilities(sourceId: string): Promise<SourceCapabilities> {
-    return capabilitiesForSource(await this.getSource(sourceId));
+    return sourceCapabilitiesFor(await this.getSource(sourceId));
   }
 
   async prepareScanBatch(
@@ -743,7 +768,7 @@ export class PGliteSourceRepository implements SourceRepository {
             ? this.openSource(sourceRow.value, sourceRow.id)
             : undefined;
         const capabilities = source
-          ? capabilitiesForSource(source)
+          ? sourceCapabilitiesFor(source)
           : undefined;
         const rejection = !source
           ? {
@@ -1466,7 +1491,7 @@ function sourceScanId(batchKey: string, sourceId: string): string {
     .slice(0, 32)}`;
 }
 
-function capabilitiesForSource(source: LocalSource): SourceCapabilities {
+export function sourceCapabilitiesFor(source: LocalSource): SourceCapabilities {
   const blockers: SourceCapabilities["blockers"] = [];
   if (source.status === "DISABLED") {
     blockers.push("SOURCE_DISABLED");

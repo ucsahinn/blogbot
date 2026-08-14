@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
@@ -264,6 +264,35 @@ fn configure_hidden_command(command: &mut Command) {
     }
 }
 
+fn powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn deferred_installer_script(installer_path: &Path, parent_pid: u32) -> String {
+    let installer = powershell_single_quoted(&installer_path.display().to_string());
+    format!(
+        "Wait-Process -Id {parent_pid} -ErrorAction SilentlyContinue; Start-Process -FilePath '{installer}' -ArgumentList @('/S')"
+    )
+}
+
+fn launch_installer_after_exit(installer_path: &Path, parent_pid: u32) -> Result<(), CommandError> {
+    let mut launcher = Command::new("powershell.exe");
+    configure_hidden_command(&mut launcher);
+    launcher
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+        ])
+        .arg(deferred_installer_script(installer_path, parent_pid));
+    launcher
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_INSTALLER_START_FAILED".into()))
+}
+
 fn create_installer_file(version: &str) -> Result<(PathBuf, std::fs::File), CommandError> {
     let mut random = [0u8; 16];
     unsafe {
@@ -349,7 +378,9 @@ pub async fn install_unsigned_update(
         Ok(chunk) => chunk,
         Err(_) => {
             let _ = std::fs::remove_file(&path);
-            return Err(CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_FAILED".into()));
+            return Err(CommandError::UpdateUnavailable(
+                "UPDATE_DOWNLOAD_FAILED".into(),
+            ));
         }
     } {
         downloaded = downloaded.saturating_add(chunk.len() as u64);
@@ -383,10 +414,7 @@ pub async fn install_unsigned_update(
         ));
     }
 
-    let mut installer = Command::new(&path);
-    configure_hidden_command(&mut installer);
-    installer.arg("/S");
-    if installer.spawn().is_err() {
+    if launch_installer_after_exit(&path, std::process::id()).is_err() {
         let _ = std::fs::remove_file(&path);
         return Err(CommandError::UpdateUnavailable(
             "UPDATE_INSTALLER_START_FAILED".into(),
@@ -398,6 +426,8 @@ pub async fn install_unsigned_update(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         current_version, github_release_update, is_newer_version, manifest_update,
         resolve_manifest_or_release, validate_release_url, validate_sha256,
@@ -527,5 +557,15 @@ mod tests {
                 "every requested field must match the exact checked manifest tuple"
             );
         }
+    }
+
+    #[test]
+    fn defers_the_silent_installer_until_the_current_process_has_exited() {
+        let script =
+            super::deferred_installer_script(Path::new(r"C:\Temp\Blogbot O'Brien.setup.exe"), 4242);
+
+        assert!(script.contains("Wait-Process -Id 4242"));
+        assert!(script.contains("Start-Process -FilePath 'C:\\Temp\\Blogbot O''Brien.setup.exe'"));
+        assert!(script.contains("-ArgumentList @('/S')"));
     }
 }
