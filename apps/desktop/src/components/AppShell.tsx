@@ -1,5 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
+import desktopPackage from "../../package.json" with { type: "json" };
+
 import { userFacingUpdateError, type BlogbotBridge, type UnsignedDesktopUpdate } from "../bridge.ts";
 import type { BootstrapSnapshot } from "../types.ts";
 
@@ -257,7 +259,7 @@ export function AppShell({
               </div>
               {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
               <strong>Blogbot · yerel yayın uygulaması</strong>
-              <span>Sürüm 0.1.16 · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
+              <span>Sürüm {desktopPackage.version} · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
               <a
                 className="about-project-link"
                 href="https://github.com/ucsahinn/blogbot"

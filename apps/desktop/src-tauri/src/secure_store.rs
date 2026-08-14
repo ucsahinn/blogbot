@@ -77,10 +77,13 @@ fn ordered_key_candidates(
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if persisted_data {
+        // Once a candidate has successfully opened the encrypted workspace it
+        // is persisted here as the canonical key. Prefer it over stale keys
+        // from earlier Tauri identifiers.
+        candidates.push(stable);
         if let Some(app_key) = app_key {
             candidates.push(app_key);
         }
-        candidates.push(stable);
         candidates.extend(legacy);
     } else {
         candidates.push(stable);
@@ -374,13 +377,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_data_prefers_the_current_app_key_before_stable_or_legacy_keys() {
+    fn persisted_data_prefers_the_canonical_stable_key_before_identifier_or_legacy_keys() {
         let stable = PathBuf::from("stable/data-key.dpapi");
         let app = PathBuf::from("current-app/data-key.dpapi");
         let legacy = PathBuf::from("legacy/data-key.dpapi");
         assert_eq!(
             super::ordered_key_candidates(stable.clone(), Some(app.clone()), vec![legacy.clone()], true),
-            vec![app, stable, legacy]
+            vec![stable, app, legacy]
         );
     }
 
