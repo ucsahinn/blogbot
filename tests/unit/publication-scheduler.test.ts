@@ -6,11 +6,11 @@ import { InMemoryBackendStore } from "../../packages/database/src/in-memory-back
 import { computeRevisionHash, computeWarningSetHash } from "../../packages/editorial/src/revision.ts";
 import { PublicationScheduler } from "../../apps/engine/src/publication-scheduler.ts";
 
-function revision(scheduledAt: string) {
+function revision(scheduledAt: string, id = "rev-1") {
   const evidenceExcerpt = "Kaynak kanıtı doğrulandı.";
   const evidenceHash = createHash("sha256").update(evidenceExcerpt, "utf8").digest("hex");
   return {
-    id: "rev-1", translationKey: "tk-1", state: "SCHEDULED" as const,
+    id, translationKey: `tk-${id}`, state: "SCHEDULED" as const,
     tr: { title: "Başlık", slug: "baslik", description: "Açıklama", bodyMarkdown: "Gövde", heroImageAlt: "Görsel" },
     en: { title: "Title", slug: "title", description: "Description", bodyMarkdown: "Body", heroImageAlt: "Image" },
     section: "haberler" as const, articleType: "news" as const, author: "Ada", tags: [],
@@ -88,6 +88,43 @@ test("publication scheduler does not enqueue without a matching preview or after
   const scheduler = new PublicationScheduler(backend, () => now);
   assert.equal((await scheduler.tick()).enqueued.length, 0);
   assert.equal((await backend.listOutbox()).length, 0);
+});
+
+test("publication scheduler rejects an expired matching preview", async () => {
+  const { backend, now } = await setup("2026-07-30T10:00:00.000Z", "2026-07-30T09:00:00.000Z");
+  const current = await backend.getLocalState("publication.preview:rev-1") as Record<string, unknown>;
+  await backend.setLocalState("publication.preview:rev-1", {
+    ...current,
+    expiresAtUnixMs: now.getTime()
+  });
+
+  const result = await new PublicationScheduler(backend, () => now).tick();
+
+  assert.deepEqual(result.skipped, [{ revisionId: "rev-1", reason: "PREVIEW_STALE" }]);
+  assert.equal((await backend.listOutbox()).length, 0);
+});
+
+test("publication scheduler pages past expired and already-enqueued revisions", async () => {
+  const { backend, now } = await setup("2026-07-30T10:00:00.000Z", "2026-07-30T09:00:00.000Z");
+  for (let index = 0; index < 50; index += 1) {
+    await backend.insertRevision(revision("2026-07-29T00:00:00.000Z", `expired-${String(index).padStart(3, "0")}`));
+  }
+  for (let index = 0; index < 50; index += 1) {
+    const prior = revision("2026-07-30T08:00:00.000Z", `enqueued-${String(index).padStart(3, "0")}`);
+    await backend.insertRevision(prior);
+    await backend.enqueuePublication(prior.id, computeRevisionHash(prior), {
+      previewHash: "9".repeat(64),
+      targetRepository: "owner/site",
+      baseBranch: "main",
+      targetBaseSha: "f".repeat(40),
+      adapterVersion: "1"
+    });
+  }
+
+  const result = await new PublicationScheduler(backend, () => now).tick();
+
+  assert.deepEqual(result.enqueued, ["rev-1"]);
+  assert.equal((await backend.listOutbox()).length, 51);
 });
 
 test("publication scheduler reports a transient indexed-read fault and resumes without bypassing approval", async () => {

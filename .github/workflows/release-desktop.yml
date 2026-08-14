@@ -34,7 +34,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') {
             throw "RELEASE_VERSION_INVALID"
           }
           $desktopManifest = Get-Content apps/desktop/package.json -Raw | ConvertFrom-Json

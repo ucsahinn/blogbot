@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -213,6 +214,52 @@ test("backup rejects traversal paths", async () => {
       }),
       (error: unknown) =>
         error instanceof BackupError && error.code === "BACKUP_PATH_UNSAFE"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restore rejects an archive with more files than its bounded native writer accepts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "blogbot-portable-backup-file-limit-"));
+  const source = join(root, "source");
+  const target = join(root, "restored");
+  mkdirSync(source);
+  const relativePaths = Array.from({ length: 257 }, (_, index) => `state-${String(index)}.txt`);
+  for (const relativePath of relativePaths) writeFileSync(join(source, relativePath), "x");
+
+  try {
+    const archive = await createPortableBackup({ sourceDirectory: source, relativePaths, recoveryKey });
+    await assert.rejects(
+      planPortableRestore({ archive, recoveryKey, targetDirectory: target }),
+      (error: unknown) => error instanceof BackupError && error.code === "BACKUP_LIMIT_EXCEEDED"
+    );
+    assert.equal(existsSync(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("backup rejects a file reached through an intermediate Windows junction", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "blogbot-portable-backup-junction-"));
+  const source = join(root, "source");
+  const outside = join(root, "outside");
+  mkdirSync(source);
+  mkdirSync(outside);
+  writeFileSync(join(outside, "secret.txt"), "outside secret");
+  symlinkSync(outside, join(source, "linked"), "junction");
+
+  try {
+    await assert.rejects(
+      createPortableBackup({
+        sourceDirectory: source,
+        relativePaths: ["linked/secret.txt"],
+        recoveryKey
+      }),
+      (error: unknown) =>
+        error instanceof BackupError && error.code === "BACKUP_SOURCE_INVALID"
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

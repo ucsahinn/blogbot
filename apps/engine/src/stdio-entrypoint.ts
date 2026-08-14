@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { lstat, readdir, stat, unlink } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { lstat, open, readdir, realpath, stat, unlink } from "node:fs/promises";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   fetchSource,
@@ -37,7 +39,7 @@ import {
   SourceDocumentError
 } from "../../../packages/security/src/source-document.ts";
 import { assertSafeSourceUrl } from "../../../packages/security/src/url-policy.ts";
-import { applyPortableRestorePlan, createPortableBackup, planPortableRestore } from "../../../packages/backup/src/portable-backup.ts";
+import { createPortableBackup, nativeRestoreEntries, planPortableRestore } from "../../../packages/backup/src/portable-backup.ts";
 import { planBackupRetention } from "../../../packages/backup/src/retention.ts";
 import { LocalEngine } from "./local-engine.ts";
 import { LocalQueueRuntime } from "./local-queue.ts";
@@ -64,7 +66,8 @@ import { PublicationScheduler } from "./publication-scheduler.ts";
 import { publicationIntentBinding } from "./publication-intent.ts";
 import { renderCoverVariants, renderGeneratedImageVariants, type ArtDirection } from "../../../packages/visuals/src/index.ts";
 import { imageGeneratorFromEnvironment, type ImageGeneratorPort } from "./imagegen-provider.ts";
-import type { PublicationBundlePolicy } from "../../publisher/src/publication.ts";
+import { isEngineMediaReference, type ApprovedPublicationCommand, type PublicationBundlePolicy, type PublicationEffectsPort, type PublicationFile } from "../../publisher/src/publication.ts";
+import { createConnectorAwarePublicationProcessor, type PublicationRuntimeConnector } from "../../publisher/src/runtime.ts";
 import type { DashboardSyncResult } from "../../../packages/database/src/backend-repository.ts";
 
 const MAX_LINE_BYTES = 1_000_000;
@@ -82,6 +85,34 @@ const MAX_BACKUP_INPUT_BYTES = 128 * 1024 * 1024;
 // decrypting an unbounded feed catalog on every desktop refresh was the main
 // source of multi-second freezes on large local workspaces.
 const MAX_CANDIDATE_ENTRIES_PER_SOURCE = 250;
+
+async function applyRestoreThroughNativeWriter(plan: Awaited<ReturnType<typeof planPortableRestore>>): Promise<void> {
+  const executable = process.env.BLOGBOT_SECURE_RESTORE_BIN?.trim();
+  if (!executable) throw new Error("SECURE_RESTORE_SIDECAR_UNAVAILABLE");
+  const payload = JSON.stringify({
+    parentDirectory: dirname(plan.targetDirectory),
+    targetName: basename(plan.targetDirectory),
+    files: nativeRestoreEntries(plan).map((entry) => ({
+      path: entry.path,
+      base64: entry.data.toString("base64")
+    }))
+  });
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn(executable, [], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+    child.once("error", () => reject(new Error("SECURE_RESTORE_SIDECAR_UNAVAILABLE")));
+    child.once("exit", (code) => code === 0 ? resolvePromise() : reject(new Error("SECURE_RESTORE_WRITE_FAILED")));
+    child.stdin.end(payload, "utf8");
+  });
+}
+
+function trustedHighRiskChecklistHash(revision: ArticleRevision): string {
+  const checklist = (revision.qualityGates ?? [])
+    .filter((gate) => gate.group === "security")
+    .map((gate) => ({ id: gate.id, state: gate.state, detail: gate.detail }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  if (checklist.length === 0) throw new Error("RISK_CHECKLIST_UNAVAILABLE");
+  return createHash("sha256").update(canonicalJson(checklist), "utf8").digest("hex");
+}
 
 /** Exact bundles are only restart-recovery state, never permanent media storage. */
 export function isPublicationPreviewCurrent(value: unknown, nowUnixMs = Date.now()): boolean {
@@ -186,6 +217,20 @@ function publicationContentBytes(content: unknown): Buffer {
     return Buffer.from(content);
   }
   throw new Error("APPROVAL_BOUND_FILE_CONTENT_INVALID");
+}
+
+function approvalBoundFilesDigest(files: readonly PublicationFile[]): string {
+  const digest = createHash("sha256");
+  for (const file of [...files].sort((left, right) => left.path.localeCompare(right.path))) {
+    const content = publicationContentBytes(file.content);
+    const size = Buffer.alloc(8);
+    size.writeBigUInt64BE(BigInt(content.byteLength));
+    digest.update(file.path, "utf8");
+    digest.update(Buffer.from([0]));
+    digest.update(size);
+    digest.update(content);
+  }
+  return digest.digest("hex");
 }
 
 /** A media reference is immutable only when it points to this exact revision. */
@@ -332,12 +377,28 @@ async function runBackgroundMaintenance(
 
 async function assertBoundedBackupInput(root: string, relativePaths: readonly string[]): Promise<void> {
   let totalBytes = 0;
+  const canonicalRoot = await realpath(root);
+  const rootInfo = await lstat(resolve(root));
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("BACKUP_INPUT_ROOT_INVALID");
   for (const relativePath of relativePaths) {
     if (!relativePath || relativePath.includes("..") || relativePath.startsWith("/") || relativePath.startsWith("\\")) {
       throw new Error("BACKUP_INPUT_PATH_INVALID");
     }
-    const info = await lstat(join(root, relativePath));
+    let current = resolve(root);
+    const components = relativePath.replaceAll("\\", "/").split("/");
+    for (const component of components.slice(0, -1)) {
+      current = join(current, component);
+      const ancestor = await lstat(current);
+      if (!ancestor.isDirectory() || ancestor.isSymbolicLink()) throw new Error("BACKUP_INPUT_PATH_INVALID");
+    }
+    const sourcePath = join(root, relativePath);
+    const info = await lstat(sourcePath);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error("BACKUP_INPUT_FILE_INVALID");
+    const canonicalPath = await realpath(sourcePath);
+    const relation = relative(canonicalRoot, canonicalPath);
+    if (relation === "" || relation === ".." || relation.startsWith(`..\\`) || isAbsolute(relation)) {
+      throw new Error("BACKUP_INPUT_PATH_INVALID");
+    }
     totalBytes += info.size;
     if (totalBytes > MAX_BACKUP_INPUT_BYTES) throw new Error("BACKUP_INPUT_LIMIT_EXCEEDED");
   }
@@ -565,7 +626,7 @@ export async function handleBackupRequest(
       targetDirectory
     });
     if (kind === "backup.restore" || kind === "backup.auto.restore") {
-      await applyPortableRestorePlan(plan);
+      await applyRestoreThroughNativeWriter(plan);
       return {
         version: 1,
         id,
@@ -619,6 +680,8 @@ export interface EngineProtocolOptions {
   imageGenerator?: ImageGeneratorPort;
   /** True only when the host injected a processor that can reconcile the durable outbox. */
   publicationReady?: boolean;
+  /** Native host drains credential-free broker commands. */
+  nativePublicationBroker?: boolean;
   /**
    * Test-fixture seam only. Production protocol callers must persist revisions
    * through the internal draft/final-review materializer, never a caller
@@ -640,6 +703,10 @@ export interface PersistentEngineProtocolOptions {
   codexPort?: StructuredCodexPort;
   /** Test-only seam; production reads an explicitly configured local ImageGen key. */
   imageGenerator?: ImageGeneratorPort;
+  /** Native/host-owned publication boundary; credentials never cross the renderer protocol. */
+  publicationBroker?: ProductionPublicationBroker;
+  /** Native desktop owns all credentialed GitHub effects and drains through broker protocol calls. */
+  nativePublicationBroker?: boolean;
   publicationProcessor?: PublicationEffectProcessor;
   /** Enabled by default so due approved work is recovered after restart. */
   startPublicationScheduler?: boolean;
@@ -647,6 +714,127 @@ export interface PersistentEngineProtocolOptions {
   /** Test-fixture seam; never enabled by the stdio production host. */
   allowUnsafeRevisionSaveForTests?: boolean;
 }
+
+export interface ProductionPublicationEffects extends PublicationEffectsPort {
+  getBaseBranchSha(): Promise<string>;
+}
+
+export interface ProductionPublicationBroker {
+  connector: PublicationRuntimeConnector;
+  effects: ProductionPublicationEffects;
+}
+
+function publicationFiles(value: unknown): readonly PublicationFile[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.every((file) => isRecord(file) && typeof file.path === "string" && (
+    typeof file.content === "string" || file.content instanceof Uint8Array || isRecord(file.content)
+  )) ? value as PublicationFile[] : null;
+}
+
+async function materializeEngineMediaFiles(
+  files: readonly PublicationFile[],
+  revision: ArticleRevision,
+  dataDir: string
+): Promise<readonly PublicationFile[]> {
+  return Promise.all(files.map(async (file) => {
+    if (!isEngineMediaReference(file.content)) return file;
+    const reference = engineMediaReference(file.content, revision.id);
+    if (!reference) throw new Error("APPROVAL_BOUND_MEDIA_REFERENCE_INVALID");
+    const candidates = revision.media.filter((media) => media.sha256.toLowerCase() === reference.sha256);
+    if (candidates.length !== 1) throw new Error("APPROVAL_BOUND_MEDIA_REFERENCE_INVALID");
+    const media = candidates[0]!;
+    const normalizedPath = media.path.replaceAll("\\", "/");
+    const expectedPrefix = `media/${revision.id}/`;
+    if (
+      normalizedPath !== media.path ||
+      !normalizedPath.startsWith(expectedPrefix) ||
+      normalizedPath.slice(expectedPrefix.length).length === 0 ||
+      normalizedPath.split("/").some((segment) => !segment || segment === "." || segment === ".." || segment.includes("\0"))
+    ) {
+      throw new Error("APPROVAL_BOUND_MEDIA_PATH_INVALID");
+    }
+
+    const mediaRoot = resolve(dataDir, "media", revision.id);
+    const sourcePath = resolve(dataDir, normalizedPath);
+    const relation = relative(mediaRoot, sourcePath);
+    if (!relation || relation === ".." || relation.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(relation)) {
+      throw new Error("APPROVAL_BOUND_MEDIA_PATH_INVALID");
+    }
+    const canonicalRoot = await realpath(mediaRoot);
+    const canonicalSource = await realpath(sourcePath);
+    const canonicalRelation = relative(canonicalRoot, canonicalSource);
+    if (!canonicalRelation || canonicalRelation === ".." || canonicalRelation.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(canonicalRelation)) {
+      throw new Error("APPROVAL_BOUND_MEDIA_PATH_INVALID");
+    }
+    let current = resolve(dataDir);
+    for (const segment of normalizedPath.split("/").slice(0, -1)) {
+      current = join(current, segment);
+      const ancestor = await lstat(current);
+      if (!ancestor.isDirectory() || ancestor.isSymbolicLink()) throw new Error("APPROVAL_BOUND_MEDIA_PATH_INVALID");
+    }
+
+    const sourceInfo = await lstat(sourcePath);
+    if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) throw new Error("APPROVAL_BOUND_MEDIA_PATH_INVALID");
+    const handle = await open(sourcePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      const before = await handle.stat();
+      if (!before.isFile() || before.isSymbolicLink() || before.size !== reference.size) {
+        throw new Error("APPROVAL_BOUND_MEDIA_MISMATCH");
+      }
+      const bytes = await handle.readFile();
+      const after = await handle.stat();
+      if (
+        after.size !== before.size ||
+        after.mtimeMs !== before.mtimeMs ||
+        after.ctimeMs !== before.ctimeMs ||
+        await realpath(sourcePath) !== canonicalSource ||
+        createHash("sha256").update(bytes).digest("hex") !== reference.sha256
+      ) {
+        throw new Error("APPROVAL_BOUND_MEDIA_MISMATCH");
+      }
+      return { ...file, content: bytes };
+    } finally {
+      await handle.close();
+    }
+  }));
+}
+
+function createProductionPublicationProcessor(
+  repository: BackendRepository,
+  broker: ProductionPublicationBroker,
+  dataDir: string
+): PublicationEffectProcessor {
+  return createConnectorAwarePublicationProcessor({
+    connector: broker.connector,
+    effects: broker.effects,
+    resolver: {
+      async resolve(effect): Promise<ApprovedPublicationCommand | null> {
+        const revision = await repository.getRevision(effect.aggregateId);
+        const preview = await repository.getLocalState(`publication.preview:${effect.aggregateId}`);
+        if (!isRecord(preview) || preview.revisionHash !== effect.revisionHash || preview.previewHash !== effect.previewHash || !isPublicationPreviewCurrent(preview)) return null;
+        const payload = isRecord(preview.payload) ? preview.payload : null;
+        const files = publicationFiles(payload?.files);
+        const currentRevisionHash = computeRevisionHash(revision);
+        if (!payload || !files || currentRevisionHash !== effect.revisionHash) return null;
+        return {
+          articleId: revision.translationKey,
+          revisionId: revision.id,
+          approvedRevisionHash: effect.revisionHash,
+          currentRevisionHash,
+          targetRepository: effect.targetRepository,
+          baseBranch: effect.baseBranch,
+          approvedBaseSha: effect.targetBaseSha,
+          currentBaseSha: await broker.effects.getBaseBranchSha(),
+          approvedHeadSha: "",
+          currentHeadSha: "",
+          files: await materializeEngineMediaFiles(files, revision, dataDir),
+          bundlePolicy: revisionBundlePolicy(revision)
+        };
+      }
+    }
+  });
+}
+
 
 export function createEngineProtocol(
   repository: BackendRepository = new InMemoryBackendStore(),
@@ -658,6 +846,9 @@ export function createEngineProtocol(
   // workspace and the active-draft poll. Keep that read cheap and stable for
   // a short window; mutations still become visible on the next refresh.
   let candidateCache: { expiresAt: number; candidates: Record<string, unknown>[] } | undefined;
+  // Serializes native claims inside this engine process. The durable outbox
+  // state prevents later reclaims; this guard closes the pre-update await gap.
+  const activeNativePublicationClaims = new Set<string>();
 
   return async (input: unknown): Promise<EngineResponse> => {
     if (!isRecord(input) || input.version !== 1 || typeof input.id !== "string") {
@@ -952,10 +1143,25 @@ export function createEngineProtocol(
             // content root for preview validation and materialization.
             const githubObject = isRecord(githubState) ? githubState : {};
             const siteObject = isRecord(siteState) ? siteState : {};
+            const deployObject = isRecord(desktopConnectorState) && isRecord(desktopConnectorState.deploy)
+              ? desktopConnectorState.deploy
+              : {};
             const checkObject = isRecord(desktopConnectorChecks) ? desktopConnectorChecks : {};
             const siteCheck = isRecord(checkObject.site) ? checkObject.site : {};
             const adapterDryRun = isRecord(siteCheck.adapterDryRun) ? siteCheck.adapterDryRun : {};
             const publishMode = siteObject.mode === "PUBLISH";
+            const requiredChecks = Array.isArray(deployObject.requiredChecks)
+              && deployObject.requiredChecks.length > 0
+              && deployObject.requiredChecks.length <= 32
+              && deployObject.requiredChecks.every((value) => typeof value === "string" && value.trim() && value.length <= 200)
+              && new Set(deployObject.requiredChecks).size === deployObject.requiredChecks.length
+                ? deployObject.requiredChecks as string[]
+                : null;
+            const deployWorkflow = typeof deployObject.workflowName === "string"
+              && /^[A-Za-z0-9_.-]+\.ya?ml$/u.test(deployObject.workflowName)
+                ? deployObject.workflowName
+                : null;
+            if (publishMode && (!requiredChecks || !deployWorkflow)) throw new Error("PUBLICATION_POLICY_UNAVAILABLE");
             const configuredTargetRepository = publishMode &&
               typeof githubObject.owner === "string" && typeof githubObject.repository === "string"
                 ? `${githubObject.owner.trim()}/${githubObject.repository.trim()}`
@@ -993,6 +1199,8 @@ export function createEngineProtocol(
               adapterVersion: approvedAdapterIdentity,
               adapterId: bundlePolicy.adapterId,
               bundlePolicy,
+              requiredChecks: requiredChecks ?? [],
+              deployWorkflow: deployWorkflow ?? "",
               siteOrigin,
               contentRoot,
               ...(approvedBaseSha ? { approvedBaseSha, currentBaseSha: approvedBaseSha } : {})
@@ -1006,6 +1214,8 @@ export function createEngineProtocol(
               ...(approvedBaseSha ? { approvedBaseSha, currentBaseSha: approvedBaseSha } : {}),
               files: Array.isArray(payload.files) ? payload.files as never : [],
               bundlePolicy,
+              requiredChecks: requiredChecks ?? [],
+              deployWorkflow: deployWorkflow ?? "",
               siteOrigin,
               contentRoot,
               now: String(payload.now ?? new Date().toISOString())
@@ -1085,6 +1295,151 @@ export function createEngineProtocol(
       } catch (error) {
         return sourceProtocolError(input.id, "command", "PUBLICATION_ENQUEUE_FAILED", error instanceof Error ? error.message : "Publication enqueue failed");
       }
+    }
+
+    if (input.kind === "publication.broker.pending") {
+      if (!options.nativePublicationBroker) {
+        return sourceProtocolError(input.id, "command", "PUBLICATION_BROKER_UNAVAILABLE", "Native publication broker is not configured");
+      }
+      const now = Date.now();
+      const effectIds = (await repository.listOutbox())
+        .filter((effect) => ["PENDING", "UNKNOWN"].includes(effect.state))
+        .filter((effect) => !effect.nextAttemptAt || Date.parse(effect.nextAttemptAt) <= now)
+        .slice(0, 16)
+        .map((effect) => effect.id);
+      return { version: 1, id: input.id, ok: true, kind: input.kind, value: { effectIds } };
+    }
+
+    if (input.kind === "publication.broker.claim") {
+      if (!options.nativePublicationBroker) {
+        return sourceProtocolError(input.id, "command", "PUBLICATION_BROKER_UNAVAILABLE", "Native publication broker is not configured");
+      }
+      const effectId = typeof input.effectId === "string" ? input.effectId : "";
+      if (!effectId || activeNativePublicationClaims.has(effectId)) {
+        return sourceProtocolError(input.id, "command", "PUBLICATION_EFFECT_NOT_CLAIMABLE", "Publication effect is not claimable");
+      }
+      activeNativePublicationClaims.add(effectId);
+      try {
+        const effect = (await repository.listOutbox()).find((item) => item.id === effectId);
+        // An active native effect is owned by its first claimant. Reclaiming is
+        // permitted only after restart, when the worker recovery path resets the
+        // durable state; concurrent claims must never duplicate remote effects.
+        if (!effect || !["PENDING", "UNKNOWN"].includes(effect.state)) {
+          return sourceProtocolError(input.id, "command", "PUBLICATION_EFFECT_NOT_CLAIMABLE", "Publication effect is not claimable");
+        }
+        const revision = await repository.getRevision(effect.aggregateId);
+        const preview = await repository.getLocalState(`publication.preview:${effect.aggregateId}`);
+        const payload = isRecord(preview) && isRecord(preview.payload) ? preview.payload : null;
+        const files = publicationFiles(payload?.files);
+        if (
+          !payload ||
+          !files ||
+          !isRecord(preview) ||
+          !isPublicationPreviewCurrent(preview) ||
+          computeRevisionHash(revision) !== effect.revisionHash ||
+          preview.revisionHash !== effect.revisionHash ||
+          preview.previewHash !== effect.previewHash
+        ) {
+          return sourceProtocolError(input.id, "command", "PUBLICATION_EFFECT_STALE", "Publication effect no longer matches its approved preview");
+        }
+        const materializedFiles = options.mediaDataDir
+          ? await materializeEngineMediaFiles(files, revision, options.mediaDataDir)
+          : files.some((file) => isEngineMediaReference(file.content))
+            ? null
+            : files;
+        if (!materializedFiles) {
+          return sourceProtocolError(input.id, "command", "PUBLICATION_MEDIA_UNAVAILABLE", "Approved publication media cannot be resolved at this boundary");
+        }
+        const bundlePolicy = revisionBundlePolicy(revision);
+        const requiredChecks = Array.isArray(payload.requiredChecks)
+          && payload.requiredChecks.length > 0
+          && payload.requiredChecks.length <= 32
+          && payload.requiredChecks.every((value) => typeof value === "string" && value.trim() && value.length <= 200)
+          && new Set(payload.requiredChecks).size === payload.requiredChecks.length
+            ? payload.requiredChecks as string[]
+            : null;
+        const deployWorkflow = typeof payload.deployWorkflow === "string"
+          && /^[A-Za-z0-9_.-]+\.ya?ml$/u.test(payload.deployWorkflow)
+            ? payload.deployWorkflow
+            : null;
+        if (!requiredChecks || !deployWorkflow) {
+          return sourceProtocolError(input.id, "command", "PUBLICATION_POLICY_UNAVAILABLE", "Approved publication policy is not configured");
+        }
+        const nativeFiles = materializedFiles.map((file) => ({
+          path: file.path,
+          content: typeof file.content === "string"
+            ? file.content
+            : { base64: publicationContentBytes(file.content).toString("base64") }
+        }));
+        const claimAttempt = (effect.claimAttempt ?? 0) + 1;
+        const claimValue = {
+          effectId: effect.id,
+          claimAttempt,
+          idempotencyKey: effect.idempotencyKey,
+          revisionId: effect.aggregateId,
+          revisionHash: effect.revisionHash,
+          targetRepository: effect.targetRepository,
+          baseBranch: effect.baseBranch,
+          expectedBaseSha: effect.targetBaseSha,
+          ...(effect.resultRef ? { priorResultRef: effect.resultRef.slice(0, 512) } : {}),
+          approvedFilesSha: approvalBoundFilesDigest(materializedFiles),
+          requiredChecks,
+          deployWorkflow,
+          adapterVersion: revision.adapterVersion,
+          bundlePolicy,
+          files: nativeFiles
+        };
+        if (Buffer.byteLength(JSON.stringify(claimValue), "utf8") > 70 * 1024 * 1024) {
+          return sourceProtocolError(input.id, "command", "PUBLICATION_CLAIM_TOO_LARGE", "Approved publication claim exceeds the native boundary");
+        }
+        await repository.updateOutbox({
+          ...effect,
+          state: "IN_PROGRESS",
+          attempts: effect.attempts + 1,
+          claimAttempt
+        });
+        return { version: 1, id: input.id, ok: true, kind: input.kind, value: claimValue };
+      } catch (error) {
+        return sourceProtocolError(input.id, "command", "PUBLICATION_MEDIA_INVALID", error instanceof Error ? error.message : "Approved publication media is invalid");
+      } finally {
+        activeNativePublicationClaims.delete(effectId);
+      }
+    }
+
+    if (input.kind === "publication.broker.complete") {
+      if (!options.nativePublicationBroker) {
+        return sourceProtocolError(input.id, "command", "PUBLICATION_BROKER_UNAVAILABLE", "Native publication broker is not configured");
+      }
+      const effectId = typeof input.effectId === "string" ? input.effectId : "";
+      const claimAttempt = Number.isSafeInteger(input.claimAttempt)
+        && Number(input.claimAttempt) > 0
+        ? Number(input.claimAttempt)
+        : 0;
+      const state = input.state === "SUCCEEDED" || input.state === "FAILED" || input.state === "UNKNOWN" ? input.state : null;
+      const effect = (await repository.listOutbox()).find((item) => item.id === effectId);
+      if (!effect || effect.state !== "IN_PROGRESS" || effect.claimAttempt !== claimAttempt || !state) {
+        return sourceProtocolError(input.id, "command", "INVALID_PUBLICATION_BROKER_RESULT", "Publication broker result is invalid");
+      }
+      const resultRef = typeof input.resultRef === "string" ? input.resultRef.slice(0, 512) : undefined;
+      const lastError = typeof input.lastError === "string" ? input.lastError.slice(0, 512) : undefined;
+      const retryAfterMs = Number.isSafeInteger(input.retryAfterMs)
+        && Number(input.retryAfterMs) >= 0
+        && Number(input.retryAfterMs) <= 86_400_000
+        ? Number(input.retryAfterMs)
+        : undefined;
+      const { nextAttemptAt: _previousRetryDeadline, ...withoutPreviousRetryDeadline } = effect;
+      const nextAttemptAt = state === "UNKNOWN" && retryAfterMs !== undefined
+        ? new Date(Date.now() + retryAfterMs).toISOString()
+        : undefined;
+      const saved = await repository.updateOutbox({
+        ...withoutPreviousRetryDeadline,
+        state,
+        ...(nextAttemptAt ? { nextAttemptAt } : {}),
+        ...(resultRef ? { resultRef } : {}),
+        ...(lastError ? { lastError } : {}),
+        ...(state === "SUCCEEDED" ? { completedAt: new Date().toISOString() } : {})
+      });
+      return { version: 1, id: input.id, ok: true, kind: input.kind, value: saved };
     }
 
     if (input.kind === "source.test") {
@@ -1302,6 +1657,10 @@ export function createEngineProtocol(
               ) {
                 throw new Error("EDITORIAL_APPROVAL_REQUIRED");
               }
+              // The renderer may display this checklist, but it is never the
+              // authority for its approval binding. Persist only a digest
+              // reconstructed from the immutable revision held by the engine.
+              const riskChecklistHash = trustedHighRiskChecklistHash(revision);
               return transaction.saveHighRiskApproval({
                 revisionId: revision.id,
                 revisionHash: actualHash,
@@ -1309,7 +1668,7 @@ export function createEngineProtocol(
                 approvedAt: new Date().toISOString(),
                 warningSetHash: command.payload.warningSetHash,
                 approvalType: "HIGH_RISK",
-                riskChecklistHash: command.payload.riskChecklistHash,
+                riskChecklistHash,
                 windowsReauthenticatedAt: command.payload.windowsReauthenticatedAt
               });
             }
@@ -2279,7 +2638,7 @@ export async function collectDraftSourceEvidence(
  * revision refers to one of its captured entries.
  */
 export function protectedCatalogSourceIds(
-  revisions: readonly ArticleRevision[],
+  revisions: readonly { sources: readonly { id: string; evidenceVersionId?: string }[] }[],
   catalogSourceIds: readonly string[]
 ): string[] {
   const snapshotSourceIds = revisions.flatMap((revision) => revision.sources.map((source) => source.id));
@@ -2296,7 +2655,7 @@ export function protectedCatalogSourceIds(
  * remains protected rather than risking evidence loss during migration.
  */
 export function protectedCatalogEvidenceReferences(
-  revisions: readonly ArticleRevision[],
+  revisions: readonly { sources: readonly { id: string; evidenceVersionId?: string }[] }[],
   catalogSourceIds: readonly string[]
 ): string[] {
   const exactVersionIds = revisions.flatMap((revision) =>
@@ -2321,10 +2680,15 @@ async function purgeExpiredSourceEvidence(
   sourceRepository: SourceRepository,
   beforeIso: string
 ): Promise<number> {
-  const [snapshot, sources] = await Promise.all([repository.sync(0), sourceRepository.listSources()]);
+  const [references, sources] = await Promise.all([
+    repository.listRevisionEvidenceReferences
+      ? repository.listRevisionEvidenceReferences()
+      : repository.sync(0).then((snapshot) => snapshot.snapshot.revisions),
+    sourceRepository.listSources()
+  ]);
   return sourceRepository.purgeExpiredEntries(
     beforeIso,
-    protectedCatalogEvidenceReferences(snapshot.snapshot.revisions, sources.map((source) => source.id))
+    protectedCatalogEvidenceReferences(references, sources.map((source) => source.id))
   );
 }
 
@@ -2475,11 +2839,29 @@ export async function recoverWaitingDraftJobs(
   return recovered;
 }
 
+async function recoverInterruptedNativePublications(repository: BackendRepository): Promise<number> {
+  let recovered = 0;
+  for (const effect of await repository.listOutbox()) {
+    if (effect.state !== "IN_PROGRESS") continue;
+    await repository.updateOutbox({
+      ...effect,
+      state: "UNKNOWN",
+      nextAttemptAt: new Date().toISOString(),
+      lastError: "NATIVE_PUBLICATION_INTERRUPTED"
+    });
+    recovered += 1;
+  }
+  return recovered;
+}
+
 export async function createPersistentEngineProtocol(
   dataDir: string,
   options: PersistentEngineProtocolOptions = {}
 ): Promise<EngineProtocolRuntime> {
   const repository = await PGliteBackendRepository.open(dataDir);
+  if (options.nativePublicationBroker) {
+    await recoverInterruptedNativePublications(repository);
+  }
   const sourceRepository = await PGliteSourceRepository.fromDatabase(
     repository.getDatabase()
   );
@@ -2503,9 +2885,12 @@ export async function createPersistentEngineProtocol(
   let codexCoordinator: CodexWorkerCoordinator | undefined;
   let publicationOutboxWorker: PublicationOutboxWorker | undefined;
   let publicationScheduler: PublicationScheduler | undefined;
+  const publicationProcessor = options.publicationProcessor ?? (options.publicationBroker
+    ? createProductionPublicationProcessor(repository, options.publicationBroker, dataDir)
+    : undefined);
   // Keep the advertised capability independent from worker startup scope so
   // every later doctor request reports the same injected host capability.
-  const publicationReady = Boolean(options.publicationProcessor);
+  const publicationReady = Boolean(publicationProcessor) || options.nativePublicationBroker === true;
   const runSourceRetention = () => runBackgroundMaintenance(
     repository,
     "maintenance.source-retention",
@@ -2704,7 +3089,7 @@ export async function createPersistentEngineProtocol(
       );
       await registerCodexQueueWorker(queue, codexCoordinator);
     }
-    const effectivePublicationProcessor = options.publicationProcessor;
+    const effectivePublicationProcessor = publicationProcessor;
     if (effectivePublicationProcessor) {
       publicationOutboxWorker = startPublicationOutboxWorker(repository, effectivePublicationProcessor);
     }
@@ -2748,6 +3133,7 @@ export async function createPersistentEngineProtocol(
     sourceTransport,
     sourceScanCoordinator,
     publicationReady,
+    nativePublicationBroker: options.nativePublicationBroker === true,
     allowUnsafeRevisionSaveForTests: options.allowUnsafeRevisionSaveForTests === true,
     verifyEncryptionIntegrity: async () => {
       await repository.verifyEncryptionIntegrity();
@@ -2943,7 +3329,8 @@ export async function runStdioEngine(
 ): Promise<void> {
   const runtime = await createPersistentEngineProtocol(dataDir, {
     startSourceScheduler: true,
-    startPublicationScheduler: true
+    startPublicationScheduler: true,
+    nativePublicationBroker: true
   });
   let outputBroken = false;
   output.on("error", () => {

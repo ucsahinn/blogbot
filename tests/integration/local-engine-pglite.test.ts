@@ -246,6 +246,29 @@ test("enqueueing a PGlite publication emits an incremental outbox change", async
   })), [{ kind: "EFFECT_UPDATED", entityId: effect.id }]);
 });
 
+test("PGlite due revision reads support stable pagination", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-pglite-due-page-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  t.after(() => repository.close());
+
+  await repository.getDatabase().query(
+    `INSERT INTO blogbot_revision_list_index
+       (revision_id, scheduled_at_unix_ms, value)
+     VALUES ($1, $2, '{}'::jsonb), ($3, $4, '{}'::jsonb), ($5, $6, '{}'::jsonb)`,
+    [
+      "due-a", Date.parse("2026-07-30T08:00:00.000Z"),
+      "due-b", Date.parse("2026-07-30T09:00:00.000Z"),
+      "due-c", Date.parse("2026-07-30T10:00:00.000Z")
+    ]
+  );
+
+  assert.deepEqual(
+    await repository.listDueRevisionIds(Date.parse("2026-07-30T11:00:00.000Z"), 2, 2),
+    ["due-c"]
+  );
+});
+
 test("local database records immutable migration versions and hashes", async () => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-migrations-"));
   const repository = await PGliteBackendRepository.open(join(root, "pgdata"));

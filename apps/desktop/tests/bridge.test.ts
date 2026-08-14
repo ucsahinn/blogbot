@@ -358,6 +358,24 @@ test("setup connector dry-run forwards only redacted configuration", async () =>
   assert.deepEqual(calls, [{ command: "test_setup_connector", args: { connector: "github", config: { owner: "owner", repository: "site" } } }]);
 });
 
+test("deploy connector forwards an explicit required GitHub check policy", async () => {
+  const calls: Array<{ command: string; args: unknown }> = [];
+  const bridge = createInvokeBridge(async (command, args) => {
+    calls.push({ command, args });
+    return { connector: "deploy", ready: true, detail: "ok" };
+  });
+
+  await bridge.testSetupConnector({
+    connector: "deploy",
+    config: { workflowName: "deploy.yml", requiredChecks: ["build", "test"] }
+  });
+
+  assert.deepEqual(calls, [{
+    command: "test_setup_connector",
+    args: { connector: "deploy", config: { workflowName: "deploy.yml", requiredChecks: ["build", "test"] } }
+  }]);
+});
+
 test("connector state is read from the native engine-owned snapshot", async () => {
   const calls: Array<{ command: string; args: unknown }> = [];
   const bridge = createInvokeBridge(async (command, args) => {
@@ -395,6 +413,58 @@ test("connector state is read from the native engine-owned snapshot", async () =
     externalReadiness: "NOT_CONFIGURED"
   });
   assert.deepEqual(calls, [{ command: "get_connector_state", args: undefined }]);
+});
+
+test("GitHub bridge starts device flow only through an explicit mutation", async () => {
+  const calls: Array<{ command: string; args: unknown }> = [];
+  const bridge = createInvokeBridge(async (command, args) => {
+    calls.push({ command, args });
+    return {
+      status: "pending",
+      writes: false,
+      network: true,
+      userCode: "ABCD-EFGH",
+      verificationUri: "https://github.com/login/device"
+    };
+  });
+
+  assert.deepEqual(await bridge.startGitHubDeviceFlow(), {
+    status: "pending",
+    writes: false,
+    network: true,
+    userCode: "ABCD-EFGH",
+    verificationUri: "https://github.com/login/device"
+  });
+  assert.deepEqual(calls, [{ command: "github_device_flow_start", args: undefined }]);
+
+  const readOnlyBridge = createInvokeBridge(async () => {
+    throw new Error("transport must not run in read-only mode");
+  }, { readOnly: true });
+  await assert.rejects(
+    () => readOnlyBridge.startGitHubDeviceFlow(),
+    (reason: unknown) => reason instanceof BridgeError && reason.code === "OFFLINE_READ_ONLY"
+  );
+});
+
+test("GitHub bridge polls and clears authorization only through explicit mutations", async () => {
+  const calls: Array<{ command: string; args: unknown }> = [];
+  const bridge = createInvokeBridge(async (command, args) => {
+    calls.push({ command, args });
+    return { status: command === "github_device_flow_clear" ? "logged-out" : "pending", writes: false, network: true };
+  });
+
+  await bridge.pollGitHubDeviceFlow();
+  await bridge.clearGitHubDeviceFlow();
+  assert.deepEqual(calls, [
+    { command: "github_device_flow_poll", args: undefined },
+    { command: "github_device_flow_clear", args: undefined }
+  ]);
+
+  const readOnlyBridge = createInvokeBridge(async () => {
+    throw new Error("transport must not run in read-only mode");
+  }, { readOnly: true });
+  await assert.rejects(() => readOnlyBridge.pollGitHubDeviceFlow(), BridgeError);
+  await assert.rejects(() => readOnlyBridge.clearGitHubDeviceFlow(), BridgeError);
 });
 
 test("GitHub bridge exposes read-only broker status and dry-run intent commands", async () => {

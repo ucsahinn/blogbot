@@ -26,6 +26,8 @@ export interface PublicationPreviewInput {
   siteOrigin: string;
   contentRoot: string;
   adapterId?: string;
+  requiredChecks: readonly string[];
+  deployWorkflow: string;
   now: string;
 }
 
@@ -101,6 +103,8 @@ export function buildPublicationPreview(input: PublicationPreviewInput): Publica
       approvedBaseSha: input.approvedBaseSha ?? "",
       adapterId: input.bundlePolicy.adapterId,
       bundlePolicy: input.bundlePolicy,
+      requiredChecks: input.requiredChecks,
+      deployWorkflow: input.deployWorkflow,
       files: input.files.map(fileDigest).sort((a, b) => a.path.localeCompare(b.path)),
       plan
     }), "utf8")

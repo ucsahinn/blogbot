@@ -24,6 +24,7 @@ const navigation: Array<{
 }> = [
   { id: "dashboard", label: "Genel Bakış", icon: "⌂" },
   { id: "content", label: "İçerik Akışı", icon: "◎" },
+  { id: "editorial", label: "Editoryal Masa", icon: "✓" },
   { id: "publishing", label: "Takvim ve Yayın", icon: "◫" },
   { id: "operations", label: "Operasyonlar", icon: "⋮" }
 ];
@@ -151,6 +152,11 @@ export function AppShell({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onNavigate, onOpenSettings]);
 
+  useEffect(() => {
+    const workspace = document.getElementById("main-workspace");
+    workspace?.focus({ preventScroll: true });
+  }, [activePage]);
+
   const runtimeLabel =
     snapshot.runtime === "ONLINE"
       ? "Yerel sistem hazır"
@@ -159,8 +165,8 @@ export function AppShell({
         : "Yerel kurtarma modu";
   const isNavigationActive = (page: PageId) =>
     activePage === page ||
-    (page === "content" && activePage === "instant") ||
-    (page === "content" && ["content-candidates", "instant", "editorial", "editorial-review"].includes(activePage));
+    (page === "content" && ["content-candidates", "instant"].includes(activePage)) ||
+    (page === "editorial" && activePage === "editorial-review");
 
   return (
     <div className="app-shell">

@@ -36,6 +36,15 @@ const fetcherExecutable = join(
   binaryDirectory,
   "blogbot-fetcher-x86_64-pc-windows-msvc.exe"
 );
+const secureRestoreExecutable = join(
+  root,
+  "apps",
+  "desktop",
+  "src-tauri",
+  "resources",
+  "secure-restore",
+  "blogbot-secure-restore.exe"
+);
 const bundle = join(work, "sea-entry.cjs");
 const blob = join(work, "sea-prep.blob");
 const config = join(work, "sea-config.json");
@@ -47,9 +56,9 @@ await rm(work, { recursive: true, force: true });
 await mkdir(work, { recursive: true });
 await mkdir(binaryDirectory, { recursive: true });
 await mkdir(resourceDirectory, { recursive: true });
+await mkdir(dirname(secureRestoreExecutable), { recursive: true });
 await rm(join(resourceDirectory, "..", "engine-node_modules"), { recursive: true, force: true });
 await mkdir(engineModulesDirectory, { recursive: true });
-
 await build({
   entryPoints: [join(root, "apps", "engine", "src", "sea-entrypoint.ts")],
   outfile: bundle,
@@ -136,6 +145,21 @@ for (const modulePath of [
     { recursive: true, force: true }
   );
 }
+
+// Tauri validates every resource glob while compiling the native helper.  The
+// resource tree must therefore be fully materialized before this cargo step;
+// otherwise a clean build fails before the restore helper can be produced.
+await run("cargo", [
+  "build",
+  "--manifest-path", join(root, "apps", "desktop", "src-tauri", "Cargo.toml"),
+  "--release",
+  "--bin",
+  "blogbot-secure-restore"
+]);
+await copyFile(
+  join(root, "apps", "desktop", "src-tauri", "target", "release", "blogbot-secure-restore.exe"),
+  secureRestoreExecutable
+);
 
 process.stdout.write(`${executable}\n`);
 

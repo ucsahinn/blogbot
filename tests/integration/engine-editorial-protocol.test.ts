@@ -477,6 +477,11 @@ test("high-risk approval is accepted only after the matching editorial approval"
 
   const secondApproval = await runtime.handle(command("APPROVAL.GRANT_HIGH_RISK", highRiskPayload, 2, "high-risk-second"));
   assert.equal(secondApproval.ok, true);
+  assert.notEqual(
+    ((secondApproval.result as { value?: { riskChecklistHash?: string } }).value ?? {}).riskChecklistHash,
+    highRiskPayload.riskChecklistHash,
+    "engine must persist its own checklist digest, not the caller-provided one"
+  );
 });
 
 test("approved revision rejects a self-consistent but substituted publication bundle", async (t) => {
@@ -656,7 +661,10 @@ test("publication enqueue persists one approved preview without nesting the PGli
   });
   const revisionHash = computeRevisionHash(expectedRevision);
   const manifestPath = `.blogbot/manifests/${expectedRevision.id}.json`;
-  const runtime = await createPersistentEngineProtocol(dataDir, { startSourceWorker: false });
+  const runtime = await createPersistentEngineProtocol(dataDir, {
+    startSourceWorker: false,
+    nativePublicationBroker: true
+  });
   t.after(() => runtime.close());
 
   await runtime.handle(command("REVISION.SAVE", { revision: expectedRevision }, 0, "enqueue-save"));
@@ -666,13 +674,20 @@ test("publication enqueue persists one approved preview without nesting the PGli
     deviceId: "windows-local-device-v1",
     warningSetHash: computeWarningSetHash(expectedRevision.qualityGates)
   }, 1, "enqueue-approve"));
+  const connectorPolicySaved = await runtime.handle(command("LOCAL_STATE.SET", {
+    key: "desktop.connectors",
+    value: {
+      deploy: { workflowName: "deploy.yml", requiredChecks: ["build", "test / windows"] }
+    }
+  }, 2, "enqueue-connector-policy"));
+  assert.equal(connectorPolicySaved.ok, true, JSON.stringify(connectorPolicySaved));
   const preview = await runtime.handle({
     version: 1,
     id: "enqueue-preview",
     kind: "publication.preview",
     revisionId: expectedRevision.id,
     revisionHash,
-    expectedVersion: 2,
+    expectedVersion: 3,
     idempotencyKey: "enqueue-preview-key",
     payload: {
       targetRepository: "owner/site",
@@ -718,13 +733,142 @@ test("publication enqueue persists one approved preview without nesting the PGli
       revisionHash,
       previewHash,
       idempotencyKey: "enqueue-publication-key",
-      expectedVersion: 3
+      expectedVersion: 4
     }),
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("PUBLICATION_ENQUEUE_TIMEOUT")), 1_000))
   ]);
   assert.equal(enqueued.ok, true, JSON.stringify(enqueued));
-  const persisted = (await runtime.handle({ version: 1, id: "enqueue-state", kind: "state", afterCursor: 0 })).snapshot as { outbox: Array<{ aggregateId: string }> };
-  assert.equal(persisted.outbox.filter((effect) => effect.aggregateId === expectedRevision.id).length, 1);
+  const effectId = (enqueued.value as { id: string }).id;
+  const [claimed, concurrentClaim] = await Promise.all([
+    runtime.handle({
+      version: 1,
+      id: "claim-native-publication",
+      kind: "publication.broker.claim",
+      effectId
+    }),
+    runtime.handle({
+      version: 1,
+      id: "concurrent-native-publication-claim",
+      kind: "publication.broker.claim",
+      effectId
+    })
+  ]);
+  const successfulClaim = claimed.ok ? claimed : concurrentClaim;
+  const rejectedClaim = claimed.ok ? concurrentClaim : claimed;
+  assert.equal(successfulClaim.ok, true, JSON.stringify(successfulClaim));
+  const claim = successfulClaim.value as {
+    effectId: string;
+    claimAttempt: number;
+    approvedFilesSha: string;
+    requiredChecks: string[];
+    deployWorkflow: string;
+    adapterVersion: string;
+    bundlePolicy: {
+      adapterId: string;
+      manifestPath: string;
+      allowedPathPrefixes: string[];
+    };
+    files: Array<{ path: string; content: string | Uint8Array }>;
+  };
+  assert.equal(claim.effectId, effectId);
+  assert.equal(claim.claimAttempt, 1);
+  assert.equal("priorResultRef" in (successfulClaim.value as Record<string, unknown>), false);
+  const approvedFilesDigest = createHash("sha256");
+  for (const file of [...claim.files].sort((left, right) => left.path.localeCompare(right.path))) {
+    const content = typeof file.content === "string" ? Buffer.from(file.content, "utf8") : Buffer.from(file.content);
+    const size = Buffer.alloc(8);
+    size.writeBigUInt64BE(BigInt(content.byteLength));
+    approvedFilesDigest.update(file.path, "utf8").update(Buffer.from([0])).update(size).update(content);
+  }
+  assert.equal(claim.approvedFilesSha, approvedFilesDigest.digest("hex"));
+  assert.equal(claim.adapterVersion, expectedRevision.adapterVersion);
+  assert.deepEqual(claim.requiredChecks, ["build", "test / windows"]);
+  assert.equal(claim.deployWorkflow, "deploy.yml");
+  assert.deepEqual(claim.bundlePolicy, {
+    adapterId: "test",
+    manifestPath,
+    allowedPathPrefixes: [...files.map((file) => file.path), manifestPath]
+  });
+  assert.equal("token" in (successfulClaim.value as Record<string, unknown>), false);
+  assert.equal(rejectedClaim.ok, false);
+  assert.equal(rejectedClaim.code, "PUBLICATION_EFFECT_NOT_CLAIMABLE");
+  const duplicateClaim = await runtime.handle({
+    version: 1,
+    id: "duplicate-native-publication-claim",
+    kind: "publication.broker.claim",
+    effectId
+  });
+  assert.equal(duplicateClaim.ok, false);
+  assert.equal(duplicateClaim.code, "PUBLICATION_EFFECT_NOT_CLAIMABLE");
+  const priorResultRef = "p".repeat(600);
+  const waiting = await runtime.handle({
+    version: 1,
+    id: "wait-native-publication",
+    kind: "publication.broker.complete",
+    effectId,
+    claimAttempt: claim.claimAttempt,
+    state: "UNKNOWN",
+    resultRef: priorResultRef,
+    lastError: "GITHUB_REQUIRED_CHECKS_PENDING",
+    retryAfterMs: 50
+  });
+  assert.equal(waiting.ok, true, JSON.stringify(waiting));
+  const waitingEffect = waiting.value as { state: string; resultRef?: string; lastError?: string; nextAttemptAt?: string };
+  assert.equal(waitingEffect.state, "UNKNOWN");
+  assert.equal(waitingEffect.resultRef, priorResultRef.slice(0, 512));
+  assert.equal(waitingEffect.lastError, "GITHUB_REQUIRED_CHECKS_PENDING");
+  assert.ok(Number.isFinite(Date.parse(waitingEffect.nextAttemptAt ?? "")));
+
+  const notDue = await runtime.handle({
+    version: 1,
+    id: "pending-native-publication-not-due",
+    kind: "publication.broker.pending"
+  });
+  assert.deepEqual((notDue.value as { effectIds: string[] }).effectIds, []);
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  const due = await runtime.handle({
+    version: 1,
+    id: "pending-native-publication-due",
+    kind: "publication.broker.pending"
+  });
+  assert.deepEqual((due.value as { effectIds: string[] }).effectIds, [effectId]);
+
+  const reclaimed = await runtime.handle({
+    version: 1,
+    id: "reclaim-native-publication",
+    kind: "publication.broker.claim",
+    effectId
+  });
+  assert.equal(reclaimed.ok, true, JSON.stringify(reclaimed));
+  const reclaimedValue = reclaimed.value as { priorResultRef?: string; claimAttempt: number };
+  assert.equal(reclaimedValue.priorResultRef, priorResultRef.slice(0, 512));
+  assert.equal(reclaimedValue.claimAttempt, 2);
+  const staleCompletion = await runtime.handle({
+    version: 1,
+    id: "stale-native-publication-complete",
+    kind: "publication.broker.complete",
+    effectId,
+    claimAttempt: claim.claimAttempt,
+    state: "SUCCEEDED",
+    resultRef: "merge:stale"
+  });
+  assert.equal(staleCompletion.ok, false);
+  assert.equal(staleCompletion.code, "INVALID_PUBLICATION_BROKER_RESULT");
+  const completed = await runtime.handle({
+    version: 1,
+    id: "complete-native-publication",
+    kind: "publication.broker.complete",
+    effectId,
+    claimAttempt: reclaimedValue.claimAttempt,
+    state: "SUCCEEDED",
+    resultRef: "merge:fake-native"
+  });
+  assert.equal(completed.ok, true, JSON.stringify(completed));
+  const persisted = (await runtime.handle({ version: 1, id: "enqueue-state", kind: "state", afterCursor: 0 })).snapshot as { outbox: Array<{ aggregateId: string; state: string; resultRef?: string; nextAttemptAt?: string }> };
+  const savedEffect = persisted.outbox.find((effect) => effect.aggregateId === expectedRevision.id);
+  assert.equal(savedEffect?.state, "SUCCEEDED");
+  assert.equal(savedEffect?.resultRef, "merge:fake-native");
+  assert.equal(savedEffect?.nextAttemptAt, undefined);
 });
 
 test("normal approval rejects a revision that is not awaiting review", async (t) => {

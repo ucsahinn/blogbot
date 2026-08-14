@@ -14,6 +14,7 @@ import {
   type DashboardSyncResult,
   type RevisionListSnapshot,
   type RevisionLineageIndexEntry,
+  type RevisionEvidenceReference,
   type BackendRepository,
   type BackendRepositoryTransaction,
   type OutboxEffect,
@@ -182,11 +183,11 @@ export class InMemoryBackendStore implements BackendRepository {
     };
   }
 
-  async listDueRevisionIds(nowUnixMs: number, limit = 100): Promise<string[]> {
+  async listDueRevisionIds(nowUnixMs: number, limit = 100, offset = 0): Promise<string[]> {
     return [...this.state.revisions.values()]
       .filter((revision) => Date.parse(revision.scheduledAt) <= nowUnixMs)
       .sort((left, right) => Date.parse(left.scheduledAt) - Date.parse(right.scheduledAt) || left.id.localeCompare(right.id))
-      .slice(0, Math.min(Math.max(1, limit), 200))
+      .slice(Math.max(0, offset), Math.max(0, offset) + Math.min(Math.max(1, limit), 200))
       .map((revision) => revision.id);
   }
 
@@ -194,6 +195,15 @@ export class InMemoryBackendStore implements BackendRepository {
     return [...this.state.revisions.values()].map((revision) => ({
       id: revision.id,
       ...(revision.supersedesRevisionId ? { supersedesRevisionId: revision.supersedesRevisionId } : {})
+    }));
+  }
+
+  async listRevisionEvidenceReferences(): Promise<RevisionEvidenceReference[]> {
+    return [...this.state.revisions.values()].map((revision) => ({
+      sources: revision.sources.map(({ id, evidenceVersionId }) => ({
+        id,
+        ...(evidenceVersionId ? { evidenceVersionId } : {})
+      }))
     }));
   }
 

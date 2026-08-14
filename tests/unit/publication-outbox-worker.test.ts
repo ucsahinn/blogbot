@@ -98,6 +98,33 @@ test("publication outbox worker makes repeated unknown results terminal", async 
   assert.equal(saved?.lastError, "checks pending");
 });
 
+test("publication outbox worker keeps connector-advised unknown checks recoverable after the transient attempt limit", async () => {
+  const repository = new InMemoryBackendStore();
+  const effect = await repository.enqueuePublication("revision-checks-pending", "1".repeat(64), binding);
+  let calls = 0;
+  const worker = startPublicationOutboxWorker(repository, {
+    async process() {
+      calls += 1;
+      return calls < 4
+        ? { state: "UNKNOWN", lastError: "checks pending", retryAfterMs: 0 } as const
+        : { state: "SUCCEEDED", resultRef: "merge:checks-complete" } as const;
+    }
+  }, 1, { retryBaseMs: 1 });
+
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const saved = (await repository.sync(0)).snapshot.outbox.find((item) => item.id === effect.id);
+    if (saved?.state === "SUCCEEDED") break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  worker.stop();
+
+  const saved = (await repository.sync(0)).snapshot.outbox.find((item) => item.id === effect.id);
+  assert.equal(calls, 4);
+  assert.equal(saved?.state, "SUCCEEDED");
+  assert.equal(saved?.attempts, 4);
+  assert.equal(saved?.resultRef, "merge:checks-complete");
+});
+
 test("publication outbox worker persists backoff before retrying an unknown effect", async () => {
   const repository = new InMemoryBackendStore();
   const effect = await repository.enqueuePublication("revision-backed-off", "f".repeat(64), binding);
@@ -107,7 +134,7 @@ test("publication outbox worker persists backoff before retrying an unknown effe
       calls += 1;
       return { state: "UNKNOWN", lastError: "remote checks pending" } as const;
     }
-  }, 1, { retryBaseMs: 100 });
+  }, 1, { retryBaseMs: 10_000 });
 
   for (let attempt = 0; attempt < 50 && calls === 0; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2));

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-github-device-flow-poll"
+description = "Enables the github_device_flow_poll command without any pre-configured scope."
+commands.allow = ["github_device_flow_poll"]
+
+[[permission]]
+identifier = "deny-github-device-flow-poll"
+description = "Denies the github_device_flow_poll command without any pre-configured scope."
+commands.deny = ["github_device_flow_poll"]

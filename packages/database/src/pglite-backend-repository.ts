@@ -20,6 +20,7 @@ import {
   type RevisionListReadOptions,
   type RevisionListSnapshot,
   type RevisionLineageIndexEntry,
+  type RevisionEvidenceReference,
   type BackendRepository,
   type BackendRepositoryTransaction,
   type OutboxEffect,
@@ -634,13 +635,13 @@ export class PGliteBackendRepository
     return this.database.transaction((transaction) => readRevisionSummarySnapshot(transaction, this.protector, options));
   }
 
-  async listDueRevisionIds(nowUnixMs: number, limit = 100): Promise<string[]> {
+  async listDueRevisionIds(nowUnixMs: number, limit = 100, offset = 0): Promise<string[]> {
     const result = await this.database.query<{ revision_id: string }>(
       `SELECT revision_id FROM blogbot_revision_list_index
         WHERE scheduled_at_unix_ms <= $1
         ORDER BY scheduled_at_unix_ms, revision_id
-        LIMIT $2`,
-      [nowUnixMs, Math.min(Math.max(1, limit), 200)]
+        LIMIT $2 OFFSET $3`,
+      [nowUnixMs, Math.min(Math.max(1, limit), 200), Math.max(0, offset)]
     );
     return result.rows.map((row) => row.revision_id);
   }
@@ -654,6 +655,24 @@ export class PGliteBackendRepository
       id: row.revision_id,
       ...(row.supersedes_revision_id ? { supersedesRevisionId: row.supersedes_revision_id } : {})
     }));
+  }
+
+  async listRevisionEvidenceReferences(): Promise<RevisionEvidenceReference[]> {
+    const result = await this.database.query<{ revision_id: string; value: unknown }>(
+      "SELECT revision_id, value FROM blogbot_revision_list_index"
+    );
+    return result.rows.map((row) => {
+      const summary = this.protector.open<ArticleRevision>(
+        row.value,
+        backendContext("blogbot_revision_list_index", row.revision_id)
+      );
+      return {
+        sources: summary.sources.map(({ id, evidenceVersionId }) => ({
+          id,
+          ...(evidenceVersionId ? { evidenceVersionId } : {})
+        }))
+      };
+    });
   }
 
   async runIdempotent<T>(
@@ -1078,28 +1097,29 @@ async function readRevisionSummarySnapshot(
     row.value,
     backendContext("blogbot_revision_list_index", row.revision_id)
   ));
-  const approvals = await Promise.all(revisions.map(async (revision) => {
-    const result = await client.query<JsonRow>(
-      "SELECT value FROM blogbot_approvals WHERE revision_id = $1",
-      [revision.id]
-    );
-    return result.rows[0]
-      ? protector.open<Approval>(result.rows[0].value, backendContext("blogbot_approvals", revision.id))
-      : null;
-  }));
-  const highRiskApprovals = await Promise.all(revisions.map(async (revision) => {
-    const result = await client.query<JsonRow>(
-      "SELECT value FROM blogbot_high_risk_approvals WHERE revision_id = $1",
-      [revision.id]
-    );
-    return result.rows[0]
-      ? protector.open<HighRiskApproval>(result.rows[0].value, backendContext("blogbot_high_risk_approvals", revision.id))
-      : null;
-  }));
+  const revisionIds = revisions.map((revision) => revision.id);
+  const [approvalRows, highRiskApprovalRows] = revisionIds.length === 0
+    ? [{ rows: [] as JsonRow[] }, { rows: [] as JsonRow[] }]
+    : await Promise.all([
+      client.query<JsonRow>(
+        "SELECT revision_id AS key, value FROM blogbot_approvals WHERE revision_id = ANY($1::text[])",
+        [revisionIds]
+      ),
+      client.query<JsonRow>(
+        "SELECT revision_id AS key, value FROM blogbot_high_risk_approvals WHERE revision_id = ANY($1::text[])",
+        [revisionIds]
+      )
+    ]);
   return {
     revisions,
-    approvals: approvals.filter((value): value is Approval => value !== null),
-    highRiskApprovals: highRiskApprovals.filter((value): value is HighRiskApproval => value !== null)
+    approvals: approvalRows.rows.map((row) => protector.open<Approval>(
+      row.value,
+      backendContext("blogbot_approvals", requiredKey(row))
+    )),
+    highRiskApprovals: highRiskApprovalRows.rows.map((row) => protector.open<HighRiskApproval>(
+      row.value,
+      backendContext("blogbot_high_risk_approvals", requiredKey(row))
+    ))
   };
 }
 

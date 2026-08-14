@@ -308,7 +308,7 @@ export interface SetupConnectorDraft {
   codex: { accountLabel: string };
   github: { owner: string; repository: string; clientId?: string };
   site: { repositoryPath: string; publicSiteUrl: string; mode: SiteWorkMode };
-  deploy: { workflowName: string };
+  deploy: { workflowName: string; requiredChecks: string[] };
   backup: { folder: string };
 }
 export interface SetupConnectorTestResult {

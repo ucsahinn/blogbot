@@ -85,8 +85,17 @@ export class PublicationScheduler {
       const lineage = indexedRead
         ? await this.backend.listRevisionLineage!()
         : snapshot!.revisions;
+      const dueRevisionIds: string[] = [];
+      if (indexedRead) {
+        const pageSize = 100;
+        for (let offset = 0; ; offset += pageSize) {
+          const page = await this.backend.listDueRevisionIds!(now.getTime(), pageSize, offset);
+          dueRevisionIds.push(...page);
+          if (page.length < pageSize) break;
+        }
+      }
       const revisions = indexedRead
-        ? await Promise.all((await this.backend.listDueRevisionIds!(now.getTime(), 100)).map((id) => this.backend.getRevision(id)))
+        ? await Promise.all(dueRevisionIds.map((id) => this.backend.getRevision(id)))
         : snapshot!.revisions.filter((revision) => Date.parse(revision.scheduledAt) <= now.getTime());
       for (const revision of revisions) {
         const approval = indexedRead
@@ -111,8 +120,10 @@ export class PublicationScheduler {
           result.skipped.push({ revisionId: revision.id, reason: "PREVIEW_REQUIRED" });
           continue;
         }
-        const previewRecord = preview as { revisionHash?: unknown };
-        if (previewRecord.revisionHash !== revisionHash) {
+        const previewRecord = preview as { revisionHash?: unknown; expiresAtUnixMs?: unknown };
+        if (previewRecord.revisionHash !== revisionHash
+          || !Number.isSafeInteger(previewRecord.expiresAtUnixMs)
+          || Number(previewRecord.expiresAtUnixMs) <= now.getTime()) {
           result.skipped.push({ revisionId: revision.id, reason: "PREVIEW_STALE" });
           continue;
         }

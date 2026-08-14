@@ -1,8 +1,8 @@
-use std::sync::RwLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use std::process::{Child, Command, Stdio};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::RwLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,8 @@ use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 use thiserror::Error;
 
-use crate::engine_bridge::EngineBridge;
-use crate::github_broker::GitHubBroker;
+use crate::engine_bridge::{terminate_owned_process_tree, EngineBridge};
+use crate::github_broker::{drive_publication_broker, GitHubBroker};
 use crate::notifications;
 use crate::secure_store;
 
@@ -88,7 +88,9 @@ fn register_folder_grant(state: &DesktopState, raw: &str) -> Result<PathBuf, Com
     let canonical = std::fs::canonicalize(raw)
         .map_err(|_| CommandError::InvalidInput("seçilen klasör doğrulanamadı".into()))?;
     if !canonical.is_dir() {
-        return Err(CommandError::InvalidInput("seçilen yol bir klasör değil".into()));
+        return Err(CommandError::InvalidInput(
+            "seçilen yol bir klasör değil".into(),
+        ));
     }
     let mut grants = write_lock(&state.folder_grants)?;
     if !grants.contains(&canonical) {
@@ -100,7 +102,10 @@ fn register_folder_grant(state: &DesktopState, raw: &str) -> Result<PathBuf, Com
 fn require_granted_directory(state: &DesktopState, raw: &str) -> Result<PathBuf, CommandError> {
     let canonical = std::fs::canonicalize(raw)
         .map_err(|_| CommandError::InvalidInput("klasör bulunamadı".into()))?;
-    let grants = state.folder_grants.read().map_err(|_| CommandError::StateUnavailable)?;
+    let grants = state
+        .folder_grants
+        .read()
+        .map_err(|_| CommandError::StateUnavailable)?;
     if !canonical.is_dir() || !is_path_within_grant(&canonical, &grants) {
         return Err(CommandError::InvalidInput(
             "bu klasör önce Windows klasör seçicisiyle yetkilendirilmelidir".into(),
@@ -119,16 +124,25 @@ fn authorize_connector_directory(
         "backup" => "folder",
         _ => return Ok(()),
     };
-    let raw = config.get(field).and_then(Value::as_str).unwrap_or_default();
+    let raw = config
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let granted = require_granted_directory(state, raw)?;
-    let object = config
-        .as_object_mut()
-        .ok_or_else(|| CommandError::InvalidInput("setup connector config must be an object".into()))?;
-    object.insert(field.to_string(), json!(granted.to_string_lossy().into_owned()));
+    let object = config.as_object_mut().ok_or_else(|| {
+        CommandError::InvalidInput("setup connector config must be an object".into())
+    })?;
+    object.insert(
+        field.to_string(),
+        json!(granted.to_string_lossy().into_owned()),
+    );
     Ok(())
 }
 
-fn require_granted_restore_target(state: &DesktopState, raw: &str) -> Result<PathBuf, CommandError> {
+fn require_granted_restore_target(
+    state: &DesktopState,
+    raw: &str,
+) -> Result<PathBuf, CommandError> {
     let requested = PathBuf::from(raw.trim());
     if !requested.is_absolute() || requested.exists() {
         return Err(CommandError::InvalidInput(
@@ -140,8 +154,13 @@ fn require_granted_restore_target(state: &DesktopState, raw: &str) -> Result<Pat
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty() && *value != "." && *value != "..")
         .ok_or_else(|| CommandError::InvalidInput("geri yükleme klasörü adı geçersiz".into()))?;
-    if name.chars().any(|value| matches!(value, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')) {
-        return Err(CommandError::InvalidInput("geri yükleme klasörü adı güvenli değil".into()));
+    if name
+        .chars()
+        .any(|value| matches!(value, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+    {
+        return Err(CommandError::InvalidInput(
+            "geri yükleme klasörü adı güvenli değil".into(),
+        ));
     }
     let parent = requested
         .parent()
@@ -149,7 +168,9 @@ fn require_granted_restore_target(state: &DesktopState, raw: &str) -> Result<Pat
     let granted_parent = require_granted_directory(state, parent.to_string_lossy().as_ref())?;
     let candidate = granted_parent.join(name);
     if candidate.exists() {
-        return Err(CommandError::InvalidInput("geri yükleme hedefi zaten var".into()));
+        return Err(CommandError::InvalidInput(
+            "geri yükleme hedefi zaten var".into(),
+        ));
     }
     Ok(candidate)
 }
@@ -157,7 +178,10 @@ fn require_granted_restore_target(state: &DesktopState, raw: &str) -> Result<Pat
 fn require_granted_existing_file(state: &DesktopState, raw: &str) -> Result<PathBuf, CommandError> {
     let canonical = std::fs::canonicalize(raw)
         .map_err(|_| CommandError::InvalidInput("dosya bulunamadı".into()))?;
-    let grants = state.folder_grants.read().map_err(|_| CommandError::StateUnavailable)?;
+    let grants = state
+        .folder_grants
+        .read()
+        .map_err(|_| CommandError::StateUnavailable)?;
     if !canonical.is_file() || !is_path_within_grant(&canonical, &grants) {
         return Err(CommandError::InvalidInput(
             "bu dosyanın klasörü önce Windows klasör seçicisiyle yetkilendirilmelidir".into(),
@@ -177,7 +201,10 @@ fn require_granted_output_file(state: &DesktopState, raw: &str) -> Result<PathBu
     let canonical_parent = std::fs::canonicalize(parent)
         .map_err(|_| CommandError::InvalidInput("yedek çıktı klasörü bulunamadı".into()))?;
     let candidate = canonical_parent.join(file_name);
-    let grants = state.folder_grants.read().map_err(|_| CommandError::StateUnavailable)?;
+    let grants = state
+        .folder_grants
+        .read()
+        .map_err(|_| CommandError::StateUnavailable)?;
     if !is_path_within_grant(&candidate, &grants) {
         return Err(CommandError::InvalidInput(
             "yedek çıktı klasörü önce Windows klasör seçicisiyle yetkilendirilmelidir".into(),
@@ -188,12 +215,7 @@ fn require_granted_output_file(state: &DesktopState, raw: &str) -> Result<PathBu
 
 impl Drop for DesktopState {
     fn drop(&mut self) {
-        if let Ok(mut process) = self.local_dev_process.write() {
-            if let Some(mut child) = process.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
+        let _ = stop_local_dev_process(&self.local_dev_process);
     }
 }
 
@@ -269,10 +291,9 @@ pub fn open_project_page() -> Result<Value, CommandError> {
     // launch it through Windows without exposing an arbitrary URL command.
     let mut command = Command::new("explorer.exe");
     configure_hidden_command(&mut command);
-    command
-        .arg(PROJECT_PAGE_URL)
-        .spawn()
-        .map_err(|error| CommandError::EngineUnavailable(format!("PROJECT_PAGE_OPEN_FAILED: {error}")))?;
+    command.arg(PROJECT_PAGE_URL).spawn().map_err(|error| {
+        CommandError::EngineUnavailable(format!("PROJECT_PAGE_OPEN_FAILED: {error}"))
+    })?;
     Ok(json!({ "opened": true }))
 }
 
@@ -300,14 +321,24 @@ fn parse_opml_urls(input: &str) -> Result<Vec<String>, CommandError> {
         }
         for attribute in ["xmlurl", "htmlurl"] {
             let lower = tag.to_ascii_lowercase();
-            let Some(start) = lower.find(attribute) else { continue };
+            let Some(start) = lower.find(attribute) else {
+                continue;
+            };
             let after = &tag[start + attribute.len()..];
-            let Some((_, quoted)) = after.split_once('=') else { continue };
+            let Some((_, quoted)) = after.split_once('=') else {
+                continue;
+            };
             let quoted = quoted.trim_start();
-            let Some(quote) = quoted.chars().next() else { continue };
-            if quote != '"' && quote != '\'' { continue; }
+            let Some(quote) = quoted.chars().next() else {
+                continue;
+            };
+            if quote != '"' && quote != '\'' {
+                continue;
+            }
             let value = &quoted[quote.len_utf8()..];
-            let Some(end) = value.find(quote) else { continue };
+            let Some(end) = value.find(quote) else {
+                continue;
+            };
             let normalized = decode_xml_attribute(&value[..end]).trim().to_string();
             if is_http_url(&normalized) && !normalized.contains('@') {
                 urls.insert(normalized);
@@ -352,7 +383,9 @@ where
 {
     let first_version = read_version()?;
     match attempt(first_version) {
-        Err(CommandError::EngineUnavailable(message)) if message.starts_with("VERSION_CONFLICT:") => {
+        Err(CommandError::EngineUnavailable(message))
+            if message.starts_with("VERSION_CONFLICT:") =>
+        {
             attempt(read_version()?)
         }
         result => result,
@@ -364,7 +397,11 @@ fn doctor_runtime_mode(doctor: Option<&Value>) -> RuntimeMode {
         value.get("status").and_then(Value::as_str) == Some("READY")
             && value.get("queue").and_then(Value::as_str) == Some("ready")
     });
-    if ready { RuntimeMode::Online } else { RuntimeMode::OfflineReadOnly }
+    if ready {
+        RuntimeMode::Online
+    } else {
+        RuntimeMode::OfflineReadOnly
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,7 +409,6 @@ fn doctor_runtime_mode(doctor: Option<&Value>) -> RuntimeMode {
 pub struct HighRiskApprovalRequest {
     revision_id: String,
     expected_hash: String,
-    risk_checklist_hash: String,
     warning_set_hash: String,
     confirm_reauthenticated: bool,
 }
@@ -431,8 +467,8 @@ fn persist_editorial_state(
     mutation: Value,
     field: Option<(&str, Value)>,
 ) -> Result<Value, CommandError> {
-    let mut state = read_engine_local_state(bridge, "desktop.editorial")
-        .unwrap_or_else(|| json!({}));
+    let mut state =
+        read_engine_local_state(bridge, "desktop.editorial").unwrap_or_else(|| json!({}));
     let object = state
         .as_object_mut()
         .ok_or_else(|| CommandError::EngineUnavailable("EDITORIAL_STATE_INVALID".into()))?;
@@ -561,15 +597,19 @@ pub fn recover_local_workspace(
     let data_directory = root.join("data").join("pgdata");
     if data_directory.exists() {
         let recovery_root = root.join("recovery");
-        std::fs::create_dir_all(&recovery_root)
-            .map_err(|error| CommandError::EngineUnavailable(format!("Kurtarma klasörü açılamadı: {error}")))?;
+        std::fs::create_dir_all(&recovery_root).map_err(|error| {
+            CommandError::EngineUnavailable(format!("Kurtarma klasörü açılamadı: {error}"))
+        })?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let staged = recovery_root.join(format!("pgdata-{stamp}"));
-        std::fs::rename(&data_directory, staged)
-            .map_err(|error| CommandError::EngineUnavailable(format!("Yerel çalışma alanı güvenle taşınamadı: {error}")))?;
+        std::fs::rename(&data_directory, staged).map_err(|error| {
+            CommandError::EngineUnavailable(format!(
+                "Yerel çalışma alanı güvenle taşınamadı: {error}"
+            ))
+        })?;
     }
 
     let doctor = bridge.doctor().map_err(CommandError::EngineUnavailable)?;
@@ -593,16 +633,18 @@ pub fn recover_local_workspace(
 /// is accepted from the WebView: the returned value is produced by the native
 /// dialog and is validated before it is handed to the UI.
 #[tauri::command]
-pub fn pick_local_folder(state: tauri::State<'_, DesktopState>) -> Result<Option<String>, CommandError> {
+pub fn pick_local_folder(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Option<String>, CommandError> {
     #[cfg(windows)]
     {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::Shell::{
-            BROWSEINFOW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, SHBrowseForFolderW,
-            SHGetPathFromIDListW,
-        };
-        use windows::Win32::System::Com::CoTaskMemFree;
         use windows::core::{PCWSTR, PWSTR};
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::Win32::UI::Shell::{
+            SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS,
+            BROWSEINFOW,
+        };
 
         let title: Vec<u16> = "Blogbot için bir proje klasörü seçin"
             .encode_utf16()
@@ -633,7 +675,10 @@ pub fn pick_local_folder(state: tauri::State<'_, DesktopState>) -> Result<Option
                 "seçilen klasörün yolu okunamadı".into(),
             ));
         }
-        let end = path.iter().position(|value| *value == 0).unwrap_or(path.len());
+        let end = path
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(path.len());
         let selected = String::from_utf16_lossy(&path[..end]);
         validate_folder_selection(&selected)?;
         let granted = register_folder_grant(&state, &selected)?;
@@ -659,24 +704,36 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
     if !allowed.contains(&connector.as_str()) {
         return Err(CommandError::InvalidInput("unknown setup connector".into()));
     }
-    let object = config
-        .as_object()
-        .ok_or_else(|| CommandError::InvalidInput("setup connector config must be an object".into()))?;
+    let object = config.as_object().ok_or_else(|| {
+        CommandError::InvalidInput("setup connector config must be an object".into())
+    })?;
     let allowed_fields: &[&str] = match connector.as_str() {
         "codex" => &["accountLabel"],
         "github" => &["owner", "repository", "clientId"],
         "site" => &["repositoryPath", "publicSiteUrl", "mode"],
-        "deploy" => &["workflowName"],
+        "deploy" => &["workflowName", "requiredChecks"],
         "backup" => &["folder"],
         _ => &[],
     };
-    if object.keys().any(|key| !allowed_fields.contains(&key.as_str())) {
-        return Err(CommandError::InvalidInput("unknown setup connector field".into()));
+    if object
+        .keys()
+        .any(|key| !allowed_fields.contains(&key.as_str()))
+    {
+        return Err(CommandError::InvalidInput(
+            "unknown setup connector field".into(),
+        ));
     }
     let serialized = serde_json::to_string(&config)
         .map_err(|error| CommandError::InvalidInput(error.to_string()))?
         .to_ascii_lowercase();
-    for forbidden in ["token", "password", "privatekey", "private_key", "secret", "credential"] {
+    for forbidden in [
+        "token",
+        "password",
+        "privatekey",
+        "private_key",
+        "secret",
+        "credential",
+    ] {
         if serialized.contains(forbidden) {
             return Err(CommandError::InvalidInput(
                 "secret or credential fields are not accepted by setup".into(),
@@ -686,10 +743,21 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
     let text = |key: &str| config.get(key).and_then(Value::as_str).map(str::trim);
     let site_mode = text("mode").unwrap_or("LOCAL_ONLY");
     let missing = match connector.as_str() {
-        "codex" => text("accountLabel").map(|value| value.is_empty()).unwrap_or(true),
-        "github" => ["owner", "repository"].iter().any(|key| text(key).map(|value| value.is_empty()).unwrap_or(true)),
-        "site" => text("repositoryPath").map(|value| value.is_empty()).unwrap_or(true),
-        "deploy" => text("workflowName").map(|value| value.is_empty()).unwrap_or(true),
+        "codex" => text("accountLabel")
+            .map(|value| value.is_empty())
+            .unwrap_or(true),
+        "github" => ["owner", "repository", "clientId"]
+            .iter()
+            .any(|key| text(key).map(|value| value.is_empty()).unwrap_or(true)),
+        "site" => text("repositoryPath")
+            .map(|value| value.is_empty())
+            .unwrap_or(true),
+        "deploy" => {
+            text("workflowName")
+                .map(|value| value.is_empty())
+                .unwrap_or(true)
+                || !valid_required_github_checks(config.get("requiredChecks"))
+        }
         "backup" => text("folder").map(|value| value.is_empty()).unwrap_or(true),
         _ => true,
     };
@@ -705,19 +773,28 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
         "github" => {
             let owner = text("owner").unwrap_or_default();
             let repository = text("repository").unwrap_or_default();
-            (!valid_github_segment(owner) || !valid_github_segment(repository)).then_some("GitHub sahibi ve depo adı yalnız güvenli ad karakterlerini içerebilir.")
+            let client_id = text("clientId").unwrap_or_default();
+            (!valid_github_segment(owner)
+                || !valid_github_segment(repository)
+                || crate::github_broker::validate_client_id(client_id).is_err())
+            .then_some("GitHub sahibi, depo adı veya OAuth clientId alanı güvenli değil.")
         }
         "site" => {
             let path = text("repositoryPath").unwrap_or_default();
             let site = text("publicSiteUrl").unwrap_or_default();
             let mode = text("mode").unwrap_or("LOCAL_ONLY");
             if !valid_site_work_mode(mode) {
-                return Ok(json!({"connector": connector, "ready": false, "state": "ATTENTION", "detail": "Çalışma biçimi LOCAL_ONLY, LOCAL_DEV veya PUBLISH olmalı."}));
+                return Ok(
+                    json!({"connector": connector, "ready": false, "state": "ATTENTION", "detail": "Çalışma biçimi LOCAL_ONLY, LOCAL_DEV veya PUBLISH olmalı."}),
+                );
             }
             if mode == "PUBLISH" && site.is_empty() {
-                return Ok(json!({"connector": connector, "ready": false, "state": "ATTENTION", "detail": "Yayın biçiminde public adres gerekir; yerel biçimlerde boş bırakılabilir."}));
+                return Ok(
+                    json!({"connector": connector, "ready": false, "state": "ATTENTION", "detail": "Yayın biçiminde public adres gerekir; yerel biçimlerde boş bırakılabilir."}),
+                );
             }
-            let valid_public_url = site.is_empty() || (site.starts_with("https://") && site.len() <= 2048);
+            let valid_public_url =
+                site.is_empty() || (site.starts_with("https://") && site.len() <= 2048);
             if !is_local_path(path) || !Path::new(path).is_dir() || !valid_public_url {
                 Some("Site klasörü mevcut bir yerel klasör olmalı. Public adres yayın aşamasında eklenebilir ve https:// ile başlamalıdır.")
             } else if mode == "LOCAL_ONLY" {
@@ -732,17 +809,31 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
                 match site_adapter_dry_run(path) {
                     Ok(_) => None,
                     Err(_detail) if site.is_empty() => None,
-                    Err(detail) => Some(detail)
+                    Err(detail) => Some(detail),
                 }
             }
         }
-        "deploy" => (!text("workflowName").unwrap_or_default().chars().all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | '.')))
-            .then_some("Workflow adı yalnız harf, sayı, tire, alt çizgi ve nokta içerebilir."),
-        "backup" => (!is_local_path(text("folder").unwrap_or_default())).then_some("Yedek klasörü yerel ve mutlak bir yol olmalı."),
+        "deploy" => {
+            let workflow_invalid = !text("workflowName")
+                .unwrap_or_default()
+                .chars()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | '.'));
+            if workflow_invalid {
+                Some("Workflow adı yalnız harf, sayı, tire, alt çizgi ve nokta içerebilir.")
+            } else if !valid_required_github_checks(config.get("requiredChecks")) {
+                Some("PUBLISH için en az bir benzersiz ve geçerli zorunlu GitHub kontrolü gerekir.")
+            } else {
+                None
+            }
+        }
+        "backup" => (!is_local_path(text("folder").unwrap_or_default()))
+            .then_some("Yedek klasörü yerel ve mutlak bir yol olmalı."),
         _ => None,
     };
     if let Some(detail) = semantic_error {
-        return Ok(json!({ "connector": connector, "ready": false, "state": "ATTENTION", "detail": detail }));
+        return Ok(
+            json!({ "connector": connector, "ready": false, "state": "ATTENTION", "detail": detail }),
+        );
     }
     let adapter_dry_run = if connector == "site" && site_mode == "PUBLISH" {
         let path = text("repositoryPath").unwrap_or_default();
@@ -756,13 +847,14 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
                 "writes": false,
                 "network": false,
                 "warning": detail
-            })
+            }),
         })
     } else {
         None
     };
     let local_only = connector == "site" && site_mode != "PUBLISH";
-    let adapter_ready = adapter_dry_run.as_ref()
+    let adapter_ready = adapter_dry_run
+        .as_ref()
         .and_then(Value::as_object)
         .and_then(|value| value.get("ok"))
         .and_then(Value::as_bool)
@@ -793,24 +885,58 @@ fn valid_github_workflow(value: &str) -> bool {
         && value.len() <= 120
         && !value.contains("..")
         && (value.ends_with(".yml") || value.ends_with(".yaml"))
-        && value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
         && !value.starts_with('/')
         && !value.contains("//")
+}
+
+fn valid_required_github_checks(value: Option<&Value>) -> bool {
+    let Some(checks) = value.and_then(Value::as_array) else {
+        return false;
+    };
+    if checks.is_empty() || checks.len() > 100 {
+        return false;
+    }
+    let mut unique = std::collections::HashSet::new();
+    checks.iter().all(|check| {
+        let Some(name) = check.as_str().map(str::trim) else {
+            return false;
+        };
+        !name.is_empty()
+            && name.len() <= 200
+            && !name.chars().any(char::is_control)
+            && unique.insert(name)
+    })
 }
 
 fn valid_site_work_mode(value: &str) -> bool {
     matches!(value, "LOCAL_ONLY" | "LOCAL_DEV" | "PUBLISH")
 }
 
-fn github_preview_payload(repository: &str, workflow: &str, revision_id: &str, revision_hash: &str) -> Result<Value, CommandError> {
+fn github_preview_payload(
+    repository: &str,
+    workflow: &str,
+    revision_id: &str,
+    revision_hash: &str,
+) -> Result<Value, CommandError> {
     let mut segments = repository.split('/');
     let owner = segments.next().unwrap_or_default();
     let repo = segments.next().unwrap_or_default();
     if segments.next().is_some() || !valid_github_segment(owner) || !valid_github_segment(repo) {
-        return Err(CommandError::InvalidInput("GitHub repository must be owner/name".into()));
+        return Err(CommandError::InvalidInput(
+            "GitHub repository must be owner/name".into(),
+        ));
     }
-    if !valid_github_workflow(workflow) || revision_id.trim().is_empty() || revision_hash.len() != 64 || !revision_hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(CommandError::InvalidInput("GitHub preview intent scope is invalid".into()));
+    if !valid_github_workflow(workflow)
+        || revision_id.trim().is_empty()
+        || revision_hash.len() != 64
+        || !revision_hash.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return Err(CommandError::InvalidInput(
+            "GitHub preview intent scope is invalid".into(),
+        ));
     }
     Ok(json!({
         "mode": "dry-run",
@@ -824,36 +950,119 @@ fn github_preview_payload(repository: &str, workflow: &str, revision_id: &str, r
     }))
 }
 
+fn github_token_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
+    app.path()
+        .app_local_data_dir()
+        .map_err(|_| CommandError::StateUnavailable)
+        .map(|directory| {
+            directory
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or(directory)
+                .join("Blogbot")
+                .join("secrets")
+                .join("github-token.dpapi")
+        })
+}
+
+fn github_client_id(bridge: &EngineBridge) -> Result<String, CommandError> {
+    let connectors = read_engine_local_state_result(bridge, "desktop.connectors")?
+        .ok_or_else(|| CommandError::InvalidInput("GitHub connector is not configured".into()))?;
+    let client_id = connectors
+        .pointer("/github/clientId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CommandError::InvalidInput("GitHub clientId is not configured".into()))?;
+    crate::github_broker::validate_client_id(client_id).map_err(CommandError::InvalidInput)
+}
+
 #[tauri::command]
 pub fn github_device_flow_start(
     state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
-    serde_json::to_value(state.github_broker.begin_device_authorization())
-        .map_err(|_| CommandError::StateUnavailable)
+    ensure_mutation_allowed(&state)?;
+    let client_id = github_client_id(&bridge)?;
+    let result = state
+        .github_broker
+        .begin_device_authorization(&client_id)
+        .map_err(CommandError::EngineUnavailable)?;
+    serde_json::to_value(result).map_err(|_| CommandError::StateUnavailable)
+}
+
+#[tauri::command]
+pub fn github_device_flow_poll(
+    state: tauri::State<'_, DesktopState>,
+    app: tauri::AppHandle,
+) -> Result<Value, CommandError> {
+    ensure_mutation_allowed(&state)?;
+    let result = state
+        .github_broker
+        .poll_device_authorization(&github_token_path(&app)?)
+        .map_err(CommandError::EngineUnavailable)?;
+    serde_json::to_value(result).map_err(|_| CommandError::StateUnavailable)
+}
+
+#[tauri::command]
+pub fn github_device_flow_clear(
+    state: tauri::State<'_, DesktopState>,
+    app: tauri::AppHandle,
+) -> Result<Value, CommandError> {
+    ensure_mutation_allowed(&state)?;
+    let result = state
+        .github_broker
+        .clear_authorization(&github_token_path(&app)?)
+        .map_err(CommandError::EngineUnavailable)?;
+    serde_json::to_value(result).map_err(|_| CommandError::StateUnavailable)
 }
 
 #[tauri::command]
 pub fn github_device_flow_status(
     state: tauri::State<'_, DesktopState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, CommandError> {
-    serde_json::to_value(state.github_broker.status())
-        .map_err(|_| CommandError::StateUnavailable)
+    serde_json::to_value(
+        state
+            .github_broker
+            .status(github_token_path(&app).ok().as_deref()),
+    )
+    .map_err(|_| CommandError::StateUnavailable)
 }
 
 #[tauri::command]
-pub fn github_validate_repository(owner: String, repository: String, workflow: String) -> Result<Value, CommandError> {
+pub fn github_validate_repository(
+    owner: String,
+    repository: String,
+    workflow: String,
+) -> Result<Value, CommandError> {
     let owner = owner.trim();
     let repository = repository.trim();
     let workflow = workflow.trim();
-    if !valid_github_segment(owner) || !valid_github_segment(repository) || !valid_github_workflow(workflow) {
-        return Ok(json!({ "valid": false, "repository": format!("{owner}/{repository}"), "workflow": workflow, "writes": false, "detail": "GitHub depo veya workflow adı güvenli değil." }));
+    if !valid_github_segment(owner)
+        || !valid_github_segment(repository)
+        || !valid_github_workflow(workflow)
+    {
+        return Ok(
+            json!({ "valid": false, "repository": format!("{owner}/{repository}"), "workflow": workflow, "writes": false, "detail": "GitHub depo veya workflow adı güvenli değil." }),
+        );
     }
-    Ok(json!({ "valid": true, "repository": format!("{owner}/{repository}"), "workflow": workflow, "writes": false, "network": false }))
+    Ok(
+        json!({ "valid": true, "repository": format!("{owner}/{repository}"), "workflow": workflow, "writes": false, "network": false }),
+    )
 }
 
 #[tauri::command]
-pub fn github_preview_pull_request(repository: String, workflow: String, revision_id: String, revision_hash: String) -> Result<Value, CommandError> {
-    github_preview_payload(repository.trim(), workflow.trim(), revision_id.trim(), revision_hash.trim())
+pub fn github_preview_pull_request(
+    repository: String,
+    workflow: String,
+    revision_id: String,
+    revision_hash: String,
+) -> Result<Value, CommandError> {
+    github_preview_payload(
+        repository.trim(),
+        workflow.trim(),
+        revision_id.trim(),
+        revision_hash.trim(),
+    )
 }
 
 fn site_adapter_dry_run(path: &str) -> Result<Value, &'static str> {
@@ -872,14 +1081,21 @@ fn site_adapter_dry_run(path: &str) -> Result<Value, &'static str> {
         root.join("src").join("content.config.js"),
         root.join("src").join("content").join("config.ts"),
         root.join("src").join("content").join("config.js"),
-    ].iter().any(|candidate| candidate.is_file());
+    ]
+    .iter()
+    .any(|candidate| candidate.is_file());
     if root.join("src").join("content").is_dir() && !has_content_schema {
         return Err("Astro içerik klasörü bulundu ancak strict içerik şeması bulunamadı; src/content.config.ts veya src/content/config.ts ekleyin.");
     }
-    let files = ["astro.config.mjs", "astro.config.js", "astro.config.ts", "package.json"]
-        .into_iter()
-        .filter(|candidate| root.join(candidate).is_file())
-        .collect::<Vec<_>>();
+    let files = [
+        "astro.config.mjs",
+        "astro.config.js",
+        "astro.config.ts",
+        "package.json",
+    ]
+    .into_iter()
+    .filter(|candidate| root.join(candidate).is_file())
+    .collect::<Vec<_>>();
     Ok(json!({
         "ok": true,
         "adapterId": "astro-generic",
@@ -918,7 +1134,8 @@ fn detect_repository_remote(path: &str) -> Option<String> {
         return None;
     }
     let content = std::fs::read_to_string(config_path).ok()?;
-    content.lines()
+    content
+        .lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix("url = ").map(str::trim))
         .filter(|url| url.starts_with("https://github.com/") || url.starts_with("git@github.com:"))
@@ -941,12 +1158,16 @@ fn detect_site_content_model(path: &str) -> &'static str {
 fn validate_local_dev_project(path: &str) -> Result<std::path::PathBuf, CommandError> {
     let raw = path.trim();
     if raw.is_empty() || !Path::new(raw).is_absolute() {
-        return Err(CommandError::InvalidInput("yerel proje klasörü mutlak bir Windows yolu olmalı".into()));
+        return Err(CommandError::InvalidInput(
+            "yerel proje klasörü mutlak bir Windows yolu olmalı".into(),
+        ));
     }
     let root = std::fs::canonicalize(raw)
         .map_err(|_| CommandError::InvalidInput("yerel proje klasörü bulunamadı".into()))?;
     if !root.is_dir() || !root.join("package.json").is_file() {
-        return Err(CommandError::InvalidInput("yerel proje klasöründe package.json bulunamadı".into()));
+        return Err(CommandError::InvalidInput(
+            "yerel proje klasöründe package.json bulunamadı".into(),
+        ));
     }
     let bytes = std::fs::read(root.join("package.json"))
         .map_err(|_| CommandError::InvalidInput("package.json okunamadı".into()))?;
@@ -955,9 +1176,14 @@ fn validate_local_dev_project(path: &str) -> Result<std::path::PathBuf, CommandE
     }
     let package: Value = serde_json::from_slice(&bytes)
         .map_err(|_| CommandError::InvalidInput("package.json geçerli JSON değil".into()))?;
-    let has_dev = package.pointer("/scripts/dev").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
+    let has_dev = package
+        .pointer("/scripts/dev")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
     if !has_dev {
-        return Err(CommandError::InvalidInput("package.json içinde scripts.dev bulunamadı".into()));
+        return Err(CommandError::InvalidInput(
+            "package.json içinde scripts.dev bulunamadı".into(),
+        ));
     }
     Ok(root)
 }
@@ -1026,7 +1252,8 @@ fn verify_native_confirmation(_action: &str, _fingerprint: &str) -> Result<(), C
     ))
 }
 
-const LOCAL_DEV_ENV_ALLOWLIST: &[&str] = &["SystemRoot", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP"];
+const LOCAL_DEV_ENV_ALLOWLIST: &[&str] =
+    &["SystemRoot", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP"];
 
 fn local_dev_environment_with<F>(mut lookup: F) -> Vec<(OsString, OsString)>
 where
@@ -1043,13 +1270,14 @@ fn local_dev_environment() -> Vec<(OsString, OsString)> {
 }
 
 #[tauri::command]
-pub fn local_dev_status(
-    state: tauri::State<'_, DesktopState>,
-) -> Result<Value, CommandError> {
+pub fn local_dev_status(state: tauri::State<'_, DesktopState>) -> Result<Value, CommandError> {
     let mut process = write_lock(&state.local_dev_process)?;
     let running = match process.as_mut() {
         Some(child) => match child.try_wait() {
-            Ok(Some(_)) => { *process = None; false }
+            Ok(Some(_)) => {
+                *process = None;
+                false
+            }
             Ok(None) => true,
             Err(_) => false,
         },
@@ -1075,7 +1303,13 @@ pub fn start_local_dev(
     )?;
     let mut process = write_lock(&state.local_dev_process)?;
     if let Some(child) = process.as_mut() {
-        if child.try_wait().map_err(|_| CommandError::EngineUnavailable("yerel geliştirme süreci denetlenemedi".into()))?.is_none() {
+        if child
+            .try_wait()
+            .map_err(|_| {
+                CommandError::EngineUnavailable("yerel geliştirme süreci denetlenemedi".into())
+            })?
+            .is_none()
+        {
             return Ok(json!({ "running": true, "directory": root }));
         }
         *process = None;
@@ -1092,22 +1326,29 @@ pub fn start_local_dev(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| CommandError::EngineUnavailable(format!("yerel geliştirme süreci başlatılamadı: {error}")))?;
+        .map_err(|error| {
+            CommandError::EngineUnavailable(format!(
+                "yerel geliştirme süreci başlatılamadı: {error}"
+            ))
+        })?;
     *process = Some(child);
     Ok(json!({ "running": true, "directory": root }))
 }
 
 #[tauri::command]
-pub fn stop_local_dev(
-    state: tauri::State<'_, DesktopState>,
-) -> Result<Value, CommandError> {
+pub fn stop_local_dev(state: tauri::State<'_, DesktopState>) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
-    let mut process = write_lock(&state.local_dev_process)?;
+    stop_local_dev_process(&state.local_dev_process)?;
+    Ok(json!({ "running": false }))
+}
+
+fn stop_local_dev_process(process: &RwLock<Option<Child>>) -> Result<(), CommandError> {
+    let mut process = write_lock(process)?;
     if let Some(mut child) = process.take() {
-        let _ = child.kill();
+        terminate_owned_process_tree(&mut child);
         let _ = child.wait();
     }
-    Ok(json!({ "running": false }))
+    Ok(())
 }
 
 fn configured_site_origin(connectors: &Value) -> Option<String> {
@@ -1118,17 +1359,19 @@ fn configured_site_origin(connectors: &Value) -> Option<String> {
 }
 
 fn codex_executable() -> Option<&'static str> {
-    ["codex.cmd", "codex.exe", "codex"].into_iter().find(|candidate| {
-        let mut command = Command::new(candidate);
-        configure_hidden_command(&mut command);
-        command
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    })
+    ["codex.cmd", "codex.exe", "codex"]
+        .into_iter()
+        .find(|candidate| {
+            let mut command = Command::new(candidate);
+            configure_hidden_command(&mut command);
+            command
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        })
 }
 
 fn codex_authenticated(executable: &str, codex_home: Option<&Path>) -> bool {
@@ -1147,9 +1390,7 @@ fn codex_authenticated(executable: &str, codex_home: Option<&Path>) -> bool {
 }
 
 #[tauri::command]
-pub fn test_codex_runtime(
-    bridge: tauri::State<'_, EngineBridge>,
-) -> Result<Value, CommandError> {
+pub fn test_codex_runtime(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
     let Some(executable) = codex_executable() else {
         return Ok(json!({
             "available": false,
@@ -1163,7 +1404,9 @@ pub fn test_codex_runtime(
         .arg("--version")
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| CommandError::EngineUnavailable(format!("CODEX_VERSION_CHECK_FAILED:{error}")))?;
+        .map_err(|error| {
+            CommandError::EngineUnavailable(format!("CODEX_VERSION_CHECK_FAILED:{error}"))
+        })?;
     let output = String::from_utf8_lossy(&version.stdout)
         .lines()
         .next()
@@ -1178,7 +1421,11 @@ pub fn test_codex_runtime(
         .ok()
         .and_then(|doctor| doctor.get("capabilities").cloned())
         .and_then(|value| value.as_array().cloned())
-        .is_some_and(|capabilities| capabilities.iter().any(|item| item.as_str() == Some("CODEX.RUNNER")));
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|item| item.as_str() == Some("CODEX.RUNNER"))
+        });
     Ok(json!({
         "available": true,
         "authenticated": authenticated,
@@ -1189,9 +1436,7 @@ pub fn test_codex_runtime(
 }
 
 #[tauri::command]
-pub fn start_codex_login(
-    bridge: tauri::State<'_, EngineBridge>,
-) -> Result<Value, CommandError> {
+pub fn start_codex_login(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
     let executable = codex_executable()
         .ok_or_else(|| CommandError::EngineUnavailable("CODEX_NOT_INSTALLED".into()))?;
     let mut command = Command::new(executable);
@@ -1203,7 +1448,9 @@ pub fn start_codex_login(
         .arg("login")
         .stdin(Stdio::null())
         .spawn()
-        .map_err(|error| CommandError::EngineUnavailable(format!("CODEX_LOGIN_START_FAILED:{error}")))?;
+        .map_err(|error| {
+            CommandError::EngineUnavailable(format!("CODEX_LOGIN_START_FAILED:{error}"))
+        })?;
     Ok(json!({
         "started": true,
         "detail": "Codex giriş penceresi başlatıldı. Giriş tamamlandığında bu ekrandan yeniden test edin."
@@ -1226,8 +1473,8 @@ pub fn save_setup_connector(
         return Ok(validation);
     }
     authorize_connector_directory(&state, &connector, &mut config)?;
-    let mut saved = read_engine_local_state(&bridge, "desktop.connectors")
-        .unwrap_or_else(|| json!({}));
+    let mut saved =
+        read_engine_local_state(&bridge, "desktop.connectors").unwrap_or_else(|| json!({}));
     let object = saved
         .as_object_mut()
         .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_STATE_INVALID".into()))?;
@@ -1240,32 +1487,46 @@ pub fn save_setup_connector(
     if matches!(storage_key, "github" | "site" | "deploy") {
         write_engine_local_state(&bridge, &format!("connector.{storage_key}"), config.clone())?;
     }
-    let mut checks = read_engine_local_state(&bridge, "desktop.connectorChecks")
-        .unwrap_or_else(|| json!({}));
+    let mut checks =
+        read_engine_local_state(&bridge, "desktop.connectorChecks").unwrap_or_else(|| json!({}));
     let checks_object = checks
         .as_object_mut()
         .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_CHECK_STATE_INVALID".into()))?;
-    let site_mode = config.get("mode").and_then(Value::as_str).unwrap_or("LOCAL_ONLY");
+    let site_mode = config
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("LOCAL_ONLY");
     let adapter_verified = if connector == "site" {
         site_mode != "PUBLISH"
-            || validation.get("adapterDryRun").and_then(Value::as_object).and_then(|value| value.get("ok")).and_then(Value::as_bool) == Some(true)
+            || validation
+                .get("adapterDryRun")
+                .and_then(Value::as_object)
+                .and_then(|value| value.get("ok"))
+                .and_then(Value::as_bool)
+                == Some(true)
     } else {
         true
     };
-    let adapter_dry_run = validation.get("adapterDryRun").cloned().unwrap_or_else(|| json!({
-        "ok": true,
-        "adapterId": "local-folder-v1",
-        "adapterVersion": "1",
-        "writes": false,
-        "network": false
-    }));
+    let adapter_dry_run = validation.get("adapterDryRun").cloned().unwrap_or_else(|| {
+        json!({
+            "ok": true,
+            "adapterId": "local-folder-v1",
+            "adapterVersion": "1",
+            "writes": false,
+            "network": false
+        })
+    });
     checks_object.insert(storage_key.to_string(), json!({
         "ready": adapter_verified,
         "state": if adapter_verified { "DRY_RUN_READY" } else { "ADAPTER_DRY_RUN_REQUIRED" },
         "adapterDryRun": adapter_dry_run,
         "checkedAtUnixMs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
     }));
-    write_engine_local_state(&bridge, "desktop.connectorChecks", Value::Object(checks_object.clone()))?;
+    write_engine_local_state(
+        &bridge,
+        "desktop.connectorChecks",
+        Value::Object(checks_object.clone()),
+    )?;
     Ok(json!({
         "connector": connector,
         "ready": true,
@@ -1283,12 +1544,22 @@ const CONNECTOR_SITE_CATALOG_MIGRATION_KEY: &str = "migration:connector-site-cat
 fn safe_legacy_site_connector(value: &Value) -> Option<Value> {
     let object = value.as_object()?;
     let repository_path = object.get("repositoryPath")?.as_str()?.trim();
-    let mode = object.get("mode").and_then(Value::as_str).unwrap_or("LOCAL_ONLY").trim();
+    let mode = object
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("LOCAL_ONLY")
+        .trim();
     if !is_local_path(repository_path) || !valid_site_work_mode(mode) {
         return None;
     }
-    let public_site_url = object.get("publicSiteUrl").and_then(Value::as_str).unwrap_or("").trim();
-    if !public_site_url.is_empty() && !(public_site_url.starts_with("https://") || public_site_url.starts_with("http://")) {
+    let public_site_url = object
+        .get("publicSiteUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if !public_site_url.is_empty()
+        && !(public_site_url.starts_with("https://") || public_site_url.starts_with("http://"))
+    {
         return None;
     }
     Some(json!({
@@ -1302,17 +1573,22 @@ fn safe_legacy_site_connector(value: &Value) -> Option<Value> {
 pub fn verify_local_integrity(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
-    let response = engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-integrity-verify-{}", std::process::id()),
-        "kind": "maintenance.integrity.verify"
-    }))?;
+    let response = engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-integrity-verify-{}", std::process::id()),
+            "kind": "maintenance.integrity.verify"
+        }),
+    )?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(CommandError::EngineUnavailable(
-            response.pointer("/message").and_then(Value::as_str)
+            response
+                .pointer("/message")
+                .and_then(Value::as_str)
                 .or_else(|| response.pointer("/error/message").and_then(Value::as_str))
                 .unwrap_or("LOCAL_INTEGRITY_VERIFY_FAILED")
-                .to_string()
+                .to_string(),
         ));
     }
     Ok(response)
@@ -1323,48 +1599,67 @@ fn migrate_legacy_site_connector_catalog(
     checks: &mut Value,
     legacy_site: Option<&Value>,
 ) -> Result<Value, CommandError> {
-    let connectors_object = connectors.as_object_mut()
+    let connectors_object = connectors
+        .as_object_mut()
         .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_SNAPSHOT_CORRUPT".into()))?;
-    let checks_object = checks.as_object_mut()
+    let checks_object = checks
+        .as_object_mut()
         .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_SNAPSHOT_CORRUPT".into()))?;
     let catalog_site = connectors_object.get("site").cloned();
     let legacy_site = legacy_site.and_then(safe_legacy_site_connector);
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
 
     match (catalog_site, legacy_site) {
         (_, None) => Ok(json!({ "state": "NO_LEGACY_SITE_RECORD", "completedAtUnixMs": now })),
         (None, Some(legacy)) => {
             connectors_object.insert("site".into(), legacy);
-            checks_object.insert("site".into(), json!({
-                "ready": false,
-                "state": "MIGRATED_REVALIDATION_REQUIRED",
-                "migrationState": "MIGRATED_REVALIDATION_REQUIRED",
-                "checkedAtUnixMs": now
-            }));
+            checks_object.insert(
+                "site".into(),
+                json!({
+                    "ready": false,
+                    "state": "MIGRATED_REVALIDATION_REQUIRED",
+                    "migrationState": "MIGRATED_REVALIDATION_REQUIRED",
+                    "checkedAtUnixMs": now
+                }),
+            );
             Ok(json!({ "state": "MIGRATED_REVALIDATION_REQUIRED", "completedAtUnixMs": now }))
         }
-        (Some(current), Some(legacy)) if safe_legacy_site_connector(&current).as_ref() == Some(&legacy) =>
-            Ok(json!({ "state": "ALREADY_EQUIVALENT", "completedAtUnixMs": now })),
+        (Some(current), Some(legacy))
+            if safe_legacy_site_connector(&current).as_ref() == Some(&legacy) =>
+        {
+            Ok(json!({ "state": "ALREADY_EQUIVALENT", "completedAtUnixMs": now }))
+        }
         (Some(_), Some(_)) => {
-            checks_object.insert("site".into(), json!({
-                "ready": false,
-                "state": "MIGRATION_CONFLICT_REVIEW_REQUIRED",
-                "migrationState": "MIGRATION_CONFLICT_REVIEW_REQUIRED",
-                "checkedAtUnixMs": now
-            }));
+            checks_object.insert(
+                "site".into(),
+                json!({
+                    "ready": false,
+                    "state": "MIGRATION_CONFLICT_REVIEW_REQUIRED",
+                    "migrationState": "MIGRATION_CONFLICT_REVIEW_REQUIRED",
+                    "checkedAtUnixMs": now
+                }),
+            );
             Ok(json!({ "state": "MIGRATION_CONFLICT_REVIEW_REQUIRED", "completedAtUnixMs": now }))
         }
     }
 }
 
-fn migrate_legacy_site_connector_if_needed(bridge: &EngineBridge) -> Result<Option<Value>, CommandError> {
+fn migrate_legacy_site_connector_if_needed(
+    bridge: &EngineBridge,
+) -> Result<Option<Value>, CommandError> {
     if read_engine_local_state_result(bridge, CONNECTOR_SITE_CATALOG_MIGRATION_KEY)?.is_some() {
         return Ok(None);
     }
-    let mut connectors = read_engine_local_state_result(bridge, "desktop.connectors")?.unwrap_or_else(|| json!({}));
-    let mut checks = read_engine_local_state_result(bridge, "desktop.connectorChecks")?.unwrap_or_else(|| json!({}));
+    let mut connectors =
+        read_engine_local_state_result(bridge, "desktop.connectors")?.unwrap_or_else(|| json!({}));
+    let mut checks = read_engine_local_state_result(bridge, "desktop.connectorChecks")?
+        .unwrap_or_else(|| json!({}));
     let legacy_site = read_engine_local_state_result(bridge, "connector.site")?;
-    let marker = migrate_legacy_site_connector_catalog(&mut connectors, &mut checks, legacy_site.as_ref())?;
+    let marker =
+        migrate_legacy_site_connector_catalog(&mut connectors, &mut checks, legacy_site.as_ref())?;
     write_engine_local_state(bridge, "desktop.connectors", connectors)?;
     write_engine_local_state(bridge, "desktop.connectorChecks", checks)?;
     write_engine_local_state(bridge, CONNECTOR_SITE_CATALOG_MIGRATION_KEY, marker.clone())?;
@@ -1372,17 +1667,21 @@ fn migrate_legacy_site_connector_if_needed(bridge: &EngineBridge) -> Result<Opti
 }
 
 #[tauri::command]
-pub fn get_connector_state(
-    bridge: tauri::State<'_, EngineBridge>,
-) -> Result<Value, CommandError> {
+pub fn get_connector_state(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
     let migration = migrate_legacy_site_connector_if_needed(&bridge)?;
     let connectors_state = read_engine_local_state_result(&bridge, "desktop.connectors")?;
     let checks_state = read_engine_local_state_result(&bridge, "desktop.connectorChecks")?;
-    let source_state = if connectors_state.is_none() && checks_state.is_none() { "ABSENT" } else { "AVAILABLE" };
+    let source_state = if connectors_state.is_none() && checks_state.is_none() {
+        "ABSENT"
+    } else {
+        "AVAILABLE"
+    };
     let connectors = connectors_state.unwrap_or_else(|| json!({}));
     let checks = checks_state.unwrap_or_else(|| json!({}));
     if !connectors.is_object() || !checks.is_object() {
-        return Err(CommandError::EngineUnavailable("CONNECTOR_SNAPSHOT_CORRUPT".into()));
+        return Err(CommandError::EngineUnavailable(
+            "CONNECTOR_SNAPSHOT_CORRUPT".into(),
+        ));
     }
     let site = connectors.get("site").cloned().unwrap_or_else(|| json!({}));
     let mode = site
@@ -1434,7 +1733,10 @@ pub fn get_connector_state(
                 "publicSiteUrl": public_site_url,
                 "mode": mode
             },
-            "deploy": { "workflowName": connectors.pointer("/deploy/workflowName").and_then(Value::as_str).unwrap_or("") },
+            "deploy": {
+                "workflowName": connectors.pointer("/deploy/workflowName").and_then(Value::as_str).unwrap_or(""),
+                "requiredChecks": connectors.pointer("/deploy/requiredChecks").and_then(Value::as_array).cloned().unwrap_or_default()
+            },
             "backup": { "folder": connectors.pointer("/backup/folder").and_then(Value::as_str).unwrap_or("") }
         },
         "site": {
@@ -1451,16 +1753,23 @@ pub fn get_connector_state(
 }
 
 fn valid_github_segment(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 100 && value.chars().all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-    })
+    !value.is_empty()
+        && value.len() <= 100
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
 }
 
 fn is_local_path(value: &str) -> bool {
     value.len() >= 3
         && value.as_bytes().get(1) == Some(&b':')
-        && value.as_bytes().get(2).is_some_and(|character| *character == b'\\' || *character == b'/')
-        && value.chars().all(|character| character != '\0' && character != '"')
+        && value
+            .as_bytes()
+            .get(2)
+            .is_some_and(|character| *character == b'\\' || *character == b'/')
+        && value
+            .chars()
+            .all(|character| character != '\0' && character != '"')
 }
 
 /// Validates a path returned by the native folder picker before it crosses
@@ -1487,7 +1796,12 @@ fn valid_schedule_slot(slot_id: &str) -> bool {
     let mut parts = slot_id.split('-');
     matches!(
         (parts.next(), parts.next(), parts.next(), parts.next()),
-        (Some("slot"), Some("mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun"), Some("1" | "2" | "3" | "4" | "5"), None)
+        (
+            Some("slot"),
+            Some("mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun"),
+            Some("1" | "2" | "3" | "4" | "5"),
+            None
+        )
     )
 }
 
@@ -1513,7 +1827,10 @@ fn request_choice(
     allowed: &[&str],
     default: &str,
 ) -> Result<String, CommandError> {
-    let value = request.get(field).and_then(Value::as_str).unwrap_or(default);
+    let value = request
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or(default);
     if allowed.contains(&value) {
         Ok(value.to_string())
     } else {
@@ -1577,7 +1894,11 @@ pub fn get_bootstrap_snapshot(
         .unwrap_or("OFF");
     let revision_materializations = engine_state
         .as_ref()
-        .and_then(|value| value.pointer("/snapshot/serverCursor").and_then(Value::as_u64))
+        .and_then(|value| {
+            value
+                .pointer("/snapshot/serverCursor")
+                .and_then(Value::as_u64)
+        })
         .map(|version| read_revision_list_at_version(&bridge, version).unwrap_or_default())
         .unwrap_or_default();
     let revision_queue = build_revision_queue(&revision_materializations);
@@ -1598,7 +1919,12 @@ pub fn get_bootstrap_snapshot(
         }),
     )
     .ok()
-    .and_then(|result| result.get("sources").and_then(Value::as_array).map(Vec::len))
+    .and_then(|result| {
+        result
+            .get("sources")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+    })
     .unwrap_or(0);
     let candidates = engine_request(
         &bridge,
@@ -1629,7 +1955,10 @@ pub fn get_bootstrap_snapshot(
             matches!(
                 job.get("state").and_then(Value::as_str),
                 Some("WAITING_CODEX") | Some("QUEUED") | Some("RUNNING")
-            ) && matches!(job.get("kind").and_then(Value::as_str), Some("CODEX") | Some("DRAFT"))
+            ) && matches!(
+                job.get("kind").and_then(Value::as_str),
+                Some("CODEX") | Some("DRAFT")
+            )
         })
         .count();
     let (discovered_count, researching_count) =
@@ -1694,15 +2023,21 @@ pub fn get_prerequisite_status(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let connectors = read_engine_local_state(&bridge, "desktop.connectors")
-        .unwrap_or_else(|| json!({}));
-    let codex_configured = connectors.pointer("/codex/accountLabel")
-        .and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
+    let connectors =
+        read_engine_local_state(&bridge, "desktop.connectors").unwrap_or_else(|| json!({}));
+    let codex_configured = connectors
+        .pointer("/codex/accountLabel")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
     let codex_runner_ready = engine_doctor
         .as_ref()
         .and_then(|value| value.get("capabilities"))
         .and_then(Value::as_array)
-        .is_some_and(|capabilities| capabilities.iter().any(|item| item.as_str() == Some("CODEX.RUNNER")));
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|item| item.as_str() == Some("CODEX.RUNNER"))
+        });
     // Prerequisite reads must never spawn codex.cmd or run `login status`.
     // Those checks can take seconds and belong to the explicit Codex test
     // action. The engine capability is the last observed authenticated runner
@@ -1710,18 +2045,35 @@ pub fn get_prerequisite_status(
     // `codex.cmd --version`, which is still an external process launch.
     let codex_available = codex_runner_ready || codex_configured;
     let codex_authenticated = codex_runner_ready;
-    let github_configured = connectors.pointer("/github/owner").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty())
-        && connectors.pointer("/github/repository").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
-    let github_auth_status = serde_json::to_value(app.state::<DesktopState>().github_broker.status())
-        .unwrap_or_else(|_| json!({"status": "degraded"}));
-    let github_authorized = github_auth_status.get("status").and_then(Value::as_str) == Some("authorized");
-    let site_configured = connectors.pointer("/site/repositoryPath")
+    let github_configured = connectors
+        .pointer("/github/owner")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+        && connectors
+            .pointer("/github/repository")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+    let github_auth_status = serde_json::to_value(
+        app.state::<DesktopState>()
+            .github_broker
+            .status(github_token_path(&app).ok().as_deref()),
+    )
+    .unwrap_or_else(|_| json!({"status": "degraded"}));
+    let github_authorized =
+        github_auth_status.get("status").and_then(Value::as_str) == Some("authorized");
+    let site_configured = connectors
+        .pointer("/site/repositoryPath")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
-    let backup_configured = connectors.pointer("/backup/folder").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
-    let connector_checks = read_engine_local_state(&bridge, "desktop.connectorChecks")
-        .unwrap_or_else(|| json!({}));
-    let site_check_ready = connector_checks.pointer("/site/ready").and_then(Value::as_bool)
+    let backup_configured = connectors
+        .pointer("/backup/folder")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let connector_checks =
+        read_engine_local_state(&bridge, "desktop.connectorChecks").unwrap_or_else(|| json!({}));
+    let site_check_ready = connector_checks
+        .pointer("/site/ready")
+        .and_then(Value::as_bool)
         .unwrap_or(false);
 
     Ok(json!({
@@ -2350,8 +2702,7 @@ fn build_revision_queue(materializations: &[Value]) -> Vec<Value> {
             let has_high_risk_approval = item
                 .get("highRiskApproval")
                 .is_some_and(|value| !value.is_null());
-            let fully_approved =
-                has_editorial_approval && (!high_risk || has_high_risk_approval);
+            let fully_approved = has_editorial_approval && (!high_risk || has_high_risk_approval);
             let state = if fully_approved {
                 "APPROVED"
             } else {
@@ -2373,9 +2724,7 @@ fn build_revision_queue(materializations: &[Value]) -> Vec<Value> {
                         .count()
                 })
                 .unwrap_or(0)
-                + usize::from(
-                    high_risk && has_editorial_approval && !has_high_risk_approval,
-                );
+                + usize::from(high_risk && has_editorial_approval && !has_high_risk_approval);
             Some(json!({
                 "id": id,
                 "revisionHash": item.get("revisionHash").cloned().unwrap_or(Value::Null),
@@ -2401,18 +2750,24 @@ fn dashboard_pipeline_counts(
     let discovered = candidates
         .iter()
         .filter(|candidate| {
-            let latest_state = candidate.get("id").and_then(Value::as_str).and_then(|candidate_id| {
-                editorial_mutations.iter().rev().find_map(|mutation| {
-                    if mutation.get("candidateId").and_then(Value::as_str) != Some(candidate_id) {
-                        return None;
-                    }
-                    match mutation.get("kind").and_then(Value::as_str) {
-                        Some("CANDIDATE.DISMISS") => Some("DISMISSED"),
-                        Some("CANDIDATE.PROMOTE") => Some("RESEARCH_QUEUED"),
-                        _ => None,
-                    }
-                })
-            });
+            let latest_state =
+                candidate
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|candidate_id| {
+                        editorial_mutations.iter().rev().find_map(|mutation| {
+                            if mutation.get("candidateId").and_then(Value::as_str)
+                                != Some(candidate_id)
+                            {
+                                return None;
+                            }
+                            match mutation.get("kind").and_then(Value::as_str) {
+                                Some("CANDIDATE.DISMISS") => Some("DISMISSED"),
+                                Some("CANDIDATE.PROMOTE") => Some("RESEARCH_QUEUED"),
+                                _ => None,
+                            }
+                        })
+                    });
             latest_state.is_none()
         })
         .count();
@@ -2523,15 +2878,18 @@ fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
         .get("highRiskApproval")
         .is_some_and(|value| !value.is_null());
     let approved = has_editorial_approval && (!high_risk || has_high_risk_approval);
-    let gate_label = |id: &str| match id {
-        "claims" => "İddia ve kanıt bütünlüğü",
-        "parity" => "TR/EN anlam eşitliği",
-        "immutable-package" => "Değişmez yayın paketi",
-        "seo" => "SEO uygunluğu",
-        "safety" => "İçerik güvenliği",
-        "media" => "Medya uygunluğu",
-        _ => id,
-    }.to_string();
+    let gate_label = |id: &str| {
+        match id {
+            "claims" => "İddia ve kanıt bütünlüğü",
+            "parity" => "TR/EN anlam eşitliği",
+            "immutable-package" => "Değişmez yayın paketi",
+            "seo" => "SEO uygunluğu",
+            "safety" => "İçerik güvenliği",
+            "media" => "Medya uygunluğu",
+            _ => id,
+        }
+        .to_string()
+    };
     let gates = revision
         .get("qualityGates")
         .and_then(Value::as_array)
@@ -2598,22 +2956,55 @@ pub fn create_instant_draft(
     let urls = request
         .get("urls")
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_str).map(str::trim).filter(|url| is_http_url(url)).map(str::to_string).collect::<Vec<_>>())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|url| is_http_url(url))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     if instruction.len() < 10 || (source_ids.is_empty() && urls.is_empty()) {
         return Err(CommandError::InvalidInput(
             "anlık içerik için talimat ve en az bir kaynak gerekir".into(),
         ));
     }
-    let section = request_choice(&request, "section", &["haberler", "analiz", "dosyalar", "rehberler"], "haberler")?;
-    let article_type = request_choice(&request, "articleType", &["news", "analysis", "deep_dive", "guide"], "news")?;
+    let section = request_choice(
+        &request,
+        "section",
+        &["haberler", "analiz", "dosyalar", "rehberler"],
+        "haberler",
+    )?;
+    let article_type = request_choice(
+        &request,
+        "articleType",
+        &["news", "analysis", "deep_dive", "guide"],
+        "news",
+    )?;
     let urgency = request_choice(&request, "urgency", &["normal", "urgent"], "normal")?;
-    let tone = request_choice(&request, "tone", &["neutral", "technical", "accessible"], "neutral")?;
+    let tone = request_choice(
+        &request,
+        "tone",
+        &["neutral", "technical", "accessible"],
+        "neutral",
+    )?;
     let length = request_choice(&request, "length", &["standard", "deep"], "standard")?;
     // New draft creation always has an explicit hero-media path. Existing
     // no-media revisions remain recoverable through the dedicated repair flow.
-    let visual_policy = request_choice(&request, "visualPolicy", &["GENERATE", "LOCAL_RENDERER"], "GENERATE")?;
-    let schedule_intent = request_choice(&request, "scheduleIntent", &["NEXT_SLOT", "UNSCHEDULED"], "UNSCHEDULED")?;
+    let visual_policy = request_choice(
+        &request,
+        "visualPolicy",
+        &["GENERATE", "LOCAL_RENDERER"],
+        "GENERATE",
+    )?;
+    let schedule_intent = request_choice(
+        &request,
+        "scheduleIntent",
+        &["NEXT_SLOT", "UNSCHEDULED"],
+        "UNSCHEDULED",
+    )?;
     let editorial_preferences = read_engine_local_state(&bridge, "desktop.editorial")
         .and_then(|value| value.get("preferences").cloned())
         .unwrap_or_else(|| json!({}));
@@ -2708,27 +3099,61 @@ pub fn read_revision_media(
 ) -> Result<Value, CommandError> {
     if revision_id.is_empty()
         || revision_id.len() > 128
-        || !revision_id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-')
+        || !revision_id
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || value == '-')
         || sha256.len() != 64
         || !sha256.chars().all(|value| value.is_ascii_hexdigit())
     {
-        return Err(CommandError::InvalidInput("geçerli revizyon medya kimliği gerekir".into()));
+        return Err(CommandError::InvalidInput(
+            "geçerli revizyon medya kimliği gerekir".into(),
+        ));
     }
     let revision = read_revision_at_version(
         &bridge,
-        read_engine_state(&bridge)?.pointer("/snapshot/serverCursor").and_then(Value::as_u64)
+        read_engine_state(&bridge)?
+            .pointer("/snapshot/serverCursor")
+            .and_then(Value::as_u64)
             .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?,
         &revision_id,
     )?;
-    let media = revision.get("media").and_then(Value::as_array).and_then(|items| items.iter().find(|asset| {
-        asset.get("sha256").and_then(Value::as_str).is_some_and(|value| value.eq_ignore_ascii_case(&sha256))
-    })).ok_or_else(|| CommandError::InvalidInput("revizyon medyası bulunamadı".into()))?;
-    let byte_size = media.get("byteSize").and_then(Value::as_u64)
+    let media = revision
+        .get("media")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|asset| {
+                asset
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.eq_ignore_ascii_case(&sha256))
+            })
+        })
+        .ok_or_else(|| CommandError::InvalidInput("revizyon medyası bulunamadı".into()))?;
+    let byte_size = media
+        .get("byteSize")
+        .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_SIZE_MISSING".into()))?;
-    let bytes = read_engine_media_bytes(&bridge, &revision_id, &sha256.to_ascii_lowercase(), byte_size)?;
-    let path = media.get("path").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
-    let mime_type = if path.ends_with(".png") { "image/png" } else if path.ends_with(".jpg") || path.ends_with(".jpeg") { "image/jpeg" } else { "image/webp" };
-    Ok(json!({ "contentBase64": base64::engine::general_purpose::STANDARD.encode(bytes), "mimeType": mime_type }))
+    let bytes = read_engine_media_bytes(
+        &bridge,
+        &revision_id,
+        &sha256.to_ascii_lowercase(),
+        byte_size,
+    )?;
+    let path = media
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime_type = if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "image/webp"
+    };
+    Ok(
+        json!({ "contentBase64": base64::engine::general_purpose::STANDARD.encode(bytes), "mimeType": mime_type }),
+    )
 }
 
 #[tauri::command]
@@ -2744,14 +3169,18 @@ pub fn repair_revision_media(
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
     {
-        return Err(CommandError::InvalidInput("geçerli bir revizyon kimliği gerekir".into()));
+        return Err(CommandError::InvalidInput(
+            "geçerli bir revizyon kimliği gerekir".into(),
+        ));
     }
     let expected_version = read_engine_state(&bridge)?
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
     let revision_id = revision_id.trim().to_string();
-    let key = stable_source_key(&format!("revision-media-repair:{revision_id}:{expected_version}"));
+    let key = stable_source_key(&format!(
+        "revision-media-repair:{revision_id}:{expected_version}"
+    ));
     let response = engine_request(
         &bridge,
         json!({
@@ -2768,18 +3197,21 @@ pub fn repair_revision_media(
             }
         }),
     )?;
-    let value = response
-        .pointer("/result/value")
-        .cloned()
-        .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_SHAPE_INVALID".into()))?;
+    let value = response.pointer("/result/value").cloned().ok_or_else(|| {
+        CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_SHAPE_INVALID".into())
+    })?;
     let successor_id = value
         .pointer("/revision/id")
         .and_then(Value::as_str)
-        .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_ID_MISSING".into()))?;
+        .ok_or_else(|| {
+            CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_ID_MISSING".into())
+        })?;
     let revision_hash = value
         .get("revisionHash")
         .and_then(Value::as_str)
-        .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_HASH_MISSING".into()))?;
+        .ok_or_else(|| {
+            CommandError::EngineUnavailable("REVISION_MEDIA_REPAIR_HASH_MISSING".into())
+        })?;
     let mutation = json!({
         "kind": "REVISION.MEDIA_REPAIR",
         "revisionId": revision_id,
@@ -2807,9 +3239,13 @@ fn build_approval_command(
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
         || expected_hash.len() != 64
-        || !expected_hash.chars().all(|character| character.is_ascii_hexdigit())
+        || !expected_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
         || warning_set_hash.len() != 64
-        || !warning_set_hash.chars().all(|character| character.is_ascii_hexdigit())
+        || !warning_set_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
     {
         return Err(CommandError::InvalidInput(
             "revizyon kimliği veya exact hash geçersiz".into(),
@@ -2840,21 +3276,33 @@ fn build_high_risk_approval_command(
 ) -> Result<Value, CommandError> {
     if revision_id.is_empty()
         || revision_id.len() > 128
-        || !revision_id.chars().all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
+        || !revision_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
         || expected_hash.len() != 64
-        || !expected_hash.chars().all(|character| character.is_ascii_hexdigit())
+        || !expected_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
         || checklist_hash.len() != 64
-        || !checklist_hash.chars().all(|character| character.is_ascii_hexdigit())
+        || !checklist_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
         || warning_set_hash.len() != 64
-        || !warning_set_hash.chars().all(|character| character.is_ascii_hexdigit())
+        || !warning_set_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
     {
-        return Err(CommandError::InvalidInput("revizyon, exact hash veya risk kontrol hash'i geçersiz".into()));
+        return Err(CommandError::InvalidInput(
+            "revizyon, exact hash veya risk kontrol hash'i geçersiz".into(),
+        ));
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let request_key = stable_source_key(&format!("high-risk:{revision_id}:{expected_hash}:{checklist_hash}:{now}"));
+    let request_key = stable_source_key(&format!(
+        "high-risk:{revision_id}:{expected_hash}:{checklist_hash}:{now}"
+    ));
     let reauthenticated_at = chrono_like_iso(now)?;
     Ok(json!({
         "version": 1,
@@ -2873,6 +3321,43 @@ fn build_high_risk_approval_command(
     }))
 }
 
+fn trusted_high_risk_checklist_hash(
+    bridge: &EngineBridge,
+    expected_version: u64,
+    revision_id: &str,
+) -> Result<String, CommandError> {
+    let materialization = read_revision_at_version(bridge, expected_version, revision_id)?;
+    let gates = materialization
+        .pointer("/revision/qualityGates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CommandError::EngineUnavailable("RISK_CHECKLIST_UNAVAILABLE".into()))?;
+    let mut security_gates = Vec::new();
+    for gate in gates {
+        if gate.get("group").and_then(Value::as_str) != Some("security") {
+            continue;
+        }
+        let id = gate.get("id").and_then(Value::as_str).ok_or_else(|| {
+            CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into())
+        })?;
+        let state = gate.get("state").and_then(Value::as_str).ok_or_else(|| {
+            CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into())
+        })?;
+        let detail = gate.get("detail").and_then(Value::as_str).ok_or_else(|| {
+            CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into())
+        })?;
+        security_gates.push((id.to_string(), state.to_string(), detail.to_string()));
+    }
+    security_gates.sort_by(|left, right| left.0.cmp(&right.0));
+    if security_gates.is_empty() {
+        return Err(CommandError::EngineUnavailable(
+            "RISK_CHECKLIST_UNAVAILABLE".into(),
+        ));
+    }
+    let canonical = serde_json::to_vec(&security_gates)
+        .map_err(|_| CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into()))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
 #[cfg(windows)]
 fn verify_windows_user_consent(revision_hash: &str) -> Result<(), CommandError> {
     use windows::core::HSTRING;
@@ -2882,7 +3367,9 @@ fn verify_windows_user_consent(revision_hash: &str) -> Result<(), CommandError> 
 
     let availability = UserConsentVerifier::CheckAvailabilityAsync()
         .and_then(|operation| operation.get())
-        .map_err(|error| CommandError::EngineUnavailable(format!("WINDOWS_REAUTH_UNAVAILABLE:{error}")))?;
+        .map_err(|error| {
+            CommandError::EngineUnavailable(format!("WINDOWS_REAUTH_UNAVAILABLE:{error}"))
+        })?;
     if availability != UserConsentVerifierAvailability::Available {
         return Err(CommandError::EngineUnavailable(
             "WINDOWS_REAUTH_NOT_CONFIGURED".into(),
@@ -2891,12 +3378,12 @@ fn verify_windows_user_consent(revision_hash: &str) -> Result<(), CommandError> 
     let suffix = revision_hash
         .get(revision_hash.len().saturating_sub(8)..)
         .unwrap_or(revision_hash);
-    let message = HSTRING::from(format!(
-        "Blogbot yüksek risk onayı · revizyon …{suffix}"
-    ));
+    let message = HSTRING::from(format!("Blogbot yüksek risk onayı · revizyon …{suffix}"));
     let result = UserConsentVerifier::RequestVerificationAsync(&message)
         .and_then(|operation| operation.get())
-        .map_err(|error| CommandError::EngineUnavailable(format!("WINDOWS_REAUTH_FAILED:{error}")))?;
+        .map_err(|error| {
+            CommandError::EngineUnavailable(format!("WINDOWS_REAUTH_FAILED:{error}"))
+        })?;
     if result != UserConsentVerificationResult::Verified {
         return Err(CommandError::InvalidInput(
             "Windows kullanıcı doğrulaması tamamlanmadı; yüksek risk onayı verilmedi".into(),
@@ -2930,7 +3417,10 @@ fn chrono_like_iso(unix_ms: u128) -> Result<String, CommandError> {
     let hour = day_seconds / 3_600;
     let minute = (day_seconds % 3_600) / 60;
     let second = day_seconds % 60;
-    Ok(format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{:03}Z", system_time.subsec_millis()))
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{:03}Z",
+        system_time.subsec_millis()
+    ))
 }
 
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
@@ -2961,7 +3451,12 @@ pub fn approve_revision(
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
-    let command = build_approval_command(&revision_id, &expected_hash, &warning_set_hash, expected_version)?;
+    let command = build_approval_command(
+        &revision_id,
+        &expected_hash,
+        &warning_set_hash,
+        expected_version,
+    )?;
     authorize_native_confirmation(
         "İncelediğiniz içerik revizyonunu onayla",
         &expected_hash,
@@ -2985,9 +3480,22 @@ pub fn approve_revision(
         .pointer("/result/value")
         .cloned()
         .ok_or_else(|| CommandError::EngineUnavailable("APPROVAL_SHAPE_INVALID".into()))?;
-    let materialization = read_revision_at_version(&bridge, expected_version, &revision_id)
+    // Approval advances the engine cursor. Re-read the cursor after the mutation
+    // instead of asking the immutable materializer for the pre-approval snapshot.
+    let committed_version = read_engine_state(&bridge)?
+        .pointer("/snapshot/serverCursor")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
+    if committed_version < expected_version {
+        return Err(CommandError::EngineUnavailable(
+            "APPROVAL_CURSOR_REGRESSED".into(),
+        ));
+    }
+    let materialization = read_revision_at_version(&bridge, committed_version, &revision_id)
         .map_err(|error| match error {
-            CommandError::InvalidInput(_) => CommandError::EngineUnavailable("APPROVED_REVISION_MISSING".into()),
+            CommandError::InvalidInput(_) => {
+                CommandError::EngineUnavailable("APPROVED_REVISION_MISSING".into())
+            }
             other => other,
         })?;
     let review_revision = build_review_revision(&materialization)?;
@@ -3008,10 +3516,14 @@ where
     F: FnOnce(&str) -> Result<(), CommandError>,
 {
     if !confirm_reauthenticated {
-        return Err(CommandError::InvalidInput("Windows yeniden doğrulaması açıkça onaylanmalı".into()));
+        return Err(CommandError::InvalidInput(
+            "Windows yeniden doğrulaması açıkça onaylanmalı".into(),
+        ));
     }
     if !secure_store_ready {
-        return Err(CommandError::EngineUnavailable("SECURE_STORE_NOT_READY".into()));
+        return Err(CommandError::EngineUnavailable(
+            "SECURE_STORE_NOT_READY".into(),
+        ));
     }
     verifier(expected_hash)
 }
@@ -3026,7 +3538,6 @@ pub fn approve_high_risk_revision(
     let HighRiskApprovalRequest {
         revision_id,
         expected_hash,
-        risk_checklist_hash,
         warning_set_hash,
         confirm_reauthenticated,
     } = request;
@@ -3038,12 +3549,35 @@ pub fn approve_high_risk_revision(
         verify_windows_user_consent,
     )?;
     let engine_state = read_engine_state(&bridge)?;
-    let expected_version = engine_state.pointer("/snapshot/serverCursor").and_then(Value::as_u64)
+    let expected_version = engine_state
+        .pointer("/snapshot/serverCursor")
+        .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
-    let command = build_high_risk_approval_command(&revision_id, &expected_hash, &risk_checklist_hash, &warning_set_hash, expected_version)?;
-    let request_id = command.get("requestId").and_then(Value::as_str).ok_or(CommandError::StateUnavailable)?.to_string();
-    let response = engine_request(&bridge, json!({ "version": 1, "id": request_id, "kind": "command", "command": command }))?;
-    response.pointer("/result/value").cloned().ok_or_else(|| CommandError::EngineUnavailable("HIGH_RISK_APPROVAL_SHAPE_INVALID".into()))
+    let risk_checklist_hash = trusted_high_risk_checklist_hash(
+        &bridge,
+        expected_version,
+        &revision_id,
+    )?;
+    let command = build_high_risk_approval_command(
+        &revision_id,
+        &expected_hash,
+        &risk_checklist_hash,
+        &warning_set_hash,
+        expected_version,
+    )?;
+    let request_id = command
+        .get("requestId")
+        .and_then(Value::as_str)
+        .ok_or(CommandError::StateUnavailable)?
+        .to_string();
+    let response = engine_request(
+        &bridge,
+        json!({ "version": 1, "id": request_id, "kind": "command", "command": command }),
+    )?;
+    response
+        .pointer("/result/value")
+        .cloned()
+        .ok_or_else(|| CommandError::EngineUnavailable("HIGH_RISK_APPROVAL_SHAPE_INVALID".into()))
 }
 
 #[tauri::command]
@@ -3051,6 +3585,7 @@ pub fn enqueue_publication(
     revision_id: String,
     revision_hash: String,
     preview_hash: String,
+    app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
@@ -3061,12 +3596,20 @@ pub fn enqueue_publication(
         || !preview_hash.chars().all(|value| value.is_ascii_hexdigit())
         || preview_hash.len() != 64
     {
-        return Err(CommandError::InvalidInput("revizyon kimliği, tam revizyon özeti ve yayın önizleme özeti gerekir".into()));
+        return Err(CommandError::InvalidInput(
+            "revizyon kimliği, tam revizyon özeti ve yayın önizleme özeti gerekir".into(),
+        ));
     }
     let connector_mode = read_engine_local_state(&bridge, "desktop.connectors")
-        .and_then(|value| value.pointer("/site/mode").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|value| {
+            value
+                .pointer("/site/mode")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .unwrap_or_else(|| "LOCAL_ONLY".to_string());
-    if connector_mode == "PUBLISH" {
+    let token_path = github_token_path(&app)?;
+    if connector_mode == "PUBLISH" && !state.github_broker.publication_ready(&token_path) {
         return Err(CommandError::EngineUnavailable(
             "GITHUB_CREDENTIAL_BROKER_UNAVAILABLE".into(),
         ));
@@ -3076,17 +3619,76 @@ pub fn enqueue_publication(
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
     let idempotency_key = stable_source_key(&format!("publication:{revision_id}:{revision_hash}"));
-    let response = engine_request(&bridge, json!({
-        "version": 1,
-        "id": idempotency_key,
-        "kind": "publication.enqueue",
-        "revisionId": revision_id,
-        "revisionHash": revision_hash,
-        "previewHash": preview_hash,
-        "expectedVersion": version,
-        "idempotencyKey": idempotency_key
-    }))?;
-    response.get("value").cloned().ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_ENQUEUE_SHAPE_INVALID".into()))
+    let response = engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": idempotency_key,
+            "kind": "publication.enqueue",
+            "revisionId": revision_id,
+            "revisionHash": revision_hash,
+            "previewHash": preview_hash,
+            "expectedVersion": version,
+            "idempotencyKey": idempotency_key
+        }),
+    )?;
+    let value = response.get("value").cloned().ok_or_else(|| {
+        CommandError::EngineUnavailable("PUBLICATION_ENQUEUE_SHAPE_INVALID".into())
+    })?;
+    if connector_mode == "PUBLISH" {
+        let effect_id = value.get("id").and_then(Value::as_str).ok_or_else(|| {
+            CommandError::EngineUnavailable("PUBLICATION_EFFECT_ID_MISSING".into())
+        })?;
+        let effects = state.github_broker.publication_effects(&token_path);
+        return drive_publication_broker(effect_id, |request| bridge.request(request), &effects)
+            .map_err(CommandError::EngineUnavailable);
+    }
+    Ok(value)
+}
+
+pub fn start_native_publication_drainer(app: tauri::AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let state = app.state::<DesktopState>();
+        if read_lock(&state.publishing_paused)
+            .map(|value| *value)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let bridge = app.state::<EngineBridge>();
+        let token_path = match github_token_path(&app) {
+            Ok(path) if path.is_file() => path,
+            _ => continue,
+        };
+        let pending = match engine_request(
+            &bridge,
+            json!({
+                "version": 1,
+                "id": format!(
+                    "native-pending-{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                ),
+                "kind": "publication.broker.pending"
+            }),
+        ) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let effect_ids = pending
+            .pointer("/value/effectIds")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let effects = state.github_broker.publication_effects(&token_path);
+        for effect_id in effect_ids.iter().filter_map(Value::as_str).take(16) {
+            let _ =
+                drive_publication_broker(effect_id, |request| bridge.request(request), &effects);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -3097,32 +3699,54 @@ struct PreviewMaterializationFile {
 }
 
 fn preview_file_bytes(file: &Value) -> Result<Vec<u8>, CommandError> {
-    let content = file.get("content").ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_MISSING".into()))?;
+    let content = file.get("content").ok_or_else(|| {
+        CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_MISSING".into())
+    })?;
     if let Some(text) = content.as_str() {
         return Ok(text.as_bytes().to_vec());
     }
     let values: Vec<&Value> = if let Some(values) = content.as_array() {
         values.iter().collect()
     } else if let Some(object) = content.as_object() {
-        let mut indexed = object.iter().map(|(index, value)| {
-            index.parse::<usize>()
-                .map(|index| (index, value))
-                .map_err(|_| CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into()))
-        }).collect::<Result<Vec<_>, _>>()?;
+        let mut indexed = object
+            .iter()
+            .map(|(index, value)| {
+                index
+                    .parse::<usize>()
+                    .map(|index| (index, value))
+                    .map_err(|_| {
+                        CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into())
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         indexed.sort_by_key(|(index, _)| *index);
-        if indexed.iter().enumerate().any(|(expected, (actual, _))| expected != *actual) {
-            return Err(CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into()));
+        if indexed
+            .iter()
+            .enumerate()
+            .any(|(expected, (actual, _))| expected != *actual)
+        {
+            return Err(CommandError::EngineUnavailable(
+                "PUBLICATION_FILE_CONTENT_INVALID".into(),
+            ));
         }
         indexed.into_iter().map(|(_, value)| value).collect()
     } else {
-        return Err(CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into()));
+        return Err(CommandError::EngineUnavailable(
+            "PUBLICATION_FILE_CONTENT_INVALID".into(),
+        ));
     };
-    values.into_iter().map(|value| {
-        value.as_u64()
-            .filter(|value| *value <= u8::MAX as u64)
-            .map(|value| value as u8)
-            .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into()))
-    }).collect()
+    values
+        .into_iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|value| *value <= u8::MAX as u64)
+                .map(|value| value as u8)
+                .ok_or_else(|| {
+                    CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_INVALID".into())
+                })
+        })
+        .collect()
 }
 
 /// `symlink_metadata` alone is insufficient on Windows: directory junctions
@@ -3135,9 +3759,15 @@ fn is_reparse_point(path: &Path) -> std::io::Result<bool> {
         use std::iter::once;
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{GetFileAttributesW, FILE_ATTRIBUTE_REPARSE_POINT, INVALID_FILE_ATTRIBUTES};
+        use windows::Win32::Storage::FileSystem::{
+            GetFileAttributesW, FILE_ATTRIBUTE_REPARSE_POINT, INVALID_FILE_ATTRIBUTES,
+        };
 
-        let wide = path.as_os_str().encode_wide().chain(once(0)).collect::<Vec<_>>();
+        let wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(once(0))
+            .collect::<Vec<_>>();
         // SAFETY: the buffer is NUL-terminated and lives for the duration of
         // the synchronous Win32 call.
         let attributes = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
@@ -3156,20 +3786,34 @@ fn is_reparse_point(path: &Path) -> std::io::Result<bool> {
 const ENGINE_MEDIA_CHUNK_BYTES: u64 = 64 * 1024;
 const ENGINE_MEDIA_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
-fn preview_file_media_reference(content: &Value, revision_id: &str) -> Result<Option<(String, u64)>, CommandError> {
+fn preview_file_media_reference(
+    content: &Value,
+    revision_id: &str,
+) -> Result<Option<(String, u64)>, CommandError> {
     if content.get("kind").and_then(Value::as_str) != Some("engine-media-ref") {
         return Ok(None);
     }
-    let reference_revision = content.get("revisionId").and_then(Value::as_str).unwrap_or_default();
-    let sha256 = content.get("sha256").and_then(Value::as_str).unwrap_or_default();
-    let byte_size = content.get("byteSize").and_then(Value::as_u64).unwrap_or_default();
+    let reference_revision = content
+        .get("revisionId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let sha256 = content
+        .get("sha256")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let byte_size = content
+        .get("byteSize")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
     if reference_revision != revision_id
         || sha256.len() != 64
         || !sha256.chars().all(|value| value.is_ascii_hexdigit())
         || byte_size == 0
         || byte_size > ENGINE_MEDIA_MAX_BYTES
     {
-        return Err(CommandError::EngineUnavailable("PUBLICATION_MEDIA_REFERENCE_INVALID".into()));
+        return Err(CommandError::EngineUnavailable(
+            "PUBLICATION_MEDIA_REFERENCE_INVALID".into(),
+        ));
     }
     Ok(Some((sha256.to_ascii_lowercase(), byte_size)))
 }
@@ -3183,22 +3827,29 @@ fn read_engine_media_bytes(
     let mut output = Vec::with_capacity(expected_size as usize);
     let mut offset = 0u64;
     loop {
-        let response = engine_request(bridge, json!({
-            "version": 1,
-            "id": format!("desktop-media-read:{revision_id}:{sha256}:{offset}"),
-            "kind": "media.read",
-            "revisionId": revision_id,
-            "sha256": sha256,
-            "offset": offset,
-            "length": ENGINE_MEDIA_CHUNK_BYTES
-        }))?;
-        let value = response.get("value").ok_or_else(|| CommandError::EngineUnavailable("MEDIA_READ_SHAPE_INVALID".into()))?;
+        let response = engine_request(
+            bridge,
+            json!({
+                "version": 1,
+                "id": format!("desktop-media-read:{revision_id}:{sha256}:{offset}"),
+                "kind": "media.read",
+                "revisionId": revision_id,
+                "sha256": sha256,
+                "offset": offset,
+                "length": ENGINE_MEDIA_CHUNK_BYTES
+            }),
+        )?;
+        let value = response
+            .get("value")
+            .ok_or_else(|| CommandError::EngineUnavailable("MEDIA_READ_SHAPE_INVALID".into()))?;
         let returned_offset = value.get("offset").and_then(Value::as_u64);
         let total = value.get("totalBytes").and_then(Value::as_u64);
         let encoded = value.get("contentBase64").and_then(Value::as_str);
         let eof = value.get("eof").and_then(Value::as_bool);
         if returned_offset != Some(offset) || total != Some(expected_size) || eof.is_none() {
-            return Err(CommandError::EngineUnavailable("MEDIA_READ_SHAPE_INVALID".into()));
+            return Err(CommandError::EngineUnavailable(
+                "MEDIA_READ_SHAPE_INVALID".into(),
+            ));
         }
         let chunk = base64::engine::general_purpose::STANDARD
             .decode(encoded.unwrap_or_default())
@@ -3207,19 +3858,28 @@ fn read_engine_media_bytes(
             return Err(CommandError::EngineUnavailable("MEDIA_READ_STALLED".into()));
         }
         output.extend_from_slice(&chunk);
-        offset = offset.checked_add(chunk.len() as u64)
+        offset = offset
+            .checked_add(chunk.len() as u64)
             .ok_or_else(|| CommandError::EngineUnavailable("MEDIA_READ_SIZE_INVALID".into()))?;
         if offset > expected_size {
-            return Err(CommandError::EngineUnavailable("MEDIA_READ_SIZE_INVALID".into()));
+            return Err(CommandError::EngineUnavailable(
+                "MEDIA_READ_SIZE_INVALID".into(),
+            ));
         }
-        if eof == Some(true) { break; }
+        if eof == Some(true) {
+            break;
+        }
     }
     if output.len() as u64 != expected_size {
-        return Err(CommandError::EngineUnavailable("MEDIA_READ_SIZE_INVALID".into()));
+        return Err(CommandError::EngineUnavailable(
+            "MEDIA_READ_SIZE_INVALID".into(),
+        ));
     }
     let actual = format!("{:x}", Sha256::digest(&output));
     if actual != sha256 {
-        return Err(CommandError::EngineUnavailable("MEDIA_READ_INTEGRITY_FAILURE".into()));
+        return Err(CommandError::EngineUnavailable(
+            "MEDIA_READ_INTEGRITY_FAILURE".into(),
+        ));
     }
     Ok(output)
 }
@@ -3236,19 +3896,35 @@ where
 {
     let mut validated = Vec::with_capacity(files.len());
     for (relative, content) in files {
-        if relative.is_empty() || relative.contains('\\') || relative.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
-            return Err(CommandError::InvalidInput("önizleme içinde güvensiz dosya yolu var".into()));
+        if relative.is_empty()
+            || relative.contains('\\')
+            || relative
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(CommandError::InvalidInput(
+                "önizleme içinde güvensiz dosya yolu var".into(),
+            ));
         }
         let destination = root.join(relative);
         if !destination.starts_with(root) {
-            return Err(CommandError::InvalidInput("dosya yolu hedef klasör dışına çıkıyor".into()));
+            return Err(CommandError::InvalidInput(
+                "dosya yolu hedef klasör dışına çıkıyor".into(),
+            ));
         }
         let mut ancestor = destination.parent();
         while let Some(path) = ancestor {
-            if path == root { break; }
+            if path == root {
+                break;
+            }
             if let Ok(metadata) = std::fs::symlink_metadata(path) {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() || is_reparse_point(path).unwrap_or(true) {
-                    return Err(CommandError::InvalidInput("hedef klasörde güvenli olmayan bir yol var".into()));
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_dir()
+                    || is_reparse_point(path).unwrap_or(true)
+                {
+                    return Err(CommandError::InvalidInput(
+                        "hedef klasörde güvenli olmayan bir yol var".into(),
+                    ));
                 }
             }
             ancestor = path.parent();
@@ -3256,14 +3932,23 @@ where
         let backup = if destination.exists() {
             let metadata = std::fs::symlink_metadata(&destination)
                 .map_err(|_| CommandError::InvalidInput("hedef dosya doğrulanamadı".into()))?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() || is_reparse_point(&destination).unwrap_or(true) {
-                return Err(CommandError::InvalidInput("hedefteki dosya güvenli değil".into()));
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || is_reparse_point(&destination).unwrap_or(true)
+            {
+                return Err(CommandError::InvalidInput(
+                    "hedefteki dosya güvenli değil".into(),
+                ));
             }
             Some(backup_root.join(relative))
         } else {
             None
         };
-        validated.push(PreviewMaterializationFile { destination, content: content.clone(), backup });
+        validated.push(PreviewMaterializationFile {
+            destination,
+            content: content.clone(),
+            backup,
+        });
     }
 
     // Stage every original before writing anything so a backup failure cannot
@@ -3271,10 +3956,13 @@ where
     for file in &validated {
         if let Some(backup) = &file.backup {
             if let Some(parent) = backup.parent() {
-                std::fs::create_dir_all(parent).map_err(|_| CommandError::EngineUnavailable("yerel geri alma alanı hazırlanamadı".into()))?;
+                std::fs::create_dir_all(parent).map_err(|_| {
+                    CommandError::EngineUnavailable("yerel geri alma alanı hazırlanamadı".into())
+                })?;
             }
-            std::fs::copy(&file.destination, backup)
-                .map_err(|_| CommandError::EngineUnavailable("yerel geri alma kopyası oluşturulamadı".into()))?;
+            std::fs::copy(&file.destination, backup).map_err(|_| {
+                CommandError::EngineUnavailable("yerel geri alma kopyası oluşturulamadı".into())
+            })?;
         }
     }
 
@@ -3283,7 +3971,9 @@ where
         if let Some(parent) = file.destination.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 rollback_preview_bundle(&applied);
-                return Err(CommandError::EngineUnavailable("yerel önizleme yazımı geri alındı".into()));
+                return Err(CommandError::EngineUnavailable(
+                    "yerel önizleme yazımı geri alındı".into(),
+                ));
             }
         }
         // Register before invoking the writer: a replacement can fail after
@@ -3291,7 +3981,9 @@ where
         applied.push((file.destination.clone(), file.backup.clone()));
         if write_file(&file.destination, &file.content).is_err() {
             rollback_preview_bundle(&applied);
-            return Err(CommandError::EngineUnavailable("yerel önizleme yazımı geri alındı".into()));
+            return Err(CommandError::EngineUnavailable(
+                "yerel önizleme yazımı geri alındı".into(),
+            ));
         }
     }
     Ok(validated.len())
@@ -3326,86 +4018,181 @@ pub fn materialize_local_preview(
         || preview_hash.len() != 64
         || !is_local_path(&target_directory)
     {
-        return Err(CommandError::InvalidInput("approved revision, preview hash ve yerel hedef klasör gerekir".into()));
+        return Err(CommandError::InvalidInput(
+            "approved revision, preview hash ve yerel hedef klasör gerekir".into(),
+        ));
     }
     let root = require_granted_directory(&state, &target_directory)?;
     // Setup persists the selected site in the encrypted connector catalog.
     // Retain the former key as a read-only migration fallback.
     let configured_root = read_engine_local_state(&bridge, "desktop.connectors")
-        .and_then(|value| value.pointer("/site/repositoryPath").and_then(Value::as_str).map(str::to_owned))
-        .or_else(|| read_engine_local_state(&bridge, "connector.site")
-            .and_then(|value| value.get("repositoryPath").and_then(Value::as_str).map(str::to_owned)))
-        .ok_or_else(|| CommandError::InvalidInput("önce Kurulum Merkezi'nden site klasörünü kaydedin".into()))?;
-    let configured_root = std::fs::canonicalize(configured_root)
-        .map_err(|error| CommandError::InvalidInput(format!("kayıtlı site klasörü okunamadı: {error}")))?;
+        .and_then(|value| {
+            value
+                .pointer("/site/repositoryPath")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            read_engine_local_state(&bridge, "connector.site").and_then(|value| {
+                value
+                    .get("repositoryPath")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        })
+        .ok_or_else(|| {
+            CommandError::InvalidInput("önce Kurulum Merkezi'nden site klasörünü kaydedin".into())
+        })?;
+    let configured_root = std::fs::canonicalize(configured_root).map_err(|error| {
+        CommandError::InvalidInput(format!("kayıtlı site klasörü okunamadı: {error}"))
+    })?;
     if root != configured_root {
-        return Err(CommandError::InvalidInput("yalnız Kurulum Merkezi'nde seçilen site klasörüne yazılabilir".into()));
+        return Err(CommandError::InvalidInput(
+            "yalnız Kurulum Merkezi'nde seçilen site klasörüne yazılabilir".into(),
+        ));
     }
-    let state_value = read_engine_local_state(&bridge, &format!("publication.preview:{revision_id}"))
-        .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_PREVIEW_MISSING".into()))?;
+    let state_value =
+        read_engine_local_state(&bridge, &format!("publication.preview:{revision_id}"))
+            .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_PREVIEW_MISSING".into()))?;
     let preview_now_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     if state_value.get("revisionHash").and_then(Value::as_str) != Some(revision_hash.as_str())
         || state_value.get("previewHash").and_then(Value::as_str) != Some(preview_hash.as_str())
-        || !state_value.get("expiresAtUnixMs").and_then(Value::as_u64).is_some_and(|expires_at| u128::from(expires_at) > preview_now_unix_ms)
+        || !state_value
+            .get("expiresAtUnixMs")
+            .and_then(Value::as_u64)
+            .is_some_and(|expires_at| u128::from(expires_at) > preview_now_unix_ms)
     {
-        return Err(CommandError::InvalidInput("önizleme artık onaylı revizyonla eşleşmiyor".into()));
+        return Err(CommandError::InvalidInput(
+            "önizleme artık onaylı revizyonla eşleşmiyor".into(),
+        ));
     }
     let snapshot = read_engine_state(&bridge)?;
-    let revision = snapshot.pointer("/snapshot/revisions").and_then(Value::as_array).and_then(|items| {
-        items.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(revision_id.as_str()))
-    }).ok_or_else(|| CommandError::InvalidInput("onaylı revizyon bulunamadı".into()))?;
-    if !matches!(revision.get("state").and_then(Value::as_str), Some("REVIEW_REQUIRED" | "APPROVED" | "PR_READY" | "SCHEDULED")) {
-        return Err(CommandError::InvalidInput("revizyon yayınlanabilir durumda değil".into()));
+    let revision = snapshot
+        .pointer("/snapshot/revisions")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(revision_id.as_str()))
+        })
+        .ok_or_else(|| CommandError::InvalidInput("onaylı revizyon bulunamadı".into()))?;
+    if !matches!(
+        revision.get("state").and_then(Value::as_str),
+        Some("REVIEW_REQUIRED" | "APPROVED" | "PR_READY" | "SCHEDULED")
+    ) {
+        return Err(CommandError::InvalidInput(
+            "revizyon yayınlanabilir durumda değil".into(),
+        ));
     }
-    let parity_ready = revision.pointer("/translationParity/status").and_then(Value::as_str) == Some("MATCHED");
+    let parity_ready = revision
+        .pointer("/translationParity/status")
+        .and_then(Value::as_str)
+        == Some("MATCHED");
     if !parity_ready {
-        return Err(CommandError::InvalidInput("TR/EN doğruluk eşleşmesi tamamlanmadan yazılamaz".into()));
+        return Err(CommandError::InvalidInput(
+            "TR/EN doğruluk eşleşmesi tamamlanmadan yazılamaz".into(),
+        ));
     }
-    let claims_ready = revision.get("claims").and_then(Value::as_array).is_some_and(|claims| claims.iter().all(|claim| {
-        claim.get("status").and_then(Value::as_str) == Some("VERIFIED")
-            && claim.get("evidenceAnchors").and_then(Value::as_array).is_some_and(|anchors| !anchors.is_empty() && anchors.iter().all(|anchor| anchor.get("quoteHash").and_then(Value::as_str).is_some_and(|hash| hash.len() == 64 && hash.chars().all(|value| value.is_ascii_hexdigit()))))
-    }));
+    let claims_ready = revision
+        .get("claims")
+        .and_then(Value::as_array)
+        .is_some_and(|claims| {
+            claims.iter().all(|claim| {
+                claim.get("status").and_then(Value::as_str) == Some("VERIFIED")
+                    && claim
+                        .get("evidenceAnchors")
+                        .and_then(Value::as_array)
+                        .is_some_and(|anchors| {
+                            !anchors.is_empty()
+                                && anchors.iter().all(|anchor| {
+                                    anchor.get("quoteHash").and_then(Value::as_str).is_some_and(
+                                        |hash| {
+                                            hash.len() == 64
+                                                && hash
+                                                    .chars()
+                                                    .all(|value| value.is_ascii_hexdigit())
+                                        },
+                                    )
+                                })
+                        })
+            })
+        });
     if !claims_ready {
-        return Err(CommandError::InvalidInput("kaynak kanıtları doğrulanmadan yazılamaz".into()));
+        return Err(CommandError::InvalidInput(
+            "kaynak kanıtları doğrulanmadan yazılamaz".into(),
+        ));
     }
-    let approved = snapshot.pointer("/snapshot/approvals").and_then(Value::as_array).is_some_and(|items| {
-        items.iter().any(|item| item.get("revisionId").and_then(Value::as_str) == Some(revision_id.as_str())
-            && item.get("revisionHash").and_then(Value::as_str) == Some(revision_hash.as_str()))
-    });
+    let approved = snapshot
+        .pointer("/snapshot/approvals")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("revisionId").and_then(Value::as_str) == Some(revision_id.as_str())
+                    && item.get("revisionHash").and_then(Value::as_str)
+                        == Some(revision_hash.as_str())
+            })
+        });
     if !approved {
-        return Err(CommandError::InvalidInput("yerel klasöre yazmak için insan onayı gerekir".into()));
+        return Err(CommandError::InvalidInput(
+            "yerel klasöre yazmak için insan onayı gerekir".into(),
+        ));
     }
     if revision.get("riskLevel").and_then(Value::as_str) == Some("HIGH") {
-        let high_risk = snapshot.pointer("/snapshot/highRiskApprovals").and_then(Value::as_array).is_some_and(|items| items.iter().any(|item| {
-            item.get("revisionId").and_then(Value::as_str) == Some(revision_id.as_str())
-                && item.get("revisionHash").and_then(Value::as_str) == Some(revision_hash.as_str())
-        }));
+        let high_risk = snapshot
+            .pointer("/snapshot/highRiskApprovals")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("revisionId").and_then(Value::as_str) == Some(revision_id.as_str())
+                        && item.get("revisionHash").and_then(Value::as_str)
+                            == Some(revision_hash.as_str())
+                })
+            });
         if !high_risk {
-            return Err(CommandError::InvalidInput("yüksek riskli yazı için ikinci onay gerekir".into()));
+            return Err(CommandError::InvalidInput(
+                "yüksek riskli yazı için ikinci onay gerekir".into(),
+            ));
         }
     }
-    let files = state_value.pointer("/payload/files").and_then(Value::as_array)
+    let files = state_value
+        .pointer("/payload/files")
+        .and_then(Value::as_array)
         .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILES_MISSING".into()))?;
-    let backup_root = root.join(".blogbot").join("backups").join(&preview_hash[..12]);
-    let bundle = files.iter().map(|file| {
-        let path = file.get("path").and_then(Value::as_str)
-            .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILE_PATH_INVALID".into()))?
-            .to_owned();
-        let content = file.get("content")
-            .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_MISSING".into()))?;
-        let bytes = match preview_file_media_reference(content, &revision_id)? {
-            Some((sha256, byte_size)) => read_engine_media_bytes(&bridge, &revision_id, &sha256, byte_size)?,
-            None => preview_file_bytes(file)?
-        };
-        Ok((path, bytes))
-    }).collect::<Result<Vec<_>, CommandError>>()?;
+    let backup_root = root
+        .join(".blogbot")
+        .join("backups")
+        .join(&preview_hash[..12]);
+    let bundle = files
+        .iter()
+        .map(|file| {
+            let path = file
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    CommandError::EngineUnavailable("PUBLICATION_FILE_PATH_INVALID".into())
+                })?
+                .to_owned();
+            let content = file.get("content").ok_or_else(|| {
+                CommandError::EngineUnavailable("PUBLICATION_FILE_CONTENT_MISSING".into())
+            })?;
+            let bytes = match preview_file_media_reference(content, &revision_id)? {
+                Some((sha256, byte_size)) => {
+                    read_engine_media_bytes(&bridge, &revision_id, &sha256, byte_size)?
+                }
+                None => preview_file_bytes(file)?,
+            };
+            Ok((path, bytes))
+        })
+        .collect::<Result<Vec<_>, CommandError>>()?;
     let backup_prefix = format!(".blogbot/backups/{}", &preview_hash[..12]);
     let written = crate::secure_preview_fs::materialize(&root, &bundle, &backup_prefix)
         .map_err(|_| CommandError::EngineUnavailable("yerel önizleme yazımı geri alındı".into()))?;
-    Ok(json!({"written": written, "targetDirectory": root, "backupDirectory": if written > 0 { Some(backup_root) } else { None::<std::path::PathBuf> }}))
+    Ok(
+        json!({"written": written, "targetDirectory": root, "backupDirectory": if written > 0 { Some(backup_root) } else { None::<std::path::PathBuf> }}),
+    )
 }
 
 #[tauri::command]
@@ -3440,27 +4227,59 @@ pub fn preview_publication(
         // Never invent a host or repository: an unconfigured site remains
         // blocked by the engine's connector validation.
         if let Some(connectors) = read_engine_local_state(&bridge, "desktop.connectors") {
-            if object.get("siteOrigin").and_then(Value::as_str).unwrap_or_default().is_empty() {
+            if object
+                .get("siteOrigin")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .is_empty()
+            {
                 if let Some(origin) = configured_site_origin(&connectors) {
                     object.insert("siteOrigin".into(), Value::String(origin));
                 }
             }
-            if object.get("targetRepository").and_then(Value::as_str).unwrap_or_default().is_empty() {
-                let owner = connectors.pointer("/github/owner").and_then(Value::as_str).unwrap_or_default();
-                let repository = connectors.pointer("/github/repository").and_then(Value::as_str).unwrap_or_default();
+            if object
+                .get("targetRepository")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                let owner = connectors
+                    .pointer("/github/owner")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let repository = connectors
+                    .pointer("/github/repository")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 if !owner.is_empty() && !repository.is_empty() {
-                    object.insert("targetRepository".into(), Value::String(format!("{owner}/{repository}")));
+                    object.insert(
+                        "targetRepository".into(),
+                        Value::String(format!("{owner}/{repository}")),
+                    );
                 }
             }
-            if object.get("baseBranch").and_then(Value::as_str).unwrap_or_default().is_empty() {
+            if object
+                .get("baseBranch")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .is_empty()
+            {
                 object.insert("baseBranch".into(), Value::String("main".into()));
             }
-            if object.get("contentRoot").and_then(Value::as_str).unwrap_or_default().is_empty() {
+            if object
+                .get("contentRoot")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .is_empty()
+            {
                 // The publisher's contentRoot is a logical deployment root,
                 // not the user's Windows checkout path. Keep it generic and
                 // POSIX-safe; the actual site adapter owns its file layout.
                 if object.get("siteOrigin").and_then(Value::as_str).is_some()
-                    && object.get("targetRepository").and_then(Value::as_str).is_some()
+                    && object
+                        .get("targetRepository")
+                        .and_then(Value::as_str)
+                        .is_some()
                 {
                     object.insert("contentRoot".into(), Value::String("/site".into()));
                 }
@@ -3473,7 +4292,8 @@ pub fn preview_publication(
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
     let idempotency_key = stable_source_key(&format!(
         "publication-preview:{revision_id}:{revision_hash}:{}",
-        serde_json::to_string(&preview_payload).map_err(|error| CommandError::InvalidInput(error.to_string()))?
+        serde_json::to_string(&preview_payload)
+            .map_err(|error| CommandError::InvalidInput(error.to_string()))?
     ));
     let response = engine_request(
         &bridge,
@@ -3488,10 +4308,9 @@ pub fn preview_publication(
             "payload": preview_payload
         }),
     )?;
-    let value = response
-        .get("value")
-        .cloned()
-        .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_PREVIEW_SHAPE_INVALID".into()))?;
+    let value = response.get("value").cloned().ok_or_else(|| {
+        CommandError::EngineUnavailable("PUBLICATION_PREVIEW_SHAPE_INVALID".into())
+    })?;
     if value.get("previewHash").and_then(Value::as_str).is_none() {
         return Err(CommandError::EngineUnavailable(
             "PUBLICATION_PREVIEW_HASH_MISSING".into(),
@@ -3501,9 +4320,7 @@ pub fn preview_publication(
 }
 
 #[tauri::command]
-pub fn get_operations(
-    bridge: tauri::State<'_, EngineBridge>,
-) -> Result<Value, CommandError> {
+pub fn get_operations(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
     let state = read_engine_state(&bridge)?;
     let jobs = state
         .pointer("/snapshot/jobs")
@@ -3544,27 +4361,43 @@ pub fn get_operations(
         .unwrap_or_default();
     events.splice(0..0, editorial_operation_events(&editorial_mutations));
     for job in jobs.iter().filter(|job| {
-        matches!(job.get("state").and_then(Value::as_str), Some("FAILED" | "DEAD_LETTER"))
+        matches!(
+            job.get("state").and_then(Value::as_str),
+            Some("FAILED" | "DEAD_LETTER")
+        )
     }) {
-        let id = job.get("id").and_then(Value::as_str).unwrap_or("unknown-job");
+        let id = job
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown-job");
         let state = job.get("state").and_then(Value::as_str).unwrap_or("FAILED");
         let detail = sanitize_operation_error(
-            job.get("lastError").and_then(Value::as_str).unwrap_or("İş hata durumunda.")
+            job.get("lastError")
+                .and_then(Value::as_str)
+                .unwrap_or("İş hata durumunda."),
         );
-        events.insert(0, json!({
-            "id": format!("job-{id}"),
-            "at": "şimdi",
-            "title": "İş başarısız",
-            "detail": format!("{state} · {detail}"),
-            "state": "BLOCKED",
-            "level": "ERROR",
-            "correlationId": id
-        }));
+        events.insert(
+            0,
+            json!({
+                "id": format!("job-{id}"),
+                "at": "şimdi",
+                "title": "İş başarısız",
+                "detail": format!("{state} · {detail}"),
+                "state": "BLOCKED",
+                "level": "ERROR",
+                "correlationId": id
+            }),
+        );
     }
     events.truncate(30);
     let queue_depth = jobs
         .iter()
-        .filter(|job| matches!(job.get("state").and_then(Value::as_str), Some("QUEUED" | "RUNNING" | "RETRY_SCHEDULED" | "WAITING_CODEX")))
+        .filter(|job| {
+            matches!(
+                job.get("state").and_then(Value::as_str),
+                Some("QUEUED" | "RUNNING" | "RETRY_SCHEDULED" | "WAITING_CODEX")
+            )
+        })
         .count();
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3572,16 +4405,28 @@ pub fn get_operations(
         .as_millis() as i128;
     let oldest_job_minutes = jobs
         .iter()
-        .filter(|job| matches!(job.get("state").and_then(Value::as_str), Some("QUEUED" | "RUNNING" | "RETRY_SCHEDULED" | "WAITING_CODEX")))
-        .filter_map(|job| job.pointer("/metadata/lastQueuedAtUnixMs")
-            .or_else(|| job.pointer("/metadata/createdAtUnixMs"))
-            .and_then(Value::as_u64))
+        .filter(|job| {
+            matches!(
+                job.get("state").and_then(Value::as_str),
+                Some("QUEUED" | "RUNNING" | "RETRY_SCHEDULED" | "WAITING_CODEX")
+            )
+        })
+        .filter_map(|job| {
+            job.pointer("/metadata/lastQueuedAtUnixMs")
+                .or_else(|| job.pointer("/metadata/createdAtUnixMs"))
+                .and_then(Value::as_u64)
+        })
         .map(|created| ((now_ms - created as i128).max(0) / 60_000) as u64)
         .max()
         .unwrap_or(0);
     let outbox_pending = outbox
         .iter()
-        .filter(|effect| matches!(effect.get("state").and_then(Value::as_str), Some("PENDING" | "IN_PROGRESS" | "UNKNOWN")))
+        .filter(|effect| {
+            matches!(
+                effect.get("state").and_then(Value::as_str),
+                Some("PENDING" | "IN_PROGRESS" | "UNKNOWN")
+            )
+        })
         .count();
     let revision_queue = build_revision_queue(&read_revision_list(&bridge).unwrap_or_default());
     let schedule = scheduled_operation_items(&revision_queue);
@@ -3639,8 +4484,9 @@ fn diagnostic_bundle_path() -> Result<PathBuf, CommandError> {
         .ok_or_else(|| CommandError::EngineUnavailable("LOCALAPPDATA bulunamadı".into()))?
         .join("Blogbot")
         .join("diagnostics");
-    std::fs::create_dir_all(&root)
-        .map_err(|error| CommandError::EngineUnavailable(format!("Tanılama klasörü açılamadı: {error}")))?;
+    std::fs::create_dir_all(&root).map_err(|error| {
+        CommandError::EngineUnavailable(format!("Tanılama klasörü açılamadı: {error}"))
+    })?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CommandError::EngineUnavailable(error.to_string()))?
@@ -3654,15 +4500,25 @@ fn reveal_diagnostic_directory(directory: &Path) -> Result<(), CommandError> {
         let mut command = Command::new("explorer.exe");
         configure_hidden_command(&mut command);
         command.arg(directory);
-        command.spawn().map_err(|error| CommandError::EngineUnavailable(format!("Tanılama klasörü açılamadı: {error}")))?;
+        command.spawn().map_err(|error| {
+            CommandError::EngineUnavailable(format!("Tanılama klasörü açılamadı: {error}"))
+        })?;
     }
     Ok(())
 }
 
 fn write_redacted_diagnostic_copy(source: Option<&Path>, target: &Path) {
-    let Some(source) = source else { return; };
-    let Ok(text) = std::fs::read_to_string(source) else { return; };
-    let redacted = text.lines().map(redact_diagnostic_line).collect::<Vec<_>>().join("\n");
+    let Some(source) = source else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(source) else {
+        return;
+    };
+    let redacted = text
+        .lines()
+        .map(redact_diagnostic_line)
+        .collect::<Vec<_>>()
+        .join("\n");
     let _ = std::fs::write(target, format!("{redacted}\n"));
 }
 
@@ -3670,8 +4526,12 @@ fn write_diagnostic_lines<F>(source: Option<&Path>, target: &Path, include: F)
 where
     F: Fn(&str) -> bool,
 {
-    let Some(source) = source else { return; };
-    let Ok(text) = std::fs::read_to_string(source) else { return; };
+    let Some(source) = source else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(source) else {
+        return;
+    };
     let redacted = text
         .lines()
         .filter(|line| include(line))
@@ -3682,12 +4542,20 @@ where
 }
 
 fn diagnostic_file_size(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn read_recent_diagnostic_lines(path: Option<&Path>) -> Vec<String> {
     path.and_then(|value| std::fs::read_to_string(value).ok())
-        .map(|text| text.lines().rev().take(500).map(redact_diagnostic_line).collect())
+        .map(|text| {
+            text.lines()
+                .rev()
+                .take(500)
+                .map(redact_diagnostic_line)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -3696,15 +4564,15 @@ fn redact_diagnostic_line(line: &str) -> String {
 }
 
 #[tauri::command]
-pub fn export_diagnostics(
-    bridge: tauri::State<'_, EngineBridge>,
-) -> Result<Value, CommandError> {
+pub fn export_diagnostics(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
     let engine_path = bridge.diagnostic_log_path();
-    let operations = get_operations(bridge.clone()).unwrap_or_else(|_| json!({
-        "events": [],
-        "worker": {"state": "UNKNOWN"},
-        "publisher": {"state": "UNKNOWN"}
-    }));
+    let operations = get_operations(bridge.clone()).unwrap_or_else(|_| {
+        json!({
+            "events": [],
+            "worker": {"state": "UNKNOWN"},
+            "publisher": {"state": "UNKNOWN"}
+        })
+    });
     let payload = json!({
         "format": "blogbot-diagnostics-v1",
         "generatedAtUnixMs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
@@ -3726,27 +4594,42 @@ pub fn export_diagnostics(
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|error| CommandError::EngineUnavailable(error.to_string()))?;
     let directory = diagnostic_bundle_path()?;
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| CommandError::EngineUnavailable(format!("Tanılama klasörü oluşturulamadı: {error}")))?;
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        CommandError::EngineUnavailable(format!("Tanılama klasörü oluşturulamadı: {error}"))
+    })?;
     let path = directory.join("diagnostics.json");
-    std::fs::write(&path, &bytes)
-        .map_err(|error| CommandError::EngineUnavailable(format!("Tanılama paketi yazılamadı: {error}")))?;
+    std::fs::write(&path, &bytes).map_err(|error| {
+        CommandError::EngineUnavailable(format!("Tanılama paketi yazılamadı: {error}"))
+    })?;
     write_redacted_diagnostic_copy(engine_path.as_deref(), &directory.join("engine.stderr.log"));
     write_diagnostic_lines(
         engine_path.as_deref(),
         &directory.join("bridge-events.log"),
-        |line| line.starts_with("BRIDGE_") || line.starts_with("ENGINE_")
+        |line| line.starts_with("BRIDGE_") || line.starts_with("ENGINE_"),
     );
-    if let Some(startup) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).map(|root| root.join("Blogbot").join("diagnostics").join("startup-state.log")) {
+    if let Some(startup) = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|root| {
+            root.join("Blogbot")
+                .join("diagnostics")
+                .join("startup-state.log")
+        })
+    {
         write_redacted_diagnostic_copy(Some(&startup), &directory.join("startup-state.log"));
     }
-    let files = ["diagnostics.json", "engine.stderr.log", "bridge-events.log", "startup-state.log"]
-        .into_iter()
-        .filter_map(|name| {
-            let file = directory.join(name);
-            file.is_file().then(|| json!({ "name": name, "bytes": diagnostic_file_size(&file) }))
-        })
-        .collect::<Vec<_>>();
+    let files = [
+        "diagnostics.json",
+        "engine.stderr.log",
+        "bridge-events.log",
+        "startup-state.log",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        let file = directory.join(name);
+        file.is_file()
+            .then(|| json!({ "name": name, "bytes": diagnostic_file_size(&file) }))
+    })
+    .collect::<Vec<_>>();
     let manifest = json!({
         "format": "blogbot-diagnostics-manifest-v2",
         "generatedAtUnixMs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
@@ -3762,7 +4645,7 @@ pub fn export_diagnostics(
     });
     let _ = std::fs::write(
         directory.join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest).unwrap_or_default()
+        serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
     );
     reveal_diagnostic_directory(&directory)?;
     Ok(json!({
@@ -3784,9 +4667,9 @@ fn sanitize_operation_error(value: &str) -> String {
         .any(|token| {
             token.len() >= 5
                 && token.contains('_')
-                && token
-                    .chars()
-                    .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_')
+                && token.chars().all(|character| {
+                    character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+                })
         })
     {
         return "İş tamamlanamadı. Ayrıntı kullanıcıya gösterilmedi; Operasyonlar’dan tanılama paketi oluşturabilirsiniz.".to_string();
@@ -3925,7 +4808,11 @@ fn scheduled_operation_items(revisions: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn candidate_workflow_state(candidate_id: &str, mutations: &[Value], jobs: &[Value]) -> &'static str {
+fn candidate_workflow_state(
+    candidate_id: &str,
+    mutations: &[Value],
+    jobs: &[Value],
+) -> &'static str {
     if let Some(job) = jobs.iter().rev().find(|job| {
         job.get("kind").and_then(Value::as_str) == Some("DRAFT")
             && job.pointer("/metadata/candidateId").and_then(Value::as_str) == Some(candidate_id)
@@ -3962,31 +4849,46 @@ fn codex_usage_from_jobs(jobs: &[Value], now_unix_ms: u128) -> Result<Vec<Value>
     let active_default = jobs
         .iter()
         .filter(|job| job.get("kind").and_then(Value::as_str) == Some("DRAFT"))
-        .filter(|job| matches!(job.get("state").and_then(Value::as_str), Some("QUEUED" | "RUNNING" | "WAITING_CODEX")))
+        .filter(|job| {
+            matches!(
+                job.get("state").and_then(Value::as_str),
+                Some("QUEUED" | "RUNNING" | "WAITING_CODEX")
+            )
+        })
         .count();
     let utc_day_start = (now_unix_ms / 86_400_000) * 86_400_000;
     let successes = jobs
         .iter()
         .filter(|job| job.get("kind").and_then(Value::as_str) == Some("DRAFT"))
         .filter(|job| job.get("state").and_then(Value::as_str) == Some("SUCCEEDED"))
-        .filter_map(|job| job.pointer("/metadata/completedAtUnixMs").and_then(Value::as_u64))
+        .filter_map(|job| {
+            job.pointer("/metadata/completedAtUnixMs")
+                .and_then(Value::as_u64)
+        })
         .map(u128::from)
         .collect::<Vec<_>>();
     let completed_today = successes
         .iter()
         .filter(|completed_at| **completed_at >= utc_day_start && **completed_at <= now_unix_ms)
         .count();
-    let last_success_at = successes.into_iter().filter(|completed_at| *completed_at <= now_unix_ms).max()
+    let last_success_at = successes
+        .into_iter()
+        .filter(|completed_at| *completed_at <= now_unix_ms)
+        .max()
         .map(chrono_like_iso)
         .transpose()?;
     Ok(vec![
         json!({ "role": "FAST", "label": "Sınıflandırma ve tekrar analizi", "queueDepth": 0, "completedToday": Value::Null, "lastSuccessAt": Value::Null }),
         json!({ "role": "DEFAULT", "label": "Araştırma, Türkçe ve İngilizce", "queueDepth": active_default, "completedToday": if completed_today == 0 { Value::Null } else { json!(completed_today) }, "lastSuccessAt": last_success_at }),
-        json!({ "role": "DEEP_REVIEW", "label": "Çelişki ve son kalite denetimi", "queueDepth": 0, "completedToday": Value::Null, "lastSuccessAt": Value::Null })
+        json!({ "role": "DEEP_REVIEW", "label": "Çelişki ve son kalite denetimi", "queueDepth": 0, "completedToday": Value::Null, "lastSuccessAt": Value::Null }),
     ])
 }
 
-fn codex_role_state_for_usage(role: &str, default_queue_depth: usize, runtime_state: &str) -> &'static str {
+fn codex_role_state_for_usage(
+    role: &str,
+    default_queue_depth: usize,
+    runtime_state: &str,
+) -> &'static str {
     if role == "DEFAULT" && default_queue_depth > 0 {
         return "BUSY";
     }
@@ -4007,7 +4909,11 @@ pub fn get_editorial_workspace(
     let engine_state = workspace_engine_state(runtime, read_engine_state(&bridge))?;
     let materializations = engine_state
         .as_ref()
-        .and_then(|value| value.pointer("/snapshot/serverCursor").and_then(Value::as_u64))
+        .and_then(|value| {
+            value
+                .pointer("/snapshot/serverCursor")
+                .and_then(Value::as_u64)
+        })
         .map(|version| read_revision_list_at_version(&bridge, version).unwrap_or_default())
         .unwrap_or_default();
     let revision_queue = build_revision_queue(&materializations);
@@ -4023,10 +4929,17 @@ pub fn get_editorial_workspace(
         .unwrap_or_default();
     let sequence = engine_state
         .as_ref()
-        .and_then(|value| value.pointer("/snapshot/serverCursor").and_then(Value::as_u64))
+        .and_then(|value| {
+            value
+                .pointer("/snapshot/serverCursor")
+                .and_then(Value::as_u64)
+        })
         .unwrap_or(0);
     let stale = engine_state.is_none() || !matches!(runtime, RuntimeMode::Online);
-    let now_unix_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let now_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let generated_at = chrono_like_iso(now_unix_ms)?;
     let mut drafts = revision_queue
         .iter()
@@ -4047,25 +4960,30 @@ pub fn get_editorial_workspace(
         })
         .collect::<Vec<_>>();
     let failures = workspace_failures(&jobs);
-    let codex_usage = codex_usage_from_jobs(
-        &jobs,
-        now_unix_ms
-    )?;
-    let codex_depth = codex_usage.iter()
+    let codex_usage = codex_usage_from_jobs(&jobs, now_unix_ms)?;
+    let codex_depth = codex_usage
+        .iter()
         .find(|role| role.get("role").and_then(Value::as_str) == Some("DEFAULT"))
         .and_then(|role| role.get("queueDepth").and_then(Value::as_u64))
         .unwrap_or(0) as usize;
-    let connectors = read_engine_local_state(&bridge, "desktop.connectors")
-        .unwrap_or_else(|| json!({}));
-    let connector_checks = read_engine_local_state(&bridge, "desktop.connectorChecks")
-        .unwrap_or_else(|| json!({}));
-    let codex_configured = connectors.pointer("/codex/accountLabel")
+    let connectors =
+        read_engine_local_state(&bridge, "desktop.connectors").unwrap_or_else(|| json!({}));
+    let connector_checks =
+        read_engine_local_state(&bridge, "desktop.connectorChecks").unwrap_or_else(|| json!({}));
+    let codex_configured = connectors
+        .pointer("/codex/accountLabel")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
-    let codex_runner_ready = bridge.doctor().ok()
+    let codex_runner_ready = bridge
+        .doctor()
+        .ok()
         .and_then(|value| value.get("capabilities").cloned())
         .and_then(|value| value.as_array().cloned())
-        .is_some_and(|capabilities| capabilities.iter().any(|item| item.as_str() == Some("CODEX.RUNNER")));
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|item| item.as_str() == Some("CODEX.RUNNER"))
+        });
     // Workspace reads must remain local and bounded. Running codex.cmd --version
     // and `login status` here blocks the Tauri command thread and opens a
     // console window on Windows. The explicit Codex test command owns those
@@ -4078,12 +4996,22 @@ pub fn get_editorial_workspace(
     } else {
         "UNAVAILABLE"
     };
-    let site_configured = connectors.pointer("/site/repositoryPath")
+    let site_configured = connectors
+        .pointer("/site/repositoryPath")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
-    let site_ready = connector_checks.pointer("/site/ready").and_then(Value::as_bool).unwrap_or(false);
-    let github_configured = connectors.pointer("/github/owner").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty())
-        && connectors.pointer("/github/repository").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
+    let site_ready = connector_checks
+        .pointer("/site/ready")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let github_configured = connectors
+        .pointer("/github/owner")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+        && connectors
+            .pointer("/github/repository")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
     let checked_at = generated_at.clone();
     let candidate_values = engine_request(
         &bridge,
@@ -4097,8 +5025,8 @@ pub fn get_editorial_workspace(
     .and_then(|response| response.get("candidates").cloned())
     .and_then(|value| value.as_array().cloned())
     .unwrap_or_default();
-    let persisted_editorial = read_engine_local_state(&bridge, "desktop.editorial")
-        .unwrap_or_else(|| json!({}));
+    let persisted_editorial =
+        read_engine_local_state(&bridge, "desktop.editorial").unwrap_or_else(|| json!({}));
     let candidate_mutations = persisted_editorial
         .get("mutations")
         .and_then(Value::as_array)
@@ -4107,7 +5035,10 @@ pub fn get_editorial_workspace(
     let candidates = candidate_values
         .into_iter()
         .map(|candidate| {
-            let id = candidate.get("id").and_then(Value::as_str).unwrap_or_default();
+            let id = candidate
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let state = candidate_workflow_state(id, &candidate_mutations, &jobs);
             json!({
                 "id": candidate.get("id").cloned().unwrap_or(Value::Null),
@@ -4130,38 +5061,57 @@ pub fn get_editorial_workspace(
     // Schedule and preference commands are intentionally local-only until the
     // corresponding engine contracts exist. Rehydrate their durable desktop
     // state so a restart does not make a successful UI mutation appear lost.
-    let persisted_schedule = persisted_editorial
-        .get("schedule")
-        .cloned();
+    let persisted_schedule = persisted_editorial.get("schedule").cloned();
     let weekly_days = [
-        ("mon", "Pazartesi", "10:00"), ("tue", "Salı", "16:30"),
-        ("wed", "Çarşamba", "10:00"), ("thu", "Perşembe", "16:30"),
-        ("fri", "Cuma", "10:00"), ("sat", "Cumartesi", "11:00"),
+        ("mon", "Pazartesi", "10:00"),
+        ("tue", "Salı", "16:30"),
+        ("wed", "Çarşamba", "10:00"),
+        ("thu", "Perşembe", "16:30"),
+        ("fri", "Cuma", "10:00"),
+        ("sat", "Cumartesi", "11:00"),
         ("sun", "Pazar", "11:00"),
     ];
-    let mut weekly_slots = weekly_days.iter().flat_map(|(day, label, default_time)| {
-        (1..=5).map(move |position| json!({
+    let mut weekly_slots = weekly_days
+        .iter()
+        .flat_map(|(day, label, default_time)| {
+            (1..=5).map(move |position| json!({
             "id": format!("slot-{day}-{position}"), "dayLabel": label, "time": default_time,
             "enabled": position == 1, "articleId": null, "articleTitle": null, "state": "EMPTY"
         }))
-    }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     if let Some(saved) = persisted_schedule.as_ref().and_then(Value::as_object) {
         let mut apply_slot = |slot_value: &Value| {
             if let Some(slot_id) = slot_value.get("slotId").and_then(Value::as_str) {
                 let canonical_slot_id = match slot_id {
-                    "slot-mon" => "slot-mon-1", "slot-tue" => "slot-tue-1", "slot-wed" => "slot-wed-1",
-                    "slot-thu" => "slot-thu-1", "slot-fri" => "slot-fri-1", "slot-sat" => "slot-sat-1",
-                    "slot-sun" => "slot-sun-1", value => value,
+                    "slot-mon" => "slot-mon-1",
+                    "slot-tue" => "slot-tue-1",
+                    "slot-wed" => "slot-wed-1",
+                    "slot-thu" => "slot-thu-1",
+                    "slot-fri" => "slot-fri-1",
+                    "slot-sat" => "slot-sat-1",
+                    "slot-sun" => "slot-sun-1",
+                    value => value,
                 };
-                if let Some(slot) = weekly_slots.iter_mut().find(|slot| slot.get("id").and_then(Value::as_str) == Some(canonical_slot_id)) {
+                if let Some(slot) = weekly_slots
+                    .iter_mut()
+                    .find(|slot| slot.get("id").and_then(Value::as_str) == Some(canonical_slot_id))
+                {
                     if let Some(object) = slot.as_object_mut() {
-                        if let Some(time) = slot_value.get("time").and_then(Value::as_str) { object.insert("time".into(), json!(time)); }
-                        if let Some(enabled) = slot_value.get("enabled").and_then(Value::as_bool) { object.insert("enabled".into(), json!(enabled)); }
+                        if let Some(time) = slot_value.get("time").and_then(Value::as_str) {
+                            object.insert("time".into(), json!(time));
+                        }
+                        if let Some(enabled) = slot_value.get("enabled").and_then(Value::as_bool) {
+                            object.insert("enabled".into(), json!(enabled));
+                        }
                         let article_id = slot_value.get("articleId").and_then(Value::as_str);
                         let article_title = slot_value.get("articleTitle").and_then(Value::as_str);
                         if let Some(article_id) = article_id {
                             object.insert("articleId".into(), json!(article_id));
-                            object.insert("articleTitle".into(), json!(article_title.unwrap_or("Onaylı post")));
+                            object.insert(
+                                "articleTitle".into(),
+                                json!(article_title.unwrap_or("Onaylı post")),
+                            );
                             object.insert("state".into(), json!("READY"));
                         } else if slot_value.get("articleId").is_some() {
                             object.insert("articleId".into(), Value::Null);
@@ -4173,7 +5123,9 @@ pub fn get_editorial_workspace(
             }
         };
         if let Some(slots) = saved.get("slots").and_then(Value::as_object) {
-            for slot_value in slots.values() { apply_slot(slot_value); }
+            for slot_value in slots.values() {
+                apply_slot(slot_value);
+            }
         } else {
             apply_slot(&Value::Object(saved.clone()));
         }
@@ -4181,14 +5133,16 @@ pub fn get_editorial_workspace(
     let preferences = persisted_editorial
         .get("preferences")
         .cloned()
-        .unwrap_or_else(|| json!({
-        "author": "Blogbot Editorya",
-        "reviewer": "Editör",
-        "notifications": true,
-        "emailDigest": false,
-        "defaultSection": "haberler",
-        "showSourceReferences": true
-    }));
+        .unwrap_or_else(|| {
+            json!({
+                "author": "Blogbot Editorya",
+                "reviewer": "Editör",
+                "notifications": true,
+                "emailDigest": false,
+                "defaultSection": "haberler",
+                "showSourceReferences": true
+            })
+        });
     let site_origin = configured_site_origin(&connectors);
     let history = outbox
         .iter()
@@ -4269,14 +5223,34 @@ fn candidate_draft_payload(candidate_id: &str, candidate: &Value) -> Result<Valu
     let source_ids = candidate
         .get("sourceIds")
         .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).filter(|value| !value.trim().is_empty()).take(12).collect::<Vec<_>>())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .take(12)
+                .collect::<Vec<_>>()
+        })
         .filter(|values| !values.is_empty())
-        .or_else(|| candidate.get("sourceId").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).map(|value| vec![value]))
+        .or_else(|| {
+            candidate
+                .get("sourceId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| vec![value])
+        })
         .ok_or_else(|| CommandError::EngineUnavailable("CANDIDATE_SOURCE_MISSING".into()))?;
     let urls = candidate
         .get("sourceUrls")
         .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).filter(|url| is_http_url(url)).take(12).collect::<Vec<_>>())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|url| is_http_url(url))
+                .take(12)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     Ok(json!({
         "draftId": format!("draft-candidate-{candidate_id}"),
@@ -4301,11 +5275,18 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
         if !matches!(job_state, "QUEUED" | "RUNNING" | "WAITING_CODEX") {
             continue;
         }
-        let id = match job.get("id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+        let id = match job
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
             Some(value) => value,
             None => continue,
         };
-        if drafts.iter().any(|draft| draft.get("id").and_then(Value::as_str) == Some(id)) {
+        if drafts
+            .iter()
+            .any(|draft| draft.get("id").and_then(Value::as_str) == Some(id))
+        {
             continue;
         }
         let metadata = job.get("metadata").and_then(Value::as_object);
@@ -4323,12 +5304,13 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
             .unwrap_or_else(|| "Araştırma bekleyen içerik".to_string());
         let section = match metadata
             .and_then(|value| value.get("section"))
-            .and_then(Value::as_str) {
-                Some("analiz") => "analiz",
-                Some("dosyalar") => "dosyalar",
-                Some("rehberler") => "rehberler",
-                _ => "haberler",
-            };
+            .and_then(Value::as_str)
+        {
+            Some("analiz") => "analiz",
+            Some("dosyalar") => "dosyalar",
+            Some("rehberler") => "rehberler",
+            _ => "haberler",
+        };
         let recovered_after_restart = metadata
             .and_then(|value| value.get("recoveryCount"))
             .and_then(Value::as_u64)
@@ -4351,11 +5333,18 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
         // The durable queue records a phase, not a measured percentage.
         // Until the engine emits a real progress metric, never invent one in
         // the editor UI: indeterminate progress communicates the truth.
-        let running_detail = match metadata.and_then(|value| value.get("progressStage")).and_then(Value::as_str) {
+        let running_detail = match metadata
+            .and_then(|value| value.get("progressStage"))
+            .and_then(Value::as_str)
+        {
             Some("PREPARING_SOURCES") => "Kaynak kanıtları hazırlanıyor.",
             Some("RUNNING_CODEX") => "Codex özgün Türkçe ve İngilizce taslağı üretiyor.",
-            Some("FINAL_REVIEW_QUEUED") => "Taslak hazırlandı; son kalite incelemesi yerel kuyruğa alındı.",
-            Some("FINAL_REVIEW") => "Taslak, kaynak ve iki dil için son kalite incelemesinden geçiyor.",
+            Some("FINAL_REVIEW_QUEUED") => {
+                "Taslak hazırlandı; son kalite incelemesi yerel kuyruğa alındı."
+            }
+            Some("FINAL_REVIEW") => {
+                "Taslak, kaynak ve iki dil için son kalite incelemesinden geçiyor."
+            }
             _ => "Kaynaklar araştırılıyor ve taslak hazırlanıyor.",
         };
         let (blockers, detail) = match job_state {
@@ -4371,14 +5360,18 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
             "QUEUED" => ("QUEUED", "NONE", Value::Null),
             _ => match wait_reason {
                 Some("RUNNER_TIMEOUT") => ("FAILED", "RETRY", json!("RUNNER_TIMEOUT")),
-                Some("RUNNER_REQUIRES_RETRY") => ("FAILED", "RETRY", json!("RUNNER_REQUIRES_RETRY")),
+                Some("RUNNER_REQUIRES_RETRY") => {
+                    ("FAILED", "RETRY", json!("RUNNER_REQUIRES_RETRY"))
+                }
                 Some("RETRY_LIMIT_REACHED") => ("FAILED", "RETRY", json!("RETRY_LIMIT_REACHED")),
                 Some("RATE_LIMIT") => ("WAITING", "NONE", json!("RATE_LIMIT")),
                 Some("USAGE_LIMIT") => ("WAITING", "NONE", json!("USAGE_LIMIT")),
-                Some("PAID_FALLBACK_DISABLED") => ("WAITING", "NONE", json!("PAID_FALLBACK_DISABLED")),
+                Some("PAID_FALLBACK_DISABLED") => {
+                    ("WAITING", "NONE", json!("PAID_FALLBACK_DISABLED"))
+                }
                 Some("AUTH_REQUIRED") => ("WAITING", "CONNECT_CODEX", json!("AUTH_REQUIRED")),
                 _ => ("WAITING", "CONNECT_CODEX", json!("CODEX_UNAVAILABLE")),
-            }
+            },
         };
         drafts.push(json!({
             "id": id,
@@ -4407,8 +5400,15 @@ pub fn promote_candidate(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
-    if candidate_id.trim().is_empty() || candidate_id.len() > 200 || !candidate_id.chars().all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '.')) {
-        return Err(CommandError::InvalidInput("candidate id is required".into()));
+    if candidate_id.trim().is_empty()
+        || candidate_id.len() > 200
+        || !candidate_id
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '.'))
+    {
+        return Err(CommandError::InvalidInput(
+            "candidate id is required".into(),
+        ));
     }
     let candidate = engine_request(
         &bridge,
@@ -4420,9 +5420,15 @@ pub fn promote_candidate(
     )?
     .get("candidates")
     .and_then(Value::as_array)
-    .and_then(|items| items.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(candidate_id.as_str())))
+    .and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(candidate_id.as_str()))
+    })
     .cloned()
-    .ok_or_else(|| CommandError::InvalidInput("aday yerel çalışma bileşeninde bulunamadı".into()))?;
+    .ok_or_else(|| {
+        CommandError::InvalidInput("aday yerel çalışma bileşeninde bulunamadı".into())
+    })?;
     let payload = candidate_draft_payload(&candidate_id, &candidate)?;
     let key = stable_source_key(&format!("candidate-draft:{candidate_id}"));
     let response = retry_version_conflicted_draft(
@@ -4432,21 +5438,29 @@ pub fn promote_candidate(
                 .and_then(Value::as_u64)
                 .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))
         },
-        |version| engine_request(&bridge, json!({
-            "version": 1,
-            "id": key.clone(),
-            "kind": "command",
-            "command": {
-                "version": 1,
-                "requestId": key.clone(),
-                "idempotencyKey": key.clone(),
-                "expectedVersion": version,
-                "kind": "DRAFT.CREATE",
-                "payload": payload.clone()
-            }
-        })),
+        |version| {
+            engine_request(
+                &bridge,
+                json!({
+                    "version": 1,
+                    "id": key.clone(),
+                    "kind": "command",
+                    "command": {
+                        "version": 1,
+                        "requestId": key.clone(),
+                        "idempotencyKey": key.clone(),
+                        "expectedVersion": version,
+                        "kind": "DRAFT.CREATE",
+                        "payload": payload.clone()
+                    }
+                }),
+            )
+        },
     )?;
-    let job = response.pointer("/result/value/backendJob").cloned().unwrap_or(Value::Null);
+    let job = response
+        .pointer("/result/value/backendJob")
+        .cloned()
+        .unwrap_or(Value::Null);
     let mutation = json!({
         "kind": "CANDIDATE.PROMOTE",
         "candidateId": candidate_id,
@@ -4466,7 +5480,9 @@ pub fn dismiss_candidate(
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
     if candidate_id.trim().is_empty() {
-        return Err(CommandError::InvalidInput("candidate id is required".into()));
+        return Err(CommandError::InvalidInput(
+            "candidate id is required".into(),
+        ));
     }
     let mutation = json!({
         "kind": "CANDIDATE.DISMISS",
@@ -4534,7 +5550,9 @@ fn revision_edit_payload(
         })
         .unwrap_or_default();
     if source_urls.is_empty() {
-        return Err(CommandError::InvalidInput("revizyonda yeniden kullanılabilir kaynak kanıtı yok".into()));
+        return Err(CommandError::InvalidInput(
+            "revizyonda yeniden kullanılabilir kaynak kanıtı yok".into(),
+        ));
     }
     Ok(json!({
         "draftId": format!("draft-edit-{revision_id}-{}", &stable_source_key(&format!("{revision_id}:{instruction}"))[..12]),
@@ -4566,39 +5584,51 @@ pub fn request_revision_edit(
         .filter(|value| !value.is_empty());
     if revision_id.trim().is_empty()
         || revision_id.len() > 200
-        || !revision_id.chars().all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '.'))
+        || !revision_id
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '.'))
         || instruction.trim().len() < 3
         || instruction.len() > 20_000
         || title.is_some_and(|value| value.len() > 160)
     {
-        return Err(CommandError::InvalidInput("revision id and edit instruction are required".into()));
+        return Err(CommandError::InvalidInput(
+            "revision id and edit instruction are required".into(),
+        ));
     }
     let version = read_engine_state(&bridge)?
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
-    let materialized = read_revision_at_version(&bridge, version, &revision_id)
-        .map_err(|error| match error {
-            CommandError::InvalidInput(_) => CommandError::InvalidInput("revizyon yerel çalışma bileşeninde bulunamadı".into()),
+    let materialized =
+        read_revision_at_version(&bridge, version, &revision_id).map_err(|error| match error {
+            CommandError::InvalidInput(_) => {
+                CommandError::InvalidInput("revizyon yerel çalışma bileşeninde bulunamadı".into())
+            }
             other => other,
         })?;
     let base_revision = build_review_revision(&materialized)?;
     let payload = revision_edit_payload(&revision_id, instruction.trim(), base_revision, title)?;
     let key = stable_source_key(&format!("revision-edit:{revision_id}:{instruction}"));
-    let response = engine_request(&bridge, json!({
-        "version": 1,
-        "id": key,
-        "kind": "command",
-        "command": {
+    let response = engine_request(
+        &bridge,
+        json!({
             "version": 1,
-            "requestId": key,
-            "idempotencyKey": key,
-            "expectedVersion": version,
-            "kind": "DRAFT.CREATE",
-            "payload": payload
-        }
-    }))?;
-    let job = response.pointer("/result/value/backendJob").cloned().unwrap_or(Value::Null);
+            "id": key,
+            "kind": "command",
+            "command": {
+                "version": 1,
+                "requestId": key,
+                "idempotencyKey": key,
+                "expectedVersion": version,
+                "kind": "DRAFT.CREATE",
+                "payload": payload
+            }
+        }),
+    )?;
+    let job = response
+        .pointer("/result/value/backendJob")
+        .cloned()
+        .unwrap_or(Value::Null);
     let mutation = json!({
         "kind": "REVISION.EDIT_REQUEST",
         "revisionId": revision_id,
@@ -4623,12 +5653,19 @@ pub fn update_schedule_slot(
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
     if !valid_schedule_slot(slot_id.trim()) || !valid_hhmm(time.trim()) {
-        return Err(CommandError::InvalidInput("known weekly slot and valid HH:MM time are required".into()));
+        return Err(CommandError::InvalidInput(
+            "known weekly slot and valid HH:MM time are required".into(),
+        ));
     }
     let slot_id = slot_id.trim().to_string();
     let time = time.trim().to_string();
-    if article_id.as_deref().is_some_and(|value| !value.trim().is_empty())
-        || article_title.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+    if article_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || article_title
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
         return Err(CommandError::InvalidInput(
             "weekly cadence cannot assign an approved article; create a new NEXT_SLOT draft instead".into(),
         ));
@@ -4639,8 +5676,8 @@ pub fn update_schedule_slot(
         "enabled": enabled,
         "time": time
     });
-    let mut schedule_state = read_engine_local_state(&bridge, "desktop.editorial")
-        .unwrap_or_else(|| json!({}));
+    let mut schedule_state =
+        read_engine_local_state(&bridge, "desktop.editorial").unwrap_or_else(|| json!({}));
     let slots = schedule_state
         .as_object_mut()
         .ok_or_else(|| CommandError::EngineUnavailable("EDITORIAL_STATE_INVALID".into()))?
@@ -4656,16 +5693,38 @@ pub fn update_schedule_slot(
         .ok_or_else(|| CommandError::EngineUnavailable("SCHEDULE_SLOTS_INVALID".into()))?;
     // Preserve historical assignments for display only. They never schedule
     // or approve a revision, and a cadence edit must not silently erase them.
-    let legacy_assignment = slots_object.get(&slot_id).and_then(Value::as_object).map(|slot| (
-        slot.get("articleId").cloned(), slot.get("articleTitle").cloned()
-    ));
+    let legacy_assignment = slots_object
+        .get(&slot_id)
+        .and_then(Value::as_object)
+        .map(|slot| {
+            (
+                slot.get("articleId").cloned(),
+                slot.get("articleTitle").cloned(),
+            )
+        });
     let mut persisted = mutation.clone();
-    if let (Some((article_id, article_title)), Some(object)) = (legacy_assignment, persisted.as_object_mut()) {
-        if let Some(article_id) = article_id { object.insert("articleId".into(), article_id); }
-        if let Some(article_title) = article_title { object.insert("articleTitle".into(), article_title); }
+    if let (Some((article_id, article_title)), Some(object)) =
+        (legacy_assignment, persisted.as_object_mut())
+    {
+        if let Some(article_id) = article_id {
+            object.insert("articleId".into(), article_id);
+        }
+        if let Some(article_title) = article_title {
+            object.insert("articleTitle".into(), article_title);
+        }
     }
     slots_object.insert(slot_id.clone(), persisted);
-    persist_editorial_state(&bridge, mutation.clone(), Some(("schedule", schedule_state.get("schedule").cloned().unwrap_or_else(|| json!({"slots": {}})))))?;
+    persist_editorial_state(
+        &bridge,
+        mutation.clone(),
+        Some((
+            "schedule",
+            schedule_state
+                .get("schedule")
+                .cloned()
+                .unwrap_or_else(|| json!({"slots": {}})),
+        )),
+    )?;
     write_lock(&state.editorial_mutations)?.push(mutation);
     Ok(json!({ "ok": true, "slotId": slot_id, "enabled": enabled, "time": time }))
 }
@@ -4678,10 +5737,16 @@ pub fn save_desktop_preferences(
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
     if !preferences.is_object() {
-        return Err(CommandError::InvalidInput("desktop preferences must be an object".into()));
+        return Err(CommandError::InvalidInput(
+            "desktop preferences must be an object".into(),
+        ));
     }
     let mutation = json!({ "kind": "PREFERENCES.SET", "preferences": preferences });
-    persist_editorial_state(&bridge, mutation, Some(("preferences", preferences.clone())))?;
+    persist_editorial_state(
+        &bridge,
+        mutation,
+        Some(("preferences", preferences.clone())),
+    )?;
     *write_lock(&state.preferences)? = preferences.clone();
     Ok(json!({ "ok": true, "preferences": preferences }))
 }
@@ -4802,7 +5867,10 @@ pub fn send_test_notification(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Value, CommandError> {
-    let preferences = state.preferences.read().map_err(|_| CommandError::StateUnavailable)?;
+    let preferences = state
+        .preferences
+        .read()
+        .map_err(|_| CommandError::StateUnavailable)?;
     if !preferences
         .get("notifications")
         .and_then(Value::as_bool)
@@ -4857,21 +5925,26 @@ pub fn backup_create(
         || relative_paths.is_empty()
         || relative_paths.len() > 256
     {
-        return Err(CommandError::InvalidInput("backup source, output, recovery key, and bounded file list are required".into()));
+        return Err(CommandError::InvalidInput(
+            "backup source, output, recovery key, and bounded file list are required".into(),
+        ));
     }
     let source_directory = require_granted_directory(&state, &source_directory)?;
     let output_path = require_granted_output_file(&state, &output_path)?;
-    engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-backup-create-{}", std::process::id()),
-        "kind": "backup.create",
-        "payload": {
-            "sourceDirectory": source_directory,
-            "relativePaths": relative_paths,
-            "outputPath": output_path,
-            "recoveryKey": recovery_key
-        }
-    }))
+    engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-backup-create-{}", std::process::id()),
+            "kind": "backup.create",
+            "payload": {
+                "sourceDirectory": source_directory,
+                "relativePaths": relative_paths,
+                "outputPath": output_path,
+                "recoveryKey": recovery_key
+            }
+        }),
+    )
 }
 
 #[tauri::command]
@@ -4882,15 +5955,20 @@ pub fn backup_verify(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     if archive_path.trim().is_empty() || !valid_recovery_key(&recovery_key) {
-        return Err(CommandError::InvalidInput("archive path and recovery key are required".into()));
+        return Err(CommandError::InvalidInput(
+            "archive path and recovery key are required".into(),
+        ));
     }
     let archive_path = require_granted_existing_file(&state, &archive_path)?;
-    engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-backup-verify-{}", std::process::id()),
-        "kind": "backup.verify",
-        "payload": { "archivePath": archive_path, "recoveryKey": recovery_key }
-    }))
+    engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-backup-verify-{}", std::process::id()),
+            "kind": "backup.verify",
+            "payload": { "archivePath": archive_path, "recoveryKey": recovery_key }
+        }),
+    )
 }
 
 #[tauri::command]
@@ -4901,23 +5979,29 @@ pub fn backup_restore_preview(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
-    if archive_path.trim().is_empty() || target_directory.trim().is_empty() || !valid_recovery_key(&recovery_key) {
+    if archive_path.trim().is_empty()
+        || target_directory.trim().is_empty()
+        || !valid_recovery_key(&recovery_key)
+    {
         return Err(CommandError::InvalidInput(
             "archive path, target directory, and recovery key are required".into(),
         ));
     }
     let archive_path = require_granted_existing_file(&state, &archive_path)?;
     let target_directory = require_granted_restore_target(&state, &target_directory)?;
-    engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-backup-preview-{}", std::process::id()),
-        "kind": "backup.restore.preview",
-        "payload": {
-            "archivePath": archive_path,
-            "targetDirectory": target_directory,
-            "recoveryKey": recovery_key
-        }
-    }))
+    engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-backup-preview-{}", std::process::id()),
+            "kind": "backup.restore.preview",
+            "payload": {
+                "archivePath": archive_path,
+                "targetDirectory": target_directory,
+                "recoveryKey": recovery_key
+            }
+        }),
+    )
 }
 
 #[tauri::command]
@@ -4929,19 +6013,25 @@ pub fn backup_restore_apply(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
-    if archive_path.trim().is_empty() || target_directory.trim().is_empty() || !valid_recovery_key(&recovery_key) {
+    if archive_path.trim().is_empty()
+        || target_directory.trim().is_empty()
+        || !valid_recovery_key(&recovery_key)
+    {
         return Err(CommandError::InvalidInput(
             "archive path, target directory, and recovery key are required".into(),
         ));
     }
     let archive_path = require_granted_existing_file(&state, &archive_path)?;
     let target_directory = require_granted_restore_target(&state, &target_directory)?;
-    engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-backup-restore-{}", std::process::id()),
-        "kind": "backup.restore",
-        "payload": { "archivePath": archive_path, "targetDirectory": target_directory, "recoveryKey": recovery_key }
-    }))
+    engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-backup-restore-{}", std::process::id()),
+            "kind": "backup.restore",
+            "payload": { "archivePath": archive_path, "targetDirectory": target_directory, "recoveryKey": recovery_key }
+        }),
+    )
 }
 
 fn valid_automatic_backup_name(value: &str) -> bool {
@@ -4949,21 +6039,24 @@ fn valid_automatic_backup_name(value: &str) -> bool {
     name.starts_with("automatic-")
         && name.ends_with(".backup")
         && name.len() <= 160
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '.')
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '.'
+        })
 }
 
 #[tauri::command]
 pub fn automatic_backup_list(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
-    engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-automatic-backup-list-{}", std::process::id()),
-        "kind": "backup.auto.list",
-        "payload": {}
-    }))
+    engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-automatic-backup-list-{}", std::process::id()),
+            "kind": "backup.auto.list",
+            "payload": {}
+        }),
+    )
 }
 
 #[tauri::command]
@@ -4972,14 +6065,19 @@ pub fn automatic_backup_verify(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     if !valid_automatic_backup_name(&backup_name) {
-        return Err(CommandError::InvalidInput("automatic backup selection is invalid".into()));
+        return Err(CommandError::InvalidInput(
+            "automatic backup selection is invalid".into(),
+        ));
     }
-    engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-automatic-backup-verify-{}", std::process::id()),
-        "kind": "backup.auto.verify",
-        "payload": { "backupName": backup_name.trim() }
-    }))
+    engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-automatic-backup-verify-{}", std::process::id()),
+            "kind": "backup.auto.verify",
+            "payload": { "backupName": backup_name.trim() }
+        }),
+    )
 }
 
 #[tauri::command]
@@ -4990,15 +6088,20 @@ pub fn automatic_backup_restore_preview(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     if !valid_automatic_backup_name(&backup_name) || target_directory.trim().is_empty() {
-        return Err(CommandError::InvalidInput("automatic backup selection and restore target are required".into()));
+        return Err(CommandError::InvalidInput(
+            "automatic backup selection and restore target are required".into(),
+        ));
     }
     let target_directory = require_granted_restore_target(&state, &target_directory)?;
-    engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-automatic-backup-preview-{}", std::process::id()),
-        "kind": "backup.auto.restore.preview",
-        "payload": { "backupName": backup_name.trim(), "targetDirectory": target_directory }
-    }))
+    engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-automatic-backup-preview-{}", std::process::id()),
+            "kind": "backup.auto.restore.preview",
+            "payload": { "backupName": backup_name.trim(), "targetDirectory": target_directory }
+        }),
+    )
 }
 
 #[tauri::command]
@@ -5010,45 +6113,149 @@ pub fn automatic_backup_restore_apply(
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
     if !valid_automatic_backup_name(&backup_name) || target_directory.trim().is_empty() {
-        return Err(CommandError::InvalidInput("automatic backup selection and restore target are required".into()));
+        return Err(CommandError::InvalidInput(
+            "automatic backup selection and restore target are required".into(),
+        ));
     }
     let target_directory = require_granted_restore_target(&state, &target_directory)?;
-    engine_request(&bridge, json!({
-        "version": 1,
-        "id": format!("desktop-automatic-backup-restore-{}", std::process::id()),
-        "kind": "backup.auto.restore",
-        "payload": { "backupName": backup_name.trim(), "targetDirectory": target_directory }
-    }))
+    engine_request(
+        &bridge,
+        json!({
+            "version": 1,
+            "id": format!("desktop-automatic-backup-restore-{}", std::process::id()),
+            "kind": "backup.auto.restore",
+            "payload": { "backupName": backup_name.trim(), "targetDirectory": target_directory }
+        }),
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
+    #[cfg(windows)]
+    use std::process::{Child, Command, Stdio};
+    #[cfg(windows)]
+    use std::thread;
+    #[cfg(windows)]
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
 
     use super::{
-        append_pending_draft_jobs, build_approval_command, build_high_risk_approval_command, build_review_revision, build_revision_queue, build_source_scan_command, dashboard_pipeline_counts,
-        authorize_connector_directory, authorize_high_risk_consent, authorize_native_confirmation, candidate_draft_payload, candidate_workflow_state, configured_site_origin, doctor_runtime_mode, editorial_operation_events, ensure_mutation_allowed, ensure_trusted_local_dev, has_publication_capability, github_preview_payload, is_local_path, is_path_within_grant, is_reparse_point, local_dev_environment_with, materialize_preview_bundle_with, migrate_legacy_site_connector_catalog, preview_file_bytes, preview_file_media_reference, publication_observability, register_folder_grant, request_choice, require_granted_directory, require_granted_restore_target, retry_version_conflicted_draft, revision_edit_payload, scheduled_operation_items, valid_github_segment, valid_github_workflow, valid_site_work_mode, valid_hhmm, valid_recovery_key, valid_schedule_slot, validate_folder_selection, validate_local_dev_project, write_lock, CommandError, DesktopState, RuntimeMode,
-        workspace_engine_state,
+        append_pending_draft_jobs, authorize_connector_directory, authorize_high_risk_consent,
+        authorize_native_confirmation, build_approval_command, build_high_risk_approval_command,
+        build_review_revision, build_revision_queue, build_source_scan_command,
+        candidate_draft_payload, candidate_workflow_state, configured_site_origin,
+        dashboard_pipeline_counts, doctor_runtime_mode, editorial_operation_events,
+        ensure_mutation_allowed, ensure_trusted_local_dev, github_preview_payload,
+        has_publication_capability, is_local_path, is_path_within_grant, is_reparse_point,
+        local_dev_environment_with, materialize_preview_bundle_with,
+        migrate_legacy_site_connector_catalog, preview_file_bytes, preview_file_media_reference,
+        publication_observability, register_folder_grant, request_choice,
+        require_granted_directory, require_granted_restore_target, retry_version_conflicted_draft,
+        revision_edit_payload, scheduled_operation_items, valid_github_segment,
+        valid_github_workflow, valid_hhmm, valid_recovery_key, valid_schedule_slot,
+        valid_site_work_mode, validate_folder_selection, validate_local_dev_project,
+        workspace_engine_state, write_lock, CommandError, DesktopState, RuntimeMode,
     };
+
+    #[cfg(windows)]
+    fn descendant_http_fixture() -> (Child, u16) {
+        let port = TcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve fixture port")
+            .local_addr()
+            .expect("fixture address")
+            .port();
+        let script = format!(
+            "import subprocess,sys,time; subprocess.Popen([sys.executable,'-m','http.server','{port}','--bind','127.0.0.1'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(300)"
+        );
+        let child = Command::new("python")
+            .args(["-c", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fixture parent");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "descendant HTTP server did not start"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        (child, port)
+    }
+
+    #[cfg(windows)]
+    fn assert_port_closes(port: u16) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "descendant HTTP server survived termination"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stopping_local_dev_terminates_its_owned_descendant_process_tree() {
+        let (child, port) = descendant_http_fixture();
+        let process = std::sync::RwLock::new(Some(child));
+
+        super::stop_local_dev_process(&process).expect("stop local dev fixture");
+
+        assert_port_closes(port);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dropping_desktop_state_terminates_local_dev_descendants() {
+        let (child, port) = descendant_http_fixture();
+        let state = super::DesktopState::default();
+        *state
+            .local_dev_process
+            .write()
+            .expect("local dev process lock") = Some(child);
+
+        drop(state);
+
+        assert_port_closes(port);
+    }
 
     #[test]
     fn bootstrap_runtime_requires_ready_doctor_handshake() {
         assert_eq!(doctor_runtime_mode(None), RuntimeMode::OfflineReadOnly);
-        assert_eq!(doctor_runtime_mode(Some(&json!({"status": "DEGRADED", "queue": "ready"}))), RuntimeMode::OfflineReadOnly);
-        assert_eq!(doctor_runtime_mode(Some(&json!({"status": "READY", "queue": "starting"}))), RuntimeMode::OfflineReadOnly);
-        assert_eq!(doctor_runtime_mode(Some(&json!({"status": "READY", "queue": "ready"}))), RuntimeMode::Online);
+        assert_eq!(
+            doctor_runtime_mode(Some(&json!({"status": "DEGRADED", "queue": "ready"}))),
+            RuntimeMode::OfflineReadOnly
+        );
+        assert_eq!(
+            doctor_runtime_mode(Some(&json!({"status": "READY", "queue": "starting"}))),
+            RuntimeMode::OfflineReadOnly
+        );
+        assert_eq!(
+            doctor_runtime_mode(Some(&json!({"status": "READY", "queue": "ready"}))),
+            RuntimeMode::Online
+        );
     }
 
     #[test]
     fn online_editorial_workspace_never_turns_a_failed_engine_read_into_an_empty_success() {
         let result = workspace_engine_state(
             RuntimeMode::Online,
-            Err(CommandError::EngineUnavailable("ENGINE_RESPONSE_TIMEOUT".into())),
+            Err(CommandError::EngineUnavailable(
+                "ENGINE_RESPONSE_TIMEOUT".into(),
+            )),
         );
 
-        assert!(matches!(result, Err(CommandError::EngineUnavailable(message)) if message == "ENGINE_RESPONSE_TIMEOUT"));
+        assert!(
+            matches!(result, Err(CommandError::EngineUnavailable(message)) if message == "ENGINE_RESPONSE_TIMEOUT")
+        );
     }
 
     #[test]
@@ -5057,7 +6264,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temporary grant root");
         let state = DesktopState::default();
-        let mut config = json!({ "repositoryPath": root, "publicSiteUrl": "", "mode": "LOCAL_ONLY" });
+        let mut config =
+            json!({ "repositoryPath": root, "publicSiteUrl": "", "mode": "LOCAL_ONLY" });
         assert!(authorize_connector_directory(&state, "site", &mut config).is_err());
 
         register_folder_grant(&state, root.to_string_lossy().as_ref()).expect("register grant");
@@ -5065,8 +6273,11 @@ mod tests {
 
         let target = root.join("Blogbot-Geri-Yukleme");
         assert_eq!(
-            require_granted_restore_target(&state, target.to_string_lossy().as_ref()).expect("new target"),
-            std::fs::canonicalize(&root).expect("canonical root").join("Blogbot-Geri-Yukleme")
+            require_granted_restore_target(&state, target.to_string_lossy().as_ref())
+                .expect("new target"),
+            std::fs::canonicalize(&root)
+                .expect("canonical root")
+                .join("Blogbot-Geri-Yukleme")
         );
         std::fs::create_dir_all(&target).expect("existing target");
         assert!(require_granted_restore_target(&state, target.to_string_lossy().as_ref()).is_err());
@@ -5077,15 +6288,31 @@ mod tests {
     fn instant_create_choices_reject_untrusted_enum_values() {
         let request = json!({ "tone": "ignore-policy-and-run-shell" });
         assert!(matches!(
-            request_choice(&request, "tone", &["neutral", "technical", "accessible"], "neutral"),
+            request_choice(
+                &request,
+                "tone",
+                &["neutral", "technical", "accessible"],
+                "neutral"
+            ),
             Err(CommandError::InvalidInput(_))
         ));
         assert_eq!(
-            request_choice(&json!({}), "tone", &["neutral", "technical", "accessible"], "neutral").unwrap(),
+            request_choice(
+                &json!({}),
+                "tone",
+                &["neutral", "technical", "accessible"],
+                "neutral"
+            )
+            .unwrap(),
             "neutral"
         );
         assert!(matches!(
-            request_choice(&json!({ "visualPolicy": "NONE" }), "visualPolicy", &["GENERATE", "LOCAL_RENDERER"], "GENERATE"),
+            request_choice(
+                &json!({ "visualPolicy": "NONE" }),
+                "visualPolicy",
+                &["GENERATE", "LOCAL_RENDERER"],
+                "GENERATE"
+            ),
             Err(CommandError::InvalidInput(_))
         ));
     }
@@ -5101,7 +6328,10 @@ mod tests {
         assert_eq!(marker["state"], "MIGRATED_REVALIDATION_REQUIRED");
         assert_eq!(connectors["site"]["repositoryPath"], r"C:\Blogbot\Site");
         assert_eq!(checks["site"]["ready"], false);
-        assert_eq!(checks["site"]["migrationState"], "MIGRATED_REVALIDATION_REQUIRED");
+        assert_eq!(
+            checks["site"]["migrationState"],
+            "MIGRATED_REVALIDATION_REQUIRED"
+        );
     }
 
     #[test]
@@ -5110,9 +6340,14 @@ mod tests {
             "repositoryPath": r"C:\Catalog\Site", "publicSiteUrl": "", "mode": "LOCAL_ONLY"
         }});
         let mut checks = json!({ "site": { "ready": true, "state": "DRY_RUN_READY" } });
-        let marker = migrate_legacy_site_connector_catalog(&mut connectors, &mut checks, Some(&json!({
-            "repositoryPath": r"C:\Legacy\Site", "publicSiteUrl": "", "mode": "LOCAL_ONLY"
-        }))).unwrap();
+        let marker = migrate_legacy_site_connector_catalog(
+            &mut connectors,
+            &mut checks,
+            Some(&json!({
+                "repositoryPath": r"C:\Legacy\Site", "publicSiteUrl": "", "mode": "LOCAL_ONLY"
+            })),
+        )
+        .unwrap();
 
         assert_eq!(marker["state"], "MIGRATION_CONFLICT_REVIEW_REQUIRED");
         assert_eq!(connectors["site"]["repositoryPath"], r"C:\Catalog\Site");
@@ -5138,12 +6373,16 @@ mod tests {
 
     #[test]
     fn native_folder_grant_requires_an_explicit_picker_registration() {
-        let root = std::env::temp_dir().join(format!("blogbot-folder-grant-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("blogbot-folder-grant-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let state = DesktopState::default();
         assert!(require_granted_directory(&state, &root.to_string_lossy()).is_err());
         let granted = register_folder_grant(&state, &root.to_string_lossy()).unwrap();
-        assert_eq!(require_granted_directory(&state, &root.to_string_lossy()).unwrap(), granted);
+        assert_eq!(
+            require_granted_directory(&state, &root.to_string_lossy()).unwrap(),
+            granted
+        );
         std::fs::remove_dir(&root).unwrap();
     }
 
@@ -5160,7 +6399,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(payload["candidateId"], "candidate-1");
-        assert_eq!(payload["candidateTitle"], "Kaynak katalogundan gelen aday başlığı");
+        assert_eq!(
+            payload["candidateTitle"],
+            "Kaynak katalogundan gelen aday başlığı"
+        );
         assert_eq!(payload["sourceIds"], json!(["source-real-1"]));
         assert!(payload["candidateUrl"].is_null());
         assert_eq!(payload["section"], "analiz");
@@ -5179,7 +6421,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(payload["candidateUrl"], "https://news.example/stories/selected");
+        assert_eq!(
+            payload["candidateUrl"],
+            "https://news.example/stories/selected"
+        );
         assert_eq!(payload["urls"], json!([]));
     }
 
@@ -5197,8 +6442,17 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(payload["sourceIds"], json!(["source-primary", "source-independent"]));
-        assert_eq!(payload["urls"], json!(["https://primary.example/story", "https://independent.example/story"]));
+        assert_eq!(
+            payload["sourceIds"],
+            json!(["source-primary", "source-independent"])
+        );
+        assert_eq!(
+            payload["urls"],
+            json!([
+                "https://primary.example/story",
+                "https://independent.example/story"
+            ])
+        );
         assert_eq!(payload["candidateUrl"], "https://primary.example/story");
     }
 
@@ -5219,7 +6473,12 @@ mod tests {
         .expect("the retried draft command is accepted");
 
         assert_eq!(attempted_versions, vec![41, 42]);
-        assert_eq!(result.pointer("/result/value/backendJob/id").and_then(serde_json::Value::as_str), Some("draft-candidate-1"));
+        assert_eq!(
+            result
+                .pointer("/result/value/backendJob/id")
+                .and_then(serde_json::Value::as_str),
+            Some("draft-candidate-1")
+        );
     }
 
     #[test]
@@ -5236,8 +6495,14 @@ mod tests {
             "metadata": { "candidateId": "candidate-failed" }
         })];
 
-        assert_eq!(candidate_workflow_state("candidate-failed", &mutations, &jobs), "RESEARCH_FAILED");
-        assert_eq!(candidate_workflow_state("candidate-other", &mutations, &jobs), "NEW");
+        assert_eq!(
+            candidate_workflow_state("candidate-failed", &mutations, &jobs),
+            "RESEARCH_FAILED"
+        );
+        assert_eq!(
+            candidate_workflow_state("candidate-other", &mutations, &jobs),
+            "NEW"
+        );
     }
 
     #[test]
@@ -5254,31 +6519,38 @@ mod tests {
             "metadata": { "candidateId": "candidate-complete" }
         })];
 
-        assert_eq!(candidate_workflow_state("candidate-complete", &mutations, &jobs), "PROMOTED");
+        assert_eq!(
+            candidate_workflow_state("candidate-complete", &mutations, &jobs),
+            "PROMOTED"
+        );
     }
 
     #[test]
     fn codex_usage_projects_only_observed_local_draft_activity() {
         let now = 1_785_600_000_000_u128;
-        let usage = super::codex_usage_from_jobs(&[
-            json!({
-                "id": "draft-running",
-                "kind": "DRAFT",
-                "state": "RUNNING"
-            }),
-            json!({
-                "id": "draft-complete",
-                "kind": "DRAFT",
-                "state": "SUCCEEDED",
-                "metadata": { "completedAtUnixMs": now - 1_000 }
-            }),
-            json!({
-                "id": "source-complete",
-                "kind": "SOURCE_SCAN",
-                "state": "SUCCEEDED",
-                "metadata": { "completedAtUnixMs": now - 1_000 }
-            })
-        ], now).expect("usage");
+        let usage = super::codex_usage_from_jobs(
+            &[
+                json!({
+                    "id": "draft-running",
+                    "kind": "DRAFT",
+                    "state": "RUNNING"
+                }),
+                json!({
+                    "id": "draft-complete",
+                    "kind": "DRAFT",
+                    "state": "SUCCEEDED",
+                    "metadata": { "completedAtUnixMs": now - 1_000 }
+                }),
+                json!({
+                    "id": "source-complete",
+                    "kind": "SOURCE_SCAN",
+                    "state": "SUCCEEDED",
+                    "metadata": { "completedAtUnixMs": now - 1_000 }
+                }),
+            ],
+            now,
+        )
+        .expect("usage");
 
         assert_eq!(usage[0]["role"], "FAST");
         assert!(usage[0]["completedToday"].is_null());
@@ -5291,10 +6563,22 @@ mod tests {
 
     #[test]
     fn codex_role_state_marks_only_the_role_with_observed_work_busy() {
-        assert_eq!(super::codex_role_state_for_usage("DEFAULT", 2, "BUSY"), "BUSY");
-        assert_eq!(super::codex_role_state_for_usage("FAST", 2, "BUSY"), "READY");
-        assert_eq!(super::codex_role_state_for_usage("DEEP_REVIEW", 2, "BUSY"), "READY");
-        assert_eq!(super::codex_role_state_for_usage("FAST", 0, "UNAVAILABLE"), "UNAVAILABLE");
+        assert_eq!(
+            super::codex_role_state_for_usage("DEFAULT", 2, "BUSY"),
+            "BUSY"
+        );
+        assert_eq!(
+            super::codex_role_state_for_usage("FAST", 2, "BUSY"),
+            "READY"
+        );
+        assert_eq!(
+            super::codex_role_state_for_usage("DEEP_REVIEW", 2, "BUSY"),
+            "READY"
+        );
+        assert_eq!(
+            super::codex_role_state_for_usage("FAST", 0, "UNAVAILABLE"),
+            "UNAVAILABLE"
+        );
     }
 
     #[test]
@@ -5318,7 +6602,7 @@ mod tests {
                 "slotId": "slot-sun",
                 "time": "18:45",
                 "enabled": true
-            })
+            }),
         ]);
 
         assert_eq!(schedule.len(), 1);
@@ -5343,7 +6627,7 @@ mod tests {
                     "section": "analiz",
                     "createdAtUnixMs": 1
                 }
-            })]
+            })],
         );
 
         assert_eq!(drafts.len(), 1);
@@ -5355,7 +6639,10 @@ mod tests {
         assert_eq!(drafts[0]["executionState"], "WAITING");
         assert_eq!(drafts[0]["nextAction"], "CONNECT_CODEX");
         assert_eq!(drafts[0]["reasonCode"], "CODEX_UNAVAILABLE");
-        assert_eq!(drafts[0]["detail"], "Codex hesabı veya izole runner bekleniyor.");
+        assert_eq!(
+            drafts[0]["detail"],
+            "Codex hesabı veya izole runner bekleniyor."
+        );
     }
 
     #[test]
@@ -5372,7 +6659,7 @@ mod tests {
                     "progressStage": "RETRYING_CODEX",
                     "codexRetryReason": "EXECUTION_FAILED"
                 }
-            })]
+            })],
         );
 
         assert_eq!(drafts.len(), 1);
@@ -5395,10 +6682,13 @@ mod tests {
                     "section": "analiz",
                     "progressStage": "FINAL_REVIEW"
                 }
-            })]
+            })],
         );
 
-        assert_eq!(drafts[0]["detail"], "Taslak, kaynak ve iki dil için son kalite incelemesinden geçiyor.");
+        assert_eq!(
+            drafts[0]["detail"],
+            "Taslak, kaynak ve iki dil için son kalite incelemesinden geçiyor."
+        );
         assert_eq!(drafts[0]["reviewable"], false);
     }
 
@@ -5439,7 +6729,10 @@ mod tests {
         assert_eq!(events[0]["correlationId"], "slot-sun");
         assert_eq!(events[1]["title"], "Araştırma işi kuyruğa alındı");
         assert_eq!(events[1]["correlationId"], "draft-candidate-1");
-        assert!(events[1]["detail"].as_str().unwrap_or_default().contains("Editoryal Masa"));
+        assert!(events[1]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Editoryal Masa"));
     }
 
     #[test]
@@ -5455,11 +6748,14 @@ mod tests {
                     "section": "analiz",
                     "createdAtUnixMs": 1
                 }
-            })]
+            })],
         );
 
         assert_eq!(drafts.len(), 1);
-        assert_eq!(drafts[0]["titleTr"], "Yapay zeka düzenlemesini kaynaklarla karşılaştır");
+        assert_eq!(
+            drafts[0]["titleTr"],
+            "Yapay zeka düzenlemesini kaynaklarla karşılaştır"
+        );
         assert_eq!(drafts[0]["reviewable"], false);
     }
 
@@ -5481,14 +6777,23 @@ mod tests {
             "Başlığı ve sonucu netleştir",
             base.clone(),
             Some("Kapsamlı yeniden oluşturma işleniyor"),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(payload["revisionId"], "revision-1");
         assert_eq!(payload["urls"], json!(["https://example.org/evidence"]));
         assert_eq!(payload["section"], "dosyalar");
-        assert_eq!(payload["candidateTitle"], "Kapsamlı yeniden oluşturma işleniyor");
+        assert_eq!(
+            payload["candidateTitle"],
+            "Kapsamlı yeniden oluşturma işleniyor"
+        );
         assert_eq!(payload["baseRevision"], base);
-        assert_eq!(payload["sources"][0]["evidenceAnchors"][0]["quoteHash"], "a".repeat(64));
-        assert!(revision_edit_payload("revision-1", "Düzenle", json!({ "sources": [] }), None).is_err());
+        assert_eq!(
+            payload["sources"][0]["evidenceAnchors"][0]["quoteHash"],
+            "a".repeat(64)
+        );
+        assert!(
+            revision_edit_payload("revision-1", "Düzenle", json!({ "sources": [] }), None).is_err()
+        );
     }
 
     #[test]
@@ -5505,7 +6810,10 @@ mod tests {
             called = true;
             Ok(())
         });
-        assert!(matches!(unavailable, Err(CommandError::EngineUnavailable(_))));
+        assert!(matches!(
+            unavailable,
+            Err(CommandError::EngineUnavailable(_))
+        ));
         assert!(!called);
 
         let cancelled = authorize_high_risk_consent(true, true, &"a".repeat(64), |_| {
@@ -5517,14 +6825,11 @@ mod tests {
     #[test]
     fn native_confirmation_is_fail_closed_and_bound_to_visible_details() {
         let mut observed = None;
-        let rejected = authorize_native_confirmation(
-            "İçeriği onayla",
-            "abc123",
-            |action, fingerprint| {
+        let rejected =
+            authorize_native_confirmation("İçeriği onayla", "abc123", |action, fingerprint| {
                 observed = Some((action.to_string(), fingerprint.to_string()));
                 Err(CommandError::InvalidInput("cancelled".into()))
-            },
-        );
+            });
         assert!(matches!(rejected, Err(CommandError::InvalidInput(_))));
         assert_eq!(
             observed,
@@ -5592,6 +6897,44 @@ mod tests {
     }
 
     #[test]
+    fn publish_deploy_connector_fails_closed_without_explicit_required_checks() {
+        let missing = super::test_setup_connector(
+            "deploy".into(),
+            json!({ "workflowName": "deploy.yml", "requiredChecks": [] }),
+        )
+        .expect("validation result");
+        assert_eq!(missing["ready"], false);
+
+        let omitted =
+            super::test_setup_connector("deploy".into(), json!({ "workflowName": "deploy.yml" }))
+                .expect("validation result");
+        assert_eq!(omitted["ready"], false);
+    }
+
+    #[test]
+    fn publish_deploy_connector_accepts_only_unique_bounded_check_names() {
+        let valid = super::test_setup_connector(
+            "deploy".into(),
+            json!({ "workflowName": "deploy.yml", "requiredChecks": ["build", "test / windows"] }),
+        )
+        .expect("validation result");
+        assert_eq!(valid["ready"], true);
+
+        for required_checks in [
+            json!(["build", "build"]),
+            json!(["build", "  "]),
+            json!(["x".repeat(201)]),
+        ] {
+            let invalid = super::test_setup_connector(
+                "deploy".into(),
+                json!({ "workflowName": "deploy.yml", "requiredChecks": required_checks }),
+            )
+            .expect("validation result");
+            assert_eq!(invalid["ready"], false);
+        }
+    }
+
+    #[test]
     fn native_folder_selection_accepts_only_absolute_windows_paths() {
         assert!(validate_folder_selection(r"C:\Users\editor\site").is_ok());
         assert!(validate_folder_selection("https://example.com/site").is_err());
@@ -5612,17 +6955,31 @@ mod tests {
     fn github_bridge_contracts_are_local_only_and_scope_safe() {
         assert!(valid_github_workflow("deploy.yml"));
         assert!(!valid_github_workflow("../deploy.yml"));
-        assert!(github_preview_payload("owner/site", "deploy.yml", "rev-1", &"a".repeat(64)).is_ok());
+        assert!(
+            github_preview_payload("owner/site", "deploy.yml", "rev-1", &"a".repeat(64)).is_ok()
+        );
         assert!(github_preview_payload("owner/site", "deploy.yml", "rev-1", "secret").is_err());
     }
 
     #[test]
     fn publication_observability_never_marks_missing_intent_ready() {
         assert_eq!(publication_observability(None), ("NOT_STARTED", "BLOCKED"));
-        assert_eq!(publication_observability(Some("PENDING")), ("NOT_STARTED", "BLOCKED"));
-        assert_eq!(publication_observability(Some("IN_PROGRESS")), ("RUNNING", "PUBLISHING"));
-        assert_eq!(publication_observability(Some("FAILED")), ("FAILED", "BLOCKED"));
-        assert_eq!(publication_observability(Some("SUCCEEDED")), ("PASSED", "READY"));
+        assert_eq!(
+            publication_observability(Some("PENDING")),
+            ("NOT_STARTED", "BLOCKED")
+        );
+        assert_eq!(
+            publication_observability(Some("IN_PROGRESS")),
+            ("RUNNING", "PUBLISHING")
+        );
+        assert_eq!(
+            publication_observability(Some("FAILED")),
+            ("FAILED", "BLOCKED")
+        );
+        assert_eq!(
+            publication_observability(Some("SUCCEEDED")),
+            ("PASSED", "READY")
+        );
     }
 
     #[test]
@@ -5651,7 +7008,8 @@ mod tests {
 
     #[test]
     fn local_preview_rolls_back_prior_files_when_a_later_write_fails() {
-        let root = std::env::temp_dir().join(format!("blogbot-preview-rollback-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("blogbot-preview-rollback-{}", std::process::id()));
         let backup = root.join(".blogbot").join("backups").join("preview");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("existing.md"), "old content").unwrap();
@@ -5660,23 +7018,28 @@ mod tests {
             ("new.md".to_string(), b"new file".to_vec()),
         ];
         let mut writes = 0;
-        let result = materialize_preview_bundle_with(&root, &files, &backup, |destination, content| {
-            writes += 1;
-            if writes == 2 {
-                return Err(std::io::Error::other("simulated write failure"));
-            }
-            std::fs::write(destination, content)
-        });
+        let result =
+            materialize_preview_bundle_with(&root, &files, &backup, |destination, content| {
+                writes += 1;
+                if writes == 2 {
+                    return Err(std::io::Error::other("simulated write failure"));
+                }
+                std::fs::write(destination, content)
+            });
 
         assert!(matches!(result, Err(CommandError::EngineUnavailable(_))));
-        assert_eq!(std::fs::read_to_string(root.join("existing.md")).unwrap(), "old content");
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing.md")).unwrap(),
+            "old content"
+        );
         assert!(!root.join("new.md").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn regular_preview_paths_are_not_windows_reparse_points() {
-        let path = std::env::temp_dir().join(format!("blogbot-preview-reparse-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("blogbot-preview-reparse-{}", std::process::id()));
         std::fs::write(&path, "regular file").unwrap();
         assert!(!is_reparse_point(&path).unwrap());
         let _ = std::fs::remove_file(path);
@@ -5689,7 +7052,8 @@ mod tests {
             vec![0, 1, 2, 255]
         );
         assert_eq!(
-            preview_file_bytes(&json!({ "content": { "0": 82, "1": 73, "2": 70, "3": 70 } })).unwrap(),
+            preview_file_bytes(&json!({ "content": { "0": 82, "1": 73, "2": 70, "3": 70 } }))
+                .unwrap(),
             b"RIFF".to_vec()
         );
         assert!(preview_file_bytes(&json!({ "content": { "0": 82, "2": 70 } })).is_err());
@@ -5703,7 +7067,10 @@ mod tests {
             "sha256": "a".repeat(64),
             "byteSize": 512
         });
-        assert_eq!(preview_file_media_reference(&reference, "revision-1").unwrap(), Some(("a".repeat(64), 512)));
+        assert_eq!(
+            preview_file_media_reference(&reference, "revision-1").unwrap(),
+            Some(("a".repeat(64), 512))
+        );
         assert!(preview_file_media_reference(&reference, "revision-2").is_err());
         assert!(preview_file_media_reference(&json!({ "kind": "engine-media-ref", "revisionId": "revision-1", "sha256": "bad", "byteSize": 0 }), "revision-1").is_err());
     }
@@ -5740,12 +7107,16 @@ mod tests {
             &"b".repeat(64),
             &"c".repeat(64),
             4,
-        ).expect("high-risk command");
+        )
+        .expect("high-risk command");
         assert_eq!(command["kind"], "APPROVAL.GRANT_HIGH_RISK");
         assert_eq!(command["payload"]["revisionHash"], "a".repeat(64));
         assert_eq!(command["payload"]["riskChecklistHash"], "b".repeat(64));
         assert_eq!(command["payload"]["warningSetHash"], "c".repeat(64));
-        assert!(command["payload"]["windowsReauthenticatedAt"].as_str().unwrap().ends_with('Z'));
+        assert!(command["payload"]["windowsReauthenticatedAt"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z'));
     }
 
     #[test]
@@ -5758,11 +7129,14 @@ mod tests {
         </body></opml>"#)
         .expect("OPML URLs");
 
-        assert_eq!(urls, vec![
-            "https://example.com/feed.xml".to_string(),
-            "https://example.org".to_string(),
-            "https://example.org/atom.xml".to_string()
-        ]);
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/feed.xml".to_string(),
+                "https://example.org".to_string(),
+                "https://example.org/atom.xml".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -5780,11 +7154,15 @@ mod tests {
 
     #[test]
     fn editorial_workspace_failures_redact_persisted_job_errors() {
+        let simulated_authorization_error = format!(
+            "Authorization: Bearer {}",
+            ["should", "not", "reach", "the", "webview"].join("-")
+        );
         let failures = super::workspace_failures(&[json!({
             "id": "job-secret",
             "kind": "DRAFT",
             "state": "FAILED",
-            "lastError": "Authorization: Bearer should-not-reach-the-webview",
+            "lastError": simulated_authorization_error,
             "attempts": 2
         })]);
 
@@ -5938,9 +7316,6 @@ mod tests {
         assert_eq!(command["payload"]["revisionId"], "revision-1");
         assert_eq!(command["payload"]["revisionHash"], "a".repeat(64));
         assert_eq!(command["payload"]["warningSetHash"], "b".repeat(64));
-        assert_eq!(
-            command["payload"]["deviceId"],
-            "windows-local-device-v1"
-        );
+        assert_eq!(command["payload"]["deviceId"], "windows-local-device-v1");
     }
 }

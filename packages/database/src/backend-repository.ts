@@ -43,6 +43,8 @@ export interface OutboxEffect {
   idempotencyKey: string;
   state: OutboxEffectState;
   attempts: number;
+  /** Monotonic fencing token for a specific native publication claim. */
+  claimAttempt?: number;
   /** Durable retry deadline for a recoverable external publication effect. */
   nextAttemptAt?: string;
   resultRef?: string;
@@ -122,6 +124,11 @@ export interface RevisionLineageIndexEntry {
   supersedesRevisionId?: string;
 }
 
+/** Lightweight immutable evidence references used by retention maintenance. */
+export interface RevisionEvidenceReference {
+  sources: Array<Pick<ArticleRevision["sources"][number], "id" | "evidenceVersionId">>;
+}
+
 export class BackendStoreError extends Error {
   constructor(
     readonly code:
@@ -182,8 +189,9 @@ export interface BackendRepository extends BackendRepositoryTransaction {
   /** Optional while compatibility stores migrate away from full snapshots. */
   listRevisionSnapshot?(): Promise<RevisionListSnapshot>;
   listRevisionSummarySnapshot?(options?: RevisionListReadOptions): Promise<RevisionListSnapshot>;
-  listDueRevisionIds?(nowUnixMs: number, limit?: number): Promise<string[]>;
+  listDueRevisionIds?(nowUnixMs: number, limit?: number, offset?: number): Promise<string[]>;
   listRevisionLineage?(): Promise<RevisionLineageIndexEntry[]>;
+  listRevisionEvidenceReferences?(): Promise<RevisionEvidenceReference[]>;
 }
 
 /**

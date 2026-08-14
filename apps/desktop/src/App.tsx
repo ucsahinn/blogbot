@@ -35,7 +35,7 @@ const fallbackConnectorState: ConnectorStateSnapshot = {
     codex: { accountLabel: "" },
     github: { owner: "", repository: "" },
     site: { repositoryPath: "", publicSiteUrl: "", mode: "LOCAL_ONLY" },
-    deploy: { workflowName: "" },
+    deploy: { workflowName: "", requiredChecks: [] },
     backup: { folder: "" }
   },
   site: { repositoryPath: "", publicSiteUrl: "", adapterId: null, adapterVersion: null },

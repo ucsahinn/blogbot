@@ -80,6 +80,28 @@ function mediaType(contentType: string | undefined): string {
   return contentType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
 }
 
+function withinDeadline<T>(work: Promise<T>, deadlineAtMs: number): Promise<T> {
+  const remainingMs = deadlineAtMs - Date.now();
+  if (remainingMs <= 0) {
+    return Promise.reject(new FetchBoundaryError("TIMEOUT", "source wall-clock deadline exceeded"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new FetchBoundaryError("TIMEOUT", "source wall-clock deadline exceeded"));
+    }, remainingMs);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 export async function fetchSource(
   inputUrl: string,
   transport: FetchTransport,
@@ -98,17 +120,18 @@ export async function fetchSource(
 
   for (let redirectCount = 0; ; redirectCount += 1) {
     const parsed = new URL(currentUrl);
-    const approvedAddresses = validateResolvedAddresses(
-      await transport.resolve(parsed.hostname)
-    );
-    const response = await transport.request({
+    const approvedAddresses = validateResolvedAddresses(await withinDeadline(
+      transport.resolve(parsed.hostname),
+      deadlineAtMs
+    ));
+    const response = await withinDeadline(transport.request({
       url: currentUrl,
       approvedAddresses,
       redirect: "manual",
       timeoutMs,
       deadlineAtMs,
       maxResponseBytes: maxBytes
-    });
+    }), deadlineAtMs);
 
     if (redirectStatuses.has(response.status)) {
       if (redirectCount >= maxRedirects) {

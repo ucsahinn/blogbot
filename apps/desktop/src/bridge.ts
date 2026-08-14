@@ -53,6 +53,18 @@ export interface AutomaticBackupSnapshot {
   createdAt: string;
 }
 
+export type GitHubDeviceFlowStatus = "unconfigured" | "logged-out" | "pending" | "authorized" | "expired" | "access-denied" | "degraded";
+
+export interface GitHubDeviceFlowResult {
+  status: GitHubDeviceFlowStatus;
+  writes: false;
+  network: boolean;
+  userCode?: string;
+  verificationUri?: "https://github.com/login/device";
+  scopes?: string[];
+  detail?: string;
+}
+
 export class BridgeError extends Error {
   readonly code: "OFFLINE_READ_ONLY" | "BRIDGE_UNAVAILABLE" | "COMMAND_FAILED";
 
@@ -84,7 +96,10 @@ export interface BlogbotBridge {
   testSetupConnector(input: { connector: SetupConnectorId; config: SetupConnectorDraft[SetupConnectorId] }): Promise<SetupConnectorTestResult>;
   saveSetupConnector(input: { connector: SetupConnectorId; config: SetupConnectorDraft[SetupConnectorId] }): Promise<SetupConnectorTestResult>;
   getConnectorState(): Promise<ConnectorStateSnapshot>;
-  getGitHubDeviceFlowStatus(): Promise<{ status: "unconfigured" | "logged-out" | "pending" | "authorized" | "degraded"; writes: false; network: boolean; scopes?: string[]; detail?: string }>;
+  startGitHubDeviceFlow(): Promise<GitHubDeviceFlowResult>;
+  pollGitHubDeviceFlow(): Promise<GitHubDeviceFlowResult>;
+  clearGitHubDeviceFlow(): Promise<GitHubDeviceFlowResult>;
+  getGitHubDeviceFlowStatus(): Promise<GitHubDeviceFlowResult>;
   validateGitHubRepository(input: { owner: string; repository: string; workflow: string }): Promise<{ valid: boolean; repository: string; workflow: string; writes: false; detail?: string }>;
   previewGitHubPullRequest(input: { repository: string; workflow: string; revisionId: string; revisionHash: string }): Promise<{ mode: "dry-run"; writes: false; repository: string; workflow: string; steps: readonly string[] }>;
   getAutostartStatus(): Promise<{ enabled: boolean }>;
@@ -151,7 +166,6 @@ export interface BlogbotBridge {
   approveHighRiskRevision(input: {
     revisionId: string;
     expectedHash: string;
-    riskChecklistHash: string;
     warningSetHash: string;
     confirmReauthenticated: boolean;
   }): Promise<{ approvedAt: string; revisionHash: string; approvalType: "HIGH_RISK" }>;
@@ -330,6 +344,9 @@ export function createInvokeBridge(
     testSetupConnector: (input) => read("test_setup_connector", input as Record<string, unknown>),
     saveSetupConnector: (input) => mutate("save_setup_connector", input as Record<string, unknown>),
     getConnectorState: () => read("get_connector_state"),
+    startGitHubDeviceFlow: () => mutate("github_device_flow_start"),
+    pollGitHubDeviceFlow: () => mutate("github_device_flow_poll"),
+    clearGitHubDeviceFlow: () => mutate("github_device_flow_clear"),
     getGitHubDeviceFlowStatus: () => read("github_device_flow_status"),
     validateGitHubRepository: (input) => read("github_validate_repository", input),
     previewGitHubPullRequest: (input) => read("github_preview_pull_request", input),
@@ -511,7 +528,7 @@ export function createCoalescingBridge(
   };
   const invalidatingMutations = new Set([
     "installUnsignedUpdate", "recoverLocalWorkspace", "startLocalDev",
-    "stopLocalDev", "startCodexLogin", "saveSetupConnector", "setAutostart",
+    "stopLocalDev", "startCodexLogin", "saveSetupConnector", "startGitHubDeviceFlow", "setAutostart",
     "sendTestNotification", "promoteCandidate", "dismissCandidate", "retryJob",
     "requestRevisionEdit", "repairRevisionMedia", "updateScheduleSlot", "saveDesktopPreferences",
     "scanSource", "scanAllSources", "saveSources", "reviewSource",

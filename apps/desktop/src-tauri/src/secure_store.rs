@@ -11,6 +11,9 @@ use windows::Win32::Security::Cryptography::{
     BCryptGenRandom, CryptProtectData, CryptUnprotectData, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
     CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
 };
+use windows::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,7 +31,11 @@ fn stable_secret_path(app: &AppHandle) -> Option<PathBuf> {
         .app_local_data_dir()
         .ok()
         .and_then(|directory| directory.parent().map(Path::to_path_buf))
-        .map(|root| root.join(STABLE_DATA_ROOT).join("secrets").join("data-key.dpapi"))
+        .map(|root| {
+            root.join(STABLE_DATA_ROOT)
+                .join("secrets")
+                .join("data-key.dpapi")
+        })
 }
 
 fn app_secret_path(app: &AppHandle) -> Option<PathBuf> {
@@ -55,6 +62,22 @@ fn existing_valid_key(path: &Path) -> Option<Vec<u8>> {
         .filter(|plaintext| plaintext.len() == 32)
 }
 
+fn migrate_legacy_key_to_stable(
+    stable_directory: &Path,
+    stable_path: &Path,
+    legacy_paths: &[PathBuf],
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(key) = legacy_paths
+        .iter()
+        .find_map(|candidate| existing_valid_key(candidate))
+    else {
+        return Ok(None);
+    };
+    let protected = protect_for_current_user(&key)
+        .map_err(|error| format!("DATA_KEY_PROTECT_FAILED: {error}"))?;
+    persist_new_key_atomically(stable_directory, stable_path, &protected, &key).map(Some)
+}
+
 fn should_prefer_legacy_key(stable: &Path, app_key: Option<&Path>) -> bool {
     if stable.exists() {
         return false;
@@ -62,9 +85,15 @@ fn should_prefer_legacy_key(stable: &Path, app_key: Option<&Path>) -> bool {
     let data_dir = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .map(|root| root.join("Blogbot").join("data").join("pgdata"));
-    let Some(data_dir) = data_dir else { return false; };
-    if !data_dir.exists() { return false; }
-    let Some(app_key) = app_key else { return true; };
+    let Some(data_dir) = data_dir else {
+        return false;
+    };
+    if !data_dir.exists() {
+        return false;
+    }
+    let Some(app_key) = app_key else {
+        return true;
+    };
     app_key.exists()
 }
 
@@ -112,9 +141,7 @@ pub fn load_or_create_data_key(app: &AppHandle) -> Result<String, String> {
         .map(|root| root.join("Blogbot").join("data").join("pgdata"))
         .is_some_and(|path| path.exists());
     if persisted_data {
-        if let Some(key) = legacy_secret_paths()
-            .iter()
-            .find_map(|candidate| existing_valid_key(candidate))
+        if let Some(key) = migrate_legacy_key_to_stable(&directory, &path, &legacy_secret_paths())?
         {
             return Ok(key.iter().map(|byte| format!("{byte:02x}")).collect());
         }
@@ -190,8 +217,7 @@ fn persist_new_key_atomically(
         }
         // Rename within the same directory is atomic on Windows and works on
         // filesystems where hard-links are disabled by policy.
-        fs::rename(&temp_path, path)
-            .map_err(|error| format!("DATA_KEY_COMMIT_FAILED: {error}"))?;
+        fs::rename(&temp_path, path).map_err(|error| format!("DATA_KEY_COMMIT_FAILED: {error}"))?;
         Ok::<_, String>(key.to_vec())
     })();
 
@@ -264,12 +290,70 @@ pub fn unprotect_for_current_user(ciphertext: &[u8]) -> Result<Vec<u8>, WindowsE
     Ok(copy_and_free(output))
 }
 
+#[allow(dead_code)]
+pub fn store_github_token_at(path: &Path, token: &[u8]) -> Result<(), String> {
+    if token.is_empty() || token.len() > 1024 {
+        return Err("GITHUB_TOKEN_INVALID".into());
+    }
+    let directory = path
+        .parent()
+        .ok_or_else(|| "GITHUB_TOKEN_DIRECTORY_UNAVAILABLE".to_string())?;
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("GITHUB_TOKEN_DIRECTORY_CREATE_FAILED: {error}"))?;
+    let protected = protect_for_current_user(token)
+        .map_err(|error| format!("GITHUB_TOKEN_PROTECT_FAILED: {error}"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = directory.join(format!("github-token.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .map_err(|error| format!("GITHUB_TOKEN_TEMP_CREATE_FAILED: {error}"))?;
+        file.write_all(&protected)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("GITHUB_TOKEN_WRITE_FAILED: {error}"))?;
+        let source = windows::core::HSTRING::from(temp.as_os_str());
+        let destination = windows::core::HSTRING::from(path.as_os_str());
+        unsafe {
+            MoveFileExW(
+                &source,
+                &destination,
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+            .map_err(|error| format!("GITHUB_TOKEN_COMMIT_FAILED: {error}"))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
+#[allow(dead_code)]
+pub fn load_github_token_at(path: &Path) -> Result<Vec<u8>, String> {
+    let protected = fs::read(path).map_err(|_| "GITHUB_TOKEN_UNAVAILABLE".to_string())?;
+    let token = unprotect_for_current_user(&protected)
+        .map_err(|_| "GITHUB_TOKEN_UNAVAILABLE".to_string())?;
+    if token.is_empty() || token.len() > 1024 {
+        return Err("GITHUB_TOKEN_INVALID".into());
+    }
+    Ok(token)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{persist_new_key_atomically, protect_for_current_user, unprotect_for_current_user};
+    use super::{
+        migrate_legacy_key_to_stable, persist_new_key_atomically, protect_for_current_user,
+        unprotect_for_current_user,
+    };
 
     #[test]
     fn dpapi_round_trip_is_bound_to_the_current_windows_user() {
@@ -281,8 +365,77 @@ mod tests {
     }
 
     #[test]
+    fn github_token_is_dpapi_protected_at_rest_and_rotates_atomically() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-github-token-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create token directory");
+        let path = directory.join("github-token.dpapi");
+        super::store_github_token_at(&path, b"native-token-secret").expect("store token");
+        let disk = fs::read(&path).expect("read protected token");
+        assert!(!String::from_utf8_lossy(&disk).contains("native-token-secret"));
+        assert_eq!(
+            super::load_github_token_at(&path).expect("load token"),
+            b"native-token-secret"
+        );
+        super::store_github_token_at(&path, b"rotated-native-token")
+            .expect("atomically rotate token");
+        assert_eq!(
+            super::load_github_token_at(&path).expect("load rotated token"),
+            b"rotated-native-token"
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
     fn invalid_ciphertext_fails_closed() {
         assert!(unprotect_for_current_user(b"not-dpapi-ciphertext").is_err());
+    }
+
+    #[test]
+    fn legacy_migration_persists_the_same_key_after_the_legacy_file_is_deleted() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "blogbot-legacy-key-migration-{}-{nonce}",
+            std::process::id()
+        ));
+        let stable_directory = root.join("stable").join("secrets");
+        let stable_path = stable_directory.join("data-key.dpapi");
+        let legacy_path = root.join("legacy").join("secrets").join("data-key.dpapi");
+        fs::create_dir_all(legacy_path.parent().expect("legacy directory"))
+            .expect("create legacy directory");
+        fs::create_dir_all(&stable_directory).expect("create stable directory");
+        let key = [19_u8; 32];
+        fs::write(
+            &legacy_path,
+            protect_for_current_user(&key).expect("protect legacy key"),
+        )
+        .expect("write legacy key");
+
+        let migrated = migrate_legacy_key_to_stable(
+            &stable_directory,
+            &stable_path,
+            std::slice::from_ref(&legacy_path),
+        )
+        .expect("migrate legacy key")
+        .expect("legacy key exists");
+        assert_eq!(migrated, key);
+
+        fs::remove_file(&legacy_path).expect("delete legacy key");
+        let recovered = unprotect_for_current_user(
+            &fs::read(&stable_path).expect("stable key survives legacy deletion"),
+        )
+        .expect("recover stable key");
+        assert_eq!(recovered, key);
+        fs::remove_dir_all(&root).expect("remove test directory");
     }
 
     #[test]

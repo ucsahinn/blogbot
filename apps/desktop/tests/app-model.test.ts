@@ -72,7 +72,7 @@ test("setup draft is projected from the engine-owned connector snapshot", () => 
       codex: { accountLabel: "Yerel hesap" },
       github: { owner: "editor", repository: "site", clientId: "public-client" },
       site: { repositoryPath: "C:\\site", publicSiteUrl: "", mode: "LOCAL_DEV" as const },
-      deploy: { workflowName: "deploy.yml" },
+      deploy: { workflowName: "deploy.yml", requiredChecks: ["build"] },
       backup: { folder: "D:\\backups" }
     },
     site: {

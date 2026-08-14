@@ -21,7 +21,7 @@ const connectorState: ConnectorStateSnapshot = {
     codex: { accountLabel: "" },
     github: { owner: "", repository: "" },
     site: { repositoryPath: "", publicSiteUrl: "", mode: "LOCAL_ONLY" },
-    deploy: { workflowName: "" },
+    deploy: { workflowName: "", requiredChecks: [] },
     backup: { folder: "" }
   },
   site: {
@@ -684,6 +684,15 @@ export function createDemoTransport(): InvokeTransport {
           connectorState.configured = Boolean(repositoryPath || publicSiteUrl);
           connectorState.site.repositoryPath = repositoryPath;
           connectorState.site.publicSiteUrl = publicSiteUrl;
+        }
+        if (connector === "deploy" && config && typeof config === "object") {
+          const deploy = config as Partial<ConnectorStateSnapshot["config"]["deploy"]>;
+          connectorState.config.deploy = {
+            workflowName: typeof deploy.workflowName === "string" ? deploy.workflowName : "",
+            requiredChecks: Array.isArray(deploy.requiredChecks)
+              ? deploy.requiredChecks.filter((check): check is string => typeof check === "string")
+              : []
+          };
         }
         return { ready: true, writes: true, network: false, detail: "Kurulum alanları demo çalışma alanında doğrulandı." };
       }

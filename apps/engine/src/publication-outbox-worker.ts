@@ -89,7 +89,10 @@ export function startPublicationOutboxWorker(
         try {
           const result = await processor.process(claimed);
           const { nextAttemptAt: _previousRetryDeadline, ...withoutPreviousRetryDeadline } = claimed;
-          const terminalUnknown = result.state === "UNKNOWN" && claimed.attempts >= MAX_TRANSIENT_PUBLICATION_ATTEMPTS;
+          const connectorRequestedRetry = Number.isSafeInteger(result.retryAfterMs) && result.retryAfterMs! >= 0;
+          const terminalUnknown = result.state === "UNKNOWN"
+            && !connectorRequestedRetry
+            && claimed.attempts >= MAX_TRANSIENT_PUBLICATION_ATTEMPTS;
           const nextAttemptAt = result.state === "UNKNOWN" && !terminalUnknown
             ? new Date(Date.now() + retryDelayMs(claimed.attempts, result.retryAfterMs, retryBaseMs)).toISOString()
             : undefined;

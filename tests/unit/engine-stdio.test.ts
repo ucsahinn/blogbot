@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -132,6 +132,8 @@ test("publication preview validates a selected generic adapter bundle and return
       },
       siteOrigin: "https://example.org",
       contentRoot: "/srv/site",
+      requiredChecks: ["ci/test"],
+      deployWorkflow: "deploy.yml",
       now: "2026-07-30T12:00:00.000Z"
   } as const;
   const first = buildPublicationPreview(request);
@@ -161,6 +163,8 @@ test("local-only publication preview accepts an empty public origin", () => {
     bundlePolicy: { adapterId: "astro-generic", manifestPath, allowedPathPrefixes: ["src/content/articles/", ".blogbot/manifests/"], requiredLocalePrefixes: ["src/content/articles/tr/", "src/content/articles/en/"] },
     siteOrigin: "",
     contentRoot: "C:\\Projects\\demo",
+    requiredChecks: [],
+    deployWorkflow: "",
     now: "2026-07-30T12:00:00.000Z"
   });
   assert.equal(preview.plan.target.siteOrigin, "");
@@ -519,7 +523,7 @@ test("engine backup verification rejects a directory masquerading as an archive"
   assert.equal(result.code, "BACKUP_INVALID");
 });
 
-test("engine backup restore writes only into a new target after verification", async () => {
+test("engine backup restore fails closed when the native restore writer is unavailable", async () => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-engine-backup-apply-"));
   const source = join(root, "source");
   const archive = join(root, "backup.blogbot");
@@ -532,15 +536,23 @@ test("engine backup restore writes only into a new target after verification", a
     recoveryKey: "correct-recovery-key-123",
     createdAt: "2026-07-30T09:00:00.000Z"
   }));
-  const result = await handleBackupRequest({
-    version: 1,
-    id: "backup-apply-1",
-    kind: "backup.restore",
-    payload: { archivePath: archive, recoveryKey: "correct-recovery-key-123", targetDirectory: target }
-  }, root);
-  assert.equal(result.ok, true);
-  assert.equal(result.restored, true);
-  assert.equal(await (await import("node:fs/promises")).readFile(join(target, "state.json"), "utf8"), "{}\n");
+  const previousRestoreWriter = process.env.BLOGBOT_SECURE_RESTORE_BIN;
+  delete process.env.BLOGBOT_SECURE_RESTORE_BIN;
+  try {
+    const result = await handleBackupRequest({
+      version: 1,
+      id: "backup-apply-1",
+      kind: "backup.restore",
+      payload: { archivePath: archive, recoveryKey: "correct-recovery-key-123", targetDirectory: target }
+    }, root);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "BACKUP_INVALID");
+    assert.equal(result.message, "SECURE_RESTORE_SIDECAR_UNAVAILABLE");
+    await assert.rejects(() => access(target));
+  } finally {
+    if (previousRestoreWriter === undefined) delete process.env.BLOGBOT_SECURE_RESTORE_BIN;
+    else process.env.BLOGBOT_SECURE_RESTORE_BIN = previousRestoreWriter;
+  }
 });
 
 test("stdio dispatcher keeps read-only requests out of the mutation queue", () => {

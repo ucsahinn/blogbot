@@ -139,7 +139,8 @@ export function SetupCenter({
   const [localDevStatusChecking, setLocalDevStatusChecking] = useState(false);
   const [localDevStatusError, setLocalDevStatusError] = useState(false);
   const [localDevTrusted, setLocalDevTrusted] = useState(false);
-  const [githubBrokerStatus, setGitHubBrokerStatus] = useState<"unknown" | "unconfigured" | "logged-out" | "pending" | "authorized" | "degraded">("unknown");
+  const [githubBrokerStatus, setGitHubBrokerStatus] = useState<"unknown" | "unconfigured" | "logged-out" | "pending" | "authorized" | "expired" | "access-denied" | "degraded">("unknown");
+  const [githubDeviceFlow, setGitHubDeviceFlow] = useState<{ userCode: string } | null>(null);
   const [selectedTask, setSelectedTask] = useState<SetupTaskId>(() =>
     startInGuide ? "first-start" : "overview"
   );
@@ -611,20 +612,61 @@ export function SetupCenter({
       setConnectorMessages((current) => ({ ...current, codex: detail }));
     } finally { setBusy(false); }
   };
-  const refreshGitHubLoginStatus = async () => {
+  const startGitHubDeviceFlow = async () => {
+    setBusy(true);
+    setGitHubDeviceFlow(null);
+    try {
+      const result = await bridge.startGitHubDeviceFlow();
+      if (!result.userCode || result.verificationUri !== "https://github.com/login/device") {
+        throw new Error("GITHUB_DEVICE_RESPONSE_INVALID");
+      }
+      setGitHubDeviceFlow({ userCode: result.userCode });
+      setGitHubBrokerStatus("pending");
+      setConnectorMessages((current) => ({
+        ...current,
+        github: "GitHub cihaz kodu hazır. Sabit doğrulama adresini tarayıcıda açıp kodu girin; durum yalnız siz istediğinizde yeniden kontrol edilir."
+      }));
+    } catch (reason) {
+      setConnectorMessages((current) => ({
+        ...current,
+        github: explainFailure(reason, "GitHub cihaz giriş akışı başlatılamadı.", "public OAuth istemci kimliğini kontrol edip yeniden deneyin.")
+      }));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const pollGitHubDeviceFlow = async () => {
+    setBusy(true);
+    try {
+      const result = await bridge.pollGitHubDeviceFlow();
+      setGitHubBrokerStatus(result.status);
+      if (result.status !== "pending") setGitHubDeviceFlow(null);
+      setConnectorMessages((current) => ({
+        ...current,
+        github: result.detail ?? `GitHub durumu: ${result.status}`
+      }));
+    } catch (reason) {
+      setConnectorMessages((current) => ({
+        ...current,
+        github: explainFailure(reason, "GitHub cihaz girişi doğrulanamadı.", "GitHub'daki onayı tamamlayıp bekleme süresinden sonra yeniden deneyin.")
+      }));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const refreshGitHubBrokerStatus = async () => {
     setBusy(true);
     try {
       const result = await bridge.getGitHubDeviceFlowStatus();
       setGitHubBrokerStatus(result.status);
       setConnectorMessages((current) => ({
         ...current,
-        github: result.detail ?? `GitHub durumu: ${result.status}`
+        github: result.detail ?? `GitHub bağlantı durumu: ${result.status}`
       }));
     } catch (reason) {
-      setGitHubBrokerStatus("degraded");
       setConnectorMessages((current) => ({
         ...current,
-        github: explainFailure(reason, "GitHub yetkilendirme durumu alınamadı.", "Kurulum denetimini yeniden çalıştırıp tekrar deneyin.")
+        github: explainFailure(reason, "GitHub bağlantı durumu okunamadı.", "yerel broker yapılandırmasını kontrol edip yeniden deneyin.")
       }));
     } finally {
       setBusy(false);
@@ -744,7 +786,7 @@ export function SetupCenter({
     {
       id: "deploy",
       label: "Yayın workflow'u",
-      description: "GitHub Actions üzerinde seçtiğiniz statik siteyi yayınlayan workflow dosyası. Bu alan hosting sunucusuna doğrudan erişim vermez.",
+      description: "GitHub Actions workflow dosyasını ve birleşmeden önce başarıyla tamamlanması gereken kontrolleri açıkça belirtin. Kontrol listesi boşsa yayın kapalı kalır.",
       fields: [["workflowName", "Workflow dosyası (ör. deploy.yml)"]]
     },
     {
@@ -765,7 +807,7 @@ export function SetupCenter({
           : githubBrokerStatus === "pending"
             ? "GitHub giriş onayı bekliyor; tarayıcıdaki device login adımını tamamlayıp durumu yenileyin."
             : githubBrokerStatus === "logged-out"
-              ? "Bu paket GitHub girişini WebView üzerinden başlatmaz. Güvenli broker kurulumu tamamlandığında cihaz doğrulamasını o akıştan başlatın; burada yalnız durum görünür."
+              ? "GitHub cihaz girişini yalnız siz düğmeye bastığınızda başlatır. Kod hazır olduğunda sabit GitHub doğrulama adresi gösterilir; durum otomatik sorgulanmaz."
               : "Giriş için yalnız public OAuth istemci kimliği gerekir. Token ve private key Blogbot ekranına yazılmaz; depo erişimi doğrulanmadan yayın kapalı kalır.";
 
   return (
@@ -1199,6 +1241,27 @@ export function SetupCenter({
                   ) : null}
                 </label>
                 ))}
+              {connector.id === "deploy" ? (
+                <label className="field">
+                  <span>Zorunlu GitHub kontrolleri</span>
+                  <textarea
+                    id="deploy-required-checks"
+                    name="deploy-required-checks"
+                    value={connectorDraft.deploy.requiredChecks.join("\n")}
+                    onChange={(event) => setConnectorDraft((current) => ({
+                      ...current,
+                      deploy: {
+                        ...current.deploy,
+                        requiredChecks: event.target.value.split(/[\n,]+/u).map((value) => value.trim()).filter(Boolean)
+                      }
+                    }))}
+                    rows={3}
+                    required
+                    aria-describedby="deploy-required-checks-help"
+                  />
+                  <small id="deploy-required-checks-help">Her satıra GitHub'da görünen tam kontrol adını yazın. En az bir zorunlu GitHub kontrolü belirtilmeden PUBLISH doğrulaması başarısız olur.</small>
+                </label>
+              ) : null}
               {connector.id === "site" && connectorDraft.site.mode === "LOCAL_DEV" ? (
                 <div className="local-dev-control">
                   <span className="field-help">Yerel proje sunucusu</span>
@@ -1225,7 +1288,16 @@ export function SetupCenter({
                 ) : null}
                 {connector.id === "github" ? (
                   <>
-                    <button className="button button-secondary" type="button" disabled={busy} aria-describedby="github-broker-help" onClick={() => void refreshGitHubLoginStatus()}>Durumu kontrol et</button>
+                    <button className="button button-secondary" type="button" disabled={busy} onClick={() => void refreshGitHubBrokerStatus()}>GitHub bağlantı durumunu kontrol et</button>
+                    <button className="button button-primary" type="button" disabled={busy} onClick={() => void startGitHubDeviceFlow()}>GitHub cihaz girişini başlat</button>
+                    <button className="button button-secondary" type="button" disabled={busy || githubBrokerStatus !== "pending"} aria-describedby="github-broker-help" onClick={() => void pollGitHubDeviceFlow()}>GitHub onayını kontrol et</button>
+                    {githubDeviceFlow ? (
+                      <div role="status" aria-live="polite">
+                        <span>GitHub cihaz kodu</span>
+                        <code>{githubDeviceFlow.userCode}</code>
+                        <span>Doğrulama adresi: https://github.com/login/device</span>
+                      </div>
+                    ) : null}
                     <small id="github-broker-help">{githubBrokerHelp}</small>
                   </>
                 ) : null}

@@ -75,6 +75,28 @@ function wordCount(value: string): number {
   return value.trim().split(/\s+/u).filter(Boolean).length;
 }
 
+function readingTimeMinutes(value: string): number {
+  return Math.max(1, Math.ceil(wordCount(value) / 200));
+}
+
+function scheduledAtLabel(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Geçerli zaman seçilmedi";
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(timestamp));
+}
+
+function claimEvidenceLabel(claims: ReviewRevision["claims"]): string {
+  const unresolved = claims.filter((claim) => claim.status !== "VERIFIED").length;
+  return unresolved === 0 ? "Tüm iddialar kaynaklı" : `${unresolved} iddia kaynak bekliyor`;
+}
+
 function safeSourceReferenceUrl(value: string): string | null {
   try {
     const url = new URL(value);
@@ -250,6 +272,7 @@ export function ReviewWorkspace({
   );
   const hasUnacceptableWarning = acceptedWarnings.some((gate) => !isAcceptableWarning(gate));
   const claimsBlocked = Boolean(revision?.gates.some((gate) => gate.id === "claims" && gate.state === "BLOCK"));
+  const mediaGateState = revision?.gates.find((gate) => gate.id === "media")?.state;
   const activeContent = revision?.[locale];
   const previousContent = revision?.previous[locale];
   const heroMedia = revision?.media.find((media) => media.role === "hero");
@@ -351,19 +374,9 @@ export function ReviewWorkspace({
     setNotice("");
     try {
       const acceptedWarningSetHash = await warningSetHash(revision.gates);
-      const checklist = revision.gates
-        .filter((gate) => gate.group === "security")
-        .map((gate) => ({ id: gate.id, state: gate.state, detail: gate.detail }))
-        .sort((left, right) => left.id.localeCompare(right.id));
-      const bytes = new TextEncoder().encode(JSON.stringify(checklist));
-      const digest = await crypto.subtle.digest("SHA-256", bytes);
-      const riskChecklistHash = [...new Uint8Array(digest)]
-        .map((value) => value.toString(16).padStart(2, "0"))
-        .join("");
       const result = await bridge.approveHighRiskRevision({
         revisionId: revision.id,
         expectedHash: revision.revisionHash,
-        riskChecklistHash,
         warningSetHash: acceptedWarningSetHash,
         confirmReauthenticated: true
       });
@@ -875,7 +888,7 @@ export function ReviewWorkspace({
                       return (
                         <article className="article-preview" key={contentLocale} lang={contentLocale}>
                           <div className="locale-heading"><strong>{contentLocale.toUpperCase()}</strong><span>{contentLocale === "tr" ? "Özgün editoryal sürüm" : "Doğal yerelleştirme"}</span></div>
-                          <div className="article-meta"><span>{sectionLabel(revision.section)}</span><span>8 dk okuma</span><span>{revision.author}</span></div>
+                          <div className="article-meta"><span>{sectionLabel(revision.section)}</span><span>{readingTimeMinutes(content.bodyMarkdown)} dk okuma</span><span>{revision.author}</span></div>
                           <h1>{content.title}</h1>
                           <p className="article-description">{content.description}</p>
                           {heroMedia && heroDataUrl ? (
@@ -937,7 +950,7 @@ export function ReviewWorkspace({
                         </div>
                         <div>
                           <dt>Takvim</dt>
-                          <dd>29 Temmuz · 16:30</dd>
+                          <dd>{scheduledAtLabel(revision.scheduledAt)}</dd>
                         </div>
                         <div>
                           <dt>Adaptör</dt>
@@ -971,7 +984,7 @@ export function ReviewWorkspace({
                         <p className="section-kicker">İDDİA DEFTERİ</p>
                         <h2>{revision.claims.length} doğrulanabilir iddia</h2>
                       </div>
-                      <span className="pass-label">Tümü kaynaklı</span>
+                      <span className={revision.claims.every((claim) => claim.status === "VERIFIED") ? "pass-label" : "warning-label"}>{claimEvidenceLabel(revision.claims)}</span>
                     </div>
                     <div className="claim-list">
                       {revision.claims.map((claim, index) => (
@@ -1048,7 +1061,11 @@ export function ReviewWorkspace({
                       <p className="section-kicker">MEDYA PAKETİ</p>
                       <h2>Oran, alt metin ve hash kontrolleri</h2>
                     </div>
-                    <span className="pass-label">2 / 2 uygun</span>
+                    <span className={mediaGateState === "PASS" ? "pass-label" : "warning-label"}>
+                      {mediaGateState === "PASS"
+                        ? `${revision.media.length} / ${revision.media.length} uygun`
+                        : revision.media.length === 0 ? "Medya eksik" : `${revision.media.length} medya · kontrol gerekli`}
+                    </span>
                   </div>
                   <div className="media-grid">
                     {revision.media.map((media) => (
@@ -1083,8 +1100,11 @@ export function ReviewWorkspace({
                       <span>kontrol geçti</span>
                     </div>
                     <p>
-                      Yayın paketi editoryal, SEO ve güvenlik sınırlarından
-                      geçti. Engel oluşursa onay düğmesi otomatik kapanır.
+                      {summary.blockers > 0
+                        ? `Yayın paketi ${summary.blockers} engel nedeniyle onaya hazır değil.`
+                        : summary.warnings > 0
+                          ? `Yayın paketi ${summary.warnings} uyarıyla tamamlandı; onaydan önce uyarıları inceleyin.`
+                          : "Yayın paketi editoryal, SEO ve güvenlik sınırlarından geçti."}
                     </p>
                     {claimsBlocked ? (
                       <button

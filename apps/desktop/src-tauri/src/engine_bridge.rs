@@ -1,10 +1,10 @@
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
+use std::fs::{create_dir_all, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::fs::{OpenOptions, create_dir_all};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
@@ -17,7 +17,10 @@ use tauri::{AppHandle, Manager};
 
 use crate::secure_store;
 
-const MAX_RESPONSE_BYTES: usize = 1_000_000;
+// Native publication claims may include up to 50 MiB of approved media encoded
+// as base64. Keep request traffic narrow while allowing that one bounded,
+// credential-free response plus JSON metadata.
+const MAX_RESPONSE_BYTES: usize = 72 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 1_000_000;
 // A ready engine may legitimately spend longer than a UI round-trip on a
 // guarded source fetch (the fetcher itself allows an 8s wall-clock hop), a
@@ -80,19 +83,36 @@ pub fn redact_diagnostic_for_persistence(line: &str) -> String {
     let bounded = line.chars().take(4_000).collect::<String>();
     let lower = bounded.to_ascii_lowercase();
     let sensitive_markers = [
-        "token", "password", "passwd", "secret", "api_key", "apikey",
-        "authorization", "bearer", "private_key", "cookie", "credential",
-        "github_pat_", "ghp_", "sk-", "-----begin", "eyj",
+        "token",
+        "password",
+        "passwd",
+        "secret",
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "private_key",
+        "cookie",
+        "credential",
+        "github_pat_",
+        "ghp_",
+        "sk-",
+        "-----begin",
+        "eyj",
     ];
     let has_long_opaque_value = bounded
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-' && character != '_')
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+        })
         .any(|part| part.len() >= 40);
     let may_contain_identity_or_path = bounded.contains('@')
         || bounded.contains("http://")
         || bounded.contains("https://")
         || bounded.contains("\\Users\\")
         || bounded.contains("/home/");
-    if sensitive_markers.iter().any(|marker| lower.contains(marker))
+    if sensitive_markers
+        .iter()
+        .any(|marker| lower.contains(marker))
         || has_long_opaque_value
         || may_contain_identity_or_path
     {
@@ -169,7 +189,7 @@ fn owned_process_tree_kill_args(pid: u32) -> [String; 4] {
     ["/pid".into(), pid.to_string(), "/t".into(), "/f".into()]
 }
 
-fn terminate_owned_process_tree(child: &mut Child) {
+pub(crate) fn terminate_owned_process_tree(child: &mut Child) {
     #[cfg(windows)]
     {
         let mut taskkill = Command::new("taskkill.exe");
@@ -190,6 +210,7 @@ fn terminate_owned_process_tree(child: &mut Child) {
 pub struct EngineBridge {
     executable: Option<PathBuf>,
     fetcher_executable: Option<PathBuf>,
+    secure_restore_executable: Option<PathBuf>,
     assets: Option<PathBuf>,
     node_modules: Option<PathBuf>,
     codex_command: Option<String>,
@@ -292,6 +313,7 @@ impl EngineBridge {
     pub fn discover(app: &AppHandle) -> Self {
         let executable = discover_engine_executable();
         let fetcher_executable = discover_fetcher_executable();
+        let secure_restore_executable = discover_secure_restore_executable(app);
         let assets = discover_pglite_assets(app);
         let node_modules = discover_engine_node_modules(app);
         let codex_command = discover_codex_command();
@@ -306,12 +328,17 @@ impl EngineBridge {
         let bridge = Self {
             executable,
             fetcher_executable,
+            secure_restore_executable,
             assets,
             node_modules,
             codex_command,
             codex_home,
             data_key_hex: data_key.as_ref().ok().cloned(),
-            diagnostic_log: app.path().app_data_dir().ok().map(|directory| directory.join("logs").join("engine.stderr.log")),
+            diagnostic_log: app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|directory| directory.join("logs").join("engine.stderr.log")),
             process: Mutex::new(None),
             request_sequence: AtomicU64::new(1),
             last_error: Mutex::new(data_key.err()),
@@ -389,7 +416,11 @@ impl EngineBridge {
         self.process
             .lock()
             .ok()
-            .and_then(|mut process| process.as_mut().map(|value| value.child.try_wait().ok().flatten().is_none()))
+            .and_then(|mut process| {
+                process
+                    .as_mut()
+                    .map(|value| value.child.try_wait().ok().flatten().is_none())
+            })
             .unwrap_or(false)
     }
 
@@ -411,10 +442,16 @@ impl EngineBridge {
             .and_then(Value::as_str)
             .ok_or_else(|| "ENGINE_REQUEST_ID_MISSING".to_string())?
             .to_string();
-        let suffix = format!(".bridge-{}", self.request_sequence.fetch_add(1, Ordering::Relaxed));
+        let suffix = format!(
+            ".bridge-{}",
+            self.request_sequence.fetch_add(1, Ordering::Relaxed)
+        );
         let transport_id = format!(
             "{}{}",
-            original_id.chars().take(200usize.saturating_sub(suffix.len())).collect::<String>(),
+            original_id
+                .chars()
+                .take(200usize.saturating_sub(suffix.len()))
+                .collect::<String>(),
             suffix
         );
         request["id"] = Value::String(transport_id.clone());
@@ -490,7 +527,10 @@ impl EngineBridge {
             }
             Err(error) => {
                 if let Ok(mut process) = self.process.lock() {
-                    if process.as_ref().is_some_and(|value| value.child.id() == process_id) {
+                    if process
+                        .as_ref()
+                        .is_some_and(|value| value.child.id() == process_id)
+                    {
                         *process = None;
                     }
                 }
@@ -507,7 +547,10 @@ impl EngineBridge {
             return Err("ENGINE_RESPONSE_ID_MISMATCH".to_string());
         }
         if let Ok(mut process) = self.process.lock() {
-            if let Some(process) = process.as_mut().filter(|value| value.child.id() == process_id) {
+            if let Some(process) = process
+                .as_mut()
+                .filter(|value| value.child.id() == process_id)
+            {
                 process.ready = true;
             }
         }
@@ -542,6 +585,10 @@ impl EngineBridge {
             .fetcher_executable
             .as_ref()
             .ok_or_else(|| "FETCHER_SIDECAR_MISSING".to_string())?;
+        let secure_restore_executable = self
+            .secure_restore_executable
+            .as_ref()
+            .ok_or_else(|| "SECURE_RESTORE_SIDECAR_MISSING".to_string())?;
         let mut command = Command::new(executable);
         command.env_clear();
         command
@@ -549,6 +596,7 @@ impl EngineBridge {
             .env("BLOGBOT_PGLITE_ASSETS", assets)
             .env("BLOGBOT_ENGINE_MODULES", node_modules)
             .env("BLOGBOT_FETCHER_BIN", fetcher_executable)
+            .env("BLOGBOT_SECURE_RESTORE_BIN", secure_restore_executable)
             .env("BLOGBOT_DATA_KEY_HEX", data_key_hex)
             .envs(self.codex_environment())
             .stdin(Stdio::piped())
@@ -575,16 +623,28 @@ impl EngineBridge {
             .name("blogbot-engine-stderr".to_string())
             .spawn(move || {
                 if let Some(path) = stderr_path {
-                    if let Some(parent) = path.parent() { let _ = create_dir_all(parent); }
-                    let mut log = OpenOptions::new().create(true).append(true).open(&path).ok();
+                    if let Some(parent) = path.parent() {
+                        let _ = create_dir_all(parent);
+                    }
+                    let mut log = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .ok();
                     let reader = BufReader::new(stderr);
                     for line in reader.lines().map_while(Result::ok) {
                         let redacted = redact_diagnostic_for_persistence(&line);
                         if let Some(file) = log.as_mut() {
-                            if file.metadata().map(|meta| meta.len()).unwrap_or(0) > MAX_DIAGNOSTIC_LOG_BYTES {
+                            if file.metadata().map(|meta| meta.len()).unwrap_or(0)
+                                > MAX_DIAGNOSTIC_LOG_BYTES
+                            {
                                 drop(log.take());
                                 let _ = std::fs::write(&path, b"[diagnostic log rotated]\n");
-                                log = OpenOptions::new().create(true).append(true).open(&path).ok();
+                                log = OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&path)
+                                    .ok();
                             }
                         }
                         if let Some(file) = log.as_mut() {
@@ -629,9 +689,9 @@ impl EngineBridge {
                         Ok(line) => match reader_pending.resolve_line(&line) {
                             Ok(true) => {}
                             Ok(false) => {
-                            // A timed-out request can leave a late response behind.
-                            // Bridge-generated IDs prevent it being delivered to a
-                            // newer caller, so it is safe to discard here.
+                                // A timed-out request can leave a late response behind.
+                                // Bridge-generated IDs prevent it being delivered to a
+                                // newer caller, so it is safe to discard here.
                             }
                             Err(error) => {
                                 reader_protocol_fault.store(true, Ordering::Release);
@@ -675,7 +735,7 @@ impl EngineBridge {
             }
             if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
                 let detail = redact_diagnostic_for_persistence(
-                    &self.last_error().unwrap_or_else(|| "unknown".to_string())
+                    &self.last_error().unwrap_or_else(|| "unknown".to_string()),
                 );
                 let _ = writeln!(file, "BRIDGE_ERROR {detail}");
             }
@@ -683,8 +743,12 @@ impl EngineBridge {
     }
 
     fn record_diagnostic_event(&self, event: &str) {
-        let Some(path) = &self.diagnostic_log else { return; };
-        if let Some(parent) = path.parent() { let _ = create_dir_all(parent); }
+        let Some(path) = &self.diagnostic_log else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = create_dir_all(parent);
+        }
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
             let detail = redact_diagnostic_for_persistence(event);
             let _ = writeln!(file, "{detail}");
@@ -709,7 +773,8 @@ fn discover_codex_command() -> Option<String> {
         .find(|candidate| {
             let mut probe = Command::new(candidate);
             configure_hidden_command(&mut probe);
-            probe.arg("--version")
+            probe
+                .arg("--version")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -721,13 +786,22 @@ fn discover_codex_command() -> Option<String> {
             // cannot rely on PATH. Resolve the executable before spawning it.
             let mut where_command = Command::new("where.exe");
             configure_hidden_command(&mut where_command);
-            let resolved = where_command.arg(candidate)
+            let resolved = where_command
+                .arg(candidate)
                 .stdin(Stdio::null())
                 .output()
                 .ok()
                 .and_then(|output| String::from_utf8(output.stdout).ok())
-                .and_then(|output| output.lines().map(str::trim).find(|line| !line.is_empty()).map(PathBuf::from));
-            resolved.filter(|path| path.is_file()).map(|path| path.to_string_lossy().into_owned())
+                .and_then(|output| {
+                    output
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(PathBuf::from)
+                });
+            resolved
+                .filter(|path| path.is_file())
+                .map(|path| path.to_string_lossy().into_owned())
         })
 }
 
@@ -754,7 +828,9 @@ fn discover_engine_executable() -> Option<PathBuf> {
 
 fn discover_fetcher_executable() -> Option<PathBuf> {
     if let Some(path) = env::var_os("BLOGBOT_FETCHER_BIN").map(PathBuf::from) {
-        if path.is_file() { return Some(path); }
+        if path.is_file() {
+            return Some(path);
+        }
     }
     let mut candidates = Vec::new();
     if let Ok(current) = env::current_exe() {
@@ -763,7 +839,51 @@ fn discover_fetcher_executable() -> Option<PathBuf> {
             candidates.push(directory.join("blogbot-fetcher-x86_64-pc-windows-msvc.exe"));
         }
     }
-    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries").join("blogbot-fetcher-x86_64-pc-windows-msvc.exe"));
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("blogbot-fetcher-x86_64-pc-windows-msvc.exe"),
+    );
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn discover_secure_restore_executable(app: &AppHandle) -> Option<PathBuf> {
+    if let Some(path) = env::var_os("BLOGBOT_SECURE_RESTORE_BIN").map(PathBuf::from) {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let mut candidates = Vec::new();
+    if let Ok(current) = env::current_exe() {
+        if let Some(directory) = current.parent() {
+            candidates.push(directory.join("blogbot-secure-restore.exe"));
+            candidates.push(directory.join("blogbot-secure-restore-x86_64-pc-windows-msvc.exe"));
+        }
+    }
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("blogbot-secure-restore-x86_64-pc-windows-msvc.exe"),
+    );
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("secure-restore")
+            .join("blogbot-secure-restore.exe"),
+    );
+    if let Ok(resource_directory) = app.path().resource_dir() {
+        candidates.push(
+            resource_directory
+                .join("resources")
+                .join("secure-restore")
+                .join("blogbot-secure-restore.exe"),
+        );
+        candidates.push(
+            resource_directory
+                .join("secure-restore")
+                .join("blogbot-secure-restore.exe"),
+        );
+    }
     candidates.into_iter().find(|path| path.is_file())
 }
 
@@ -801,17 +921,32 @@ fn discover_engine_node_modules(app: &AppHandle) -> Option<PathBuf> {
                 .join("engine-node_modules")
                 .join("node_modules"),
         );
-        candidates.push(resource_directory.join("engine-node_modules").join("node_modules"));
+        candidates.push(
+            resource_directory
+                .join("engine-node_modules")
+                .join("node_modules"),
+        );
     }
-    candidates
-        .into_iter()
-        .find(|path| path.join("sharp").join("package.json").is_file()
-            && path.join("@img").join("sharp-win32-x64").join("lib").join("sharp-win32-x64-0.35.3.node").is_file())
+    candidates.into_iter().find(|path| {
+        path.join("sharp").join("package.json").is_file()
+            && path
+                .join("@img")
+                .join("sharp-win32-x64")
+                .join("lib")
+                .join("sharp-win32-x64-0.35.3.node")
+                .is_file()
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_engine_executable, has_pglite_assets, is_safe_read_retry, redact_diagnostic_for_persistence, response_timeout_for_request, serialize_bounded_request, sidecar_environment_with, should_retry_after_transport_fault, transport_error_for_request, PendingResponses, MAINTENANCE_RESPONSE_TIMEOUT, RESPONSE_TIMEOUT, STARTUP_RESPONSE_TIMEOUT, WINDOWS_CREATE_NO_WINDOW};
+    use super::{
+        discover_engine_executable, has_pglite_assets, is_safe_read_retry,
+        redact_diagnostic_for_persistence, response_timeout_for_request, serialize_bounded_request,
+        should_retry_after_transport_fault, sidecar_environment_with, transport_error_for_request,
+        PendingResponses, MAINTENANCE_RESPONSE_TIMEOUT, RESPONSE_TIMEOUT, STARTUP_RESPONSE_TIMEOUT,
+        WINDOWS_CREATE_NO_WINDOW,
+    };
     use serde_json::json;
     use std::path::Path;
     use std::time::Duration;
@@ -839,7 +974,10 @@ mod tests {
 
     #[test]
     fn owned_sidecar_shutdown_targets_only_the_owned_process_tree() {
-        assert_eq!(super::owned_process_tree_kill_args(4242), ["/pid", "4242", "/t", "/f"].map(String::from));
+        assert_eq!(
+            super::owned_process_tree_kill_args(4242),
+            ["/pid", "4242", "/t", "/f"].map(String::from)
+        );
     }
 
     #[test]
@@ -859,20 +997,42 @@ mod tests {
         ] {
             assert!(should_retry_after_transport_fault(error), "{error}");
         }
-        assert!(!should_retry_after_transport_fault("ENGINE_REQUEST_TOO_LARGE"));
-        assert!(!should_retry_after_transport_fault("ENGINE_REQUEST_ID_MISSING"));
+        assert!(!should_retry_after_transport_fault(
+            "ENGINE_REQUEST_TOO_LARGE"
+        ));
+        assert!(!should_retry_after_transport_fault(
+            "ENGINE_REQUEST_ID_MISSING"
+        ));
         assert!(is_safe_read_retry(&json!({ "kind": "state" })));
-        assert!(is_safe_read_retry(&json!({ "kind": "command", "command": { "kind": "REVISION.GET" } })));
-        assert!(!is_safe_read_retry(&json!({ "kind": "publication.enqueue" })));
-        assert!(!is_safe_read_retry(&json!({ "kind": "command", "command": { "kind": "APPROVAL.GRANT" } })));
+        assert!(is_safe_read_retry(
+            &json!({ "kind": "command", "command": { "kind": "REVISION.GET" } })
+        ));
+        assert!(!is_safe_read_retry(
+            &json!({ "kind": "publication.enqueue" })
+        ));
+        assert!(!is_safe_read_retry(
+            &json!({ "kind": "command", "command": { "kind": "APPROVAL.GRANT" } })
+        ));
     }
 
     #[test]
     fn bounded_backup_requests_get_a_longer_timeout_without_expanding_normal_requests() {
-        assert_eq!(response_timeout_for_request(&json!({ "kind": "backup.verify" }), true), MAINTENANCE_RESPONSE_TIMEOUT);
-        assert_eq!(response_timeout_for_request(&json!({ "kind": "maintenance.integrity.verify" }), true), MAINTENANCE_RESPONSE_TIMEOUT);
-        assert_eq!(response_timeout_for_request(&json!({ "kind": "state" }), true), RESPONSE_TIMEOUT);
-        assert_eq!(response_timeout_for_request(&json!({ "kind": "backup.restore" }), false), STARTUP_RESPONSE_TIMEOUT);
+        assert_eq!(
+            response_timeout_for_request(&json!({ "kind": "backup.verify" }), true),
+            MAINTENANCE_RESPONSE_TIMEOUT
+        );
+        assert_eq!(
+            response_timeout_for_request(&json!({ "kind": "maintenance.integrity.verify" }), true),
+            MAINTENANCE_RESPONSE_TIMEOUT
+        );
+        assert_eq!(
+            response_timeout_for_request(&json!({ "kind": "state" }), true),
+            RESPONSE_TIMEOUT
+        );
+        assert_eq!(
+            response_timeout_for_request(&json!({ "kind": "backup.restore" }), false),
+            STARTUP_RESPONSE_TIMEOUT
+        );
     }
 
     #[test]
@@ -886,16 +1046,38 @@ mod tests {
     #[test]
     fn pending_responses_are_routed_by_request_id_without_cross_talking() {
         let pending = PendingResponses::default();
-        let first = pending.register("desktop-read-1").expect("first pending response");
-        let second = pending.register("desktop-read-2").expect("second pending response");
+        let first = pending
+            .register("desktop-read-1")
+            .expect("first pending response");
+        let second = pending
+            .register("desktop-read-2")
+            .expect("second pending response");
 
-        assert!(pending.resolve_line(r#"{"id":"desktop-read-2","ok":true}"#).unwrap());
-        assert_eq!(second.recv_timeout(Duration::from_millis(50)).unwrap().unwrap(), r#"{"id":"desktop-read-2","ok":true}"#);
+        assert!(pending
+            .resolve_line(r#"{"id":"desktop-read-2","ok":true}"#)
+            .unwrap());
+        assert_eq!(
+            second
+                .recv_timeout(Duration::from_millis(50))
+                .unwrap()
+                .unwrap(),
+            r#"{"id":"desktop-read-2","ok":true}"#
+        );
         assert!(first.try_recv().is_err());
 
-        assert!(pending.resolve_line(r#"{"id":"desktop-read-1","ok":true}"#).unwrap());
-        assert_eq!(first.recv_timeout(Duration::from_millis(50)).unwrap().unwrap(), r#"{"id":"desktop-read-1","ok":true}"#);
-        assert!(!pending.resolve_line(r#"{"id":"late-response","ok":true}"#).unwrap());
+        assert!(pending
+            .resolve_line(r#"{"id":"desktop-read-1","ok":true}"#)
+            .unwrap());
+        assert_eq!(
+            first
+                .recv_timeout(Duration::from_millis(50))
+                .unwrap()
+                .unwrap(),
+            r#"{"id":"desktop-read-1","ok":true}"#
+        );
+        assert!(!pending
+            .resolve_line(r#"{"id":"late-response","ok":true}"#)
+            .unwrap());
     }
 
     #[test]
@@ -932,7 +1114,7 @@ mod tests {
     #[test]
     fn diagnostics_are_redacted_before_they_reach_disk() {
         for canary in [
-            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+            &format!("Authorization: Bearer {}", "abcdefghijklmnopqrstuvwxyz"),
             "token=top-secret-value",
             concat!("github_", "pat_123456789012345678901234567890"),
             "user@example.com failed",

@@ -227,6 +227,25 @@ async function createQaBridge(): Promise<BlogbotBridge> {
       snapshot.queue = snapshot.queue.filter((item) => item.id !== "rev-identity");
       return snapshot;
     }
+    if (state === "truthful-review" && command === "get_review_revision") {
+      const revision = structuredClone(value) as {
+        scheduledAt: string;
+        tr: { bodyMarkdown: string };
+        en: { bodyMarkdown: string };
+        claims: Array<{ status: string }>;
+        media: unknown[];
+        gates: Array<{ id: string; state: string }>;
+      };
+      revision.scheduledAt = "2031-12-24T18:45:00.000Z";
+      revision.tr.bodyMarkdown = "Kısa doğrulanmış metin.";
+      revision.en.bodyMarkdown = "Short verified copy.";
+      if (revision.claims[0]) revision.claims[0].status = "NEEDS_SOURCE";
+      revision.media = [];
+      const mediaGate = revision.gates.find((gate) => gate.id === "media");
+      if (mediaGate) mediaGate.state = "BLOCK";
+      else if (revision.gates[0]) revision.gates[0].state = "BLOCK";
+      return revision;
+    }
     if (state === "high-risk-approval-refresh" && command === "get_review_revision") {
       const revision = structuredClone(value) as Record<string, unknown>;
       revision.riskLevel = "HIGH";

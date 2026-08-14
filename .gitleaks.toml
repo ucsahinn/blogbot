@@ -9,6 +9,8 @@ paths = [
   '''(^|/)target/''',
   '''(^|/)dist/''',
   '''(^|/)output/''',
+  '''(^|/)test-results/''',
+  '''(^|/)playwright-report/''',
   '''(^|/)\.playwright-mcp/''',
   '''(^|/)\.serena/'''
 ]

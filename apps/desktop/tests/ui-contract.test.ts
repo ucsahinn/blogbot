@@ -66,6 +66,19 @@ test("background synchronization exposes failures without creating an unhandled 
   assert.match(shell, /role="status" aria-live="polite"/u);
 });
 
+test("primary navigation preserves five stable workspaces and route focus", async () => {
+  const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
+  const primaryNavigation = shell.match(/const navigation:[\s\S]*?= \[([\s\S]*?)\n\];/u)?.[1] ?? "";
+
+  assert.equal([...primaryNavigation.matchAll(/\{ id: /gu)].length, 5);
+  for (const destination of ["dashboard", "content", "editorial", "publishing", "operations"]) {
+    assert.match(primaryNavigation, new RegExp(`id: "${destination}"`, "u"));
+  }
+  assert.match(shell, /page === "editorial" && activePage === "editorial-review"/u);
+  assert.doesNotMatch(shell, /page === "content"[^\n]*editorial-review/u);
+  assert.match(shell, /workspace\?\.focus\(\{ preventScroll: true \}\);[\s\S]*?\[activePage\]/u);
+});
+
 test("collapsed and mobile navigation retain names and setup/settings entry points", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
   assert.match(shell, /aria-label=\{item\.label\}/u);
@@ -209,6 +222,32 @@ test("automatic local recovery snapshots are selectable without exposing their d
   assert.doesNotMatch(setup, /automatic.*recoveryKey/iu);
 });
 
+test("GitHub device login starts only from a user action and renders only the safe code and fixed URL", async () => {
+  const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
+
+  assert.match(setup, /const startGitHubDeviceFlow = async \(\) =>/u);
+  assert.match(setup, /await bridge\.startGitHubDeviceFlow\(\)/u);
+  assert.match(setup, /await bridge\.pollGitHubDeviceFlow\(\)/u);
+  assert.match(setup, /onClick=\{\(\) => void startGitHubDeviceFlow\(\)\}/u);
+  assert.match(setup, /GitHub cihaz girişini başlat/u);
+  assert.match(setup, /GitHub onayını kontrol et/u);
+  assert.match(setup, /githubDeviceFlow\.userCode/u);
+  assert.match(setup, /https:\/\/github\.com\/login\/device/u);
+  assert.doesNotMatch(setup, /githubDeviceFlow\.(?:deviceCode|accessToken|token)/u);
+});
+
+test("publish setup requires explicit GitHub check names instead of assuming CI success", async () => {
+  const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
+  const types = await readFile(source("types.ts"), "utf8");
+
+  assert.match(types, /deploy: \{ workflowName: string; requiredChecks: string\[\] \}/u);
+  assert.match(setup, /Zorunlu GitHub kontrolleri/u);
+  assert.match(setup, /requiredChecks\.join\("\\n"\)/u);
+  assert.match(setup, /split\(/u);
+  assert.match(setup, /filter\(Boolean\)/u);
+  assert.match(setup, /En az bir zorunlu GitHub kontrolü/u);
+});
+
 test("diagnostics exposes an explicit bounded encrypted-data integrity check", async () => {
   const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
   const bridge = await readFile(source("bridge.ts"), "utf8");
@@ -226,8 +265,7 @@ test("main WebView exposes only native-granted filesystem actions and keeps cred
     "utf8"
   );
   for (const forbidden of [
-    "allow-get-local-dev-logs",
-    "allow-github-device-flow-start"
+    "allow-get-local-dev-logs"
   ]) {
     assert.doesNotMatch(permissions, new RegExp(`\\b${forbidden}\\b`, "u"));
   }
@@ -238,6 +276,9 @@ test("main WebView exposes only native-granted filesystem actions and keeps cred
     "allow-backup-verify",
     "allow-backup-restore-preview",
     "allow-backup-restore-apply",
+    "allow-github-device-flow-start",
+    "allow-github-device-flow-poll",
+    "allow-github-device-flow-clear",
     "allow-github-device-flow-status"
   ]) {
     assert.match(permissions, new RegExp(`\\b${granted}\\b`, "u"));

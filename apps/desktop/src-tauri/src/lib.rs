@@ -1,9 +1,11 @@
 mod commands;
 mod engine_bridge;
 mod github_broker;
+pub mod github_publication;
+pub mod github_rest_adapter;
 mod notifications;
+pub mod secure_preview_fs;
 mod secure_store;
-mod secure_preview_fs;
 mod tray;
 mod unsigned_updater;
 
@@ -11,9 +13,7 @@ use tauri::Manager;
 
 fn startup_diagnostic_detail(startup_error: Option<&str>) -> String {
     let startup_error = startup_error.unwrap_or("none");
-    format!(
-        "startup_handshake=deferred\nlast_error={startup_error}\n"
-    )
+    format!("startup_handshake=deferred\nlast_error={startup_error}\n")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -60,6 +60,7 @@ pub fn run() {
             }
             commands::set_engine_ready(&app.state::<commands::DesktopState>(), runtime_ready);
             app.manage(bridge);
+            commands::start_native_publication_drainer(app.handle().clone());
             tray::install(app)?;
             Ok(())
         })
@@ -72,6 +73,8 @@ pub fn run() {
             commands::save_setup_connector,
             commands::get_connector_state,
             commands::github_device_flow_start,
+            commands::github_device_flow_poll,
+            commands::github_device_flow_clear,
             commands::github_device_flow_status,
             commands::github_validate_repository,
             commands::github_preview_pull_request,
@@ -116,17 +119,17 @@ pub fn run() {
             commands::secure_store_status,
             commands::send_test_notification,
             commands::autostart_status,
-            commands::set_autostart
-            ,commands::backup_verify
-            ,commands::backup_create
-            ,commands::backup_restore_preview
-            ,commands::backup_restore_apply
-            ,commands::automatic_backup_list
-            ,commands::automatic_backup_verify
-            ,commands::automatic_backup_restore_preview
-            ,commands::automatic_backup_restore_apply
-            ,commands::check_unsigned_update
-            ,commands::install_unsigned_update
+            commands::set_autostart,
+            commands::backup_verify,
+            commands::backup_create,
+            commands::backup_restore_preview,
+            commands::backup_restore_apply,
+            commands::automatic_backup_list,
+            commands::automatic_backup_verify,
+            commands::automatic_backup_restore_preview,
+            commands::automatic_backup_restore_apply,
+            commands::check_unsigned_update,
+            commands::install_unsigned_update
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

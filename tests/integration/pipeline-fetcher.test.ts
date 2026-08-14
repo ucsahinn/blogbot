@@ -147,6 +147,20 @@ test("surfaces a bounded transport timeout without retrying the same hop", async
   assert.equal(attempts, 1);
 });
 
+test("the fetch deadline also bounds a stalled DNS resolution", async () => {
+  const startedAt = Date.now();
+  await assert.rejects(
+    fetchSource("https://feed.example/dns-stall", {
+      resolve: async () => new Promise<string[]>((resolve) => setTimeout(() => resolve(["93.184.216.34"]), 200)),
+      request: async () => {
+        throw new Error("request must not start after DNS deadline");
+      }
+    }, { timeoutMs: 25 }),
+    (error: unknown) => error instanceof FetchBoundaryError && error.code === "TIMEOUT"
+  );
+  assert.ok(Date.now() - startedAt < 150);
+});
+
 test("node transport connects only to an approved address while preserving the source host", async (t) => {
   let receivedHost = "";
   const server = createServer((request, response) => {

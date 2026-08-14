@@ -73,20 +73,49 @@ test("all primary routes render without browser runtime errors", async ({ page }
   }
 });
 
-test("primary navigation buttons open their named workspaces", async ({ page }) => {
+test("primary navigation exposes exactly the five stable workspaces", async ({ page }) => {
   const destinations = [
     ["Genel Bakış", "#dashboard", "Yayın akışı kontrol altında."],
     ["İçerik Akışı", "#content", "Kaynaklardan yayın fikrine tek çalışma alanı."],
+    ["Editoryal Masa", "#editorial", "Taslak, iki dil ve kanıt paketi aynı masada."],
     ["Takvim ve Yayın", "#publishing", "Haftalık ritim, hazır çıktılar ve geçmiş."],
     ["Operasyonlar", "#operations", "İşler, Codex kapasitesi ve sistem sağlığı."]
   ] as const;
 
+  const primaryNavigation = page.getByRole("navigation", { name: "Ana menü" });
+  await page.goto("#dashboard");
+  await expect(primaryNavigation.getByRole("button")).toHaveCount(destinations.length);
+
   for (const [label, hash, heading] of destinations) {
     await page.goto("#dashboard");
-    await page.getByRole("navigation", { name: "Ana menü" }).getByRole("button", { name: label }).click();
+    await primaryNavigation.getByRole("button", { name: label }).click();
     await expect(page).toHaveURL(new RegExp(`${hash}$`, "u"));
     await expect(page.getByRole("heading", { name: heading })).toBeVisible();
   }
+});
+
+test("editorial deep routes activate Editoryal Masa instead of İçerik Akışı", async ({ page }) => {
+  const primaryNavigation = page.getByRole("navigation", { name: "Ana menü" });
+
+  for (const route of ["editorial", "editorial-review"]) {
+    await page.goto(`#${route}`);
+    await expect(primaryNavigation.getByRole("button", { name: "Editoryal Masa" })).toHaveAttribute("aria-current", "page");
+    await expect(primaryNavigation.getByRole("button", { name: "İçerik Akışı" })).not.toHaveAttribute("aria-current", "page");
+  }
+});
+
+test("route transitions move focus to the main workspace", async ({ page }) => {
+  await page.goto("#dashboard");
+  await page.getByRole("navigation", { name: "Ana menü" }).getByRole("button", { name: "Editoryal Masa" }).click();
+
+  await expect(page).toHaveURL(/#editorial$/u);
+  await expect(page.getByRole("main")).toBeFocused();
+
+  await page.evaluate(() => {
+    window.location.hash = "#content-candidates";
+  });
+  await expect(page).toHaveURL(/#content-candidates$/u);
+  await expect(page.getByRole("main")).toBeFocused();
 });
 
 test("operational workspace copy follows the 14px body type floor", async ({ page }) => {
@@ -250,6 +279,10 @@ test("representative workspaces have no automatically detectable accessibility v
 });
 
 test("every primary route has no automatically detectable accessibility violations", async ({ page }) => {
+  // Axe scans every application surface in one browser session. The complete
+  // route matrix legitimately exceeds Playwright's 30-second default on
+  // slower Windows CI hosts even when every scan is clean.
+  test.setTimeout(60_000);
   for (const [route] of surfaces) {
     await page.goto(`#${route}`);
     await waitForPageTransition(page);
@@ -1265,6 +1298,23 @@ test("revision edit keeps the accepted job visible while the editorial inventory
   await expect(page.getByRole("button", { name: /Düzenleme talebini işliyor/u })).toBeVisible({ timeout: 10_000 });
 });
 
+test("review metadata is derived from the selected immutable revision", async ({ page }) => {
+  await page.goto("?state=truthful-review#editorial-review");
+
+  await expect(page.getByText("2031", { exact: false })).toBeVisible();
+  await expect(page.getByText("29 Temmuz · 16:30", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("8 dk okuma", { exact: true })).toHaveCount(0);
+  await page.getByRole("tab", { name: /İddialar ve kaynaklar/u }).click();
+  await expect(page.getByText("Tümü kaynaklı", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("1 iddia kaynak bekliyor", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: /Medya/u }).click();
+  await expect(page.getByText("Medya eksik", { exact: true })).toBeVisible();
+  await expect(page.getByText("2 / 2 uygun", { exact: true })).toHaveCount(0);
+  await page.getByRole("tab", { name: /SEO ve güvenlik/u }).click();
+  await expect(page.getByText(/engel nedeniyle onaya hazır değil/u)).toBeVisible();
+  await expect(page.getByText(/sınırlarından geçti/u)).toHaveCount(0);
+});
+
 test("review content makes missing hero media actionable instead of showing a synthetic preview", async ({ page }) => {
   await page.goto("#editorial-review");
 
@@ -1350,7 +1400,7 @@ test("saved local output target unlocks approved revision materialization", asyn
   await expect(page.getByRole("status")).toContainText("dosya yerel proje klasörüne yazıldı");
 });
 
-test("local write confirmation returns keyboard focus to its trigger when cancelled", async ({ page }) => {
+test("local write confirmation traps focus on the safe action and returns it when cancelled", async ({ page }) => {
   await page.goto("#setup");
   await page.getByRole("button", { name: /Yayın bağlantısı: Yerel klasör, proje veya GitHub hedefini/u }).click();
   const localOutput = page.getByRole("group", { name: "Çıktı klasörü" });
@@ -1361,9 +1411,17 @@ test("local write confirmation returns keyboard focus to its trigger when cancel
   await page.getByRole("button", { name: "Bu revizyonu onayla" }).click();
   const materialize = page.getByRole("button", { name: /Onaylı paketi seçili klasöre yaz/u });
   await materialize.click();
-  await expect(page.getByRole("alertdialog", { name: "Yerel dosya yazımını onayla" })).toBeVisible();
+  const confirmation = page.getByRole("alertdialog", { name: "Yerel dosya yazımını onayla" });
+  await expect(confirmation).toBeVisible();
+  const cancel = confirmation.getByRole("button", { name: "Vazgeç" });
+  const confirm = confirmation.getByRole("button", { name: "Dosyaları yerel hedefe yaz" });
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(cancel).toBeFocused();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("alertdialog", { name: "Yerel dosya yazımını onayla" })).toHaveCount(0);
+  await expect(confirmation).toHaveCount(0);
   await expect(materialize).toBeFocused();
 });
 
@@ -1518,10 +1576,11 @@ test("setup exposes the read-only GitHub broker status before external authoriza
   await page.getByRole("button", { name: /Yayın bağlantısı/u }).click();
   await page.getByRole("radio", { name: /Yayındaki siteye gönder/u }).click();
 
-  const status = page.getByRole("button", { name: "Durumu kontrol et" });
+  const github = page.getByTestId("setup-connector-github");
+  const status = github.getByRole("button", { name: "GitHub bağlantı durumunu kontrol et" });
   await expect(status).toBeEnabled();
   await status.click();
-  await expect(page.getByRole("status")).toContainText("Demo GitHub bağlantısı hazır.");
+  await expect(github.getByRole("status")).toContainText("Demo GitHub bağlantısı hazır.");
 });
 
 test("local project setup explains when the safe process status cannot be checked", async ({ page }) => {

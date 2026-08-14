@@ -3,7 +3,7 @@ description = "Allows the trusted Blogbot main window to invoke only the applica
 permissions = [
   "allow-get-bootstrap-snapshot", "allow-engine-doctor", "allow-get-prerequisite-status",
   "allow-test-setup-connector", "allow-save-setup-connector", "allow-get-connector-state",
-  "allow-github-device-flow-status", "allow-github-validate-repository", "allow-github-preview-pull-request",
+  "allow-github-device-flow-start", "allow-github-device-flow-poll", "allow-github-device-flow-clear", "allow-github-device-flow-status", "allow-github-validate-repository", "allow-github-preview-pull-request",
   "allow-test-codex-runtime", "allow-start-codex-login",
   "allow-test-local-engine", "allow-verify-local-integrity", "allow-recover-local-workspace", "allow-pick-local-folder", "allow-local-dev-status",
   "allow-start-local-dev", "allow-stop-local-dev",

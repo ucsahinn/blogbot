@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,6 +24,40 @@ pub struct UnsignedUpdate {
     pub notes: String,
     pub url: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct CheckedUpdateAuthorization {
+    version: String,
+    url: String,
+    sha256: String,
+}
+
+impl CheckedUpdateAuthorization {
+    fn new(update: &UnsignedUpdate) -> Self {
+        Self {
+            version: update.version.clone(),
+            url: update.url.clone(),
+            sha256: update.sha256.clone(),
+        }
+    }
+
+    fn validate(&self, request: &InstallUnsignedUpdateRequest) -> Result<(), CommandError> {
+        if self.version != request.version
+            || self.url != request.url
+            || self.sha256 != request.sha256
+        {
+            return Err(CommandError::InvalidInput(
+                "UPDATE_NOT_AUTHORIZED_BY_CHECK".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn checked_update_authorization() -> &'static Mutex<Option<CheckedUpdateAuthorization>> {
+    static AUTHORIZATION: OnceLock<Mutex<Option<CheckedUpdateAuthorization>>> = OnceLock::new();
+    AUTHORIZATION.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,7 +248,12 @@ async fn fetch_update() -> Result<Option<UnsignedUpdate>, CommandError> {
 }
 
 pub async fn check_unsigned_update() -> Result<Option<UnsignedUpdate>, CommandError> {
-    fetch_update().await
+    let update = fetch_update().await?;
+    let authorization = update.as_ref().map(CheckedUpdateAuthorization::new);
+    *checked_update_authorization().lock().map_err(|_| {
+        CommandError::UpdateUnavailable("UPDATE_AUTHORIZATION_UNAVAILABLE".into())
+    })? = authorization;
+    Ok(update)
 }
 
 fn configure_hidden_command(command: &mut Command) {
@@ -228,7 +268,9 @@ fn create_installer_file(version: &str) -> Result<(PathBuf, std::fs::File), Comm
     let mut random = [0u8; 16];
     unsafe {
         if BCryptGenRandom(None, &mut random, BCRYPT_USE_SYSTEM_PREFERRED_RNG).is_err() {
-            return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_TEMP_UNAVAILABLE".into()));
+            return Err(CommandError::UpdateUnavailable(
+                "UPDATE_INSTALLER_TEMP_UNAVAILABLE".into(),
+            ));
         }
     }
     let entropy = random
@@ -236,16 +278,25 @@ fn create_installer_file(version: &str) -> Result<(PathBuf, std::fs::File), Comm
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     for attempt in 0..32u32 {
-        let path = std::env::temp_dir().join(format!(
-            "Blogbot-{version}-{entropy}-{attempt}.setup.exe"
-        ));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        let path =
+            std::env::temp_dir().join(format!("Blogbot-{version}-{entropy}-{attempt}.setup.exe"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_WRITE_FAILED".into())),
+            Err(_) => {
+                return Err(CommandError::UpdateUnavailable(
+                    "UPDATE_INSTALLER_WRITE_FAILED".into(),
+                ))
+            }
         }
     }
-    Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_TEMP_UNAVAILABLE".into()))
+    Err(CommandError::UpdateUnavailable(
+        "UPDATE_INSTALLER_TEMP_UNAVAILABLE".into(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +311,12 @@ pub async fn install_unsigned_update(
     app: AppHandle,
     request: InstallUnsignedUpdateRequest,
 ) -> Result<(), CommandError> {
+    checked_update_authorization()
+        .lock()
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_AUTHORIZATION_UNAVAILABLE".into()))?
+        .as_ref()
+        .ok_or_else(|| CommandError::InvalidInput("UPDATE_CHECK_REQUIRED".into()))?
+        .validate(&request)?;
     validate_release_url(&request.url)?;
     validate_sha256(&request.sha256)?;
     if !is_newer_version(&request.version)? {
@@ -277,31 +334,44 @@ pub async fn install_unsigned_update(
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_UNAVAILABLE".into()))?
         .error_for_status()
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_HTTP_ERROR".into()))?;
-    if response.content_length().is_some_and(|length| length > MAX_INSTALLER_BYTES) {
-        return Err(CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_TOO_LARGE".into()));
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_INSTALLER_BYTES)
+    {
+        return Err(CommandError::UpdateUnavailable(
+            "UPDATE_DOWNLOAD_TOO_LARGE".into(),
+        ));
     }
     let (path, mut installer_file) = create_installer_file(&request.version)?;
     let mut digest = Sha256::new();
     let mut downloaded = 0u64;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_FAILED".into()))?
-    {
+    while let Some(chunk) = match response.chunk().await {
+        Ok(chunk) => chunk,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_FAILED".into()));
+        }
+    } {
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         if downloaded > MAX_INSTALLER_BYTES {
             let _ = std::fs::remove_file(&path);
-            return Err(CommandError::UpdateUnavailable("UPDATE_DOWNLOAD_TOO_LARGE".into()));
+            return Err(CommandError::UpdateUnavailable(
+                "UPDATE_DOWNLOAD_TOO_LARGE".into(),
+            ));
         }
         digest.update(&chunk);
         if installer_file.write_all(&chunk).is_err() {
             let _ = std::fs::remove_file(&path);
-            return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_WRITE_FAILED".into()));
+            return Err(CommandError::UpdateUnavailable(
+                "UPDATE_INSTALLER_WRITE_FAILED".into(),
+            ));
         }
     }
     if installer_file.sync_all().is_err() {
         let _ = std::fs::remove_file(&path);
-        return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_WRITE_FAILED".into()));
+        return Err(CommandError::UpdateUnavailable(
+            "UPDATE_INSTALLER_WRITE_FAILED".into(),
+        ));
     }
     drop(installer_file);
 
@@ -316,9 +386,12 @@ pub async fn install_unsigned_update(
     let mut installer = Command::new(&path);
     configure_hidden_command(&mut installer);
     installer.arg("/S");
-    installer
-        .spawn()
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_INSTALLER_START_FAILED".into()))?;
+    if installer.spawn().is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(CommandError::UpdateUnavailable(
+            "UPDATE_INSTALLER_START_FAILED".into(),
+        ));
+    }
     app.exit(0);
     Ok(())
 }
@@ -326,8 +399,9 @@ pub async fn install_unsigned_update(
 #[cfg(test)]
 mod tests {
     use super::{
-        current_version, github_release_update, is_newer_version, manifest_update, validate_release_url,
-        validate_sha256, resolve_manifest_or_release, CommandError, GithubRelease,
+        current_version, github_release_update, is_newer_version, manifest_update,
+        resolve_manifest_or_release, validate_release_url, validate_sha256,
+        CheckedUpdateAuthorization, CommandError, GithubRelease, InstallUnsignedUpdateRequest,
         ReleaseManifest, UnsignedUpdate,
     };
 
@@ -338,7 +412,10 @@ mod tests {
         let major = segments.next().expect("major version");
         let minor = segments.next().expect("minor version");
         let patch = segments.next().expect("patch version") + 1;
-        assert!(segments.next().is_none(), "package version has three segments");
+        assert!(
+            segments.next().is_none(),
+            "package version has three segments"
+        );
         format!("{major}.{minor}.{patch}")
     }
 
@@ -396,12 +473,59 @@ mod tests {
         };
 
         let result = resolve_manifest_or_release(
-            Err(CommandError::UpdateUnavailable("UPDATE_MANIFEST_UNAVAILABLE".into())),
+            Err(CommandError::UpdateUnavailable(
+                "UPDATE_MANIFEST_UNAVAILABLE".into(),
+            )),
             Ok(Some(fallback)),
         )
         .unwrap()
         .unwrap();
 
         assert_eq!(result.version, "0.1.15");
+    }
+
+    #[test]
+    fn install_authorization_rejects_a_renderer_mixing_manifest_tuple_fields() {
+        let version = next_test_version();
+        let checked = UnsignedUpdate {
+            version: version.clone(),
+            notes: "Official release".into(),
+            url: format!(
+                "https://github.com/ucsahinn/blogbot/releases/download/v{version}/Blogbot_{version}_x64-setup.exe"
+            ),
+            sha256: "a".repeat(64),
+        };
+        let authorization = CheckedUpdateAuthorization::new(&checked);
+        let official = InstallUnsignedUpdateRequest {
+            version: checked.version.clone(),
+            url: checked.url.clone(),
+            sha256: checked.sha256.clone(),
+        };
+
+        assert!(authorization.validate(&official).is_ok());
+
+        let mismatches = [
+            InstallUnsignedUpdateRequest {
+                version: format!("{}.0", checked.version),
+                url: official.url.clone(),
+                sha256: official.sha256.clone(),
+            },
+            InstallUnsignedUpdateRequest {
+                version: official.version.clone(),
+                url: official.url.replace("Blogbot_", "Forged_"),
+                sha256: official.sha256.clone(),
+            },
+            InstallUnsignedUpdateRequest {
+                version: official.version.clone(),
+                url: official.url.clone(),
+                sha256: "b".repeat(64),
+            },
+        ];
+        for request in mismatches {
+            assert!(
+                authorization.validate(&request).is_err(),
+                "every requested field must match the exact checked manifest tuple"
+            );
+        }
     }
 }

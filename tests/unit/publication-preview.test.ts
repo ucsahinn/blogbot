@@ -32,6 +32,8 @@ test("publication preview hashes an immutable engine media reference without inl
     currentBaseSha: "b".repeat(40),
     siteOrigin: "https://example.test",
     contentRoot: "/site",
+    requiredChecks: ["ci/test"],
+    deployWorkflow: "deploy.yml",
     bundlePolicy: {
       adapterId: "astro-generic",
       manifestPath: ".blogbot/manifests/revision-media-ref.json",

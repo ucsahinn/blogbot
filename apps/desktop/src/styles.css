@@ -11,16 +11,27 @@
   --ink: #122329;
   --ink-soft: #405056;
   --ink-faint: #405056;
+  /* Backward-compatible semantic aliases used by older screens. */
+  --text: var(--ink);
+  --text-secondary: var(--ink-soft);
+  --muted: var(--ink-soft);
+  --ink-muted: var(--ink-soft);
   --canvas: #f3f4f0;
   --surface: #fbfcf9;
   --surface-raised: #ffffff;
   --surface-muted: #edf0eb;
+  --surface-soft: var(--surface-muted);
+  --paper-soft: var(--surface);
   --line: #dce1da;
   --line-strong: #c8d0c7;
+  --border-subtle: var(--line);
+  --border-strong: var(--line-strong);
+  --radius-md: 12px;
   --sidebar: #0d1b21;
   --sidebar-soft: #17272d;
   --sidebar-line: #26383e;
   --accent: #a93618;
+  --brand: var(--accent);
   --accent-dark: #862a14;
   --accent-soft: #fff0e9;
   --teal: #17695f;
