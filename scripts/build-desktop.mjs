@@ -35,4 +35,8 @@ const environment = process.platform === "win32"
 if (process.platform === "win32") {
   await mkdir(String(environment.WIX_TEMP), { recursive: true });
 }
-await run(process.execPath, [npmCli, "run", "tauri", "--workspace", "@blogbot/desktop", "--", "build"], environment);
+await run(
+  process.execPath,
+  [npmCli, "run", "tauri", "--workspace", "@blogbot/desktop", "--", "build", "--", "--bin", "blogbot"],
+  environment
+);

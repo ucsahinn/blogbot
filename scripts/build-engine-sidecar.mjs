@@ -153,11 +153,11 @@ await run("cargo", [
   "build",
   "--manifest-path", join(root, "apps", "desktop", "src-tauri", "Cargo.toml"),
   "--release",
-  "--bin",
+  "--example",
   "blogbot-secure-restore"
 ]);
 await copyFile(
-  join(root, "apps", "desktop", "src-tauri", "target", "release", "blogbot-secure-restore.exe"),
+  join(root, "apps", "desktop", "src-tauri", "target", "release", "examples", "blogbot-secure-restore.exe"),
   secureRestoreExecutable
 );
 

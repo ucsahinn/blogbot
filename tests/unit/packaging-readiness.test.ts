@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -47,14 +47,13 @@ test("operation log entries retain correlation and human-readable diagnostics", 
   }
 });
 
-test("Windows bundle manifest packages Blogbot as the main executable and includes the sidecar, local PGlite assets, and WebView2 bootstrapper", async () => {
+test("Windows bundle manifest includes the sidecar, local PGlite assets, and WebView2 bootstrapper", async () => {
   const config = JSON.parse(
     await readFile(
       join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"),
       "utf8"
     )
   ) as {
-    mainBinaryName?: string;
     bundle?: {
       active?: boolean;
       targets?: string[];
@@ -65,7 +64,6 @@ test("Windows bundle manifest packages Blogbot as the main executable and includ
   };
   const bundle = config.bundle;
 
-  assert.equal(config.mainBinaryName, "blogbot");
   assert.equal(bundle?.active, true);
   assert.deepEqual(new Set(bundle?.targets), new Set(["msi", "nsis"]));
   assert.ok(bundle?.externalBin?.includes("binaries/blogbot-engine"));
@@ -137,6 +135,16 @@ test("Windows auto-update uses an unsigned HTTPS GitHub Release feed with SHA-25
   assert.doesNotMatch(releaseWorkflow, /UPDATER_SIGNATURE/u);
 });
 
+test("secure restore helper is built as a Cargo example so Tauri sees only the GUI binary", async () => {
+  const buildScript = await readFile(join(repositoryRoot, "scripts", "build-engine-sidecar.mjs"), "utf8");
+
+  await access(
+    join(repositoryRoot, "apps", "desktop", "src-tauri", "examples", "blogbot-secure-restore.rs")
+  );
+  assert.match(buildScript, /"--example",\s*"blogbot-secure-restore"/u);
+  assert.match(buildScript, /target",\s*"release",\s*"examples",\s*"blogbot-secure-restore\.exe"/u);
+});
+
 test("secret scan excludes generated build artifacts but keeps source files in scope", async () => {
   const config = await readFile(join(repositoryRoot, ".gitleaks.toml"), "utf8");
 
@@ -169,6 +177,11 @@ test("desktop production build invokes Tauri after preparing the local engine", 
   assert.match(desktopBuildScript, /build:engine/u, "desktop build must prepare the bundled engine first");
   assert.match(desktopBuildScript, /tauri/u, "desktop build must produce a Tauri executable, not only Vite assets");
   assert.match(desktopBuildScript, /\bbuild\b/u, "desktop build must invoke the Tauri production build command");
+  assert.match(
+    desktopBuildScript,
+    /"--bin",\s*"blogbot"/u,
+    "Tauri packaging must explicitly build the GUI binary"
+  );
   assert.doesNotMatch(desktopBuildScript, /--no-bundle/u, "release packaging must generate the configured MSI and NSIS installers");
   assert.match(desktopBuildScript, /WIX_TEMP/u, "Windows MSI packaging must use an app-owned writable WiX temporary directory");
 });
