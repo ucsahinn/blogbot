@@ -11,6 +11,34 @@ import {
   SourceRepositoryError
 } from "../../packages/database/src/source-repository.ts";
 
+function countTransactionalQueries(repository: PGliteSourceRepository) {
+  const holder = repository as unknown as { database: PGlite };
+  const database = holder.database;
+  const originalTransaction = database.transaction.bind(database);
+  let count = 0;
+  holder.database = new Proxy(database, {
+    get(target, property, receiver) {
+      if (property === "transaction") {
+        return async (callback: (transaction: PGlite) => Promise<unknown>) => originalTransaction(async (transaction) => callback(new Proxy(transaction, {
+          get(transactionTarget, transactionProperty, transactionReceiver) {
+            if (transactionProperty === "query") {
+              return async (...args: Parameters<PGlite["query"]>) => {
+                count += 1;
+                return transactionTarget.query(...args);
+              };
+            }
+            const value = Reflect.get(transactionTarget, transactionProperty, transactionReceiver);
+            return typeof value === "function" ? value.bind(transactionTarget) : value;
+          }
+        }) as unknown as PGlite));
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  }) as PGlite;
+  return () => count;
+}
+
 test("source catalog and feed entries persist across repository restart", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-repo-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -342,4 +370,52 @@ test("completed source encryption migration rejects plaintext scan records", asy
   } finally {
     await reopened.close();
   }
+});
+
+test("large source scan commits entries with a bounded number of database queries", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-scan-batched-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const repository = await PGliteSourceRepository.open(dataDir);
+  t.after(() => repository.close());
+  await repository.saveSource({
+    id: "source-batched",
+    url: "https://news.example/batched.xml",
+    kind: "RSS",
+    status: "ACTIVE",
+    trustStatus: "APPROVED",
+    rightsStatus: "APPROVED",
+    language: "en",
+    discoveredFeeds: [],
+    createdAt: "2026-08-15T00:00:00.000Z",
+    updatedAt: "2026-08-15T00:00:00.000Z",
+    version: 1
+  });
+  const [scan] = await repository.prepareScanBatch(
+    "engine:batched-scan",
+    "batched scan request",
+    [{ sourceId: "source-batched", expectedVersion: 1 }],
+    "2026-08-15T00:01:00.000Z"
+  );
+  assert.ok(scan);
+  await repository.markScanRunning(scan.id, "2026-08-15T00:01:01.000Z");
+  const queryCount = countTransactionalQueries(repository);
+
+  const completed = await repository.completeSourceScan(scan.id, {
+    kind: "RSS",
+    finalUrl: "https://news.example/batched.xml",
+    contentType: "application/rss+xml",
+    discoveredFeeds: [],
+    completedAt: "2026-08-15T00:02:00.000Z",
+    entries: Array.from({ length: 64 }, (_, index) => ({
+      externalId: `story-${index}`,
+      title: `Story ${index}`,
+      summary: `Summary ${index}`,
+      url: `https://news.example/stories/${index}`,
+      publishedAt: "2026-08-15T00:00:00.000Z"
+    }))
+  });
+
+  assert.equal(completed.entriesAdded, 64);
+  assert.ok(queryCount() <= 16, `expected batched scan writes, received ${queryCount()} transaction queries`);
+  assert.equal((await repository.listEntries("source-batched")).length, 64);
 });

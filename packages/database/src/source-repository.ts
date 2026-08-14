@@ -273,6 +273,10 @@ CREATE INDEX IF NOT EXISTS blogbot_source_scans_batch_idx
   ON blogbot_source_scans (batch_key, ordinal);
 `;
 
+// Keep an interactive PGlite read from waiting behind hundreds of individual
+// source-entry statements in a single scan transaction.
+const SOURCE_ENTRY_WRITE_BATCH_SIZE = 32;
+
 export class PGliteSourceRepository implements SourceRepository {
   private constructor(
     private readonly database: PGlite,
@@ -528,54 +532,7 @@ export class PGliteSourceRepository implements SourceRepository {
     await this.getSource(sourceId);
     let inserted = 0;
     await this.database.transaction(async (transaction) => {
-      for (const entry of entries) {
-        const capturedAt = new Date().toISOString();
-        const contentHash = sourceEntryVersionContentHash(sourceId, entry);
-        const existing = await transaction.query<{ content_hash: string }>(
-          `SELECT content_hash
-             FROM blogbot_source_entry_versions
-            WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
-          [sourceId, entry.externalId, contentHash]
-        );
-        if (!existing.rows[0]) {
-          inserted += 1;
-        }
-        const sortAt = normalizedEntrySortAt(entry.publishedAt, capturedAt);
-        const stored: StoredSourceEntry = {
-          sourceId,
-          capturedAt,
-          contentHash,
-          versionId: sourceEntryVersionId(sourceId, entry.externalId, contentHash),
-          ...entry
-        };
-        await transaction.query(
-          `INSERT INTO blogbot_source_entry_versions (
-             source_id, external_id, content_hash, entry_url, sort_at, captured_at, value
-           ) VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::jsonb)
-           ON CONFLICT (source_id, external_id, content_hash) DO NOTHING`,
-          [
-            sourceId,
-            entry.externalId,
-            contentHash,
-            entry.url,
-            sortAt,
-            capturedAt,
-            JSON.stringify(
-              this.protector.seal(
-                stored,
-                sourceEntryVersionContext(sourceId, entry.externalId, contentHash)
-              )
-            )
-          ]
-        );
-        await transaction.query(
-          `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (source_id, external_id)
-           DO UPDATE SET content_hash = EXCLUDED.content_hash`,
-          [sourceId, entry.externalId, contentHash]
-        );
-      }
+      inserted = await this.writeSourceEntries(transaction, sourceId, entries, new Date().toISOString());
     });
     return inserted;
   }
@@ -947,55 +904,12 @@ export class PGliteSourceRepository implements SourceRepository {
         ]
       );
 
-      let entriesAdded = 0;
-      for (const entry of input.entries) {
-        const contentHash = sourceEntryVersionContentHash(source.id, entry);
-        const existing = await transaction.query<{ content_hash: string }>(
-          `SELECT content_hash
-             FROM blogbot_source_entry_versions
-            WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
-          [source.id, entry.externalId, contentHash]
-        );
-        if (!existing.rows[0]) {
-          entriesAdded += 1;
-        }
-        const capturedAt = input.completedAt;
-        const sortAt = normalizedEntrySortAt(entry.publishedAt, capturedAt);
-        const stored: StoredSourceEntry = {
-          sourceId: source.id,
-          capturedAt,
-          contentHash,
-          versionId: sourceEntryVersionId(source.id, entry.externalId, contentHash),
-          ...entry
-        };
-        await transaction.query(
-          `INSERT INTO blogbot_source_entry_versions (
-             source_id, external_id, content_hash, entry_url, sort_at, captured_at, value
-           ) VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::jsonb)
-           ON CONFLICT (source_id, external_id, content_hash) DO NOTHING`,
-          [
-            source.id,
-            entry.externalId,
-            contentHash,
-            entry.url,
-            sortAt,
-            capturedAt,
-            JSON.stringify(
-              this.protector.seal(
-                stored,
-                sourceEntryVersionContext(source.id, entry.externalId, contentHash)
-              )
-            )
-          ]
-        );
-        await transaction.query(
-          `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (source_id, external_id)
-           DO UPDATE SET content_hash = EXCLUDED.content_hash`,
-          [source.id, entry.externalId, contentHash]
-        );
-      }
+      const entriesAdded = await this.writeSourceEntries(
+        transaction,
+        source.id,
+        input.entries,
+        input.completedAt
+      );
       const completed: LocalSourceScan = {
         ...scan,
         state: "SUCCEEDED",
@@ -1029,6 +943,66 @@ export class PGliteSourceRepository implements SourceRepository {
       await this.writeScan(transaction, failed);
       return failed;
     });
+  }
+
+  private async writeSourceEntries(
+    client: Pick<PGlite, "query">,
+    sourceId: string,
+    entries: readonly SourceFeedEntry[],
+    capturedAt: string
+  ): Promise<number> {
+    let inserted = 0;
+    for (let offset = 0; offset < entries.length; offset += SOURCE_ENTRY_WRITE_BATCH_SIZE) {
+      const batch = entries.slice(offset, offset + SOURCE_ENTRY_WRITE_BATCH_SIZE).map((entry) => {
+        const contentHash = sourceEntryVersionContentHash(sourceId, entry);
+        const stored: StoredSourceEntry = {
+          sourceId,
+          capturedAt,
+          contentHash,
+          versionId: sourceEntryVersionId(sourceId, entry.externalId, contentHash),
+          ...entry
+        };
+        return {
+          externalId: entry.externalId,
+          contentHash,
+          url: entry.url,
+          sortAt: normalizedEntrySortAt(entry.publishedAt, capturedAt),
+          value: JSON.stringify(
+            this.protector.seal(
+              stored,
+              sourceEntryVersionContext(sourceId, entry.externalId, contentHash)
+            )
+          )
+        };
+      });
+      if (batch.length === 0) continue;
+      const insertedRows = await client.query<{ external_id: string }>(
+        `INSERT INTO blogbot_source_entry_versions (
+           source_id, external_id, content_hash, entry_url, sort_at, captured_at, value
+         ) VALUES ${sqlValuesPlaceholders(batch.length, 7)}
+         ON CONFLICT (source_id, external_id, content_hash) DO NOTHING
+         RETURNING external_id`,
+        batch.flatMap((entry) => [
+          sourceId,
+          entry.externalId,
+          entry.contentHash,
+          entry.url,
+          entry.sortAt,
+          capturedAt,
+          entry.value
+        ])
+      );
+      inserted += insertedRows.rows.length;
+      const latest = [...new Map(batch.map((entry) => [entry.externalId, entry])).values()];
+      await client.query(
+        `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
+         VALUES ${sqlValuesPlaceholders(latest.length, 3)}
+         ON CONFLICT (source_id, external_id)
+         DO UPDATE SET content_hash = EXCLUDED.content_hash`,
+        latest.flatMap((entry) => [sourceId, entry.externalId, entry.contentHash])
+      );
+    }
+    return inserted;
   }
 
   private async findSourceById(
@@ -1416,6 +1390,13 @@ async function verifySourceEntryVersions(database: PGlite, protector: JsonProtec
       sourceEntryVersionContentHash(row.source_id, entry) !== row.content_hash
     ) throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
   }
+}
+
+function sqlValuesPlaceholders(rowCount: number, columnCount: number): string {
+  return Array.from({ length: rowCount }, (_, row) => {
+    const offset = row * columnCount;
+    return `(${Array.from({ length: columnCount }, (_, column) => `$${offset + column + 1}`).join(", ")})`;
+  }).join(", ");
 }
 
 function normalizedEntrySortAt(publishedAt: string | undefined, fallbackIso: string): string {

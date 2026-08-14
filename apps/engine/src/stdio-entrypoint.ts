@@ -2697,6 +2697,15 @@ async function purgeExpiredSourceEvidence(
   );
 }
 
+/**
+ * Automatic archive creation holds PGlite's exclusive query gate while it
+ * snapshots the live data directory. Keep it outside the interactive startup
+ * window; users can still create a manual backup immediately when needed.
+ */
+export function automaticBackupInitialDelayMs(): number {
+  return 24 * 60 * 60 * 1_000;
+}
+
 /** Resolves legacy candidate jobs to the one feed entry the editor selected.
  * Older queue records predate `candidateUrl`; keep their durable identity but
  * never send an entire feed to the Codex runner when the selected entry can
@@ -2910,7 +2919,6 @@ export async function createPersistentEngineProtocol(
     () => createConsistentAutomaticBackup(repository.getDatabase(), dataDir)
   );
   let automaticBackupTimer: ReturnType<typeof setInterval> | undefined;
-  let initialAutomaticBackupTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     await queue.start();
     await sourceScanCoordinator.recover();
@@ -3116,17 +3124,11 @@ export async function createPersistentEngineProtocol(
     // ready. Bootstrap first; maintenance remains best-effort and unref'd.
     sourceRetentionTimer = setInterval(() => { void runSourceRetention(); }, 24 * 60 * 60 * 1_000);
     sourceRetentionTimer.unref?.();
-    automaticBackupTimer = setInterval(() => { void runAutomaticBackup(); }, 24 * 60 * 60 * 1_000);
+    automaticBackupTimer = setInterval(() => { void runAutomaticBackup(); }, automaticBackupInitialDelayMs());
     automaticBackupTimer.unref?.();
-    // Do not compete with the first interactive read or a fast application
-    // close. The recurring tasks are durable maintenance, not a startup gate.
-    // Snapshot shortly after a stable session starts, then daily thereafter.
-    initialAutomaticBackupTimer = setTimeout(() => { void runAutomaticBackup(); }, 2 * 60 * 1_000);
-    initialAutomaticBackupTimer.unref?.();
   } catch (error) {
     if (automaticBackupTimer) clearInterval(automaticBackupTimer);
     if (sourceRetentionTimer) clearInterval(sourceRetentionTimer);
-    if (initialAutomaticBackupTimer) clearTimeout(initialAutomaticBackupTimer);
     publicationOutboxWorker?.stop();
     publicationScheduler?.stop();
     await queue.stop();
@@ -3188,7 +3190,6 @@ export async function createPersistentEngineProtocol(
       try {
         if (automaticBackupTimer) clearInterval(automaticBackupTimer);
         if (sourceRetentionTimer) clearInterval(sourceRetentionTimer);
-        if (initialAutomaticBackupTimer) clearTimeout(initialAutomaticBackupTimer);
         publicationOutboxWorker?.stop();
         publicationScheduler?.stop();
       sourceScanScheduler.stop();

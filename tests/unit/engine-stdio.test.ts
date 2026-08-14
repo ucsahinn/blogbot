@@ -9,6 +9,7 @@ import { join } from "node:path";
 import {
   createEngineProtocol,
   assertRevisionGeneratedFilesMatch,
+  automaticBackupInitialDelayMs,
   createConsistentAutomaticBackup,
   isPublicationPreviewCurrent,
   handleBackupRequest,
@@ -601,6 +602,10 @@ test("automatic snapshots can be listed, verified, and previewed without exposin
     else process.env.BLOGBOT_DATA_KEY_HEX = previousKey;
     await (await import("node:fs/promises")).rm(root, { recursive: true, force: true });
   }
+});
+
+test("automatic backups never run in the first interactive session window", () => {
+  assert.equal(automaticBackupInitialDelayMs(), 24 * 60 * 60 * 1_000);
 });
 
 test("automatic snapshot checkpoints and excludes concurrent PGlite queries before reading live data", async () => {
