@@ -62,39 +62,27 @@ fn existing_valid_key(path: &Path) -> Option<Vec<u8>> {
         .filter(|plaintext| plaintext.len() == 32)
 }
 
-fn migrate_legacy_key_to_stable(
-    stable_directory: &Path,
-    stable_path: &Path,
-    legacy_paths: &[PathBuf],
-) -> Result<Option<Vec<u8>>, String> {
-    let Some(key) = legacy_paths
-        .iter()
-        .find_map(|candidate| existing_valid_key(candidate))
-    else {
-        return Ok(None);
-    };
-    let protected = protect_for_current_user(&key)
-        .map_err(|error| format!("DATA_KEY_PROTECT_FAILED: {error}"))?;
-    persist_new_key_atomically(stable_directory, stable_path, &protected, &key).map(Some)
-}
-
-fn should_prefer_legacy_key(stable: &Path, app_key: Option<&Path>) -> bool {
-    if stable.exists() {
-        return false;
+fn ordered_key_candidates(
+    stable: PathBuf,
+    app_key: Option<PathBuf>,
+    legacy: Vec<PathBuf>,
+    persisted_data: bool,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if persisted_data {
+        if let Some(app_key) = app_key {
+            candidates.push(app_key);
+        }
+        candidates.push(stable);
+        candidates.extend(legacy);
+    } else {
+        candidates.push(stable);
+        if let Some(app_key) = app_key {
+            candidates.push(app_key);
+        }
+        candidates.extend(legacy);
     }
-    let data_dir = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|root| root.join("Blogbot").join("data").join("pgdata"));
-    let Some(data_dir) = data_dir else {
-        return false;
-    };
-    if !data_dir.exists() {
-        return false;
-    }
-    let Some(app_key) = app_key else {
-        return true;
-    };
-    app_key.exists()
+    candidates
 }
 
 pub fn status(app: &AppHandle) -> SecureStoreStatus {
@@ -140,51 +128,32 @@ pub fn load_or_create_data_key(app: &AppHandle) -> Result<String, String> {
         .map(PathBuf::from)
         .map(|root| root.join("Blogbot").join("data").join("pgdata"))
         .is_some_and(|path| path.exists());
-    if persisted_data {
-        if let Some(key) = migrate_legacy_key_to_stable(&directory, &path, &legacy_secret_paths())?
-        {
-            return Ok(key.iter().map(|byte| format!("{byte:02x}")).collect());
-        }
-    }
-    let plaintext = if let Some(existing) = existing_valid_key(&path) {
-        existing
-    } else {
-        let mut candidates = Vec::new();
-        // During the application identifier migration, the persisted database
-        // remains in %LOCALAPPDATA%\\Blogbot. Prefer the known legacy key when
-        // that database already exists; the new app-local key may have been
-        // created by a failed first launch and cannot decrypt that database.
-        if should_prefer_legacy_key(&path, app_key.as_deref()) {
-            candidates.extend(legacy_secret_paths());
-        }
-        if let Some(app_key) = app_key {
-            candidates.push(app_key);
-        }
-        candidates.extend(legacy_secret_paths());
-        if let Some((candidate, key)) = candidates
-            .iter()
-            .find_map(|candidate| existing_valid_key(candidate).map(|key| (candidate, key)))
-        {
-            if candidate != &path {
-                let protected = protect_for_current_user(&key)
-                    .map_err(|error| format!("DATA_KEY_PROTECT_FAILED: {error}"))?;
-                // Startup must not be blocked by a best-effort migration write.
-                // The legacy DPAPI key is already valid for the existing data;
-                // use it immediately and retry persistence on a later launch.
-                let _ = persist_new_key_atomically(&directory, &path, &protected, &key);
-            }
-            key
-        } else {
-            let mut key = [0_u8; 32];
-            unsafe {
-                BCryptGenRandom(None, &mut key, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
-                    .ok()
-                    .map_err(|error| format!("DATA_KEY_RANDOM_FAILED: {error}"))?;
-            }
+    let candidates = ordered_key_candidates(
+        path.clone(),
+        app_key,
+        legacy_secret_paths(),
+        persisted_data,
+    );
+    let plaintext = if let Some((candidate, key)) = candidates
+        .iter()
+        .find_map(|candidate| existing_valid_key(candidate).map(|key| (candidate, key)))
+    {
+        if candidate != &path {
             let protected = protect_for_current_user(&key)
                 .map_err(|error| format!("DATA_KEY_PROTECT_FAILED: {error}"))?;
-            persist_new_key_atomically(&directory, &path, &protected, &key)?
+            let _ = persist_new_key_atomically(&directory, &path, &protected, &key);
         }
+        key
+    } else {
+        let mut key = [0_u8; 32];
+        unsafe {
+            BCryptGenRandom(None, &mut key, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+                .ok()
+                .map_err(|error| format!("DATA_KEY_RANDOM_FAILED: {error}"))?;
+        }
+        let protected = protect_for_current_user(&key)
+            .map_err(|error| format!("DATA_KEY_PROTECT_FAILED: {error}"))?;
+        persist_new_key_atomically(&directory, &path, &protected, &key)?
     };
     if plaintext.len() != 32 {
         return Err("DATA_KEY_INVALID_LENGTH".to_string());
@@ -348,11 +317,11 @@ pub fn load_github_token_at(path: &Path) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        migrate_legacy_key_to_stable, persist_new_key_atomically, protect_for_current_user,
-        unprotect_for_current_user,
+        persist_new_key_atomically, protect_for_current_user, unprotect_for_current_user,
     };
 
     #[test]
@@ -398,44 +367,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migration_persists_the_same_key_after_the_legacy_file_is_deleted() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "blogbot-legacy-key-migration-{}-{nonce}",
-            std::process::id()
-        ));
-        let stable_directory = root.join("stable").join("secrets");
-        let stable_path = stable_directory.join("data-key.dpapi");
-        let legacy_path = root.join("legacy").join("secrets").join("data-key.dpapi");
-        fs::create_dir_all(legacy_path.parent().expect("legacy directory"))
-            .expect("create legacy directory");
-        fs::create_dir_all(&stable_directory).expect("create stable directory");
-        let key = [19_u8; 32];
-        fs::write(
-            &legacy_path,
-            protect_for_current_user(&key).expect("protect legacy key"),
-        )
-        .expect("write legacy key");
-
-        let migrated = migrate_legacy_key_to_stable(
-            &stable_directory,
-            &stable_path,
-            std::slice::from_ref(&legacy_path),
-        )
-        .expect("migrate legacy key")
-        .expect("legacy key exists");
-        assert_eq!(migrated, key);
-
-        fs::remove_file(&legacy_path).expect("delete legacy key");
-        let recovered = unprotect_for_current_user(
-            &fs::read(&stable_path).expect("stable key survives legacy deletion"),
-        )
-        .expect("recover stable key");
-        assert_eq!(recovered, key);
-        fs::remove_dir_all(&root).expect("remove test directory");
+    fn persisted_data_prefers_the_current_app_key_before_stable_or_legacy_keys() {
+        let stable = PathBuf::from("stable/data-key.dpapi");
+        let app = PathBuf::from("current-app/data-key.dpapi");
+        let legacy = PathBuf::from("legacy/data-key.dpapi");
+        assert_eq!(
+            super::ordered_key_candidates(stable.clone(), Some(app.clone()), vec![legacy.clone()], true),
+            vec![app, stable, legacy]
+        );
     }
 
     #[test]
