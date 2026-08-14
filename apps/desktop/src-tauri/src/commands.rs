@@ -439,26 +439,32 @@ fn write_engine_local_state(
     key: &str,
     value: Value,
 ) -> Result<Value, CommandError> {
-    let version = read_engine_state(bridge)?
-        .pointer("/snapshot/serverCursor")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
-    let request_id = stable_source_key(&format!("local-state:{key}:{version}"));
-    engine_request(
-        bridge,
-        json!({
-            "version": 1,
-            "id": request_id,
-            "kind": "command",
-            "command": {
-                "version": 1,
-                "requestId": request_id,
-                "idempotencyKey": request_id,
-                "expectedVersion": version,
-                "kind": "LOCAL_STATE.SET",
-                "payload": { "key": key, "value": value }
-            }
-        }),
+    retry_version_conflicted_draft(
+        || {
+            read_engine_state(bridge)?
+                .pointer("/snapshot/serverCursor")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))
+        },
+        |version| {
+            let request_id = stable_source_key(&format!("local-state:{key}:{version}"));
+            engine_request(
+                bridge,
+                json!({
+                    "version": 1,
+                    "id": request_id,
+                    "kind": "command",
+                    "command": {
+                        "version": 1,
+                        "requestId": request_id,
+                        "idempotencyKey": request_id,
+                        "expectedVersion": version,
+                        "kind": "LOCAL_STATE.SET",
+                        "payload": { "key": key, "value": value.clone() }
+                    }
+                }),
+            )
+        },
     )
 }
 
