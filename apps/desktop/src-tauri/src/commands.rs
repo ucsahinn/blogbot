@@ -1679,7 +1679,14 @@ fn migrate_legacy_site_connector_if_needed(
 
 #[tauri::command]
 pub fn get_connector_state(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
-    let migration = migrate_legacy_site_connector_if_needed(&bridge)?;
+    // Legacy catalog migration is opportunistic compatibility work. A normal
+    // read must stay available when another local engine action advances the
+    // cursor between migration writes; the next connector read retries it.
+    let migration = match migrate_legacy_site_connector_if_needed(&bridge) {
+        Ok(migration) => migration,
+        Err(CommandError::EngineUnavailable(message)) if message.starts_with("VERSION_CONFLICT:") => None,
+        Err(error) => return Err(error),
+    };
     let connectors_state = read_engine_local_state_result(&bridge, "desktop.connectors")?;
     let checks_state = read_engine_local_state_result(&bridge, "desktop.connectorChecks")?;
     let source_state = if connectors_state.is_none() && checks_state.is_none() {
