@@ -1,6 +1,6 @@
 [package]
 name = "blogbot"
-version = "0.1.23"
+version = "0.1.24"
 description = "Local Windows editorial automation for a user-selected site"
 authors = ["Blogbot"]
 edition = "2021"

@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::RwLock;
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -18,6 +18,7 @@ use crate::notifications;
 use crate::secure_store;
 
 const PROJECT_PAGE_URL: &str = "https://github.com/ucsahinn/blogbot";
+static CONNECTOR_CATALOG_MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn configure_hidden_command(command: &mut Command) {
     #[cfg(windows)]
@@ -1656,6 +1657,10 @@ fn migrate_legacy_site_connector_catalog(
 fn migrate_legacy_site_connector_if_needed(
     bridge: &EngineBridge,
 ) -> Result<Option<Value>, CommandError> {
+    let _migration_guard = CONNECTOR_CATALOG_MIGRATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| CommandError::EngineUnavailable("CONNECTOR_MIGRATION_LOCK_UNAVAILABLE".into()))?;
     if read_engine_local_state_result(bridge, CONNECTOR_SITE_CATALOG_MIGRATION_KEY)?.is_some() {
         return Ok(None);
     }
