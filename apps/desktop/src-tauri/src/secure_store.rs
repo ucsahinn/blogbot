@@ -24,6 +24,10 @@ pub struct SecureStoreStatus {
 }
 
 const STABLE_DATA_ROOT: &str = "Blogbot";
+// `app_local_data_dir` is derived from the product name on Windows, not the
+// Tauri identifier. Keep this explicit identifier path while recovering the
+// encrypted database created by earlier desktop builds.
+const CURRENT_APP_IDENTIFIER: &str = "app.blogbot.desktop";
 const LEGACY_IDENTIFIERS: &[&str] = &["net.siberdergi.blogbot"];
 
 fn stable_secret_path(app: &AppHandle) -> Option<PathBuf> {
@@ -38,11 +42,14 @@ fn stable_secret_path(app: &AppHandle) -> Option<PathBuf> {
         })
 }
 
-fn app_secret_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_local_data_dir()
-        .ok()
-        .map(|directory| directory.join("secrets").join("data-key.dpapi"))
+fn identifier_secret_path(root: &Path, identifier: &str) -> PathBuf {
+    root.join(identifier).join("secrets").join("data-key.dpapi")
+}
+
+fn app_secret_path(_app: &AppHandle) -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|root| identifier_secret_path(&root, CURRENT_APP_IDENTIFIER))
 }
 
 fn legacy_secret_paths() -> Vec<PathBuf> {
@@ -51,7 +58,7 @@ fn legacy_secret_paths() -> Vec<PathBuf> {
     };
     LEGACY_IDENTIFIERS
         .iter()
-        .map(|identifier| root.join(identifier).join("secrets").join("data-key.dpapi"))
+        .map(|identifier| identifier_secret_path(&root, identifier))
         .collect()
 }
 
@@ -374,6 +381,17 @@ mod tests {
         assert_eq!(
             super::ordered_key_candidates(stable.clone(), Some(app.clone()), vec![legacy.clone()], true),
             vec![app, stable, legacy]
+        );
+    }
+
+    #[test]
+    fn current_app_key_uses_the_tauri_identifier_not_the_product_name_directory() {
+        let root = PathBuf::from("C:/Users/editor/AppData/Local");
+        assert_eq!(
+            super::identifier_secret_path(&root, super::CURRENT_APP_IDENTIFIER),
+            root.join("app.blogbot.desktop")
+                .join("secrets")
+                .join("data-key.dpapi")
         );
     }
 
