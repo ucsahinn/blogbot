@@ -47,13 +47,14 @@ test("operation log entries retain correlation and human-readable diagnostics", 
   }
 });
 
-test("Windows bundle manifest includes the sidecar, local PGlite assets, and WebView2 bootstrapper", async () => {
+test("Windows bundle manifest packages Blogbot as the main executable and includes the sidecar, local PGlite assets, and WebView2 bootstrapper", async () => {
   const config = JSON.parse(
     await readFile(
       join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"),
       "utf8"
     )
   ) as {
+    mainBinaryName?: string;
     bundle?: {
       active?: boolean;
       targets?: string[];
@@ -64,6 +65,7 @@ test("Windows bundle manifest includes the sidecar, local PGlite assets, and Web
   };
   const bundle = config.bundle;
 
+  assert.equal(config.mainBinaryName, "blogbot");
   assert.equal(bundle?.active, true);
   assert.deepEqual(new Set(bundle?.targets), new Set(["msi", "nsis"]));
   assert.ok(bundle?.externalBin?.includes("binaries/blogbot-engine"));
