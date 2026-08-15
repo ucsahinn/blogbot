@@ -50,6 +50,8 @@ test("Boby panel uses the Boby and Luna Low voice for its visible handoff", asyn
   assert.doesNotMatch(assistant, /Codex'e ilettim/u);
   assert.match(assistant, /Merhaba, ben Boby\./u);
   assert.match(assistant, /bridge\.getBootstrapSnapshot\(\)/u);
+  assert.match(assistant, /Boby'nin canlı durumu yenilenemedi/u);
+  assert.match(assistant, /getBootstrapSnapshot\(\)[\s\S]*\.catch\(\(reason\) =>/u);
   assert.match(assistant, /bridge\.testCodexRuntime\(\)/u);
   assert.match(assistant, /bridge\.startCodexLogin\(\)/u);
   assert.match(assistant, /Boby'yi bağla/u);
@@ -58,5 +60,11 @@ test("Boby panel uses the Boby and Luna Low voice for its visible handoff", asyn
   assert.equal((quickActions.match(/disabled=\{deliveryState === "queued"\}/gu) ?? []).length, 4);
   assert.match(assistant, /Boby hazırlanıyor · Luna Low/u);
   assert.match(assistant, /setLiveStatus\(\{/u);
+  assert.match(
+    assistant,
+    /BOBY_GUIDANCE_TIMEOUT_MS\s*=\s*120_000/u,
+    "Boby guidance polling must stop after a bounded wait instead of staying pending forever"
+  );
+  assert.match(assistant, /Boby yanıtı zaman aşımına uğradı/u);
   assert.doesNotMatch(assistant, /Codex'e ilettim/u);
 });

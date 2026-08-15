@@ -97,15 +97,21 @@ export function Operations({
 
   useEffect(() => {
     if (!diagnosticsVisible) return;
+    let alive = true;
     void bridge.getEngineDiagnostics()
       .then((value) => {
+        if (!alive) return;
         setEngineDiagnostics(value);
         setEngineDiagnosticsError("");
       })
       .catch(() => {
+        if (!alive) return;
         setEngineDiagnostics({ path: null, lines: [] });
         setEngineDiagnosticsError("Engine hata günlüğü şu anda okunamadı.");
       });
+    return () => {
+      alive = false;
+    };
   }, [bridge, diagnosticsVisible]);
 
   const refreshOperations = async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { canEnableAutomationMode, connectorDraftFromState, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
@@ -133,6 +133,7 @@ export function SetupCenter({
   const [localDevStatusChecking, setLocalDevStatusChecking] = useState(false);
   const [localDevStatusError, setLocalDevStatusError] = useState(false);
   const [localDevTrusted, setLocalDevTrusted] = useState(false);
+  const localDevStatusRequestId = useRef(0);
   const [githubBrokerStatus, setGitHubBrokerStatus] = useState<"unknown" | "unconfigured" | "logged-out" | "pending" | "authorized" | "expired" | "access-denied" | "degraded">("unknown");
   const [githubDeviceFlow, setGitHubDeviceFlow] = useState<{ userCode: string } | null>(null);
   const [selectedTask, setSelectedTask] = useState<SetupTaskId>(() =>
@@ -246,20 +247,32 @@ export function SetupCenter({
   }, [bridge]);
 
   const refreshLocalDevStatus = useCallback(async () => {
+    const requestId = localDevStatusRequestId.current + 1;
+    localDevStatusRequestId.current = requestId;
     setLocalDevStatusChecking(true);
     setLocalDevStatusError(false);
     try {
       const result = await bridge.localDevStatus();
+      if (requestId !== localDevStatusRequestId.current) return;
       setLocalDevRunning(result.running);
       setLocalDevSupported(result.supported);
     } catch {
+      if (requestId !== localDevStatusRequestId.current) return;
       setLocalDevRunning(false);
       setLocalDevSupported(false);
       setLocalDevStatusError(true);
     } finally {
-      setLocalDevStatusChecking(false);
+      if (requestId === localDevStatusRequestId.current) {
+        setLocalDevStatusChecking(false);
+      }
     }
   }, [bridge]);
+
+  useEffect(() => {
+    return () => {
+      localDevStatusRequestId.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     if (connectorDraft.site.mode !== "LOCAL_DEV") return;

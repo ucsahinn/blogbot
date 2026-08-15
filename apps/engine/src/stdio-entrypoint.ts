@@ -179,7 +179,7 @@ function dashboardJobSummary(job: BackendJob): Record<string, unknown> {
  * to the engine diagnostics channel.
  */
 export function reportBackgroundTaskFault(
-  code: "SOURCE_RETENTION_UNAVAILABLE" | "AUTOMATIC_BACKUP_UNAVAILABLE" | "SOURCE_SCHEDULER_UNAVAILABLE",
+  code: "SOURCE_RETENTION_UNAVAILABLE" | "AUTOMATIC_BACKUP_UNAVAILABLE" | "SOURCE_SCHEDULER_UNAVAILABLE" | "LOCAL_QUEUE_UNAVAILABLE",
   write: (line: string) => void = (line) => process.stderr.write(line),
   detail?: string
 ): void {
@@ -2940,7 +2940,9 @@ export async function createPersistentEngineProtocol(
   const sourceRepository = await PGliteSourceRepository.fromDatabase(
     repository.getDatabase()
   );
-  const queue = new LocalQueueRuntime(repository.getDatabase());
+  const queue = new LocalQueueRuntime(repository.getDatabase(), {
+    onFault: () => reportBackgroundTaskFault("LOCAL_QUEUE_UNAVAILABLE")
+  });
   const fetcherBinary = process.env.BLOGBOT_FETCHER_BIN;
   const sourceTransport = options.sourceTransport ?? (
     fetcherBinary

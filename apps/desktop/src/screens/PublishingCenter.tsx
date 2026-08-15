@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
@@ -68,7 +68,14 @@ export function PublishingCenter({
   const [suggestingSeoSlots, setSuggestingSeoSlots] = useState(false);
   const [slotDrafts, setSlotDrafts] = useState<Record<string, SlotDraft>>({});
   const [activeSlotId, setActiveSlotId] = useState("");
+  const refreshRequestId = useRef(0);
   const siteMode = connectorState.mode;
+
+  useEffect(() => {
+    return () => {
+      refreshRequestId.current += 1;
+    };
+  }, []);
 
   const getSlotDraft = (slot: EditorialWorkspaceSnapshot["weeklySlots"][number]): SlotDraft =>
     slotDrafts[slot.id] ?? {
@@ -91,6 +98,8 @@ export function PublishingCenter({
   };
 
   const refresh = async () => {
+    const requestId = refreshRequestId.current + 1;
+    refreshRequestId.current = requestId;
     setRefreshing(true);
     setMessage("");
     try {
@@ -98,13 +107,15 @@ export function PublishingCenter({
         bridge.getEditorialWorkspace(),
         bridge.getConnectorState()
       ]);
+      if (requestId !== refreshRequestId.current) return;
       onWorkspaceChange(nextWorkspace);
       onConnectorStateChange(nextConnectorState);
       setMessage("Takvim ve yayın durumu yerel veriden yenilendi.");
     } catch {
+      if (requestId !== refreshRequestId.current) return;
       setMessage("Takvim ve yayın durumu yenilenemedi. Yerel engine ve bağlantıları Kurulum Merkezi'nden denetleyin.");
     } finally {
-      setRefreshing(false);
+      if (requestId === refreshRequestId.current) setRefreshing(false);
     }
   };
 

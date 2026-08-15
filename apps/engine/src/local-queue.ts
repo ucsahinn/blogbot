@@ -42,6 +42,12 @@ interface Worker<T extends object> {
   handler: (job: LocalJob<T>) => Promise<void>;
   timer: ReturnType<typeof setInterval>;
   running: boolean;
+  faultReported: boolean;
+}
+
+export interface LocalQueueRuntimeOptions {
+  /** Receives only a redacted fault code; never pass database error details. */
+  onFault?(error: Error): void;
 }
 
 /**
@@ -53,14 +59,23 @@ interface Worker<T extends object> {
 export class LocalQueueRuntime {
   private started = false;
   private stopping = false;
+  private lifecycleGeneration = 0;
+  private startPromise: Promise<void> | undefined;
   private readonly workers = new Map<string, Worker<object>>();
   private readonly activeRuns = new Set<Promise<void>>();
 
-  constructor(private readonly database: PGlite) {}
+  constructor(
+    private readonly database: PGlite,
+    private readonly options: LocalQueueRuntimeOptions = {}
+  ) {}
 
   async start(): Promise<void> {
     if (this.started) return;
-    await this.database.exec(`
+    if (this.startPromise) return this.startPromise;
+    const generation = ++this.lifecycleGeneration;
+    this.stopping = false;
+    const operation = (async () => {
+      await this.database.exec(`
 CREATE TABLE IF NOT EXISTS blogbot_local_queue_jobs (
   id text PRIMARY KEY,
   queue_name text NOT NULL,
@@ -76,17 +91,27 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
     // One desktop engine owns this PGlite directory. If Windows closed while
     // a handler was active, make its durable reservation visible again.
     const now = Date.now();
-    await this.database.query(
-      "UPDATE blogbot_local_queue_jobs SET state = 'created', available_at_unix_ms = $1, updated_at_unix_ms = $1 WHERE state = 'active'",
-      [now]
-    );
-    this.stopping = false;
-    this.started = true;
+      await this.database.query(
+        "UPDATE blogbot_local_queue_jobs SET state = 'created', available_at_unix_ms = $1, updated_at_unix_ms = $1 WHERE state = 'active'",
+        [now]
+      );
+      if (generation !== this.lifecycleGeneration || this.stopping) return;
+      this.started = true;
+    })();
+    this.startPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.startPromise === operation) this.startPromise = undefined;
+    }
   }
 
   async stop(): Promise<void> {
-    if (!this.started) return;
+    this.lifecycleGeneration += 1;
     this.stopping = true;
+    const pendingStart = this.startPromise;
+    if (pendingStart) await pendingStart;
+    if (!this.started) return;
     for (const worker of this.workers.values()) clearInterval(worker.timer);
     this.workers.clear();
     const outstanding = Promise.allSettled([...this.activeRuns]);
@@ -159,7 +184,8 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
       queue: name,
       handler,
       timer: setInterval(() => { void this.poll(id); }, POLL_MS),
-      running: false
+      running: false,
+      faultReported: false
     };
     worker.timer.unref?.();
     this.workers.set(id, worker as Worker<object>);
@@ -176,7 +202,19 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
       this.activeRuns.delete(run);
     });
     this.activeRuns.add(run);
-    await run;
+    try {
+      await run;
+      worker.faultReported = false;
+    } catch {
+      if (!worker.faultReported) {
+        worker.faultReported = true;
+        try {
+          this.options.onFault?.(new Error("LOCAL_QUEUE_UNAVAILABLE"));
+        } catch {
+          // Diagnostics must never create another unhandled queue rejection.
+        }
+      }
+    }
   }
 
   private async runWorker(worker: Worker<object>): Promise<void> {

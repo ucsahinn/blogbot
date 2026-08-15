@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { PGlite } from "@electric-sql/pglite";
 
 import { LocalQueueRuntime } from "../../apps/engine/src/local-queue.ts";
 import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
@@ -152,4 +153,50 @@ test("local PGlite queue recovers an active Codex job after an interrupted local
     await consumer?.stop().catch(() => undefined);
     await repository.close();
   }
+});
+
+test("local PGlite queue reports a store fault instead of leaking a poll rejection", async () => {
+  const faults: string[] = [];
+  let closed = false;
+  const database = {
+    exec: async () => undefined,
+    query: async () => {
+      if (closed) throw new Error("PGlite closed");
+      return { rows: [] };
+    }
+  } as unknown as PGlite;
+  const runtime = new LocalQueueRuntime(database, {
+    onFault: (error) => faults.push(error.message)
+  });
+  await runtime.start();
+  closed = true;
+  await runtime.work("blogbot.ingest", async () => undefined);
+
+  await new Promise((resolve) => setTimeout(resolve, 650));
+
+  assert.deepEqual(faults, ["LOCAL_QUEUE_UNAVAILABLE"]);
+  await runtime.stop();
+});
+
+test("local PGlite queue cannot finish startup after a concurrent stop request", async () => {
+  let releaseSchema: (() => void) | undefined;
+  const schemaReleased = new Promise<void>((resolve) => {
+    releaseSchema = resolve;
+  });
+  const database = {
+    exec: async () => schemaReleased,
+    query: async () => ({ rows: [] })
+  } as unknown as PGlite;
+  const runtime = new LocalQueueRuntime(database);
+
+  const starting = runtime.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const stopping = runtime.stop();
+  releaseSchema?.();
+  await Promise.all([starting, stopping]);
+
+  await assert.rejects(
+    runtime.enqueue("blogbot.ingest", { trigger: "shutdown-race" }, "shutdown-race"),
+    /Local queue runtime is not started/
+  );
 });

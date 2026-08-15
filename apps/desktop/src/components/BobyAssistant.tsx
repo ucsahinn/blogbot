@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import bobyAvatar from "../assets/boby-avatar-v2.webp";
 import { describeBobyAvailability } from "../boby-conversation.ts";
-import type { BlogbotBridge, BobyGuidanceStatus } from "../bridge.ts";
+import { userFacingBridgeError, type BlogbotBridge, type BobyGuidanceStatus } from "../bridge.ts";
 import { playFeedbackSound } from "../feedback-sounds.ts";
 import type { BootstrapSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 
@@ -23,6 +23,9 @@ interface BobyReply {
   action?: { label: string; page: PageId };
   origin?: "local" | "boby" | "system";
 }
+
+const BOBY_GUIDANCE_POLL_MS = 2_000;
+const BOBY_GUIDANCE_TIMEOUT_MS = 120_000;
 
 function pageGuidance(activePage: PageId, snapshot: BootstrapSnapshot, workspace: EditorialWorkspaceSnapshot): BobyReply {
   if (snapshot.runtime !== "ONLINE") {
@@ -166,17 +169,41 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
         // action. A failed background check must never block the conversation
         // panel or replace a diagnostic with a guessed success.
       }
-    }).catch(() => undefined);
+    }).catch((reason) => {
+      if (disposed) return;
+      setMessages((current) => [...current, {
+        text: userFacingBridgeError(
+          reason,
+          "Boby'nin canlı durumu yenilenemedi. Mevcut durum korunuyor; ayrıntı için Operasyonlar'ı kontrol edebilirsin."
+        ),
+        origin: "system",
+        action: { label: "Operasyonlar'ı aç", page: "operations" }
+      }]);
+    });
     return () => { disposed = true; };
   }, [bridge, open, refreshBobyRuntime, snapshot.codex.state, snapshot.runtime]);
 
   useEffect(() => {
     if (!open || !pendingGuidanceId) return;
     let cancelled = false;
+    const startedAt = Date.now();
+    const appendTimeout = () => {
+      setPendingGuidanceId(null);
+      setDeliveryState("failed");
+      setMessages((current) => [...current, {
+        text: "Boby yanıtı zaman aşımına uğradı. Yerel rehberlik açık; ayrıntı için Operasyonlar'ı kontrol edebilirsin.",
+        origin: "system",
+        action: { label: "Operasyonları aç", page: "operations" }
+      }]);
+    };
     const poll = async () => {
       while (!cancelled) {
-        await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+        await new Promise((resolve) => window.setTimeout(resolve, BOBY_GUIDANCE_POLL_MS));
         if (cancelled) return;
+        if (Date.now() - startedAt >= BOBY_GUIDANCE_TIMEOUT_MS) {
+          appendTimeout();
+          return;
+        }
         try {
           const result: BobyGuidanceStatus = await bridge.getBobyGuidance(pendingGuidanceId);
           if (cancelled) return;

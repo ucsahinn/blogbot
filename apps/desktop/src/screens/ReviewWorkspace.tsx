@@ -137,17 +137,20 @@ async function warningSetHash(gates: GateView[]): Promise<string> {
 function QueueCard({
   item,
   selected,
-  onSelect
+  onSelect,
+  disabled = false
 }: {
   item: QueueItem;
   selected: boolean;
   onSelect: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       className={`review-queue-item ${selected ? "is-selected" : ""}`}
       aria-pressed={selected}
+      disabled={disabled}
       onClick={onSelect}
     >
       <span className={`queue-state queue-${item.state.toLowerCase()}`} />
@@ -314,7 +317,10 @@ export function ReviewWorkspace({
       revision.claims.every((claim) => claim.status === "VERIFIED")
   );
 
+  const actionBusy = approving || approvingHighRisk || requestingEdit || requestingComprehensiveRewrite || repairingMedia || enqueueingPublication || previewingPublication || materializingLocal;
+
   const selectRevision = (revisionId: string) => {
+    if (actionBusy) return;
     setLoading(true);
     setNotice("");
     setRevision(null);
@@ -633,6 +639,7 @@ export function ReviewWorkspace({
               key={item.id}
               item={item}
               selected={selectedId === item.id}
+              disabled={actionBusy}
               onSelect={() => selectRevision(item.id)}
             />
           ))}

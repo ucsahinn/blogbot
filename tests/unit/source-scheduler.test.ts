@@ -119,3 +119,36 @@ test("source scheduler reports one diagnostic for a persistent unavailable store
 
   assert.deepEqual(faults, [{ code: "SOURCE_SCHEDULER_UNAVAILABLE", phase: "automation" }]);
 });
+
+test("source scheduler does not enqueue after stop cancels an in-flight catalog read", async () => {
+  let releaseSources!: () => void;
+  let catalogReadStarted!: () => void;
+  const catalogRead = new Promise<void>((resolve) => { releaseSources = resolve; });
+  const started = new Promise<void>((resolve) => { catalogReadStarted = resolve; });
+  let enqueued = 0;
+  const backend = {
+    getAutomation: async () => ({
+      mode: "INGEST_ONLY", onboardingComplete: true, ingestionPaused: false,
+      publishingPaused: false, timezone: "Europe/Istanbul", scanIntervalMinutes: 30
+    })
+  } as never;
+  const sources = {
+    listSources: async () => {
+      catalogReadStarted();
+      await catalogRead;
+      return [{ id: "source-1", version: 1, status: "ACTIVE" }];
+    }
+  } as never;
+  const coordinator = {
+    enqueue: async () => { enqueued += 1; return { batchKey: "unexpected", scans: [] }; }
+  } as never;
+  const scheduler = new SourceScanScheduler(backend, sources, coordinator, () => new Date("2026-07-30T10:00:00.000Z"), 60_000);
+
+  scheduler.start();
+  await started;
+  scheduler.stop();
+  releaseSources();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(enqueued, 0);
+});

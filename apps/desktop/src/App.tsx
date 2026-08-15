@@ -69,6 +69,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
 
   useEffect(() => {
     let alive = true;
+    let reconciliationTimer: number | undefined;
     void bridgeFactory()
       .then(async (runtimeBridge) => {
         // Bootstrap performs the Doctor handshake that changes the native
@@ -87,9 +88,13 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
           // external-configuration read at startup.
           setConnectorState(fallbackConnectorState);
         }
+        if (!alive) return;
         if (initialSnapshot.runtime === "ONLINE") {
           void coalescingBridge.getConnectorState().then((initialConnectorState) => {
-            if (alive) setConnectorState(initialConnectorState);
+            if (alive) {
+              setConnectorState(initialConnectorState);
+              setSyncError("");
+            }
           }).catch((reason) => {
             if (alive) {
               setSyncError(
@@ -105,7 +110,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         // first Doctor response. Keep the first truthful workspace visible,
         // then reconcile it in the background instead of holding the editor
         // on an artificial loading screen.
-        setTimeout(() => {
+        reconciliationTimer = window.setTimeout(() => {
           if (!alive) return;
           void Promise.all([
             coalescingBridge.getBootstrapSnapshot(),
@@ -114,7 +119,16 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             if (!alive) return;
             setSnapshot(settledSnapshot);
             setWorkspace(settledWorkspace);
-          }).catch(() => undefined);
+            setSyncError("");
+          }).catch((reason) => {
+            if (!alive) return;
+            setSyncError(
+              userFacingBridgeError(
+                reason,
+                "Çalışma alanı arka planda yenilenemedi. Operasyonlar ekranından yerel durumu kontrol edin."
+              )
+            );
+          });
         }, 750);
       })
       .catch((reason) => {
@@ -126,6 +140,9 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
       });
     return () => {
       alive = false;
+      if (reconciliationTimer !== undefined) {
+        window.clearTimeout(reconciliationTimer);
+      }
     };
   }, [bridgeFactory]);
 
@@ -139,9 +156,13 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
     if (!bridge || typeof window === "undefined" || !window.__TAURI_INTERNALS__) {
       return;
     }
+    let disposed = false;
     let unlisten: (() => void) | undefined;
-    void import("@tauri-apps/api/event").then(async ({ listen }) => {
-        unlisten = await listen("blogbot-sync-requested", () => {
+    const registerSyncListener = async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      if (disposed) return;
+      const cleanup = await listen("blogbot-sync-requested", () => {
+          if (disposed) return;
           setSyncError("");
           void (async () => {
             const nextSnapshot = await bridge.getBootstrapSnapshot();
@@ -161,12 +182,23 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             );
           });
         });
-    }).catch((reason) => {
-      setSyncError(
-        userFacingBridgeError(reason, "Yerel güncelleme bildirimi dinlenemedi.")
-      );
+      if (disposed) {
+        cleanup();
+        return;
+      }
+      unlisten = cleanup;
+    };
+    void registerSyncListener().catch((reason) => {
+      if (!disposed) {
+        setSyncError(
+          userFacingBridgeError(reason, "Yerel güncelleme bildirimi dinlenemedi.")
+        );
+      }
     });
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [bridge]);
 
   if (error) {

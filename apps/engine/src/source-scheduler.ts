@@ -23,6 +23,7 @@ const SAFE_SOURCE_SCHEDULER_FAULT = "SOURCE_SCHEDULER_UNAVAILABLE";
 export class SourceScanScheduler {
   private timer: ReturnType<typeof setInterval> | undefined;
   private tickInFlight = false;
+  private stopped = false;
   private lastBucket: string | undefined;
   private faultReported = false;
 
@@ -37,6 +38,7 @@ export class SourceScanScheduler {
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     this.runTick();
     this.timer = setInterval(() => this.runTick(), this.pollMs);
     if (typeof this.timer === "object" && "unref" in this.timer) {
@@ -67,17 +69,20 @@ export class SourceScanScheduler {
   private lastFaultPhase: "automation" | "catalog" | "queue" | undefined;
 
   stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = undefined;
+    this.stopped = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
   }
 
   async tick(): Promise<boolean> {
-    if (this.tickInFlight) return false;
+    if (this.stopped || this.tickInFlight) return false;
     this.tickInFlight = true;
     try {
       this.lastFaultPhase = "automation";
       const settings = await this.backend.getAutomation();
+      if (this.stopped) return false;
       const capabilities = deriveAutomationCapabilities(settings);
       if (!capabilities.canIngest) return false;
 
@@ -90,10 +95,12 @@ export class SourceScanScheduler {
       const targets: SourceScanTarget[] = (await this.sources.listSources())
         .filter((source) => source.status === "ACTIVE")
         .map((source) => ({ sourceId: source.id, expectedVersion: source.version }));
+      if (this.stopped) return false;
       if (targets.length === 0) return false;
 
       const key = `scheduler:source-scan:${bucket}`;
       this.lastFaultPhase = "queue";
+      if (this.stopped) return false;
       await this.coordinator.enqueue({
         version: 1,
         requestId: key,
@@ -102,6 +109,7 @@ export class SourceScanScheduler {
         kind: "SOURCE.SCAN",
         payload: { targets }
       });
+      if (this.stopped) return false;
       this.lastBucket = bucket;
       return true;
     } finally {

@@ -155,3 +155,26 @@ test("publication scheduler reports a transient indexed-read fault and resumes w
   assert.deepEqual(faults, ["PUBLICATION_SCHEDULER_UNAVAILABLE"]);
   assert.equal((await backend.listOutbox()).length, 1);
 });
+
+test("publication scheduler does not enqueue after stop cancels an in-flight read", async () => {
+  const { backend, now } = await setup("2026-07-30T10:00:00.000Z", "2026-07-30T09:00:00.000Z");
+  const originalGetAutomation = backend.getAutomation.bind(backend);
+  let releaseAutomation!: () => void;
+  let automationReadStarted!: () => void;
+  const automationRead = new Promise<void>((resolve) => { releaseAutomation = resolve; });
+  const started = new Promise<void>((resolve) => { automationReadStarted = resolve; });
+  backend.getAutomation = async () => {
+    automationReadStarted();
+    await automationRead;
+    return originalGetAutomation();
+  };
+  const scheduler = new PublicationScheduler(backend, () => now, 5);
+
+  scheduler.start();
+  await started;
+  scheduler.stop();
+  releaseAutomation();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal((await backend.listOutbox()).length, 0);
+});

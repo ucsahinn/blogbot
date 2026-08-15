@@ -31,6 +31,7 @@ const SAFE_PUBLICATION_SCHEDULER_FAULT = "PUBLICATION_SCHEDULER_UNAVAILABLE";
 export class PublicationScheduler {
   private timer: ReturnType<typeof setInterval> | undefined;
   private tickInFlight = false;
+  private stopped = false;
 
   constructor(
     private readonly backend: BackendRepository,
@@ -41,6 +42,7 @@ export class PublicationScheduler {
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     // Do not race the startup migration/source-worker transaction. The first
     // durable scheduling pass runs on the normal poll boundary.
     this.timer = setInterval(() => this.runTick(), this.pollMs);
@@ -63,19 +65,22 @@ export class PublicationScheduler {
   }
 
   stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = undefined;
+    this.stopped = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
   }
 
   async tick(): Promise<PublicationSchedulerResult> {
-    if (this.tickInFlight) return { enqueued: [], skipped: [] };
+    if (this.stopped || this.tickInFlight) return { enqueued: [], skipped: [] };
     this.tickInFlight = true;
     try {
       const result: PublicationSchedulerResult = { enqueued: [], skipped: [] };
       const now = this.now();
       const indexedRead = Boolean(this.backend.listDueRevisionIds && this.backend.listRevisionLineage);
       const snapshot = indexedRead ? undefined : (await this.backend.sync(0)).snapshot;
+      if (this.stopped) return result;
       const existingPublicationKeys = new Set((indexedRead
         ? await this.backend.listOutbox()
         : snapshot!.outbox).map((effect) => effect.idempotencyKey));
@@ -85,6 +90,7 @@ export class PublicationScheduler {
       const lineage = indexedRead
         ? await this.backend.listRevisionLineage!()
         : snapshot!.revisions;
+      if (this.stopped) return result;
       const dueRevisionIds: string[] = [];
       if (indexedRead) {
         const pageSize = 100;
@@ -98,6 +104,7 @@ export class PublicationScheduler {
         ? await Promise.all(dueRevisionIds.map((id) => this.backend.getRevision(id)))
         : snapshot!.revisions.filter((revision) => Date.parse(revision.scheduledAt) <= now.getTime());
       for (const revision of revisions) {
+        if (this.stopped) return result;
         const approval = indexedRead
           ? await this.backend.getApproval(revision.id)
           : snapshot!.approvals.find((item) => item.revisionId === revision.id) ?? null;
@@ -129,11 +136,13 @@ export class PublicationScheduler {
         }
         const key = `scheduler:publication:${revision.id}:${revisionHash}`;
         const binding = publicationIntentBinding(revision, previewRecord);
+        if (this.stopped) return result;
         const effect = await this.backend.runIdempotent(
           key,
           `${revisionHash}:${binding.previewHash}`,
           (transaction) => transaction.enqueuePublication(revision.id, revisionHash, binding)
         );
+        if (this.stopped) return result;
         if (!existingPublicationKeys.has(effect.idempotencyKey)) {
           result.enqueued.push(revision.id);
           existingPublicationKeys.add(effect.idempotencyKey);

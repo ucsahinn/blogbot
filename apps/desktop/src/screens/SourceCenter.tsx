@@ -107,6 +107,13 @@ export function SourceCenter({
   const [query, setQuery] = useState("");
   const reviewHeadingRef = useRef<HTMLHeadingElement>(null);
   const latestRefreshId = useRef(0);
+  const scanRunId = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      scanRunId.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     if (!reviewTarget) return;
@@ -165,6 +172,9 @@ export function SourceCenter({
         : "";
 
   const scan = async (sourceId?: string) => {
+    const runId = scanRunId.current + 1;
+    scanRunId.current = runId;
+    const isCurrentScan = () => scanRunId.current === runId;
     if (!canScan) {
       setNotice(
         "Kaynak tarama bileşeni henüz hazır değil. Kurulum Merkezi'nde Önkoşul testi çalıştırdıktan sonra yeniden deneyin."
@@ -178,6 +188,7 @@ export function SourceCenter({
       const result = sourceId
         ? await bridge.scanSource(sourceId)
         : await bridge.scanAllSources();
+      if (!isCurrentScan()) return;
       if (!result.accepted) {
         setNotice(result.detail);
         return;
@@ -185,37 +196,47 @@ export function SourceCenter({
       setNotice(result.detail);
       try {
         let lastStatus = await bridge.getSourceScanStatus(result.operationId);
+        if (!isCurrentScan()) return;
         setScanStatus(lastStatus);
         for (let attempt = 0; attempt < 20 && !lastStatus.complete; attempt += 1) {
+          if (!isCurrentScan()) return;
           setNotice(lastStatus.detail);
           await new Promise((resolve) => window.setTimeout(resolve, 750));
+          if (!isCurrentScan()) return;
           lastStatus = await bridge.getSourceScanStatus(result.operationId);
+          if (!isCurrentScan()) return;
           setScanStatus(lastStatus);
         }
+        if (!isCurrentScan()) return;
         setNotice(
           lastStatus.complete
             ? lastStatus.detail
             : `${lastStatus.detail} Tarama arka planda devam ediyor; kaynak kartını daha sonra yenileyebilirsiniz.`
         );
         await refreshSources({ silent: true });
+        if (!isCurrentScan()) return;
         if (lastStatus.complete) {
           try {
             await onSourceCatalogChange?.();
+            if (!isCurrentScan()) return;
           } catch {
+            if (!isCurrentScan()) return;
             setNotice(`${lastStatus.detail} Genel Bakış sayaçları henüz yenilenemedi; Genel Bakış ekranından yeniden deneyin.`);
           }
         }
       } catch (reason) {
+        if (!isCurrentScan()) return;
         setNotice(
           `Tarama yerel kuyruğa alındı; ancak durumu henüz okunamadı. Sonraki adım: Kaynak envanterini veya Operasyonlar ekranını yenileyin. (${userFacingBridgeError(reason, "Ayrıntı alınamadı.")})`
         );
       }
     } catch (reason) {
+      if (!isCurrentScan()) return;
       setNotice(
         userFacingBridgeError(reason, "Kaynak taraması başlatılamadı.")
       );
     } finally {
-      setScanningId("");
+      if (isCurrentScan()) setScanningId("");
     }
   };
 

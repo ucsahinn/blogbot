@@ -16,6 +16,10 @@ const skipProfileFinalRead = process.env.BLOGBOT_PROFILE_SKIP_FINAL_READ === "1"
 const retryBlockedActualProfile = process.env.BLOGBOT_PROFILE_RETRY_BLOCKED === "1";
 const rewriteFirstShortActualProfile = process.env.BLOGBOT_PROFILE_REWRITE_SHORT === "1";
 const testExistingProfileSources = process.env.BLOGBOT_PROFILE_TEST_SOURCES === "1";
+const nativeSmokeRequestTimeoutMs = Number.parseInt(
+  process.env.BLOGBOT_NATIVE_REQUEST_TIMEOUT_MS ?? "20000",
+  10
+);
 const webdriverBaseUrl = "http://127.0.0.1:4444";
 let webdriverUserDataFolder;
 const smokeFeedUrl = process.env.BLOGBOT_SMOKE_FEED_URL ?? "https://www.cshub.com/rss/news";
@@ -71,6 +75,25 @@ function wait(milliseconds) {
   return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
 }
 
+async function cleanupSmokeDataRoot(root) {
+  // WebView2 can release its profile lock shortly after the driver exits.
+  // Keep cleanup bounded but long enough for that asynchronous shutdown.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      await access(root);
+    } catch {
+      return true;
+    }
+    await wait(250);
+  }
+  // Do not hide a locked disposable profile. The path contains no user data
+  // by construction, and this redacted warning tells CI exactly what needs
+  // cleanup without dumping driver or engine contents.
+  console.error(`Native smoke temporary profile retained after cleanup retries: ${root}`);
+  return false;
+}
+
 async function requireFile(path, name) {
   if (!path) {
     fail(`${name} is required. Set ${name} to a local executable path.`);
@@ -83,7 +106,25 @@ async function requireFile(path, name) {
 }
 
 async function request(path, options) {
-  const response = await fetch(`${webdriverBaseUrl}${path}`, options);
+  if (
+    !Number.isSafeInteger(nativeSmokeRequestTimeoutMs)
+    || nativeSmokeRequestTimeoutMs < 1_000
+    || nativeSmokeRequestTimeoutMs > 120_000
+  ) {
+    fail("BLOGBOT_NATIVE_REQUEST_TIMEOUT_MS must be an integer from 1000 to 120000.");
+  }
+  let response;
+  try {
+    response = await fetch(`${webdriverBaseUrl}${path}`, {
+      ...options,
+      signal: options?.signal ?? AbortSignal.timeout(nativeSmokeRequestTimeoutMs)
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      fail(`NATIVE_SMOKE_REQUEST_TIMEOUT: ${path} did not respond within ${nativeSmokeRequestTimeoutMs}ms.`);
+    }
+    throw error;
+  }
   const payload = await response.json();
   if (!response.ok) {
     const driverMessage = typeof payload?.value?.message === "string" ? payload.value.message : "";
@@ -132,10 +173,16 @@ async function execute(sessionId, script) {
 }
 
 async function createNativeSession() {
-  const tauriOptions = { application: applicationPath };
-  if (webdriverUserDataFolder) {
-    tauriOptions.webviewOptions = { userDataFolder: webdriverUserDataFolder };
-  }
+  const tauriOptions = {
+    application: applicationPath,
+    // WebView2's GPU process is unstable on some Windows/driver combinations
+    // used by clean-machine verification. Keep this mitigation inside the
+    // disposable smoke session; production Boby keeps its normal renderer.
+    webviewOptions: {
+      additionalBrowserArguments: ["--disable-gpu"],
+      ...(webdriverUserDataFolder ? { userDataFolder: webdriverUserDataFolder } : {})
+    }
+  };
   const created = await request("/session", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1361,8 +1408,21 @@ async function main() {
     // disposable smoke profile: a release verification must never add feeds,
     // drafts, settings, or logs to the editor's real workspace.
     env: smokeDataRoot
-      ? { ...process.env, LOCALAPPDATA: smokeDataRoot, APPDATA: smokeDataRoot }
-      : process.env
+      ? {
+          ...process.env,
+          LOCALAPPDATA: smokeDataRoot,
+          APPDATA: smokeDataRoot,
+          // tauri-driver does not consistently forward WebView2's nested
+          // browser arguments on Windows. This environment variable is read
+          // by the WebView2 loader itself and is therefore the authoritative
+          // way to keep the disposable smoke renderer off the crashing GPU
+          // path.
+          WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--disable-gpu"
+        }
+      : {
+          ...process.env,
+          WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--disable-gpu"
+        }
   });
   let driverOutput = "";
   const appendDriverOutput = (chunk) => {
@@ -1510,7 +1570,7 @@ async function main() {
     if (smokeDataRoot && keepSmokeDataRoot) {
       console.error(`Native smoke temporary profile retained: ${smokeDataRoot}`);
     } else if (smokeDataRoot) {
-      await rm(smokeDataRoot, { recursive: true, force: true }).catch(() => undefined);
+      await cleanupSmokeDataRoot(smokeDataRoot);
     }
   }
 }

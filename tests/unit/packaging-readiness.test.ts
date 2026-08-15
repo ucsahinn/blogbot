@@ -227,6 +227,36 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
   assert.equal(manifest.scripts?.["smoke:native-webview"], "node scripts/native-webview-smoke.mjs");
   assert.match(smokeScript, /BLOGBOT_TAURI_DRIVER/u);
   assert.match(smokeScript, /BLOGBOT_EDGE_DRIVER/u);
+  assert.match(
+    smokeScript,
+    /AbortSignal\.timeout\(/u,
+    "native WebView driver requests must have a bounded timeout instead of hanging the release check"
+  );
+  assert.match(
+    smokeScript,
+    /NATIVE_SMOKE_REQUEST_TIMEOUT/u,
+    "native WebView timeout failures must identify the bounded request stage"
+  );
+  assert.match(
+    smokeScript,
+    /additionalBrowserArguments[\s\S]*--disable-gpu/u,
+    "native WebView smoke must isolate the known Windows GPU crash path"
+  );
+  assert.match(
+    smokeScript,
+    /WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS[\s\S]*--disable-gpu/u,
+    "the GPU mitigation must reach WebView2 through its process environment"
+  );
+  assert.match(
+    smokeScript,
+    /cleanupSmokeDataRoot/u,
+    "native smoke must retry disposable-profile cleanup and report retained artifacts"
+  );
+  assert.match(
+    smokeScript,
+    /attempt < 20/u,
+    "WebView2 shutdown can outlive the driver process and needs a bounded five-second cleanup window"
+  );
   assert.match(smokeScript, /BLOGBOT_NATIVE_PROFILE === "actual"/u);
   assert.match(
     smokeScript,

@@ -42,7 +42,8 @@ test("Boby keeps one pending direct reply alive without a short false timeout", 
 
   assert.match(assistant, /const \[pendingGuidanceId, setPendingGuidanceId\]/u);
   assert.match(assistant, /if \(!open \|\| !pendingGuidanceId\) return;/u);
-  assert.match(assistant, /window\.setTimeout\(resolve, 2_000\)/u);
+  assert.match(assistant, /BOBY_GUIDANCE_POLL_MS\s*=\s*2_000/u);
+  assert.match(assistant, /BOBY_GUIDANCE_TIMEOUT_MS\s*=\s*120_000/u);
   assert.match(assistant, /disabled=\{deliveryState === "queued"\}/u);
   assert.doesNotMatch(assistant, /attempt < 12/u);
 });
@@ -269,6 +270,33 @@ test("source catalog does not poll the local engine while the screen is idle", a
   assert.doesNotMatch(sourceCenter, /window\.setInterval\(\(\) => void refreshSources/u);
 });
 
+test("source scan polling has an explicit cancellation guard", async () => {
+  const sourceCenter = await readFile(source("screens", "SourceCenter.tsx"), "utf8");
+
+  assert.match(sourceCenter, /const scanRunId = useRef\(0\);/u);
+  assert.match(sourceCenter, /const runId = scanRunId\.current \+ 1;[\s\S]*?scanRunId\.current = runId;/u);
+  assert.match(sourceCenter, /const isCurrentScan = \(\) => scanRunId\.current === runId;/u);
+  assert.match(sourceCenter, /if \(!isCurrentScan\(\)\) return;/u);
+  assert.match(sourceCenter, /return \(\) => \{[\s\S]*?scanRunId\.current \+= 1;[\s\S]*?\};/u);
+});
+
+test("setup local-development status cannot overwrite a newer request after unmount", async () => {
+  const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
+
+  assert.match(setup, /const localDevStatusRequestId = useRef\(0\);/u);
+  assert.match(setup, /const requestId = localDevStatusRequestId\.current \+ 1;[\s\S]*?localDevStatusRequestId\.current = requestId;/u);
+  assert.match(setup, /if \(requestId !== localDevStatusRequestId\.current\) return;/u);
+  assert.match(setup, /localDevStatusRequestId\.current \+= 1;/u);
+});
+
+test("publishing refresh ignores late workspace and connector responses", async () => {
+  const publishing = await readFile(source("screens", "PublishingCenter.tsx"), "utf8");
+
+  assert.match(publishing, /const refreshRequestId = useRef\(0\);/u);
+  assert.match(publishing, /const requestId = refreshRequestId\.current \+ 1;[\s\S]*?refreshRequestId\.current = requestId;/u);
+  assert.match(publishing, /if \(requestId !== refreshRequestId\.current\) return;/u);
+});
+
 test("Codex operations distinguishes measured local work from unavailable token and quota data", async () => {
   const operations = await readFile(source("screens", "OperationsHub.tsx"), "utf8");
 
@@ -278,12 +306,37 @@ test("Codex operations distinguishes measured local work from unavailable token 
   assert.match(operations, /Sadece kalıcı yerel iş kaydından türetilen veriler gösterilir/u);
 });
 
+test("operations diagnostics ignores a late engine-log response after the panel is closed", async () => {
+  const operations = await readFile(source("screens", "Operations.tsx"), "utf8");
+
+  assert.match(
+    operations,
+    /if \(!diagnosticsVisible\) return;\s*let alive = true;[\s\S]*?if \(!alive\) return;\s*setEngineDiagnostics\(value\);\s*setEngineDiagnosticsError\(""\);/u,
+    "diagnostic success must not update an unmounted Operations screen"
+  );
+  assert.match(
+    operations,
+    /\.catch\(\(\) => \{\s*if \(!alive\) return;/u,
+    "diagnostic failures must not overwrite a newer panel state"
+  );
+  assert.match(operations, /return \(\) => \{\s*alive = false;\s*\};/u);
+});
+
 test("local materialization never reuses a publication preview from another revision", async () => {
   const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
 
   assert.match(review, /const \[lastPreview, setLastPreview\] = useState<\{ revisionId: string; hash: string \} \| null>\(null\)/u);
   assert.match(review, /setLastPreview\(null\);[\s\S]*?setSelectedId\(revisionId\)/u);
   assert.match(review, /lastPreview\?\.revisionId === revision\.id \? lastPreview\.hash : ""/u);
+});
+
+test("review queue selection is locked while an async revision mutation is running", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+
+  assert.match(review, /const actionBusy = approving \|\| approvingHighRisk \|\| requestingEdit \|\| requestingComprehensiveRewrite \|\| repairingMedia \|\| enqueueingPublication \|\| previewingPublication \|\| materializingLocal;/u);
+  assert.match(review, /if \(actionBusy\) return;[\s\S]*?setSelectedId\(revisionId\)/u);
+  assert.match(review, /<QueueCard[\s\S]*?disabled=\{actionBusy\}/u);
+  assert.match(review, /disabled=\{disabled\}/u);
 });
 
 test("setup keeps unrelated controls hidden until the user selects their task", async () => {
