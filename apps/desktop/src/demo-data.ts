@@ -13,6 +13,38 @@ import type {
   SourceTestResult
 } from "./types.ts";
 
+const demoBobyGuidance = new Map<string, unknown>();
+let demoBobyGuidanceSequence = 0;
+
+function createDemoBobyGuidance(question: string): {
+  reply: string;
+  suggestedActions: Array<{ id: string; label: string }>;
+} {
+  const normalized = question.toLocaleLowerCase("tr-TR");
+  if (/(kaynak|rss|url|haber)/u.test(normalized)) {
+    return {
+      reply: "Kaynağı İçerik Akışı'nda ekle; önce adresi test et, sonra güven ve kullanım kararını görünür biçimde ver. Tarama yalnız onayladığın kaynaktan aday çıkarır.",
+      suggestedActions: [{ id: "OPEN_CONTENT", label: "İçerik Akışı'nı aç" }]
+    };
+  }
+  if (/(post|taslak|makale|içerik hazırla)/u.test(normalized)) {
+    return {
+      reply: "Bu konu için Yeni Taslak'ta kısa editoryal talimatı ve kaynakları seç. Taslak önce kanıt, iki dil ve görsel kontrolünden geçer; yayın onayı en son sende kalır.",
+      suggestedActions: [{ id: "OPEN_INSTANT", label: "Yeni Taslak'ı aç" }]
+    };
+  }
+  if (/(seo|yayın|takvim|slot)/u.test(normalized)) {
+    return {
+      reply: "Önce incelemede değişmez sürümü doğrula. Ardından Takvim ve Yayın'da yalnız onaylı taslağı uygun bir slota yerleştir; SEO kontrolü yayın öncesi paketle birlikte görünür.",
+      suggestedActions: [{ id: "OPEN_PUBLISHING", label: "Takvim ve Yayın'ı aç" }]
+    };
+  }
+  return {
+    reply: "Sorunu aldım. Bulunduğun ekrandaki tek sonraki güvenli adımı birlikte seçelim; kaynak, taslak veya inceleme aşamasından hangisinde kaldığını yazabilirsin.",
+    suggestedActions: [{ id: "OPEN_DASHBOARD", label: "Genel Bakış'ı aç" }]
+  };
+}
+
 const connectorState: ConnectorStateSnapshot = {
   sourceState: "AVAILABLE",
   mode: "LOCAL_ONLY",
@@ -814,6 +846,24 @@ export function createDemoTransport(): InvokeTransport {
           detail: "Yazı üretimi hesabı veya izole runner bekleniyor."
         });
         return { id, state: "RESEARCHING", queueState: "QUEUED" };
+      }
+      case "request_boby_guidance": {
+        const request = args?.request as { question?: unknown } | undefined;
+        const id = `boby-demo-${Date.now()}-${++demoBobyGuidanceSequence}`;
+        const question = typeof request?.question === "string" ? request.question.trim() : "";
+        const guidance = createDemoBobyGuidance(question);
+        demoBobyGuidance.set(id, {
+          id,
+          state: "SUCCEEDED",
+          ...guidance
+        });
+        return { id, state: "QUEUED" };
+      }
+      case "get_boby_guidance": {
+        const id = String(args?.guidanceId ?? "");
+        const result = demoBobyGuidance.get(id);
+        if (!result) throw new BridgeError("COMMAND_FAILED", "Boby rehberlik isteği bulunamadı.");
+        return structuredClone(result);
       }
       case "get_review_revision":
         return structuredClone(demoReview);

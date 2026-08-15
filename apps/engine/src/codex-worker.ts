@@ -164,6 +164,7 @@ export interface CodexWorkerCoordinatorDependencies {
     role: CodexLogicalRole;
     model: string;
     output: unknown;
+    conversationSessionId?: string;
   }) => Promise<void>;
 }
 
@@ -256,7 +257,8 @@ export function createCodexWorkerCoordinator(
           },
           role: result.role,
           model: result.model,
-          output: result.output
+          output: result.output,
+          ...(result.conversationSessionId ? { conversationSessionId: result.conversationSessionId } : {})
         });
         const completed = await persistence.markCompleted({
           jobId: running.jobId,

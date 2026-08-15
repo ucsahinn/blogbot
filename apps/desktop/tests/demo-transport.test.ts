@@ -17,6 +17,27 @@ test("demo transport exposes the canonical connector snapshot required at bootst
   assert.equal(state.externalReadiness, "NOT_CONFIGURED");
 });
 
+test("demo Boby guidance responds to the editor's question instead of repeating one menu hint", async () => {
+  const bridge = createInvokeBridge(createDemoTransport());
+  const request = (question: string) => bridge.requestBobyGuidance({
+    question,
+    activePage: "content",
+    runtimeState: "ONLINE",
+    safeWorkspaceSummary: { draftCount: 1, reviewCount: 0, sourceCount: 2 }
+  });
+
+  const sourceRequest = await request("Kaynak nasıl eklenir?");
+  const draftRequest = await request("Bu konu için post hazırla");
+  const sourceReply = await bridge.getBobyGuidance(sourceRequest.id);
+  const draftReply = await bridge.getBobyGuidance(draftRequest.id);
+
+  assert.equal(sourceReply.state, "SUCCEEDED");
+  assert.equal(draftReply.state, "SUCCEEDED");
+  assert.notEqual(sourceReply.reply, draftReply.reply);
+  assert.match(sourceReply.reply ?? "", /kaynak/iu);
+  assert.match(draftReply.reply ?? "", /taslak/iu);
+});
+
 test("demo transports isolate source and workspace mutations", async () => {
   const first = createInvokeBridge(createDemoTransport());
   const second = createInvokeBridge(createDemoTransport());

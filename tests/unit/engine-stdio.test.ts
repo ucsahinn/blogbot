@@ -80,9 +80,13 @@ test("background maintenance faults use a redacted stderr-only diagnostic code",
   const lines: string[] = [];
 
   reportBackgroundTaskFault("AUTOMATIC_BACKUP_UNAVAILABLE", (line) => lines.push(line));
+  reportBackgroundTaskFault("SOURCE_SCHEDULER_UNAVAILABLE", (line) => lines.push(line), "catalog");
   reportBackgroundTaskFault("SOURCE_RETENTION_UNAVAILABLE", () => { throw new Error("diagnostics unavailable"); });
 
-  assert.deepEqual(lines, ["[Blogbot] AUTOMATIC_BACKUP_UNAVAILABLE\n"]);
+  assert.deepEqual(lines, [
+    "[Blogbot] AUTOMATIC_BACKUP_UNAVAILABLE\n",
+    "[Blogbot] SOURCE_SCHEDULER_UNAVAILABLE phase=catalog\n"
+  ]);
 });
 
 test("Codex lifecycle diagnostics identify a queue phase without recording job content", () => {

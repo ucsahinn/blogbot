@@ -24,13 +24,14 @@ pub struct SecureStoreStatus {
 }
 
 const STABLE_DATA_ROOT: &str = "Blogbot";
+const MAX_RECOVERY_KEY_CANDIDATES: usize = 8;
 // `app_local_data_dir` is derived from the product name on Windows, not the
 // Tauri identifier. Keep this explicit identifier path while recovering the
 // encrypted database created by earlier desktop builds.
 const CURRENT_APP_IDENTIFIER: &str = "app.blogbot.desktop";
 const LEGACY_IDENTIFIERS: &[&str] = &["net.siberdergi.blogbot"];
 
-fn stable_secret_path(app: &AppHandle) -> Option<PathBuf> {
+pub fn stable_data_key_path(app: &AppHandle) -> Option<PathBuf> {
     app.path()
         .app_local_data_dir()
         .ok()
@@ -60,6 +61,32 @@ fn legacy_secret_paths() -> Vec<PathBuf> {
         .iter()
         .map(|identifier| identifier_secret_path(&root, identifier))
         .collect()
+}
+
+/// Return only bounded, explicitly named same-user key backups. These files
+/// are read-only recovery candidates; they are never promoted until the
+/// engine proves that the candidate opens the encrypted workspace.
+fn recovery_key_paths(secret_directories: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut paths = secret_directories
+        .into_iter()
+        .flat_map(|directory| {
+            fs::read_dir(directory)
+                .into_iter()
+                .flat_map(|entries| entries.filter_map(Result::ok))
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    let name = path.file_name()?.to_str()?;
+                    (entry.file_type().ok()?.is_file()
+                        && name.starts_with("data-key.dpapi.")
+                        && name.ends_with(".bak"))
+                    .then_some(path)
+                })
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths.truncate(MAX_RECOVERY_KEY_CANDIDATES);
+    paths
 }
 
 fn existing_valid_key(path: &Path) -> Option<Vec<u8>> {
@@ -96,7 +123,7 @@ fn ordered_key_candidates(
 }
 
 pub fn status(app: &AppHandle) -> SecureStoreStatus {
-    let key_path = stable_secret_path(app).or_else(|| app_secret_path(app));
+    let key_path = stable_data_key_path(app).or_else(|| app_secret_path(app));
     let ready = match key_path.as_ref().map(fs::read) {
         Some(Ok(ciphertext)) => {
             unprotect_for_current_user(&ciphertext).is_ok_and(|plaintext| plaintext.len() == 32)
@@ -120,7 +147,7 @@ pub fn status(app: &AppHandle) -> SecureStoreStatus {
 }
 
 pub fn load_or_create_data_key(app: &AppHandle) -> Result<String, String> {
-    let path = stable_secret_path(app)
+    let path = stable_data_key_path(app)
         .or_else(|| app_secret_path(app))
         .ok_or_else(|| "DATA_KEY_DIRECTORY_UNAVAILABLE: LOCALAPPDATA is unavailable".to_string())?;
     let directory = path
@@ -138,12 +165,8 @@ pub fn load_or_create_data_key(app: &AppHandle) -> Result<String, String> {
         .map(PathBuf::from)
         .map(|root| root.join("Blogbot").join("data").join("pgdata"))
         .is_some_and(|path| path.exists());
-    let candidates = ordered_key_candidates(
-        path.clone(),
-        app_key,
-        legacy_secret_paths(),
-        persisted_data,
-    );
+    let candidates =
+        ordered_key_candidates(path.clone(), app_key, legacy_secret_paths(), persisted_data);
     let plaintext = if let Some((candidate, key)) = candidates
         .iter()
         .find_map(|candidate| existing_valid_key(candidate).map(|key| (candidate, key)))
@@ -169,6 +192,43 @@ pub fn load_or_create_data_key(app: &AppHandle) -> Result<String, String> {
         return Err("DATA_KEY_INVALID_LENGTH".to_string());
     }
     Ok(plaintext.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Return same-user DPAPI key candidates without changing any existing key.
+/// The first value is the canonical key. Older identifier keys are retained
+/// only for a bounded, read-only engine recovery attempt when a migrated
+/// encrypted workspace cannot be opened with that canonical key.
+pub fn load_data_key_candidates(app: &AppHandle) -> Result<Vec<String>, String> {
+    let stable_path = stable_data_key_path(app);
+    let canonical = load_or_create_data_key(app)?;
+    let mut candidates = vec![canonical];
+    let Some(root) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return Ok(candidates);
+    };
+    let app_key = identifier_secret_path(&root, CURRENT_APP_IDENTIFIER);
+    let legacy = LEGACY_IDENTIFIERS
+        .iter()
+        .map(|identifier| identifier_secret_path(&root, identifier));
+    let app_key_directory = app_key.parent().map(Path::to_path_buf);
+    let legacy: Vec<PathBuf> = legacy.collect();
+    let recovery_directories = stable_path
+        .and_then(|candidate| candidate.parent().map(Path::to_path_buf))
+        .into_iter()
+        .chain(app_key_directory)
+        .chain(legacy.iter().filter_map(|candidate| candidate.parent().map(Path::to_path_buf)));
+    let recovery_paths = recovery_key_paths(recovery_directories);
+    for path in std::iter::once(app_key)
+        .chain(legacy)
+        .chain(recovery_paths)
+    {
+        if let Some(key) = existing_valid_key(&path) {
+            let encoded: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+            if !candidates.iter().any(|candidate| candidate == &encoded) {
+                candidates.push(encoded);
+            }
+        }
+    }
+    Ok(candidates)
 }
 
 fn persist_new_key_atomically(
@@ -214,6 +274,72 @@ fn persist_new_key_atomically(
             Err(error)
         }
     }
+}
+
+/// Atomically replace a protected key only after the caller has proved that
+/// its plaintext opens the current local workspace. This is intentionally
+/// separate from first-key creation: a damaged or unrelated key may never be
+/// replaced merely because it exists.
+fn replace_protected_key_atomically(
+    directory: &Path,
+    path: &Path,
+    protected: &[u8],
+) -> Result<(), String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("DATA_KEY_CLOCK_FAILED: {error}"))?
+        .as_nanos();
+    let temp_path = directory.join(format!("data-key-promote.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| format!("DATA_KEY_TEMP_CREATE_FAILED: {error}"))?;
+        file.write_all(protected)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("DATA_KEY_WRITE_FAILED: {error}"))?;
+        let source = windows::core::HSTRING::from(temp_path.as_os_str());
+        let destination = windows::core::HSTRING::from(path.as_os_str());
+        unsafe {
+            MoveFileExW(
+                &source,
+                &destination,
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+            .map_err(|error| format!("DATA_KEY_COMMIT_FAILED: {error}"))?;
+        }
+        Ok::<(), String>(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+pub fn promote_confirmed_data_key(path: &Path, encoded_key: &str) -> Result<(), String> {
+    if encoded_key.len() != 64 || !encoded_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("DATA_KEY_INVALID_LENGTH".to_string());
+    }
+    let key = (0..encoded_key.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&encoded_key[offset..offset + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "DATA_KEY_INVALID_HEX".to_string())?;
+    if key.len() != 32 {
+        return Err("DATA_KEY_INVALID_LENGTH".to_string());
+    }
+    if existing_valid_key(path).is_some_and(|current| current == key) {
+        return Ok(());
+    }
+    let directory = path
+        .parent()
+        .ok_or_else(|| "DATA_KEY_DIRECTORY_UNAVAILABLE".to_string())?;
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("DATA_KEY_DIRECTORY_CREATE_FAILED: {error}"))?;
+    let protected = protect_for_current_user(&key)
+        .map_err(|error| format!("DATA_KEY_PROTECT_FAILED: {error}"))?;
+    replace_protected_key_atomically(directory, path, &protected)
 }
 
 fn input_blob(data: &[u8]) -> Result<CRYPT_INTEGER_BLOB, WindowsError> {
@@ -331,7 +457,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        persist_new_key_atomically, protect_for_current_user, unprotect_for_current_user,
+        persist_new_key_atomically, protect_for_current_user, recovery_key_paths,
+        unprotect_for_current_user,
     };
 
     #[test]
@@ -382,7 +509,12 @@ mod tests {
         let app = PathBuf::from("current-app/data-key.dpapi");
         let legacy = PathBuf::from("legacy/data-key.dpapi");
         assert_eq!(
-            super::ordered_key_candidates(stable.clone(), Some(app.clone()), vec![legacy.clone()], true),
+            super::ordered_key_candidates(
+                stable.clone(),
+                Some(app.clone()),
+                vec![legacy.clone()],
+                true
+            ),
             vec![stable, app, legacy]
         );
     }
@@ -396,6 +528,63 @@ mod tests {
                 .join("secrets")
                 .join("data-key.dpapi")
         );
+    }
+
+    #[test]
+    fn recovery_key_paths_accept_only_bounded_named_backups() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-recovery-key-candidates-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create recovery directory");
+        fs::write(directory.join("data-key.dpapi.recovery-1.bak"), b"candidate")
+            .expect("write backup");
+        fs::write(directory.join("data-key.dpapi.recovery-2.bak"), b"candidate")
+            .expect("write backup");
+        fs::write(directory.join("data-key.dpapi.tmp"), b"not a recovery backup")
+            .expect("write temp");
+        fs::write(directory.join("other-secret.bak"), b"not a data key")
+            .expect("write unrelated backup");
+
+        let paths = recovery_key_paths([directory.clone()]);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|path| path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("data-key.dpapi.") && name.ends_with(".bak"))));
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn confirmed_legacy_key_replaces_the_stable_key_atomically() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-stable-key-promotion-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create key directory");
+        let path = directory.join("data-key.dpapi");
+        let stale = protect_for_current_user(&[3_u8; 32]).expect("protect stale key");
+        fs::write(&path, stale).expect("write stale key");
+
+        super::replace_protected_key_atomically(
+            &directory,
+            &path,
+            &protect_for_current_user(&[9_u8; 32]).expect("protect recovered key"),
+        )
+        .expect("promote recovered key");
+
+        let restored = unprotect_for_current_user(&fs::read(&path).expect("read promoted key"))
+            .expect("unprotect promoted key");
+        assert_eq!(restored, [9_u8; 32]);
+        fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[test]

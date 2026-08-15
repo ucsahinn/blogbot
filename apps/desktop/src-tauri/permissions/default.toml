@@ -9,7 +9,7 @@ permissions = [
   "allow-start-local-dev", "allow-stop-local-dev",
   "allow-list-sources", "allow-test-source",
   "allow-scan-source", "allow-scan-all-sources", "allow-get-source-scan-status", "allow-preview-opml",
-  "allow-save-sources", "allow-review-source", "allow-create-instant-draft", "allow-get-review-revision", "allow-read-revision-media", "allow-approve-revision",
+  "allow-save-sources", "allow-review-source", "allow-create-instant-draft", "allow-request-boby-guidance", "allow-get-boby-guidance", "allow-get-review-revision", "allow-read-revision-media", "allow-approve-revision",
   "allow-approve-high-risk-revision", "allow-enqueue-publication", "allow-materialize-local-preview",
   "allow-preview-publication", "allow-get-operations", "allow-get-engine-diagnostics", "allow-export-diagnostics",
   "allow-get-editorial-workspace", "allow-promote-candidate", "allow-dismiss-candidate", "allow-retry-job",

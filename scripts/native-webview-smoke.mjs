@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { resolve, join } from "node:path";
@@ -10,12 +10,20 @@ const edgeDriverPath = process.env.BLOGBOT_EDGE_DRIVER;
 const applicationPath = process.env.BLOGBOT_DESKTOP_EXE
   ?? resolve(repositoryRoot, "apps/desktop/src-tauri/target/release/blogbot.exe");
 const inspectExistingProfile = process.env.BLOGBOT_NATIVE_PROFILE === "actual";
+const keepSmokeDataRoot = process.env.BLOGBOT_NATIVE_KEEP_TEMP === "1";
 const profileObserveMs = Number.parseInt(process.env.BLOGBOT_PROFILE_OBSERVE_MS ?? "0", 10);
 const skipProfileFinalRead = process.env.BLOGBOT_PROFILE_SKIP_FINAL_READ === "1";
 const retryBlockedActualProfile = process.env.BLOGBOT_PROFILE_RETRY_BLOCKED === "1";
 const rewriteFirstShortActualProfile = process.env.BLOGBOT_PROFILE_REWRITE_SHORT === "1";
+const testExistingProfileSources = process.env.BLOGBOT_PROFILE_TEST_SOURCES === "1";
 const webdriverBaseUrl = "http://127.0.0.1:4444";
+let webdriverUserDataFolder;
 const smokeFeedUrl = process.env.BLOGBOT_SMOKE_FEED_URL ?? "https://www.cshub.com/rss/news";
+// Navigation is a local render, not a network operation. A multi-second wait
+// means the user sees a frozen menu, so keep this gate deliberately stricter
+// than setup and engine-startup probes.
+const MAX_ROUTE_RENDER_MS = 3_000;
+const ROUTE_RENDER_POLL_MS = 100;
 const routes = [
   "dashboard",
   "content",
@@ -78,6 +86,24 @@ async function request(path, options) {
   const response = await fetch(`${webdriverBaseUrl}${path}`, options);
   const payload = await response.json();
   if (!response.ok) {
+    const driverMessage = typeof payload?.value?.message === "string" ? payload.value.message : "";
+    if (
+      path === "/session"
+      && !inspectExistingProfile
+      && /session not created: Chrome instance exited/iu.test(driverMessage)
+    ) {
+      // Boby intentionally uses Tauri's single-instance plugin. When an
+      // editor-owned instance is already open, the second isolated executable
+      // forwards to it and WebDriver only reports the misleading Edge crash.
+      fail("NATIVE_SMOKE_SINGLE_INSTANCE_CONFLICT: Boby may already be open. Close the running Boby instance, then rerun this isolated native smoke.");
+    }
+    if (
+      path === "/session"
+      && inspectExistingProfile
+      && /session not created: Chrome instance exited/iu.test(driverMessage)
+    ) {
+      fail("NATIVE_SMOKE_EXISTING_PROFILE_ATTACH_UNSUPPORTED: WebDriver cannot attach to an already-running Tauri window. Close Boby and rerun the isolated smoke; this does not indicate an application crash.");
+    }
     fail(`${path} returned ${response.status}: ${JSON.stringify(payload)}`);
   }
   return payload;
@@ -106,14 +132,25 @@ async function execute(sessionId, script) {
 }
 
 async function createNativeSession() {
+  const tauriOptions = { application: applicationPath };
+  if (webdriverUserDataFolder) {
+    tauriOptions.webviewOptions = { userDataFolder: webdriverUserDataFolder };
+  }
   const created = await request("/session", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       capabilities: {
         alwaysMatch: {
-          browserName: "webview2",
-          "tauri:options": { application: applicationPath.replaceAll("\\", "/") }
+          // tauri-driver routes Windows WebView2 sessions through its WRY
+          // capability. Using "webview2" makes msedgedriver launch and then
+          // reject the application with the misleading "Chrome not reachable"
+          // session error before the app can be inspected.
+          browserName: "wry",
+          // Keep the native Windows path intact. Converting `C:\\...` to
+          // `C:/...` is accepted by the shell but is not consistently
+          // forwarded by tauri-driver to msedgedriver on Windows.
+          "tauri:options": tauriOptions
         }
       }
     })
@@ -142,6 +179,22 @@ async function waitForApplicationTitle(sessionId) {
   fail("application title did not become available within 15 seconds.");
 }
 
+async function waitForTauriBridge(sessionId) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const ready = await execute(
+      sessionId,
+      "return typeof window.__TAURI_INTERNALS__?.invoke === 'function';"
+    );
+    if (ready === true) return;
+    await wait(150);
+  }
+  const diagnostic = await execute(
+    sessionId,
+    "return document.body?.innerText?.replace(/\\s+/g, ' ').trim().slice(0, 500) ?? '';"
+  );
+  fail(`Tauri invoke bridge did not become ready within 15 seconds. Visible text: ${JSON.stringify(diagnostic)}`);
+}
+
 async function safeFatalDiagnostic(sessionId) {
   return execute(
     sessionId,
@@ -159,7 +212,8 @@ async function safeFatalDiagnostic(sessionId) {
 
 async function waitForVisibleHeading(sessionId, route) {
   const expected = expectedHeadings[route];
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < MAX_ROUTE_RENDER_MS) {
     const heading = await execute(
       sessionId,
       `window.location.hash = '#${route}'; return document.querySelector('h1')?.textContent?.trim() ?? '';`
@@ -168,14 +222,19 @@ async function waitForVisibleHeading(sessionId, route) {
       const safeErrorCode = await safeFatalDiagnostic(sessionId);
       fail(`route #${route} reached the fatal startup state. Safe error codes: ${JSON.stringify(safeErrorCode)}`);
     }
-    if (Array.isArray(expected) ? expected.includes(heading) : heading === expected) return heading;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+    if (Array.isArray(expected) ? expected.includes(heading) : heading === expected) {
+      return {
+        heading,
+        routeRenderMs: Math.round(performance.now() - startedAt)
+      };
+    }
+    await wait(ROUTE_RENDER_POLL_MS);
   }
   const diagnostic = await execute(
     sessionId,
     "return document.body?.innerText?.replace(/\\s+/g, ' ').trim().slice(0, 500) ?? '';"
   );
-  fail(`route #${route} did not render a visible page heading within 15 seconds. Visible text: ${JSON.stringify(diagnostic)}`);
+  fail(`route #${route} did not render a visible page heading within ${MAX_ROUTE_RENDER_MS} ms. Visible text: ${JSON.stringify(diagnostic)}`);
 }
 
 async function verifySetupGuideStartsFocusedWizard(sessionId) {
@@ -1182,6 +1241,57 @@ async function inspectExistingProfileState(sessionId, localEngine) {
   };
 }
 
+async function verifyExistingProfileSources(sessionId) {
+  const catalog = await invoke(sessionId, "list_sources");
+  const sources = Array.isArray(catalog?.result?.sources) ? catalog.result.sources : [];
+  const durations = [];
+  let reachable = 0;
+  const invalidIndexes = [];
+  const unreachableIndexes = [];
+  const unreachableCodes = [];
+  const unreachableSources = [];
+
+  for (const source of sources) {
+    const url = typeof source?.url === "string" ? source.url : "";
+    if (!url) {
+      invalidIndexes.push(durations.length);
+      continue;
+    }
+    const startedAt = performance.now();
+    const result = await invoke(sessionId, "test_source", { url });
+    durations.push(Math.round(performance.now() - startedAt));
+    if (result?.ok === true && result.result?.reachable === true) {
+      reachable += 1;
+    } else {
+      unreachableIndexes.push(durations.length - 1);
+      const raw = typeof result?.error === "string" ? result.error : "SOURCE_TEST_FAILED";
+      const code = raw.match(/[A-Z][A-Z_]{2,}/u)?.[0] ?? "SOURCE_TEST_FAILED";
+      unreachableCodes.push(code);
+      unreachableSources.push({
+        index: durations.length - 1,
+        name: typeof source?.name === "string" ? source.name.slice(0, 120) : "Adsız kaynak",
+        code
+      });
+    }
+  }
+
+  if (invalidIndexes.length > 0) {
+    fail(`actual profile source catalog has ${invalidIndexes.length}/${sources.length} invalid source URLs at catalog indexes ${invalidIndexes.join(",")}.`);
+  }
+  return {
+    tested: sources.length,
+    reachable,
+    degraded: unreachableIndexes.length > 0,
+    unreachableCount: unreachableIndexes.length,
+    unreachableCodes,
+    unreachableSources,
+    maxLatencyMs: durations.length > 0 ? Math.max(...durations) : 0,
+    averageLatencyMs: durations.length > 0
+      ? Math.round(durations.reduce((total, value) => total + value, 0) / durations.length)
+      : 0
+  };
+}
+
 async function retryFirstBlockedActualDraft(sessionId) {
   await execute(sessionId, "window.location.hash = '#operations'; return true;");
   await waitForVisibleHeading(sessionId, "operations");
@@ -1241,6 +1351,8 @@ async function main() {
   ]);
 
   const smokeDataRoot = inspectExistingProfile ? undefined : await mkdtemp(join(tmpdir(), "blogbot-native-webview-"));
+  webdriverUserDataFolder = smokeDataRoot ? join(smokeDataRoot, "webview2-user-data") : undefined;
+  if (webdriverUserDataFolder) await mkdir(webdriverUserDataFolder, { recursive: true });
   const driver = spawn(tauriDriverPath, ["--native-driver", edgeDriverPath], {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -1273,6 +1385,7 @@ async function main() {
     const title = inspectExistingProfile
       ? await request(`/session/${sessionId}/title`)
       : await waitForApplicationTitle(sessionId);
+    await waitForTauriBridge(sessionId);
 
     await verifyInitialEngineSurface(sessionId);
 
@@ -1302,6 +1415,14 @@ async function main() {
     const nativeReadCommands = await verifyNativeReadCommands(sessionId);
     const catalogRead = await measureCatalogReadLatency(sessionId);
     if (inspectExistingProfile) {
+      const profileRoutePerformance = [];
+      for (const route of routes) {
+        const { heading, routeRenderMs } = await waitForVisibleHeading(sessionId, route);
+        profileRoutePerformance.push({ route, heading, routeRenderMs });
+      }
+      const profileSourceChecks = testExistingProfileSources
+        ? await verifyExistingProfileSources(sessionId)
+        : undefined;
       const initialProfile = await inspectExistingProfileState(sessionId, localEngine.result);
       const retryJourney = retryBlockedActualProfile
         ? await retryFirstBlockedActualDraft(sessionId)
@@ -1323,7 +1444,9 @@ async function main() {
         retryJourney,
         comprehensiveRewriteJourney,
         nativeReadCommands,
-        catalogRead
+        catalogRead,
+        profileRoutePerformance,
+        profileSourceChecks
       }, null, 2));
       return;
     }
@@ -1334,6 +1457,7 @@ async function main() {
     await new Promise((resolveWait) => setTimeout(resolveWait, 700));
     sessionId = await createNativeSession();
     await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
+    await waitForTauriBridge(sessionId);
     const recoveredWorkspace = await invoke(sessionId, "get_editorial_workspace");
     const recoveredDraft = recoveredWorkspace?.result?.drafts?.find(
       (draft) => draft?.id === candidateJourney.draftId
@@ -1358,8 +1482,8 @@ async function main() {
 
     const evidence = [];
     for (const route of routes) {
-      const heading = await waitForVisibleHeading(sessionId, route);
-      evidence.push({ route, heading });
+      const { heading, routeRenderMs } = await waitForVisibleHeading(sessionId, route);
+      evidence.push({ route, heading, routeRenderMs });
     }
 
     const publishingHeading = evidence.find((entry) => entry.route === "publishing")?.heading;
@@ -1383,7 +1507,9 @@ async function main() {
       driver.kill();
       await Promise.race([once(driver, "exit"), new Promise((resolveWait) => setTimeout(resolveWait, 1000))]);
     }
-    if (smokeDataRoot) {
+    if (smokeDataRoot && keepSmokeDataRoot) {
+      console.error(`Native smoke temporary profile retained: ${smokeDataRoot}`);
+    } else if (smokeDataRoot) {
       await rm(smokeDataRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   }

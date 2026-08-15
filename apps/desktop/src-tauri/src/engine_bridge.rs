@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{create_dir_all, OpenOptions};
@@ -40,6 +40,7 @@ const MAINTENANCE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 // while an unresponsive Node process consumes the old shutdown grace period.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(1);
 const MAX_DIAGNOSTIC_LOG_BYTES: u64 = 256 * 1024;
+const MAX_DIAGNOSTIC_LOG_ROTATIONS: usize = 4;
 // `CREATE_NO_WINDOW` applies to every helper process started by the desktop
 // host. In particular, probing a `.cmd` launcher at app start must never flash
 // a Command Prompt behind the Blogbot window.
@@ -128,6 +129,29 @@ pub fn redact_diagnostic_for_persistence(line: &str) -> String {
     bounded
 }
 
+pub(crate) fn diagnostic_log_variants(path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![path.to_path_buf()];
+    paths.extend((1..=MAX_DIAGNOSTIC_LOG_ROTATIONS).map(|index| {
+        PathBuf::from(format!("{}.{}", path.display(), index))
+    }));
+    paths
+}
+
+fn rotate_diagnostic_log(path: &Path) {
+    for index in (1..=MAX_DIAGNOSTIC_LOG_ROTATIONS).rev() {
+        let source = if index == 1 {
+            path.to_path_buf()
+        } else {
+            PathBuf::from(format!("{}.{}", path.display(), index - 1))
+        };
+        let target = PathBuf::from(format!("{}.{}", path.display(), index));
+        if source.is_file() {
+            let _ = std::fs::remove_file(&target);
+            let _ = std::fs::rename(&source, &target);
+        }
+    }
+}
+
 fn serialize_bounded_request(request: &Value) -> Result<String, String> {
     let serialized = serde_json::to_string(request)
         .map_err(|error| format!("ENGINE_REQUEST_INVALID: {error}"))?;
@@ -157,7 +181,13 @@ fn should_retry_after_transport_fault(error: &str) -> bool {
 /// commands must surface UNKNOWN/diagnostics and rely on their durable ledger.
 fn is_safe_read_retry(request: &Value) -> bool {
     match request.get("kind").and_then(Value::as_str) {
-        Some("doctor") | Some("state") => true,
+        // These projections only read the durable local store. If the owned
+        // sidecar dies or its response channel stalls, replaying them once
+        // against a fresh sidecar cannot duplicate an external or local
+        // effect. In particular, `source.list` drives the content workspace
+        // during navigation, so treating a transient transport loss as final
+        // needlessly leaves the editor on a failed refresh.
+        Some("doctor") | Some("state") | Some("source.list") => true,
         Some("command") => matches!(
             request
                 .get("command")
@@ -197,18 +227,92 @@ fn owned_process_tree_kill_args(pid: u32) -> [String; 4] {
     ["/pid".into(), pid.to_string(), "/t".into(), "/f".into()]
 }
 
+fn owned_descendant_pids(root_pid: u32, parent_links: &[(u32, u32)]) -> Vec<u32> {
+    let mut children_by_parent = HashMap::<u32, Vec<u32>>::new();
+    for &(pid, parent_pid) in parent_links {
+        children_by_parent.entry(parent_pid).or_default().push(pid);
+    }
+    let mut descendants = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending = children_by_parent.remove(&root_pid).unwrap_or_default();
+    while let Some(pid) = pending.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        descendants.push(pid);
+        if let Some(children) = children_by_parent.remove(&pid) {
+            pending.extend(children);
+        }
+    }
+    descendants
+}
+
+#[cfg(windows)]
+fn owned_process_tree_descendants(root_pid: u32) -> Vec<u32> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+    };
+
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return Vec::new();
+    };
+    let mut entry = PROCESSENTRY32 {
+        dwSize: std::mem::size_of::<PROCESSENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut links = Vec::new();
+    if unsafe { Process32First(snapshot, &mut entry) }.is_ok() {
+        loop {
+            links.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            if unsafe { Process32Next(snapshot, &mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+    owned_descendant_pids(root_pid, &links)
+}
+
+#[cfg(windows)]
+fn terminate_owned_pid(pid: u32) -> bool {
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) }) else {
+        return false;
+    };
+    unsafe { TerminateProcess(process, 1) }.is_ok()
+}
+
 pub(crate) fn terminate_owned_process_tree(child: &mut Child) {
     #[cfg(windows)]
     {
-        let mut taskkill = Command::new("taskkill.exe");
-        configure_hidden_command(&mut taskkill);
-        let status = taskkill
-            .args(owned_process_tree_kill_args(child.id()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if status.is_ok_and(|result| result.success()) {
+        // taskkill /T has proved insufficient for npm/Python launchers that
+        // detach their server after start. Snapshot the already-owned tree,
+        // stop deepest descendants first, then stop the root. No process is
+        // selected by name or outside this root's captured ancestry.
+        let mut pids = owned_process_tree_descendants(child.id());
+        pids.reverse();
+        pids.push(child.id());
+        let mut root_stopped = false;
+        for pid in pids {
+            let stopped = terminate_owned_pid(pid);
+            if pid == child.id() {
+                root_stopped = stopped;
+            }
+            if !stopped {
+                let mut taskkill = Command::new("taskkill.exe");
+                configure_hidden_command(&mut taskkill);
+                let status = taskkill
+                    .args(owned_process_tree_kill_args(pid))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                if pid == child.id() && status.is_ok_and(|result| result.success()) {
+                    root_stopped = true;
+                }
+            }
+        }
+        if root_stopped {
             return;
         }
     }
@@ -223,7 +327,10 @@ pub struct EngineBridge {
     node_modules: Option<PathBuf>,
     codex_command: Option<String>,
     codex_home: Option<PathBuf>,
-    data_key_hex: Option<String>,
+    data_key_hex: Mutex<Vec<String>>,
+    data_key_fallback_attempts: Mutex<usize>,
+    data_key_recovery_exhausted: AtomicBool,
+    stable_data_key_path: Option<PathBuf>,
     diagnostic_log: Option<PathBuf>,
     process: Mutex<Option<EngineProcess>>,
     request_sequence: AtomicU64,
@@ -235,6 +342,7 @@ struct EngineProcess {
     stdin: Option<ChildStdin>,
     pending: Arc<PendingResponses>,
     protocol_fault: Arc<AtomicBool>,
+    startup_decrypt_failed: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     stderr_reader: Option<JoinHandle<()>>,
     ready: bool,
@@ -332,7 +440,8 @@ impl EngineBridge {
             .app_data_dir()
             .ok()
             .map(|directory| directory.join("codex-home"));
-        let data_key = secure_store::load_or_create_data_key(app);
+        let stable_data_key_path = secure_store::stable_data_key_path(app);
+        let data_key = secure_store::load_data_key_candidates(app);
         let bridge = Self {
             executable,
             fetcher_executable,
@@ -341,7 +450,10 @@ impl EngineBridge {
             node_modules,
             codex_command,
             codex_home,
-            data_key_hex: data_key.as_ref().ok().cloned(),
+            data_key_hex: Mutex::new(data_key.as_ref().ok().cloned().unwrap_or_default()),
+            data_key_fallback_attempts: Mutex::new(0),
+            data_key_recovery_exhausted: AtomicBool::new(false),
+            stable_data_key_path,
             diagnostic_log: app
                 .path()
                 .app_data_dir()
@@ -385,19 +497,48 @@ impl EngineBridge {
             .and_then(Value::as_str)
             .unwrap_or("missing")
             .to_string();
+        if self.data_key_recovery_exhausted.load(Ordering::Acquire) {
+            self.record_diagnostic_event("LOCAL_DATA_KEY_RECOVERY_REQUIRED");
+            return Err("LOCAL_DATA_KEY_RECOVERY_REQUIRED".to_string());
+        }
         let mut result = self.request_with_restart(request.clone(), true);
         // A write/read/response fault invalidates the owned sidecar process
         // and request_with_restart drops it. The next request can therefore
         // start a clean process. A lost mutation response is intentionally not
         // replayed: the operator gets a durable status/diagnostic instead.
         // Only explicitly classified reads may restart once.
+        let mut fallback_was_used = false;
         if result
             .as_ref()
             .err()
             .is_some_and(|error| should_retry_after_transport_fault(error))
             && is_safe_read_retry(&request)
         {
-            result = self.request_with_restart(request, false);
+            result = self.request_with_restart(request.clone(), false);
+        }
+        // A legacy same-user DPAPI key is attempted only after a read request
+        // loses its engine during encrypted-store startup. It cannot replay a
+        // mutation and does not alter either key file or user data.
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| should_attempt_data_key_fallback(&request, error))
+        {
+            if self.advance_data_key_candidate() {
+                self.stop();
+                result = self.request_with_restart(request.clone(), true);
+                fallback_was_used = true;
+            } else if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("LOCAL_DATA_DECRYPT_FAILED"))
+            {
+                self.data_key_recovery_exhausted.store(true, Ordering::Release);
+                self.record_diagnostic_event("LOCAL_DATA_KEY_RECOVERY_REQUIRED");
+            }
+        }
+        if should_promote_data_key_after_fallback(fallback_was_used, result.is_ok()) {
+            self.promote_active_data_key_candidate();
         }
         if let Err(error) = &result {
             // Keep the most recent bridge-level failure available to the
@@ -440,6 +581,43 @@ impl EngineBridge {
         }
     }
 
+    fn advance_data_key_candidate(&self) -> bool {
+        let Ok(mut candidates) = self.data_key_hex.lock() else {
+            return false;
+        };
+        let Ok(mut fallback_attempts) = self.data_key_fallback_attempts.lock() else {
+            return false;
+        };
+        if !can_advance_data_key_candidate(candidates.len(), *fallback_attempts) {
+            self.record_diagnostic_event("LOCAL_DATA_KEY_FALLBACK_EXHAUSTED");
+            return false;
+        }
+        candidates.rotate_left(1);
+        *fallback_attempts += 1;
+        self.record_diagnostic_event("LOCAL_DATA_KEY_FALLBACK_ATTEMPTED");
+        true
+    }
+
+    fn promote_active_data_key_candidate(&self) {
+        let Some(path) = self.stable_data_key_path.as_ref() else {
+            self.record_diagnostic_event("LOCAL_DATA_KEY_FALLBACK_PROMOTION_SKIPPED");
+            return;
+        };
+        let candidate = self
+            .data_key_hex
+            .lock()
+            .ok()
+            .and_then(|keys| keys.first().cloned());
+        let Some(candidate) = candidate else {
+            self.record_diagnostic_event("LOCAL_DATA_KEY_FALLBACK_PROMOTION_SKIPPED");
+            return;
+        };
+        match secure_store::promote_confirmed_data_key(path, &candidate) {
+            Ok(()) => self.record_diagnostic_event("LOCAL_DATA_KEY_FALLBACK_PROMOTED"),
+            Err(_) => self.record_diagnostic_event("LOCAL_DATA_KEY_FALLBACK_PROMOTION_FAILED"),
+        }
+    }
+
     fn request_with_restart(
         &self,
         mut request: Value,
@@ -474,8 +652,12 @@ impl EngineBridge {
             .ok_or_else(|| "ENGINE_NOT_RUNNING".to_string())?;
 
         if process.protocol_fault.load(Ordering::Acquire) {
+            let decrypt_failed = process.startup_decrypt_failed.load(Ordering::Acquire);
             *guard = None;
             drop(guard);
+            if decrypt_failed {
+                return Err("LOCAL_DATA_DECRYPT_FAILED".to_string());
+            }
             if !allow_preflight_restart {
                 return Err("ENGINE_PROTOCOL_FAULT".to_string());
             }
@@ -487,8 +669,12 @@ impl EngineBridge {
             .map_err(|error| format!("ENGINE_STATUS_FAILED: {error}"))?
             .is_some()
         {
+            let decrypt_failed = process.startup_decrypt_failed.load(Ordering::Acquire);
             *guard = None;
             drop(guard);
+            if decrypt_failed {
+                return Err("LOCAL_DATA_DECRYPT_FAILED".to_string());
+            }
             if !allow_preflight_restart {
                 return Err("ENGINE_EXITED_DURING_START".to_string());
             }
@@ -498,6 +684,7 @@ impl EngineBridge {
 
         let response_receiver = process.pending.register(&transport_id)?;
         let process_id = process.child.id();
+        let startup_decrypt_failed = Arc::clone(&process.startup_decrypt_failed);
         if let Err(error) = process
             .stdin
             .as_mut()
@@ -528,6 +715,9 @@ impl EngineBridge {
         let line = match response_receiver.recv_timeout(timeout) {
             Ok(Ok(line)) => line,
             Ok(Err(error)) => {
+                if startup_decrypt_failed.load(Ordering::Acquire) {
+                    return Err("LOCAL_DATA_DECRYPT_FAILED".to_string());
+                }
                 return Err(transport_error_for_request(
                     &format!("ENGINE_READ_FAILED: {error}"),
                     &transport_id,
@@ -587,7 +777,10 @@ impl EngineBridge {
             .ok_or_else(|| "ENGINE_NATIVE_MODULES_MISSING".to_string())?;
         let data_key_hex = self
             .data_key_hex
-            .as_ref()
+            .lock()
+            .map_err(|_| "LOCAL_DATA_KEY_UNAVAILABLE".to_string())?
+            .first()
+            .cloned()
             .ok_or_else(|| "LOCAL_DATA_KEY_UNAVAILABLE".to_string())?;
         let fetcher_executable = self
             .fetcher_executable
@@ -627,6 +820,8 @@ impl EngineBridge {
             .take()
             .ok_or_else(|| "ENGINE_STDERR_UNAVAILABLE".to_string())?;
         let stderr_path = self.diagnostic_log.clone();
+        let startup_decrypt_failed = Arc::new(AtomicBool::new(false));
+        let stderr_decrypt_failed = Arc::clone(&startup_decrypt_failed);
         let stderr_reader = thread::Builder::new()
             .name("blogbot-engine-stderr".to_string())
             .spawn(move || {
@@ -641,13 +836,16 @@ impl EngineBridge {
                         .ok();
                     let reader = BufReader::new(stderr);
                     for line in reader.lines().map_while(Result::ok) {
+                        if line.contains("LOCAL_DATA_DECRYPT_FAILED") {
+                            stderr_decrypt_failed.store(true, Ordering::Release);
+                        }
                         let redacted = redact_diagnostic_for_persistence(&line);
                         if let Some(file) = log.as_mut() {
                             if file.metadata().map(|meta| meta.len()).unwrap_or(0)
                                 > MAX_DIAGNOSTIC_LOG_BYTES
                             {
                                 drop(log.take());
-                                let _ = std::fs::write(&path, b"[diagnostic log rotated]\n");
+                                rotate_diagnostic_log(&path);
                                 log = OpenOptions::new()
                                     .create(true)
                                     .append(true)
@@ -723,6 +921,7 @@ impl EngineBridge {
             stdin: Some(stdin),
             pending,
             protocol_fault,
+            startup_decrypt_failed,
             reader: Some(reader),
             stderr_reader: Some(stderr_reader),
             ready: false,
@@ -773,6 +972,27 @@ impl EngineBridge {
         }
         vars
     }
+}
+
+fn should_attempt_data_key_fallback(request: &Value, error: &str) -> bool {
+    // A decrypt failure can first close stdout, then be normalized to
+    // ENGINE_PROTOCOL_FAULT by the bounded safe-read restart above. Both
+    // forms mean a same-user legacy key may recover an existing encrypted
+    // workspace. This remains read-only and never retries a mutation.
+    is_safe_read_retry(request)
+        && (error.contains("LOCAL_DATA_DECRYPT_FAILED")
+            || error.contains("ENGINE_CLOSED_PIPE")
+            || error.starts_with("ENGINE_PROTOCOL_FAULT"))
+}
+
+fn should_promote_data_key_after_fallback(fallback_was_used: bool, request_succeeded: bool) -> bool {
+    fallback_was_used && request_succeeded
+}
+
+fn can_advance_data_key_candidate(candidate_count: usize, fallback_attempts: usize) -> bool {
+    // Candidate zero is the canonical key used at startup. Each remaining
+    // same-user legacy key is permitted exactly once for this desktop session.
+    candidate_count > fallback_attempts.saturating_add(1)
 }
 
 fn discover_codex_command() -> Option<String> {
@@ -949,15 +1169,42 @@ fn discover_engine_node_modules(app: &AppHandle) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
+        diagnostic_log_variants, rotate_diagnostic_log,
         discover_engine_executable, has_pglite_assets, is_safe_read_retry,
         redact_diagnostic_for_persistence, response_timeout_for_request, serialize_bounded_request,
-        should_retry_after_transport_fault, sidecar_environment_with, transport_error_for_request,
-        PendingResponses, MAINTENANCE_RESPONSE_TIMEOUT, RESPONSE_TIMEOUT, STARTUP_RESPONSE_TIMEOUT,
-        SHUTDOWN_DEADLINE, WINDOWS_CREATE_NO_WINDOW,
+        can_advance_data_key_candidate, should_attempt_data_key_fallback,
+        should_promote_data_key_after_fallback,
+        should_retry_after_transport_fault,
+        sidecar_environment_with, transport_error_for_request, PendingResponses,
+        MAINTENANCE_RESPONSE_TIMEOUT, RESPONSE_TIMEOUT, SHUTDOWN_DEADLINE,
+        STARTUP_RESPONSE_TIMEOUT, WINDOWS_CREATE_NO_WINDOW,
     };
     use serde_json::json;
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn diagnostic_rotation_preserves_recent_log_segments() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("blogbot-diagnostic-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("diagnostic fixture directory");
+        let path = directory.join("engine.stderr.log");
+        for (index, variant) in diagnostic_log_variants(&path).iter().enumerate() {
+            std::fs::write(variant, format!("segment-{index}")).expect("diagnostic fixture");
+        }
+
+        rotate_diagnostic_log(&path);
+
+        let rotated = diagnostic_log_variants(&path);
+        assert_eq!(std::fs::read_to_string(&rotated[1]).unwrap(), "segment-0");
+        assert_eq!(std::fs::read_to_string(&rotated[2]).unwrap(), "segment-1");
+        assert_eq!(std::fs::read_to_string(&rotated[4]).unwrap(), "segment-3");
+        assert!(!rotated[0].exists());
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn development_engine_binary_is_discoverable_after_sidecar_build() {
@@ -989,6 +1236,14 @@ mod tests {
     }
 
     #[test]
+    fn owned_process_tree_expands_only_descendants_of_the_owned_root() {
+        assert_eq!(
+            super::owned_descendant_pids(10, &[(11, 10), (12, 11), (13, 10), (99, 98)]),
+            vec![13, 11, 12]
+        );
+    }
+
+    #[test]
     fn windows_helper_processes_use_the_no_window_creation_flag() {
         assert_eq!(WINDOWS_CREATE_NO_WINDOW, 0x0800_0000);
     }
@@ -1012,6 +1267,7 @@ mod tests {
             "ENGINE_REQUEST_ID_MISSING"
         ));
         assert!(is_safe_read_retry(&json!({ "kind": "state" })));
+        assert!(is_safe_read_retry(&json!({ "kind": "source.list" })));
         assert!(is_safe_read_retry(
             &json!({ "kind": "command", "command": { "kind": "REVISION.GET" } })
         ));
@@ -1021,6 +1277,42 @@ mod tests {
         assert!(!is_safe_read_retry(
             &json!({ "kind": "command", "command": { "kind": "APPROVAL.GRANT" } })
         ));
+        assert!(should_attempt_data_key_fallback(
+            &json!({ "kind": "state" }),
+            "ENGINE_READ_FAILED: ENGINE_CLOSED_PIPE"
+        ));
+        assert!(should_attempt_data_key_fallback(
+            &json!({ "kind": "state" }),
+            "ENGINE_PROTOCOL_FAULT"
+        ));
+        assert!(should_attempt_data_key_fallback(
+            &json!({ "kind": "state" }),
+            "LOCAL_DATA_DECRYPT_FAILED"
+        ));
+        assert!(!should_attempt_data_key_fallback(
+            &json!({ "kind": "command", "command": { "kind": "APPROVAL.GRANT" } }),
+            "ENGINE_READ_FAILED: ENGINE_CLOSED_PIPE"
+        ));
+        assert!(!should_attempt_data_key_fallback(
+            &json!({ "kind": "state" }),
+            "ENGINE_RESPONSE_TIMEOUT"
+        ));
+    }
+
+    #[test]
+    fn successful_legacy_key_read_is_the_only_case_that_promotes_the_key() {
+        assert!(should_promote_data_key_after_fallback(true, true));
+        assert!(!should_promote_data_key_after_fallback(true, false));
+        assert!(!should_promote_data_key_after_fallback(false, true));
+    }
+
+    #[test]
+    fn exhausted_legacy_key_candidates_do_not_restart_every_safe_read() {
+        assert!(can_advance_data_key_candidate(2, 0));
+        assert!(!can_advance_data_key_candidate(2, 1));
+        assert!(can_advance_data_key_candidate(3, 0));
+        assert!(can_advance_data_key_candidate(3, 1));
+        assert!(!can_advance_data_key_candidate(3, 2));
     }
 
     #[test]

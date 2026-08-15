@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import desktopPackage from "../../package.json" with { type: "json" };
 
+import bobyAvatar from "../assets/boby-avatar-v2.webp";
 import { userFacingUpdateError, type BlogbotBridge, type UnsignedDesktopUpdate } from "../bridge.ts";
 import type { BootstrapSnapshot } from "../types.ts";
 
@@ -106,11 +107,16 @@ export function AppShell({
     setPendingUpdate(null);
     setUpdateMessage("Güncellemeler güvenli bağlantıyla denetleniyor…");
     try {
-      const update = await bridge.checkUnsignedUpdate();
-      if (!update) {
-        setUpdateMessage("Bu bilgisayardaki Boby güncel.");
+      const result = await bridge.checkUnsignedUpdate();
+      if (result.kind === "upToDate") {
+        setUpdateMessage(`Bu bilgisayardaki Boby, yayınlanmış ${result.latestVersion} sürümüyle güncel.`);
         return;
       }
+      if (result.kind === "localBuildNewer") {
+        setUpdateMessage(`Bu bilgisayardaki Boby, yayınlanmış ${result.latestVersion} sürümünden daha yeni. Yeni bir yayın paketi henüz yok.`);
+        return;
+      }
+      const update = result.update;
       setPendingUpdate(update);
       setUpdateMessage(`Boby ${update.version} hazır. İndirmeyi ve kurulumu siz başlatın.`);
     } catch (reason) {
@@ -177,9 +183,7 @@ export function AppShell({
       <a className="skip-link" href="#main-workspace">Ana içeriğe geç</a>
       <aside className="sidebar" aria-label="Uygulama araçları">
         <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true">
-            B
-          </span>
+          <img className="brand-avatar" src={bobyAvatar} alt="" />
           <span>
             <strong>Boby</strong>
             <small>Yerel yayın sistemi</small>
@@ -301,9 +305,7 @@ export function AppShell({
         </div>
 
         <div className="operator-card">
-          <span className="operator-avatar" aria-hidden="true">
-            B
-          </span>
+          <img className="operator-avatar" src={bobyAvatar} alt="" />
           <span>
             <strong>Editör çalışma alanı</strong>
             <small>İnsan onayı zorunlu</small>
@@ -313,7 +315,7 @@ export function AppShell({
 
       <main className="workspace" id="main-workspace" tabIndex={-1}>{children}</main>
       <button type="button" className="boby-launcher" aria-label="Editör Boby'yi aç" onClick={onOpenBoby}>
-        <span aria-hidden="true">B</span>
+        <img src={bobyAvatar} alt="" />
         <strong>Editör Boby</strong>
       </button>
       {syncError ? (

@@ -88,11 +88,17 @@ alanı durumu kontrol edilmelidir.
 
 ```powershell
 npm.cmd install
+npm.cmd run tauri -- dev
 npm.cmd run test:all
 npm.cmd run lint
 npm.cmd run typecheck
 npm.cmd run build
 ```
+
+`npm.cmd run tauri -- dev` masaüstü Tauri çalışma zamanını ve Vite arayüzünü
+başlatır. Kök komut bunu otomatik olarak `@blogbot/desktop` workspace'ine
+yönlendirir; ayrıca `npm.cmd run tauri -- --version` ile Tauri CLI kurulumu
+doğrulanabilir.
 
 Yerel engine sidecar'ını üretmek ve gerçek PGlite/pg-boss el sıkışmasını
 doğrulamak için:

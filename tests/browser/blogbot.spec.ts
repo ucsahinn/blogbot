@@ -73,16 +73,34 @@ test("all primary routes render without browser runtime errors", async ({ page }
   }
 });
 
-test("Editor Boby gives local contextual help and routes the editor to the named workspace", async ({ page }) => {
+test("Editor Boby keeps the Luna Low conversation in-panel and routes the editor from its answer", async ({ page }) => {
   await page.goto("#dashboard");
   await page.getByRole("button", { name: "Editör Boby'yi aç" }).click();
   const boby = page.getByRole("dialog", { name: "Editör Boby" });
-  await expect(boby).toContainText("Konuşmalar cihazında kalır");
+  await expect(boby).toContainText("Konuşma bu panelde aynı yerde kalır");
   await boby.getByRole("button", { name: "Kaynak ekle" }).click();
-  await expect(boby).toContainText("Kaynak eklemek için İçerik Akışı");
-  await boby.getByRole("button", { name: "Kaynakları aç" }).click();
+  await expect(boby).toContainText("Boby düşünüyor; yanıtı burada hazırlıyorum.");
+  await expect(boby).toContainText("Boby · Luna Low");
+  await expect(boby).not.toContainText("Codex'e ilettim");
+  await boby.getByRole("button", { name: "Bunu aç" }).click();
   await expect(page).toHaveURL(/#content$/u);
   await expect(page.getByRole("heading", { name: "Kaynaklardan yayın fikrine tek çalışma alanı" })).toBeVisible();
+});
+
+test("Editor Boby gives distinct in-panel guidance for two different questions", async ({ page }) => {
+  await page.goto("#dashboard");
+  await page.getByRole("button", { name: "Editör Boby'yi aç" }).click();
+  const boby = page.getByRole("dialog", { name: "Editör Boby" });
+  const question = boby.getByRole("textbox", { name: "Boby'ye sor" });
+
+  await question.fill("Kaynak nasıl eklenir?");
+  await boby.getByRole("button", { name: "Sor" }).click();
+  await expect(boby).toContainText("Kaynağı İçerik Akışı'nda ekle");
+  await expect(question).toBeEnabled();
+
+  await question.fill("Bu konu için post hazırla");
+  await boby.getByRole("button", { name: "Sor" }).click();
+  await expect(boby).toContainText("Bu konu için Yeni Taslak'ta");
 });
 
 test("primary navigation exposes exactly the five stable workspaces", async ({ page }) => {

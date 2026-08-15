@@ -25,6 +25,8 @@ export class CodexRunnerError extends Error {
 
 export interface CodexEvent {
   type: string;
+  thread_id?: string;
+  threadId?: string;
   output?: unknown;
   item?: {
     type?: string;
@@ -37,6 +39,8 @@ export interface StructuredCodexPort {
     model: string;
     input: unknown;
     outputSchema: Record<string, unknown>;
+    conversationSessionId?: string;
+    persistSession?: boolean;
   }): AsyncIterable<CodexEvent>;
 }
 
@@ -49,6 +53,9 @@ export interface StructuredCodexTask<T> {
   normalizeOutput?(value: unknown): unknown;
   paidFallbackRequested?: boolean;
   roleModels?: CodexRoleModels;
+  /** A conversational task may persist and resume its own isolated Codex thread. */
+  persistSession?: boolean;
+  conversationSessionId?: string;
 }
 
 export type StructuredCodexResult<T> =
@@ -57,6 +64,7 @@ export type StructuredCodexResult<T> =
       role: CodexLogicalRole;
       model: string;
       output: T;
+      conversationSessionId?: string;
     }
   | {
       status: "WAITING_CODEX";
@@ -67,11 +75,12 @@ export type StructuredCodexResult<T> =
 
 export function buildCodexExecArgs(
   model: string,
-  outputSchemaPath: string
+  outputSchemaPath: string,
+  options: { conversationSessionId?: string; persistSession?: boolean } = {}
 ): string[] {
   const args = [
     "exec",
-    "--ephemeral",
+    ...(options.conversationSessionId ? ["resume", options.conversationSessionId] : []),
     "--sandbox",
     "read-only",
     "--ignore-user-config",
@@ -82,6 +91,7 @@ export function buildCodexExecArgs(
     outputSchemaPath,
     "-"
   ];
+  if (!options.persistSession) args.splice(1, 0, "--ephemeral");
   if (model !== "default") {
     args.splice(args.length - 1, 0, "--model", model);
   }
@@ -138,12 +148,21 @@ export async function runStructuredCodexTask<T>(
   const selection = resolveCodexRole(task.taskKind, task.roleModels);
   let output: unknown;
   let outputReceived = false;
+  let conversationSessionId = task.conversationSessionId;
 
   for await (const event of port.run({
     model: selection.model,
     input: task.input,
-    outputSchema: task.outputSchema
+    outputSchema: task.outputSchema,
+    ...(task.conversationSessionId ? { conversationSessionId: task.conversationSessionId } : {}),
+    ...(task.persistSession !== undefined ? { persistSession: task.persistSession } : {})
   })) {
+    if (event.type === "thread.started") {
+      const threadId = event.thread_id ?? event.threadId;
+      if (typeof threadId === "string" && threadId.length > 0 && threadId.length <= 128) {
+        conversationSessionId = threadId;
+      }
+    }
     const waitingReason =
       waitingReasons[event.type as keyof typeof waitingReasons];
     if (waitingReason) {
@@ -211,6 +230,7 @@ export async function runStructuredCodexTask<T>(
   return {
     status: "COMPLETED",
     ...selection,
-    output: normalizedOutput
+    output: normalizedOutput,
+    ...(conversationSessionId ? { conversationSessionId } : {})
   };
 }

@@ -135,6 +135,25 @@ test("Windows auto-update uses an unsigned HTTPS GitHub Release feed with SHA-25
   assert.doesNotMatch(releaseWorkflow, /UPDATER_SIGNATURE/u);
 });
 
+test("Windows installer exposes Boby as the product name while preserving the stable local data identifier", async () => {
+  const [configText, releaseWorkflow] = await Promise.all([
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
+    readFile(join(repositoryRoot, ".github", "workflows", "release-desktop.yml"), "utf8")
+  ]);
+  const config = JSON.parse(configText) as { productName?: string; identifier?: string };
+
+  assert.equal(config.productName, "Boby");
+  assert.equal(config.identifier, "app.blogbot.desktop");
+  assert.match(releaseWorkflow, /Boby_\$\(\$env:RELEASE_VERSION\)_x64-setup\.exe/u);
+});
+
+test("desktop package icons are generated from the Boby avatar rather than a letter mark", async () => {
+  const iconScript = await readFile(join(repositoryRoot, "scripts", "generate-desktop-icons.ts"), "utf8");
+
+  assert.match(iconScript, /boby-avatar-v2\.png/u);
+  assert.doesNotMatch(iconScript, /readFile\(join\(iconDirectory, "icon\.svg"\)\)/u);
+});
+
 test("secure restore helper is built as a Cargo example so Tauri sees only the GUI binary", async () => {
   const buildScript = await readFile(join(repositoryRoot, "scripts", "build-engine-sidecar.mjs"), "utf8");
 
@@ -184,6 +203,18 @@ test("desktop production build invokes Tauri after preparing the local engine", 
   );
   assert.doesNotMatch(desktopBuildScript, /--no-bundle/u, "release packaging must generate the configured MSI and NSIS installers");
   assert.match(desktopBuildScript, /WIX_TEMP/u, "Windows MSI packaging must use an app-owned writable WiX temporary directory");
+});
+
+test("root Tauri development command delegates to the desktop workspace", async () => {
+  const manifest = JSON.parse(
+    await readFile(join(repositoryRoot, "package.json"), "utf8")
+  ) as { scripts?: Record<string, string> };
+
+  assert.equal(
+    manifest.scripts?.tauri,
+    "npm run tauri --workspace @blogbot/desktop --",
+    "the documented root development command must reach the desktop Tauri workspace"
+  );
 });
 
 test("native WebView smoke is an explicit, environment-gated evidence command", async () => {
@@ -236,6 +267,11 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
   );
   assert.match(
     smokeScript,
+    /waitForTauriBridge/u,
+    "native smoke must wait for the Tauri invoke bridge after a visible DOM appears"
+  );
+  assert.match(
+    smokeScript,
     /Pazar · 1\. slot: Takvimde bu slotu düzenle/u,
     "native smoke must select the compact Sunday slot before editing it"
   );
@@ -243,6 +279,16 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
     smokeScript,
     /catalogReadLatencyMs/u,
     "native smoke must report catalog-read latency so navigation stalls cannot hide behind a green smoke result"
+  );
+  assert.match(
+    smokeScript,
+    /NATIVE_SMOKE_SINGLE_INSTANCE_CONFLICT/u,
+    "native smoke must explain the Boby single-instance collision instead of surfacing a misleading WebDriver crash"
+  );
+  assert.match(
+    smokeScript,
+    /NATIVE_SMOKE_EXISTING_PROFILE_ATTACH_UNSUPPORTED/u,
+    "native smoke must explain that WebDriver cannot attach to an editor-owned Tauri window"
   );
   assert.match(smokeScript, /waitForVisibleHeading/u);
   assert.match(smokeScript, /requiredNativeReadCommands/u);
@@ -380,6 +426,20 @@ test("sidecar doctor smoke contract checks durable local readiness", async () =>
     /cwd:\s*localAppData/u,
     "sidecar smoke must not resolve native modules from the development repository"
   );
+});
+
+test("native smoke fails a slow route instead of tolerating a minute-long frozen menu", async () => {
+  const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(smoke, /const MAX_ROUTE_RENDER_MS = 3_000;/u);
+  assert.match(smoke, /route #\$\{route\} did not render a visible page heading within \$\{MAX_ROUTE_RENDER_MS\} ms/u);
+  assert.match(smoke, /routeRenderMs/u);
+  assert.match(smoke, /profileRoutePerformance/u);
+  assert.match(smoke, /BLOGBOT_PROFILE_TEST_SOURCES/u);
+  assert.match(smoke, /profileSourceChecks/u);
+  assert.match(smoke, /degraded: unreachableIndexes\.length > 0/u);
+  assert.match(smoke, /unreachableSources/u);
+  assert.doesNotMatch(smoke, /actual profile source checks failed/u);
 });
 
 test("desktop preflight verifies clean-machine installer inputs without building an installer", { skip: process.platform !== "win32" }, async () => {

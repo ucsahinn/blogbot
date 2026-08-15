@@ -107,6 +107,71 @@ test("coalescing bridge retries an in-flight workspace read after a mutation", a
   assert.deepEqual(await staleRead, { snapshot: "after-mutation" });
 });
 
+test("Boby guidance uses a bounded native request and a separate non-blocking status read", async () => {
+  const calls: Array<{ command: string; args: unknown }> = [];
+  const bridge = createInvokeBridge(async (command, args) => {
+    calls.push({ command, args });
+    return command === "request_boby_guidance"
+      ? { id: "boby-1", state: "QUEUED" }
+      : { id: "boby-1", state: "SUCCEEDED", reply: "Taslağı Editoryal Masa'da incele.", suggestedActions: [] };
+  });
+
+  const submitted = await bridge.requestBobyGuidance({
+    question: "Taslağı nerede incelerim?",
+    activePage: "content",
+    runtimeState: "ONLINE",
+    safeWorkspaceSummary: { draftCount: 2, reviewCount: 1, sourceCount: 3 }
+  });
+  const result = await bridge.getBobyGuidance("boby-1");
+
+  assert.deepEqual(submitted, { id: "boby-1", state: "QUEUED" });
+  assert.deepEqual(result, { id: "boby-1", state: "SUCCEEDED", reply: "Taslağı Editoryal Masa'da incele.", suggestedActions: [] });
+  assert.deepEqual(calls, [
+    {
+      command: "request_boby_guidance",
+      args: {
+        request: {
+          question: "Taslağı nerede incelerim?",
+          activePage: "content",
+          runtimeState: "ONLINE",
+          safeWorkspaceSummary: { draftCount: 2, reviewCount: 1, sourceCount: 3 }
+        }
+      }
+    },
+    { command: "get_boby_guidance", args: { guidanceId: "boby-1" } }
+  ]);
+});
+
+test("coalescing bridge does not hold a newly opened workspace behind a long mutation", async () => {
+  let finishBackup: (() => void) | undefined;
+  const bridge = createCoalescingBridge(createInvokeBridge(async (command) => {
+    if (command === "backup_create") {
+      return new Promise((resolve) => {
+        finishBackup = () => resolve({ outputPath: "C:/backup.blogbot", archiveSha256: "a".repeat(64), bytes: 1, entries: 1 });
+      });
+    }
+    assert.equal(command, "get_editorial_workspace");
+    return { snapshot: "available-during-backup" };
+  }));
+
+  const backup = bridge.createBackup({
+    sourceDirectory: "C:/source",
+    relativePaths: ["state.json"],
+    outputPath: "C:/backup.blogbot",
+    recoveryKey: "recovery-key"
+  });
+  await Promise.resolve();
+
+  const workspace = await Promise.race([
+    bridge.getEditorialWorkspace(),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("workspace read was held behind backup")), 50))
+  ]);
+
+  assert.deepEqual(workspace, { snapshot: "available-during-backup" });
+  finishBackup?.();
+  await backup;
+});
+
 test("coalescing bridge clears rejected reads so a later reader can retry", async () => {
   let calls = 0;
   const bridge = createCoalescingBridge(createInvokeBridge(async (command) => {
@@ -268,6 +333,10 @@ test("offline read-only bridge serves reads and redacted diagnostics but blocks 
 });
 
 test("bridge protocol failures become actionable Turkish user messages", () => {
+  assert.equal(
+    userFacingBridgeError(new Error("LOCAL_DATA_KEY_RECOVERY_REQUIRED")),
+    "Yerel şifreli çalışma alanı bu Windows kullanıcısının anahtarıyla açılamadı. Uygulamayı kapatıp yeniden açın; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun."
+  );
   assert.equal(
     userFacingBridgeError(new Error("ENGINE_UNAVAILABLE: ENGINE_RESPONSE_TIMEOUT")),
     "Yerel çalışma bileşeni zamanında yanıt vermedi. Operasyonlar’dan yerel durumu yenileyin; sorun sürerse tanılama paketi oluşturun."

@@ -10,7 +10,7 @@ import type { SourceScanCoordinator } from "./source-scan.ts";
 
 export interface SourceScanSchedulerOptions {
   /** Receives only a redacted scheduler diagnostic code. */
-  onFault?(error: Error): void;
+  onFault?(error: Error, phase?: "automation" | "catalog" | "queue"): void;
 }
 
 const SAFE_SOURCE_SCHEDULER_FAULT = "SOURCE_SCHEDULER_UNAVAILABLE";
@@ -24,6 +24,7 @@ export class SourceScanScheduler {
   private timer: ReturnType<typeof setInterval> | undefined;
   private tickInFlight = false;
   private lastBucket: string | undefined;
+  private faultReported = false;
 
   constructor(
     private readonly backend: BackendRepository,
@@ -44,19 +45,26 @@ export class SourceScanScheduler {
   }
 
   private runTick(): void {
-    void this.tick().catch(() => {
-      const error = new Error(SAFE_SOURCE_SCHEDULER_FAULT);
-      try {
-        if (this.options.onFault) {
-          this.options.onFault(error);
-        } else {
-          process.stderr.write(`[Blogbot] ${SAFE_SOURCE_SCHEDULER_FAULT}\n`);
+    void this.tick()
+      .then(() => {
+        this.faultReported = false;
+      })
+      .catch((_error: unknown) => {
+        if (this.faultReported) return;
+        this.faultReported = true;
+        try {
+          if (this.options.onFault) {
+            this.options.onFault(new Error(SAFE_SOURCE_SCHEDULER_FAULT), this.lastFaultPhase);
+          } else {
+            process.stderr.write(`[Blogbot] ${SAFE_SOURCE_SCHEDULER_FAULT}\n`);
+          }
+        } catch {
+          // Diagnostics must not stop the durable scheduler.
         }
-      } catch {
-        // Diagnostics must not stop the durable scheduler.
-      }
-    });
+      });
   }
+
+  private lastFaultPhase: "automation" | "catalog" | "queue" | undefined;
 
   stop(): void {
     if (!this.timer) return;
@@ -68,6 +76,7 @@ export class SourceScanScheduler {
     if (this.tickInFlight) return false;
     this.tickInFlight = true;
     try {
+      this.lastFaultPhase = "automation";
       const settings = await this.backend.getAutomation();
       const capabilities = deriveAutomationCapabilities(settings);
       if (!capabilities.canIngest) return false;
@@ -77,12 +86,14 @@ export class SourceScanScheduler {
       const bucket = Math.floor(nowMs / intervalMs).toString(10);
       if (bucket === this.lastBucket) return false;
 
+      this.lastFaultPhase = "catalog";
       const targets: SourceScanTarget[] = (await this.sources.listSources())
         .filter((source) => source.status === "ACTIVE")
         .map((source) => ({ sourceId: source.id, expectedVersion: source.version }));
       if (targets.length === 0) return false;
 
       const key = `scheduler:source-scan:${bucket}`;
+      this.lastFaultPhase = "queue";
       await this.coordinator.enqueue({
         version: 1,
         requestId: key,

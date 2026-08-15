@@ -146,6 +146,12 @@ export interface SourceRepository {
   listEntries(sourceId: string): Promise<StoredSourceEntry[]>;
   /** Read only the newest bounded slice needed for candidate triage. */
   listEntriesBounded(sourceId: string, limit: number): Promise<StoredSourceEntry[]>;
+  /**
+   * Return the newest durable entry timestamp for each source in one indexed
+   * projection. The desktop catalog uses this as a freshness hint and must not
+   * fan out one encrypted-feed read per source during bootstrap.
+   */
+  listLatestEntryDates?(): Promise<Map<string, string | null>>;
   /** Read the newest entries across the catalog for the desktop candidate projection. */
   listRecentEntriesBounded(limit: number): Promise<StoredSourceEntry[]>;
   /** Read immutable historical captures for an exact external source identity. */
@@ -567,6 +573,29 @@ export class PGliteSourceRepository implements SourceRepository {
       [sourceId, safeLimit]
     );
     return result.rows.map(({ external_id, content_hash, value }) => this.openSourceEntryRow(sourceId, external_id, content_hash, value));
+  }
+
+  async listLatestEntryDates(): Promise<Map<string, string | null>> {
+    const result = await this.database.query<{
+      source_id?: string;
+      last_item_at?: string | Date | null;
+    }>(
+      `SELECT versions.source_id, MAX(versions.sort_at) AS last_item_at
+         FROM blogbot_source_entry_versions AS versions
+         JOIN blogbot_source_entry_latest AS latest
+           ON latest.source_id = versions.source_id
+          AND latest.external_id = versions.external_id
+          AND latest.content_hash = versions.content_hash
+        GROUP BY versions.source_id`
+    );
+    return new Map(
+      result.rows.flatMap((row) => {
+        if (!row.source_id) return [];
+        const value = row.last_item_at;
+        const parsed = value instanceof Date ? value.toISOString() : value ?? null;
+        return [[row.source_id, parsed] as const];
+      })
+    );
   }
 
   async listRecentEntriesBounded(limit: number): Promise<StoredSourceEntry[]> {

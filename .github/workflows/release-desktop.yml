@@ -1,4 +1,4 @@
-name: Release Blogbot Desktop
+name: Release Boby Desktop
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       notes:
-        description: "Release notes shown by Blogbot"
+        description: "Release notes shown by Boby"
         required: true
         type: string
 
@@ -51,7 +51,7 @@ jobs:
           RELEASE_NOTES: ${{ inputs.notes }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          $bundle = Join-Path 'apps/desktop/src-tauri/target/release/bundle/nsis' "Blogbot_$($env:RELEASE_VERSION)_x64-setup.exe"
+          $bundle = Join-Path 'apps/desktop/src-tauri/target/release/bundle/nsis' "Boby_$($env:RELEASE_VERSION)_x64-setup.exe"
           if (-not (Test-Path -LiteralPath $bundle -PathType Leaf)) { throw "UPDATER_ARCHIVE_MISSING" }
           $bundle = (Resolve-Path -LiteralPath $bundle).Path
           $sha256 = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -75,4 +75,4 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           UPDATER_ARCHIVE: ${{ steps.manifest.outputs.archive }}
         run: |
-          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE latest.json --title "Blogbot $env:RELEASE_VERSION" --notes "${{ inputs.notes }}"
+          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE latest.json --title "Boby $env:RELEASE_VERSION" --notes "${{ inputs.notes }}"

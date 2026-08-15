@@ -21,17 +21,21 @@ test("application startup keeps the setup path available when connector state ca
   const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
 
   assert.match(appSource, /fallbackConnectorState/u);
-  assert.match(appSource, /getConnectorState\(\)\.catch\(\(reason\)[\s\S]*?fallbackConnectorState/u);
+  assert.match(appSource, /setConnectorState\(fallbackConnectorState\);/u);
+  assert.match(appSource, /getConnectorState\(\)\.then\([\s\S]*?\)\.catch\(\(reason\)/u);
 });
 
-test("application bootstrap loads the editorial workspace only after Doctor can set the runtime mode", async () => {
+test("application bootstrap renders the local workspace before a slow connector read completes", async () => {
   const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
 
   assert.match(appSource, /const coalescingBridge = createCoalescingBridge\(runtimeBridge\);/u);
   assert.match(appSource, /const initialSnapshot = await coalescingBridge\.getBootstrapSnapshot\(\);/u);
+  assert.match(appSource, /const initialWorkspace = await coalescingBridge\.getEditorialWorkspace\(\);/u);
+  assert.match(appSource, /setConnectorState\(fallbackConnectorState\);/u);
   assert.match(
     appSource,
-    /const \[initialWorkspace, initialConnectorState\] = await Promise\.all\(\[[\s\S]*?coalescingBridge\.getEditorialWorkspace\(\),[\s\S]*?coalescingBridge\.getConnectorState\(\)/u
+    /void coalescingBridge\.getConnectorState\(\)\.then\(\(initialConnectorState\) => \{/u,
+    "connector state must reconcile in the background instead of blocking the first workspace render"
   );
   assert.match(
     appSource,

@@ -19,6 +19,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "build": "npm run build --workspace @blogbot/desktop",
+    "tauri": "npm run tauri --workspace @blogbot/desktop --",
     "build:engine": "node scripts/build-engine-sidecar.mjs",
     "build:desktop": "node scripts/build-desktop.mjs",
     "smoke:engine": "node scripts/smoke-engine-sidecar.mjs",

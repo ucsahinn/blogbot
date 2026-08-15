@@ -24,9 +24,37 @@ test("desktop boot and fatal states expose truthful assistive-technology status"
 test("Boby is a persistent local editor guide with a keyboard-accessible conversation panel", async () => {
   const app = await readFile(source("App.tsx"), "utf8");
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
+  const assistant = await readFile(source("components", "BobyAssistant.tsx"), "utf8");
 
   assert.match(app, /BobyAssistant/u);
+  assert.match(app, /bridge=\{bridge\}/u);
   assert.match(shell, /onOpenBoby/u);
+  assert.match(assistant, /requestBobyGuidance/u);
+  assert.match(assistant, /getBobyGuidance/u);
+  assert.match(assistant, /describeBobyAvailability/u);
+  assert.match(assistant, /Boby isteği başlatılamadı/u);
+  assert.match(assistant, /boby-availability/u);
+  assert.match(assistant, /Yerel rehber/u);
+});
+
+test("Boby keeps one pending direct reply alive without a short false timeout", async () => {
+  const assistant = await readFile(source("components", "BobyAssistant.tsx"), "utf8");
+
+  assert.match(assistant, /const \[pendingGuidanceId, setPendingGuidanceId\]/u);
+  assert.match(assistant, /if \(!open \|\| !pendingGuidanceId\) return;/u);
+  assert.match(assistant, /window\.setTimeout\(resolve, 2_000\)/u);
+  assert.match(assistant, /disabled=\{deliveryState === "queued"\}/u);
+  assert.doesNotMatch(assistant, /attempt < 12/u);
+});
+
+test("Boby status refresh handles a rejected native probe without an unhandled promise", async () => {
+  const assistant = await readFile(source("components", "BobyAssistant.tsx"), "utf8");
+
+  assert.match(
+    assistant,
+    /onClick=\{\(\) => void refreshBobyRuntime\(\)\.catch\(/u,
+    "the visible refresh action must consume native probe failures"
+  );
 });
 
 test("notifications use local feedback sounds without speech synthesis", async () => {
@@ -56,11 +84,13 @@ test("setup center keeps the legacy guide route while opening the focused first-
 test("first-start wizard is a non-blocking three-step flow with one semantic status per step", async () => {
   const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
 
-  assert.match(setup, /type GuidedStatus = "ready" \| "blocker" \| "attention" \| "running" \| "not-tested"/u);
+  assert.match(setup, /type GuidedStatus = SetupStatusTone/u);
   assert.match(setup, /title: "Bu bilgisayarı kontrol et"/u);
   assert.match(setup, /title: "Codex'i bağla ve test et"/u);
   assert.match(setup, /title: "Çıktı klasörünü seç, test et ve bitir"/u);
   assert.match(setup, /className=\{`guided-status guided-status-\$\{guidedStepState\(step\)\}`\}/u);
+  assert.match(setup, /describePrerequisiteState/u);
+  assert.match(setup, /summarizeGuidedStates/u);
   assert.match(setup, /Codex'i şimdilik atla/u);
   assert.match(setup, /guidedMode && guidedStep === 2/u);
   assert.match(setup, /Blogbot’u bu hedefle kullan/u);
@@ -84,6 +114,14 @@ test("background synchronization exposes failures without creating an unhandled 
   assert.match(shell, /role="status" aria-live="polite"/u);
 });
 
+test("offline bootstrap does not start a connector read after Doctor has closed the local engine", async () => {
+  const app = await readFile(source("App.tsx"), "utf8");
+
+  assert.match(app, /if \(initialSnapshot\.runtime === "ONLINE"\) \{/u);
+  assert.match(app, /void coalescingBridge\.getConnectorState\(\)/u);
+  assert.match(app, /nextSnapshot\.runtime === "ONLINE"\s*\? await bridge\.getConnectorState\(\)/u);
+});
+
 test("primary navigation preserves five stable workspaces and route focus", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
   const primaryNavigation = shell.match(/const navigation:[\s\S]*?= \[([\s\S]*?)\n\];/u)?.[1] ?? "";
@@ -103,6 +141,27 @@ test("collapsed and mobile navigation retain names and setup/settings entry poin
   assert.match(shell, /className="mobile-utility-nav"/u);
   assert.match(shell, /aria-label="Ayarlar"/u);
   assert.match(shell, /aria-label="Kurulum ve önkoşullar"/u);
+});
+
+test("Boby uses the dedicated assistant avatar in every persistent entry point", async () => {
+  const app = await readFile(source("App.tsx"), "utf8");
+  const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
+  const assistant = await readFile(source("components", "BobyAssistant.tsx"), "utf8");
+
+  assert.match(app, /import bobyAvatar from "\.\/assets\/boby-avatar-v2\.webp"/u);
+  assert.equal(
+    [...app.matchAll(/src=\{bobyAvatar\}/gu)].length,
+    2,
+    "boot and safe-start failure states must not fall back to a letter mark"
+  );
+  assert.match(shell, /import bobyAvatar from "\.\.\/assets\/boby-avatar-v2\.webp"/u);
+  assert.equal(
+    [...shell.matchAll(/src=\{bobyAvatar\}/gu)].length,
+    3,
+    "brand, operator presence, and the floating chat launcher must show the same Boby avatar"
+  );
+  assert.match(assistant, /import bobyAvatar from "\.\.\/assets\/boby-avatar-v2\.webp"/u);
+  assert.match(assistant, /src=\{bobyAvatar\}/u);
 });
 
 test("about control exposes the verified project identity and GitHub source", async () => {
@@ -144,6 +203,15 @@ test("settings separates saving, reversible changes, and notification diagnostic
   assert.match(settings, /settings-action-primary/u);
   assert.match(settings, /settings-action-secondary/u);
   assert.match(settings, /settings-action-notification/u);
+});
+
+test("editorial drafts keep Boby's unavailable state human instead of exposing its runtime", async () => {
+  const desk = await readFile(new URL("../src/screens/EditorialDesk.tsx", import.meta.url), "utf8");
+
+  assert.match(desk, /Boby sohbeti açıldı. Bağlamak için Boby'yi bağla düğmesini kullan./u);
+  assert.match(desk, /"Boby'yi bağla"/u);
+  assert.match(desk, /onOpenBoby\(\)/u);
+  assert.doesNotMatch(desk, /Codex'i bağla/u);
 });
 
 test("dashboard exposes one actionable next task before supporting system detail", async () => {

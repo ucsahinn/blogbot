@@ -51,6 +51,7 @@ import {
 import { SourceScanScheduler } from "./source-scheduler.ts";
 import { createCodexCliPort } from "../../codex-runner/src/cli-port.ts";
 import type { StructuredCodexPort } from "../../codex-runner/src/structured-runner.ts";
+import { createBobyGuideTask, type BobyGuideInput, type BobyGuideOutput } from "../../codex-runner/src/boby-guide-task.ts";
 import { createCodexWorkerCoordinator, type CodexWorkSubmission, type CodexWorkerCoordinator } from "./codex-worker.ts";
 import {
   createDraftCodexTaskResolver,
@@ -178,11 +179,13 @@ function dashboardJobSummary(job: BackendJob): Record<string, unknown> {
  * to the engine diagnostics channel.
  */
 export function reportBackgroundTaskFault(
-  code: "SOURCE_RETENTION_UNAVAILABLE" | "AUTOMATIC_BACKUP_UNAVAILABLE",
-  write: (line: string) => void = (line) => process.stderr.write(line)
+  code: "SOURCE_RETENTION_UNAVAILABLE" | "AUTOMATIC_BACKUP_UNAVAILABLE" | "SOURCE_SCHEDULER_UNAVAILABLE",
+  write: (line: string) => void = (line) => process.stderr.write(line),
+  detail?: string
 ): void {
   try {
-    write(`[Blogbot] ${code}\n`);
+    const safeDetail = detail?.replace(/[^a-z]+/giu, "_").replace(/^_+|_+$/gu, "").slice(0, 32);
+    write(`[Blogbot] ${code}${safeDetail ? ` phase=${safeDetail}` : ""}\n`);
   } catch {
     // Diagnostics are best-effort and must not crash the local engine.
   }
@@ -955,6 +958,9 @@ export function createEngineProtocol(
         );
       }
       const sources = await options.sourceRepository.listSources();
+      const latestEntryDates = options.sourceRepository.listLatestEntryDates
+        ? await options.sourceRepository.listLatestEntryDates()
+        : undefined;
       return {
         version: 1,
         id: input.id,
@@ -965,12 +971,16 @@ export function createEngineProtocol(
             // The catalog view only needs a recent freshness hint. Reading the
             // complete encrypted feed for every source made bootstrap scale
             // with the user's entire history and blocked the serialized bridge.
-            const entries = await options.sourceRepository!.listEntriesBounded(source.id, 25);
-            const lastItemAt = entries
-              .map((entry) => entry.publishedAt)
-              .filter((value): value is string => typeof value === "string" && value.length > 0)
-              .sort()
-              .at(-1) ?? null;
+            const entries = latestEntryDates
+              ? undefined
+              : await options.sourceRepository!.listEntriesBounded(source.id, 25);
+            const lastItemAt = latestEntryDates?.get(source.id)
+              ?? entries
+                ?.map((entry) => entry.publishedAt)
+                .filter((value): value is string => typeof value === "string" && value.length > 0)
+                .sort()
+                .at(-1)
+              ?? null;
             return {
               ...source,
               lastItemAt,
@@ -2113,7 +2123,7 @@ async function handleLocalWorkflowCommand(
   options: EngineProtocolOptions
 ): Promise<EngineResponse | null> {
   const kind = typeof value.kind === "string" ? value.kind : "";
-  if (!["DRAFT.CREATE", "JOB.RETRY", "LOCAL_STATE.SET"].includes(kind)) return null;
+  if (!["DRAFT.CREATE", "BOBY.GUIDE", "JOB.RETRY", "LOCAL_STATE.SET"].includes(kind)) return null;
   const requestId = typeof value.requestId === "string" ? value.requestId : "";
   const idempotencyKey = typeof value.idempotencyKey === "string" ? value.idempotencyKey : "";
   const expectedVersion = typeof value.expectedVersion === "number" ? value.expectedVersion : -1;
@@ -2170,6 +2180,38 @@ async function handleLocalWorkflowCommand(
             }
           });
         }
+        if (kind === "BOBY.GUIDE") {
+          const guidanceId = typeof payload.guidanceId === "string" ? payload.guidanceId.trim() : "";
+          const question = typeof payload.question === "string" ? payload.question.trim().slice(0, 600) : "";
+          const activePage = typeof payload.activePage === "string" ? payload.activePage.trim().slice(0, 64) : "";
+          const sessionId = typeof payload.sessionId === "string" ? payload.sessionId.trim().slice(0, 128) : "";
+          const runtimeState = payload.runtimeState === "ONLINE" || payload.runtimeState === "DEGRADED" || payload.runtimeState === "OFFLINE"
+            ? payload.runtimeState
+            : "";
+          const summary = isRecord(payload.safeWorkspaceSummary) ? payload.safeWorkspaceSummary : {};
+          const boundedCount = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 100_000 ? value : 0;
+          if (!guidanceId || !question || !activePage || !runtimeState) throw new Error("INVALID_BOBY_GUIDANCE");
+          return transaction.createJob({
+            id: guidanceId,
+            kind: "CODEX",
+            state: options.codexCoordinator ? "QUEUED" : "WAITING_CODEX",
+            attempts: 0,
+            ...(options.codexCoordinator ? {} : { lastError: "CODEX_RUNNER_UNAVAILABLE" }),
+            metadata: {
+              createdAtUnixMs: Date.now(),
+              purpose: "BOBY_GUIDANCE",
+              question,
+              activePage,
+              runtimeState,
+              ...(sessionId ? { bobySessionId: sessionId } : {}),
+              safeWorkspaceSummary: {
+                draftCount: boundedCount(summary.draftCount),
+                reviewCount: boundedCount(summary.reviewCount),
+                sourceCount: boundedCount(summary.sourceCount)
+              }
+            }
+          });
+        }
         if (kind === "LOCAL_STATE.SET") {
           const key = typeof payload.key === "string" ? payload.key : "";
           if (!key || key.length > 128) throw new Error("INVALID_LOCAL_STATE_KEY");
@@ -2214,6 +2256,25 @@ async function handleLocalWorkflowCommand(
         idempotencyKey: `draft:${idempotencyKey}`,
         definitionId: "DRAFT.CREATE",
         payload: { ...effectivePayload, sources: sourceEvidence.length > 0 ? sourceEvidence : retainedEvidence }
+      });
+    }
+    if (kind === "BOBY.GUIDE" && options.codexCoordinator) {
+      const metadata: Record<string, unknown> = isRecord((result as BackendJob).metadata)
+        ? (result as BackendJob).metadata as Record<string, unknown>
+        : {};
+      codex = await options.codexCoordinator.submit({
+        jobId: (result as BackendJob).id,
+        idempotencyKey: `boby:${idempotencyKey}`,
+        definitionId: "BOBY.GUIDE",
+        payload: {
+          question: metadata.question,
+          activePage: metadata.activePage,
+          runtimeState: metadata.runtimeState,
+          ...(typeof metadata.bobySessionId === "string" && metadata.bobySessionId.length <= 128
+            ? { sessionId: metadata.bobySessionId }
+            : {}),
+          safeWorkspaceSummary: metadata.safeWorkspaceSummary
+        }
       });
     }
     if (kind === "JOB.RETRY" && options.codexCoordinator) {
@@ -2894,7 +2955,12 @@ export async function createPersistentEngineProtocol(
   const sourceScanScheduler = new SourceScanScheduler(
     repository,
     sourceRepository,
-    sourceScanCoordinator
+    sourceScanCoordinator,
+    undefined,
+    undefined,
+    {
+      onFault: (_error, phase) => reportBackgroundTaskFault("SOURCE_SCHEDULER_UNAVAILABLE", undefined, phase)
+    }
   );
   let codexCoordinator: CodexWorkerCoordinator | undefined;
   let publicationOutboxWorker: PublicationOutboxWorker | undefined;
@@ -2945,6 +3011,24 @@ export async function createPersistentEngineProtocol(
         codex: codexPort,
         taskResolver: {
           async resolve(snapshot) {
+            if (snapshot.definitionId === "BOBY.GUIDE" && isRecord(snapshot.payload)) {
+              const payload = snapshot.payload;
+              return createBobyGuideTask({
+                question: typeof payload.question === "string" ? payload.question : "",
+                activePage: typeof payload.activePage === "string" ? payload.activePage : "dashboard",
+                ...(typeof payload.sessionId === "string" ? { sessionId: payload.sessionId } : {}),
+                runtimeState: payload.runtimeState === "ONLINE" || payload.runtimeState === "DEGRADED" || payload.runtimeState === "OFFLINE"
+                  ? payload.runtimeState
+                  : "DEGRADED",
+                safeWorkspaceSummary: isRecord(payload.safeWorkspaceSummary)
+                  ? {
+                      draftCount: typeof payload.safeWorkspaceSummary.draftCount === "number" ? payload.safeWorkspaceSummary.draftCount : 0,
+                      reviewCount: typeof payload.safeWorkspaceSummary.reviewCount === "number" ? payload.safeWorkspaceSummary.reviewCount : 0,
+                      sourceCount: typeof payload.safeWorkspaceSummary.sourceCount === "number" ? payload.safeWorkspaceSummary.sourceCount : 0
+                    }
+                  : { draftCount: 0, reviewCount: 0, sourceCount: 0 }
+              } satisfies BobyGuideInput);
+            }
             if (snapshot.definitionId !== "DRAFT.CREATE" || !isRecord(snapshot.payload)) {
               return createDraftCodexTaskResolver().resolve(snapshot);
             }
@@ -2987,8 +3071,28 @@ export async function createPersistentEngineProtocol(
           reportCodexLifecycle("CODEX_JOB_RETRYING");
           await syncCodexParentJobState(repository, submission, { kind: "RETRYING", failure, transientFailureCount, retryAt });
         },
-        onCompleted: async ({ submission, output }) => {
+        onCompleted: async ({ submission, output, conversationSessionId }) => {
           reportCodexLifecycle("CODEX_JOB_COMPLETED");
+          if (submission.definitionId === "BOBY.GUIDE" && createBobyGuideTask({
+            question: "Boby",
+            activePage: "dashboard",
+            runtimeState: "ONLINE",
+            safeWorkspaceSummary: { draftCount: 0, reviewCount: 0, sourceCount: 0 }
+          }).validateOutput(output)) {
+            const job = await repository.getJob(submission.jobId);
+            await repository.saveJob({
+              ...job,
+              state: "SUCCEEDED",
+              metadata: {
+                ...(job.metadata ?? {}),
+                completedAtUnixMs: Date.now(),
+                bobyReply: (output as BobyGuideOutput).reply,
+                bobyActions: (output as BobyGuideOutput).suggestedActions,
+                ...(conversationSessionId ? { bobySessionId: conversationSessionId } : {})
+              }
+            });
+            return;
+          }
           if (submission.definitionId === "DRAFT.CREATE" && isDraftCodexOutput(output)) {
             const revision = materializeDraftRevision(submission.jobId, submission.payload, output);
             const draftPayload = isRecord(submission.payload) ? submission.payload : {};

@@ -65,6 +65,20 @@ export interface GitHubDeviceFlowResult {
   detail?: string;
 }
 
+export interface BobyGuidanceRequest {
+  question: string;
+  activePage: string;
+  runtimeState: "ONLINE" | "DEGRADED" | "OFFLINE";
+  safeWorkspaceSummary: { draftCount: number; reviewCount: number; sourceCount: number };
+}
+
+export interface BobyGuidanceStatus {
+  id: string;
+  state: "QUEUED" | "RUNNING" | "WAITING_CODEX" | "SUCCEEDED" | "FAILED";
+  reply?: string;
+  suggestedActions?: Array<{ id: string; label: string }>;
+}
+
 export class BridgeError extends Error {
   readonly code: "OFFLINE_READ_ONLY" | "BRIDGE_UNAVAILABLE" | "COMMAND_FAILED";
 
@@ -80,7 +94,7 @@ export class BridgeError extends Error {
 
 export interface BlogbotBridge {
   openProjectPage(): Promise<{ opened: true }>;
-  checkUnsignedUpdate(): Promise<UnsignedDesktopUpdate | null>;
+  checkUnsignedUpdate(): Promise<UnsignedDesktopUpdateCheck>;
   installUnsignedUpdate(update: UnsignedDesktopUpdate): Promise<void>;
   getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
   getPrerequisiteStatus(): Promise<PrerequisiteSnapshot>;
@@ -105,6 +119,8 @@ export interface BlogbotBridge {
   getAutostartStatus(): Promise<{ enabled: boolean }>;
   setAutostart(enabled: boolean): Promise<{ enabled: boolean }>;
   sendTestNotification(): Promise<{ shown: boolean }>;
+  requestBobyGuidance(request: BobyGuidanceRequest): Promise<Pick<BobyGuidanceStatus, "id" | "state">>;
+  getBobyGuidance(guidanceId: string): Promise<BobyGuidanceStatus>;
   getEditorialWorkspace(): Promise<EditorialWorkspaceSnapshot>;
   promoteCandidate(candidateId: string): Promise<{
     ok: true;
@@ -238,6 +254,9 @@ export function userFacingBridgeError(
   if (code.includes("ENGINE_NATIVE_MODULES_MISSING")) {
     return "Boby'nin paketlenmiş yerel engine bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun.";
   }
+  if (code.includes("LOCAL_DATA_KEY_RECOVERY_REQUIRED")) {
+    return "Yerel şifreli çalışma alanı bu Windows kullanıcısının anahtarıyla açılamadı. Uygulamayı kapatıp yeniden açın; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun.";
+  }
   if (code.includes("ENGINE_RESPONSE_TIMEOUT")) {
     return "Yerel çalışma bileşeni zamanında yanıt vermedi. Operasyonlar’dan yerel durumu yenileyin; sorun sürerse tanılama paketi oluşturun.";
   }
@@ -279,6 +298,11 @@ export interface UnsignedDesktopUpdate {
   url: string;
   sha256: string;
 }
+
+export type UnsignedDesktopUpdateCheck =
+  | { kind: "updateAvailable"; update: UnsignedDesktopUpdate }
+  | { kind: "upToDate"; latestVersion: string }
+  | { kind: "localBuildNewer"; latestVersion: string };
 
 export function userFacingUpdateError(reason: unknown): string {
   const raw = reason instanceof Error ? reason.message.trim().toLowerCase() : "";
@@ -353,6 +377,8 @@ export function createInvokeBridge(
     getAutostartStatus: () => read("autostart_status"),
     setAutostart: (enabled) => mutate("set_autostart", { enabled }),
     sendTestNotification: () => mutate("send_test_notification"),
+    requestBobyGuidance: (request) => mutate("request_boby_guidance", { request }),
+    getBobyGuidance: (guidanceId) => read("get_boby_guidance", { guidanceId }),
     getEditorialWorkspace: () => read("get_editorial_workspace"),
     promoteCandidate: (candidateId) =>
       mutate("promote_candidate", { candidateId }),
@@ -478,11 +504,14 @@ export function createCoalescingBridge(
     key: CoalescedSnapshot,
     read: () => Promise<T>
   ): Promise<T> => {
-    await mutationQuiescence;
+    // A backup, repair, or other durable mutation can take minutes. New
+    // navigation must keep rendering the last available local projection
+    // while that work continues; only a read that actually crossed a
+    // mutation boundary is stale and has to wait for reconciliation.
     const readGeneration = generation;
     const value = await read();
-    await mutationQuiescence;
     if (readGeneration !== generation) {
+      await mutationQuiescence;
       return readCurrent(key, read);
     }
     const windowMs = freshnessWindow(key);

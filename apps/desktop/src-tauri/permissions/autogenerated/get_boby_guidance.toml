@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-boby-guidance"
+description = "Enables the get_boby_guidance command without any pre-configured scope."
+commands.allow = ["get_boby_guidance"]
+
+[[permission]]
+identifier = "deny-get-boby-guidance"
+description = "Denies the get_boby_guidance command without any pre-configured scope."
+commands.deny = ["get_boby_guidance"]

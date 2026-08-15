@@ -96,6 +96,8 @@ pub fn run() {
             commands::preview_opml,
             commands::save_sources,
             commands::create_instant_draft,
+            commands::request_boby_guidance,
+            commands::get_boby_guidance,
             commands::get_review_revision,
             commands::read_revision_media,
             commands::repair_revision_media,

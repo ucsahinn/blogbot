@@ -165,6 +165,59 @@ test("a durable draft waiting for Codex is re-dispatched when the local runner b
   assert.equal(job.lastError, undefined);
 });
 
+test("Boby guidance queues only a bounded local guidance request", async () => {
+  const repository = new InMemoryBackendStore();
+  const submitted: unknown[] = [];
+  const coordinator: CodexWorkerCoordinator = {
+    async submit(input) {
+      submitted.push(input);
+      return { ...input, state: "QUEUED", version: 1 };
+    },
+    async recoverInterrupted() { return { recovered: false, snapshot: null }; },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  };
+  const handle = createEngineProtocol(repository, "memory", { codexCoordinator: coordinator });
+
+  const response = await handle(envelope({
+    version: 1,
+    requestId: "boby-guidance-1",
+    idempotencyKey: "boby-guidance-1", // gitleaks:allow -- deterministic test identifier, not a credential
+    expectedVersion: 0,
+    kind: "BOBY.GUIDE",
+    payload: {
+      guidanceId: "boby-guidance-1",
+      question: "Taslağı nerede incelerim?",
+      activePage: "content",
+      runtimeState: "ONLINE",
+      sessionId: "boby-luna-thread-1",
+      safeWorkspaceSummary: { draftCount: 2, reviewCount: 1, sourceCount: 3 },
+      ignoredSecret: "must-not-reach-codex"
+    }
+  }));
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(submitted, [{
+    jobId: "boby-guidance-1",
+    idempotencyKey: "boby:boby-guidance-1",
+    definitionId: "BOBY.GUIDE",
+    payload: {
+      question: "Taslağı nerede incelerim?",
+      activePage: "content",
+      runtimeState: "ONLINE",
+      sessionId: "boby-luna-thread-1",
+      safeWorkspaceSummary: { draftCount: 2, reviewCount: 1, sourceCount: 3 }
+    }
+  }]);
+  const job = await repository.getJob("boby-guidance-1");
+  assert.equal(job.kind, "CODEX");
+  assert.equal(job.state, "QUEUED");
+  assert.equal(job.metadata?.purpose, "BOBY_GUIDANCE");
+  assert.equal(job.metadata?.bobySessionId, "boby-luna-thread-1");
+  assert.equal(job.metadata?.question, "Taslağı nerede incelerim?");
+  assert.equal("ignoredSecret" in (job.metadata ?? {}), false);
+});
+
 test("restart recovery resumes the final-review subjob and clears the parent draft from RUNNING", async () => {
   const repository = new InMemoryBackendStore();
   await repository.createJob({

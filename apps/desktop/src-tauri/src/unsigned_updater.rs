@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -24,6 +25,14 @@ pub struct UnsignedUpdate {
     pub notes: String,
     pub url: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum UnsignedUpdateCheck {
+    UpdateAvailable { update: UnsignedUpdate },
+    UpToDate { latest_version: String },
+    LocalBuildNewer { latest_version: String },
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +124,24 @@ fn is_newer_version(version: &str) -> Result<bool, CommandError> {
     Ok(version_parts(version)? > version_parts(current_version())?)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateFreshness {
+    UpdateAvailable,
+    UpToDate,
+    LocalBuildNewer,
+}
+
+/// A locally built installer can legitimately have a higher version than the
+/// newest GitHub Release. That is not the same as a verified, published
+/// "up-to-date" state and must be surfaced distinctly to the editor.
+fn update_freshness_for_version(version: &str) -> Result<UpdateFreshness, CommandError> {
+    Ok(match version_parts(version)?.cmp(&version_parts(current_version())?) {
+        Ordering::Greater => UpdateFreshness::UpdateAvailable,
+        Ordering::Equal => UpdateFreshness::UpToDate,
+        Ordering::Less => UpdateFreshness::LocalBuildNewer,
+    })
+}
+
 fn validate_release_url(raw: &str) -> Result<(), CommandError> {
     let url = reqwest::Url::parse(raw)
         .map_err(|_| CommandError::InvalidInput("UPDATE_URL_INVALID".into()))?;
@@ -139,32 +166,43 @@ fn validate_sha256(sha256: &str) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn manifest_update(manifest: ReleaseManifest) -> Result<Option<UnsignedUpdate>, CommandError> {
-    if !is_newer_version(&manifest.version)? {
-        return Ok(None);
+fn manifest_update(manifest: ReleaseManifest) -> Result<UnsignedUpdateCheck, CommandError> {
+    match update_freshness_for_version(&manifest.version)? {
+        UpdateFreshness::UpToDate => Ok(UnsignedUpdateCheck::UpToDate {
+            latest_version: manifest.version,
+        }),
+        UpdateFreshness::LocalBuildNewer => Ok(UnsignedUpdateCheck::LocalBuildNewer {
+            latest_version: manifest.version,
+        }),
+        UpdateFreshness::UpdateAvailable => {
+            validate_release_url(&manifest.platforms.windows_x86_64.url)?;
+            validate_sha256(&manifest.platforms.windows_x86_64.sha256)?;
+            Ok(UnsignedUpdateCheck::UpdateAvailable {
+                update: UnsignedUpdate {
+                    version: manifest.version,
+                    notes: manifest.notes,
+                    url: manifest.platforms.windows_x86_64.url,
+                    sha256: manifest
+                        .platforms
+                        .windows_x86_64
+                        .sha256
+                        .to_ascii_lowercase(),
+                },
+            })
+        }
     }
-    validate_release_url(&manifest.platforms.windows_x86_64.url)?;
-    validate_sha256(&manifest.platforms.windows_x86_64.sha256)?;
-    Ok(Some(UnsignedUpdate {
-        version: manifest.version,
-        notes: manifest.notes,
-        url: manifest.platforms.windows_x86_64.url,
-        sha256: manifest
-            .platforms
-            .windows_x86_64
-            .sha256
-            .to_ascii_lowercase(),
-    }))
 }
 
-fn github_release_update(release: GithubRelease) -> Result<Option<UnsignedUpdate>, CommandError> {
+fn github_release_update(release: GithubRelease) -> Result<UnsignedUpdateCheck, CommandError> {
     let version = release
         .tag_name
         .strip_prefix('v')
         .unwrap_or(&release.tag_name)
         .to_string();
-    if !is_newer_version(&version)? {
-        return Ok(None);
+    match update_freshness_for_version(&version)? {
+        UpdateFreshness::UpToDate => return Ok(UnsignedUpdateCheck::UpToDate { latest_version: version }),
+        UpdateFreshness::LocalBuildNewer => return Ok(UnsignedUpdateCheck::LocalBuildNewer { latest_version: version }),
+        UpdateFreshness::UpdateAvailable => {}
     }
 
     let artifact = release
@@ -181,12 +219,14 @@ fn github_release_update(release: GithubRelease) -> Result<Option<UnsignedUpdate
 
     validate_release_url(&artifact.browser_download_url)?;
     validate_sha256(&sha256)?;
-    Ok(Some(UnsignedUpdate {
-        version,
-        notes: release.body,
-        url: artifact.browser_download_url,
-        sha256,
-    }))
+    Ok(UnsignedUpdateCheck::UpdateAvailable {
+        update: UnsignedUpdate {
+            version,
+            notes: release.body,
+            url: artifact.browser_download_url,
+            sha256,
+        },
+    })
 }
 
 /// The release manifest is the primary update contract because it binds the
@@ -195,16 +235,16 @@ fn github_release_update(release: GithubRelease) -> Result<Option<UnsignedUpdate
 /// temporarily unavailable. A valid manifest always wins, including a valid
 /// "already current" result, so a stale API response can never override it.
 fn resolve_manifest_or_release(
-    manifest: Result<Option<UnsignedUpdate>, CommandError>,
-    release: Result<Option<UnsignedUpdate>, CommandError>,
-) -> Result<Option<UnsignedUpdate>, CommandError> {
+    manifest: Result<UnsignedUpdateCheck, CommandError>,
+    release: Result<UnsignedUpdateCheck, CommandError>,
+) -> Result<UnsignedUpdateCheck, CommandError> {
     match manifest {
         Ok(update) => Ok(update),
         Err(manifest_error) => release.or(Err(manifest_error)),
     }
 }
 
-async fn fetch_update() -> Result<Option<UnsignedUpdate>, CommandError> {
+async fn fetch_update() -> Result<UnsignedUpdateCheck, CommandError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -247,13 +287,16 @@ async fn fetch_update() -> Result<Option<UnsignedUpdate>, CommandError> {
     resolve_manifest_or_release(manifest_update_result, release_update_result)
 }
 
-pub async fn check_unsigned_update() -> Result<Option<UnsignedUpdate>, CommandError> {
-    let update = fetch_update().await?;
-    let authorization = update.as_ref().map(CheckedUpdateAuthorization::new);
+pub async fn check_unsigned_update() -> Result<UnsignedUpdateCheck, CommandError> {
+    let result = fetch_update().await?;
+    let authorization = match &result {
+        UnsignedUpdateCheck::UpdateAvailable { update } => Some(CheckedUpdateAuthorization::new(update)),
+        UnsignedUpdateCheck::UpToDate { .. } | UnsignedUpdateCheck::LocalBuildNewer { .. } => None,
+    };
     *checked_update_authorization().lock().map_err(|_| {
         CommandError::UpdateUnavailable("UPDATE_AUTHORIZATION_UNAVAILABLE".into())
     })? = authorization;
-    Ok(update)
+    Ok(result)
 }
 
 fn configure_hidden_command(command: &mut Command) {
@@ -432,7 +475,8 @@ mod tests {
         current_version, github_release_update, is_newer_version, manifest_update,
         resolve_manifest_or_release, validate_release_url, validate_sha256,
         CheckedUpdateAuthorization, CommandError, GithubRelease, InstallUnsignedUpdateRequest,
-        ReleaseManifest, UnsignedUpdate,
+        ReleaseManifest, UnsignedUpdate, UnsignedUpdateCheck, UpdateFreshness,
+        update_freshness_for_version,
     };
 
     fn next_test_version() -> String {
@@ -450,6 +494,29 @@ mod tests {
     }
 
     #[test]
+    fn update_check_distinguishes_current_build_from_a_local_build_that_is_newer_than_release() {
+        assert_eq!(
+            update_freshness_for_version(current_version()).unwrap(),
+            UpdateFreshness::UpToDate
+        );
+        assert_eq!(
+            update_freshness_for_version("0.1.29").unwrap(),
+            UpdateFreshness::LocalBuildNewer
+        );
+        assert_eq!(
+            update_freshness_for_version(&next_test_version()).unwrap(),
+            UpdateFreshness::UpdateAvailable
+        );
+
+        let payload = serde_json::to_value(UnsignedUpdateCheck::LocalBuildNewer {
+            latest_version: "0.1.29".into(),
+        })
+        .expect("update check must serialize for the Tauri bridge");
+        assert_eq!(payload["kind"], "localBuildNewer");
+        assert_eq!(payload["latestVersion"], "0.1.29");
+    }
+
+    #[test]
     fn accepts_only_new_https_github_installer_releases() {
         let version = next_test_version();
         let manifest = ReleaseManifest {
@@ -462,7 +529,10 @@ mod tests {
                 },
             },
         };
-        assert!(manifest_update(manifest).unwrap().is_some());
+        assert!(matches!(
+            manifest_update(manifest).unwrap(),
+            UnsignedUpdateCheck::UpdateAvailable { .. }
+        ));
         assert!(!is_newer_version("0.1.6").unwrap());
     }
 
@@ -488,7 +558,9 @@ mod tests {
                 "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }]
         })).unwrap();
-        let update = github_release_update(release).unwrap().unwrap();
+        let UnsignedUpdateCheck::UpdateAvailable { update } = github_release_update(release).unwrap() else {
+            panic!("newer GitHub release must offer an installer");
+        };
         assert_eq!(update.version, version);
         assert_eq!(update.sha256, "a".repeat(64));
     }
@@ -506,12 +578,14 @@ mod tests {
             Err(CommandError::UpdateUnavailable(
                 "UPDATE_MANIFEST_UNAVAILABLE".into(),
             )),
-            Ok(Some(fallback)),
+            Ok(UnsignedUpdateCheck::UpdateAvailable { update: fallback }),
         )
-        .unwrap()
         .unwrap();
 
-        assert_eq!(result.version, "0.1.15");
+        let UnsignedUpdateCheck::UpdateAvailable { update } = result else {
+            panic!("release fallback must offer its verified installer");
+        };
+        assert_eq!(update.version, "0.1.15");
     }
 
     #[test]

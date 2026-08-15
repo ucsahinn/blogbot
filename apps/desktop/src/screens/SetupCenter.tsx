@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { canEnableAutomationMode, connectorDraftFromState, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
+import { describePrerequisiteState, summarizeGuidedStates, type SetupStatusTone } from "../setup-status.ts";
 import { buildSetupRequirements } from "../types.ts";
 import type { AutomaticBackupSnapshot, BlogbotBridge } from "../bridge.ts";
 import type {
@@ -21,22 +22,15 @@ interface SetupCenterProps {
   onCompleted: () => Promise<void>;
 }
 
-const stateLabels = {
-  READY: "Hazır",
-  MISSING: "Eksik",
-  BLOCKED: "Bekliyor",
-  ATTENTION: "Kontrol gerekli"
-} as const;
-
 const legacyConnectorKeys = ["blogbot.setup.connector-draft.v1", "blogbot.setup.site-adapter.v1"] as const;
 
 type SetupTaskId = "overview" | "first-start" | "writing" | "publishing" | "backup" | "diagnostics";
-type GuidedStatus = "ready" | "blocker" | "attention" | "running" | "not-tested";
+type GuidedStatus = SetupStatusTone;
 
 const guidedStatusLabels: Record<GuidedStatus, string> = {
-  ready: "Hazır",
-  blocker: "Engel var",
-  attention: "Dikkat gerekli",
+  ready: "Yapıldı",
+  blocker: "Kurulum gerekli",
+  attention: "Bağlantı veya inceleme bekliyor",
   running: "Kontrol ediliyor",
   "not-tested": "Test edilmedi"
 };
@@ -297,14 +291,10 @@ export function SetupCenter({
   );
   const guidedStepState = (step: (typeof guidedSteps)[number]): GuidedStatus => {
     if (step.id === "output") return guidedOutputStatus;
-    if (step.id === currentGuidedStep.id && busy) return "running";
     const checks = step.checkIds
       .map((id) => checksById.get(id))
       .filter((check): check is NonNullable<typeof check> => Boolean(check));
-    if (checks.length === 0) return "not-tested";
-    if (checks.some((check) => check.state === "MISSING" || check.state === "BLOCKED")) return "blocker";
-    if (checks.some((check) => check.state === "ATTENTION")) return "attention";
-    return checks.every((check) => check.state === "READY") ? "ready" : "not-tested";
+    return summarizeGuidedStates(checks.map((check) => check.state), step.id === currentGuidedStep.id && busy);
   };
   const focusedTaskCheckIds: Array<PrerequisiteSnapshot["checks"][number]["id"]> = selectedTask === "writing"
     ? ["codex"]
@@ -1097,7 +1087,9 @@ export function SetupCenter({
       </div>
 
       <div className="prerequisite-grid">
-        {(status?.checks ?? []).map((check) => (
+        {(status?.checks ?? []).map((check) => {
+          const display = describePrerequisiteState(check.state);
+          return (
           <article
             className={`prerequisite-card state-${check.state.toLowerCase()}`}
             data-state={check.state}
@@ -1106,9 +1098,9 @@ export function SetupCenter({
             <div>
               <span className="status-dot" aria-hidden="true" />
               <strong>{check.label}</strong>
-              <span className="prerequisite-state-badge" aria-label={`Durum: ${stateLabels[check.state]}`}>
-                <span aria-hidden="true">{check.state === "READY" ? "✓" : check.state === "MISSING" || check.state === "BLOCKED" ? "!" : "?"}</span>
-                {stateLabels[check.state]}
+              <span className={`prerequisite-state-badge state-${display.tone}`} aria-label={`Durum: ${display.label}`}>
+                <span aria-hidden="true">{display.tone === "ready" ? "✓" : display.tone === "blocker" ? "!" : "…"}</span>
+                {display.label}
               </span>
             </div>
             <p>{check.detail}</p>
@@ -1124,7 +1116,8 @@ export function SetupCenter({
               </button>
             ) : null}
           </article>
-        ))}
+          );
+        })}
       </div>
       </> : null}
 
@@ -1146,8 +1139,9 @@ export function SetupCenter({
                 : selectedTask === "backup"
                   ? requirement.id === "backup"
                   : false)
-            .map((requirement, index) => (
-            <div key={requirement.id} className={`setup-requirement requirement-${requirement.kind.toLowerCase()}`}>
+            .map((requirement, index) => {
+            const display = describePrerequisiteState(requirement.state);
+            return <div key={requirement.id} className={`setup-requirement requirement-${requirement.kind.toLowerCase()}`}>
               <strong>{index + 1}</strong>
               <span>
                 <b>{requirement.label}</b>
@@ -1160,11 +1154,11 @@ export function SetupCenter({
                       : "Dış yetkilendirme gerekir; bu ekranda secret, token veya private key istenmez."}
                 </small>
               </span>
-              <small className={`requirement-state state-${requirement.state.toLowerCase()}`}>
-                {stateLabels[requirement.state]}
+              <small className={`requirement-state state-${display.tone}`}>
+                {display.label}
               </small>
             </div>
-          ))}
+          })}
         </div>
         <div className="connector-input-grid" aria-label="Gizli olmayan bağlantı bilgileri">
           {connectorFields

@@ -197,7 +197,10 @@ export function createCodexCliPort(
         "utf8"
       );
 
-      const execArgs = buildCodexExecArgs(request.model, schemaPath);
+      const execArgs = buildCodexExecArgs(request.model, schemaPath, {
+        ...(request.conversationSessionId ? { conversationSessionId: request.conversationSessionId } : {}),
+        ...(request.persistSession !== undefined ? { persistSession: request.persistSession } : {})
+      });
       execArgs.splice(
         execArgs.length - 1,
         0,

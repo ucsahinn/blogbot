@@ -14,7 +14,7 @@ interface EditorialDeskProps {
   connectorState: ConnectorStateSnapshot;
   onWorkspaceChange: (snapshot: EditorialWorkspaceSnapshot) => void;
   onRefreshWorkspace: () => Promise<void>;
-  onOpenSetup: () => void;
+  onOpenBoby: () => void;
   initialTab?: "drafts" | "review";
   initialMessage?: string;
   pendingDraftId?: string;
@@ -29,7 +29,7 @@ export function EditorialDesk({
   connectorState,
   onWorkspaceChange,
   onRefreshWorkspace,
-  onOpenSetup,
+  onOpenBoby,
   initialTab = "drafts",
   initialMessage = "",
   pendingDraftId,
@@ -154,8 +154,8 @@ export function EditorialDesk({
       return;
     }
     if (draft.nextAction === "CONNECT_CODEX") {
-      setMessage("Bu iş Codex bağlantısını bekliyor. Kurulum rehberi açılıyor.");
-      onOpenSetup();
+      setMessage("Boby sohbeti açıldı. Bağlamak için Boby'yi bağla düğmesini kullan.");
+      onOpenBoby();
       return;
     }
     if (draft.nextAction === "RETRY") {
@@ -233,7 +233,7 @@ export function EditorialDesk({
                   <span id={`draft-detail-${draft.id}`}>{draft.detail}</span>
                 </span>
                 <span className={`state-pill state-${draft.executionState?.toLowerCase() ?? draft.state.toLowerCase()}`}>{draft.reviewable ? draftStateLabel(draft.state) : status}</span>
-                <span className="draft-next-action">{draft.reviewable ? "İncelemeyi aç" : draft.nextAction === "CONNECT_CODEX" ? "Codex'i bağla" : draft.nextAction === "RETRY" ? "Yeniden dene" : "Takip ediliyor"}</span>
+                <span className="draft-next-action">{draft.reviewable ? "İncelemeyi aç" : draft.nextAction === "CONNECT_CODEX" ? "Boby'yi bağla" : draft.nextAction === "RETRY" ? "Yeniden dene" : "Takip ediliyor"}</span>
               </button>
               {canRetry ? (
                 <button

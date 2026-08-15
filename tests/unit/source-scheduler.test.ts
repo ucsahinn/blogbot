@@ -64,7 +64,7 @@ test("source scheduler remains idle while ingestion is paused or disabled", asyn
 test("source scheduler reports a transient store fault and resumes the next interval", async () => {
   let reads = 0;
   let enqueued = 0;
-  const faults: string[] = [];
+  const faults: Array<{ code: string; phase: string | undefined }> = [];
   const backend = {
     getAutomation: async () => {
       reads += 1;
@@ -84,7 +84,7 @@ test("source scheduler reports a transient store fault and resumes the next inte
     coordinator,
     () => new Date("2026-07-30T10:00:00.000Z"),
     5,
-    { onFault: (error) => faults.push(error.message) }
+    { onFault: (error, phase) => faults.push({ code: error.message, phase }) }
   );
 
   scheduler.start();
@@ -93,6 +93,29 @@ test("source scheduler reports a transient store fault and resumes the next inte
   }
   scheduler.stop();
 
-  assert.deepEqual(faults, ["SOURCE_SCHEDULER_UNAVAILABLE"]);
+  assert.deepEqual(faults, [{ code: "SOURCE_SCHEDULER_UNAVAILABLE", phase: "automation" }]);
   assert.equal(enqueued, 1);
+});
+
+test("source scheduler reports one diagnostic for a persistent unavailable store", async () => {
+  const faults: Array<{ code: string; phase: string | undefined }> = [];
+  const backend = {
+    getAutomation: async () => { throw new Error("database remains unavailable"); }
+  } as never;
+  const sources = { listSources: async () => [] } as never;
+  const coordinator = { enqueue: async () => ({ batchKey: "unused", scans: [] }) } as never;
+  const scheduler = new SourceScanScheduler(
+    backend,
+    sources,
+    coordinator,
+    () => new Date("2026-07-30T10:00:00.000Z"),
+    5,
+    { onFault: (error, phase) => faults.push({ code: error.message, phase }) }
+  );
+
+  scheduler.start();
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  scheduler.stop();
+
+  assert.deepEqual(faults, [{ code: "SOURCE_SCHEDULER_UNAVAILABLE", phase: "automation" }]);
 });

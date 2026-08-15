@@ -15,13 +15,16 @@ test("unsigned updater uses the native HTTPS release bridge instead of Tauri sig
 
   assert.match(shell, /checkUnsignedUpdate/u);
   assert.match(shell, /installUnsignedUpdate/u);
+  assert.match(shell, /localBuildNewer/u);
+  assert.match(shell, /yayınlanmış \$\{result\.latestVersion\} sürümünden daha yeni/u);
+  assert.doesNotMatch(shell, /if \(!update\)/u);
   assert.doesNotMatch(shell, /@tauri-apps\/plugin-updater/u);
   assert.match(bridge, /checkUnsignedUpdate\(\)/u);
   assert.match(bridge, /installUnsignedUpdate\(/u);
   assert.match(native, /check_unsigned_update/u);
   assert.match(native, /install_unsigned_update/u);
   assert.match(workflow, /sha256/u);
-  assert.match(workflow, /Blogbot_\$\(\$env:RELEASE_VERSION\)_x64-setup\.exe/u);
+  assert.match(workflow, /Boby_\$\(\$env:RELEASE_VERSION\)_x64-setup\.exe/u);
   assert.doesNotMatch(workflow, /Get-ChildItem .*\*-setup\.exe.*Select-Object -First 1/u);
   assert.match(workflow, /\^\\d\+\\\.\\d\+\\\.\\d\+\$/u);
   assert.equal(workflow.includes("(?:-[0-9A-Za-z.-]+)?"), false);

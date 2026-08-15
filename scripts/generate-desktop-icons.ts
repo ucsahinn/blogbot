@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,7 +19,7 @@ const desktopPublicDirectory = join(
   "public"
 );
 await mkdir(desktopPublicDirectory, { recursive: true });
-const svg = await readFile(join(iconDirectory, "icon.svg"));
+const avatarSource = join(repositoryRoot, "apps", "desktop", "src", "assets", "boby-avatar-v2.png");
 const sizes = [32, 48, 64, 128, 256] as const;
 
 function createBitmapInfo(
@@ -55,8 +55,8 @@ function createBitmapInfo(
 
 const bitmaps: Array<{ size: number; bytes: Buffer }> = [];
 for (const size of sizes) {
-  const png = await sharp(svg, { density: 192 })
-    .resize(size, size)
+  const png = await sharp(avatarSource)
+    .resize(size, size, { fit: "cover", position: "centre" })
     .png({ compressionLevel: 9, palette: false })
     .toBuffer();
   await writeFile(join(iconDirectory, `${size}x${size}.png`), png);
@@ -64,8 +64,8 @@ for (const size of sizes) {
     await writeFile(join(desktopPublicDirectory, "favicon.png"), png);
   }
 
-  const { data, info } = await sharp(svg, { density: 192 })
-    .resize(size, size)
+  const { data, info } = await sharp(avatarSource)
+    .resize(size, size, { fit: "cover", position: "centre" })
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
@@ -100,7 +100,7 @@ await writeFile(
 console.log(
   JSON.stringify({
     ok: true,
-    source: "apps/desktop/src-tauri/icons/icon.svg",
+    source: "apps/desktop/src/assets/boby-avatar-v2.png",
     generated: [
       ...sizes.map((size) => `icons/${size}x${size}.png`),
       "icons/icon.ico",

@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-start`\n- `allow-github-device-flow-poll`\n- `allow-github-device-flow-clear`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-verify-local-integrity`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-get-review-revision`\n- `allow-read-revision-media`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-repair-revision-media`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`\n- `allow-automatic-backup-list`\n- `allow-automatic-backup-verify`\n- `allow-automatic-backup-restore-preview`\n- `allow-automatic-backup-restore-apply`\n- `allow-check-unsigned-update`\n- `allow-install-unsigned-update`\n- `allow-open-project-page`",
+          "description": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-start`\n- `allow-github-device-flow-poll`\n- `allow-github-device-flow-clear`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-verify-local-integrity`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-request-boby-guidance`\n- `allow-get-boby-guidance`\n- `allow-get-review-revision`\n- `allow-read-revision-media`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-repair-revision-media`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`\n- `allow-automatic-backup-list`\n- `allow-automatic-backup-verify`\n- `allow-automatic-backup-restore-preview`\n- `allow-automatic-backup-restore-apply`\n- `allow-check-unsigned-update`\n- `allow-install-unsigned-update`\n- `allow-open-project-page`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-start`\n- `allow-github-device-flow-poll`\n- `allow-github-device-flow-clear`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-verify-local-integrity`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-get-review-revision`\n- `allow-read-revision-media`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-repair-revision-media`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`\n- `allow-automatic-backup-list`\n- `allow-automatic-backup-verify`\n- `allow-automatic-backup-restore-preview`\n- `allow-automatic-backup-restore-apply`\n- `allow-check-unsigned-update`\n- `allow-install-unsigned-update`\n- `allow-open-project-page`"
+          "markdownDescription": "Allows the trusted Blogbot main window to invoke only the application's named local commands.\n#### This default permission set includes:\n\n- `allow-get-bootstrap-snapshot`\n- `allow-engine-doctor`\n- `allow-get-prerequisite-status`\n- `allow-test-setup-connector`\n- `allow-save-setup-connector`\n- `allow-get-connector-state`\n- `allow-github-device-flow-start`\n- `allow-github-device-flow-poll`\n- `allow-github-device-flow-clear`\n- `allow-github-device-flow-status`\n- `allow-github-validate-repository`\n- `allow-github-preview-pull-request`\n- `allow-test-codex-runtime`\n- `allow-start-codex-login`\n- `allow-test-local-engine`\n- `allow-verify-local-integrity`\n- `allow-recover-local-workspace`\n- `allow-pick-local-folder`\n- `allow-local-dev-status`\n- `allow-start-local-dev`\n- `allow-stop-local-dev`\n- `allow-list-sources`\n- `allow-test-source`\n- `allow-scan-source`\n- `allow-scan-all-sources`\n- `allow-get-source-scan-status`\n- `allow-preview-opml`\n- `allow-save-sources`\n- `allow-review-source`\n- `allow-create-instant-draft`\n- `allow-request-boby-guidance`\n- `allow-get-boby-guidance`\n- `allow-get-review-revision`\n- `allow-read-revision-media`\n- `allow-approve-revision`\n- `allow-approve-high-risk-revision`\n- `allow-enqueue-publication`\n- `allow-materialize-local-preview`\n- `allow-preview-publication`\n- `allow-get-operations`\n- `allow-get-engine-diagnostics`\n- `allow-export-diagnostics`\n- `allow-get-editorial-workspace`\n- `allow-promote-candidate`\n- `allow-dismiss-candidate`\n- `allow-retry-job`\n- `allow-request-revision-edit`\n- `allow-repair-revision-media`\n- `allow-update-schedule-slot`\n- `allow-save-desktop-preferences`\n- `allow-complete-onboarding`\n- `allow-set-runtime-pause`\n- `allow-secure-store-status`\n- `allow-send-test-notification`\n- `allow-autostart-status`\n- `allow-set-autostart`\n- `allow-backup-create`\n- `allow-backup-verify`\n- `allow-backup-restore-preview`\n- `allow-backup-restore-apply`\n- `allow-automatic-backup-list`\n- `allow-automatic-backup-verify`\n- `allow-automatic-backup-restore-preview`\n- `allow-automatic-backup-restore-apply`\n- `allow-check-unsigned-update`\n- `allow-install-unsigned-update`\n- `allow-open-project-page`"
         },
         {
           "description": "Enables the approve_high_risk_revision command without any pre-configured scope.",
@@ -289,6 +289,12 @@
           "type": "string",
           "const": "allow-export-diagnostics",
           "markdownDescription": "Enables the export_diagnostics command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_boby_guidance command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-boby-guidance",
+          "markdownDescription": "Enables the get_boby_guidance command without any pre-configured scope."
         },
         {
           "description": "Enables the get_bootstrap_snapshot command without any pre-configured scope.",
@@ -451,6 +457,12 @@
           "type": "string",
           "const": "allow-repair-revision-media",
           "markdownDescription": "Enables the repair_revision_media command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the request_boby_guidance command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-boby-guidance",
+          "markdownDescription": "Enables the request_boby_guidance command without any pre-configured scope."
         },
         {
           "description": "Enables the request_revision_edit command without any pre-configured scope.",
@@ -687,6 +699,12 @@
           "markdownDescription": "Denies the export_diagnostics command without any pre-configured scope."
         },
         {
+          "description": "Denies the get_boby_guidance command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-boby-guidance",
+          "markdownDescription": "Denies the get_boby_guidance command without any pre-configured scope."
+        },
+        {
           "description": "Denies the get_bootstrap_snapshot command without any pre-configured scope.",
           "type": "string",
           "const": "deny-get-bootstrap-snapshot",
@@ -847,6 +865,12 @@
           "type": "string",
           "const": "deny-repair-revision-media",
           "markdownDescription": "Denies the repair_revision_media command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_boby_guidance command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-boby-guidance",
+          "markdownDescription": "Denies the request_boby_guidance command without any pre-configured scope."
         },
         {
           "description": "Denies the request_revision_edit command without any pre-configured scope.",

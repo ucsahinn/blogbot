@@ -1,4 +1,5 @@
 export type CodexTaskKind =
+  | "BOBY_GUIDE"
   | "CLASSIFY"
   | "METADATA"
   | "DEDUPE"
@@ -29,6 +30,7 @@ export const defaultCodexRoleModels: CodexRoleModels = {
 };
 
 const taskRoles = {
+  BOBY_GUIDE: "FAST",
   CLASSIFY: "FAST",
   METADATA: "FAST",
   DEDUPE: "FAST",

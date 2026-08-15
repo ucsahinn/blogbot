@@ -30,6 +30,8 @@ fn main() {
         "save_sources",
         "review_source",
         "create_instant_draft",
+        "request_boby_guidance",
+        "get_boby_guidance",
         "get_review_revision",
         "read_revision_media",
         "repair_revision_media",

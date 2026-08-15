@@ -42,6 +42,10 @@ pub enum RuntimeMode {
 
 pub struct DesktopState {
     runtime: RwLock<RuntimeMode>,
+    /// The app-owned Boby/Luna Low session is only considered available after
+    /// the explicit, bounded runtime check succeeds. Engine capability alone
+    /// proves that the runner can start; it never proves authentication.
+    codex_authenticated: RwLock<Option<bool>>,
     onboarding_complete: RwLock<bool>,
     ingestion_paused: RwLock<bool>,
     publishing_paused: RwLock<bool>,
@@ -62,6 +66,7 @@ impl Default for DesktopState {
             // readiness handshake. The UI must never present placeholder commands
             // as a healthy production runtime.
             runtime: RwLock::new(RuntimeMode::OfflineReadOnly),
+            codex_authenticated: RwLock::new(None),
             onboarding_complete: RwLock::new(false),
             ingestion_paused: RwLock::new(false),
             publishing_paused: RwLock::new(false),
@@ -1396,8 +1401,61 @@ fn codex_authenticated(executable: &str, codex_home: Option<&Path>) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+fn boby_role_state(
+    queue_depth: usize,
+    _account_configured: bool,
+    runner_ready: bool,
+    session_authenticated: bool,
+) -> &'static str {
+    if queue_depth > 0 {
+        "BUSY"
+    } else if runner_ready && session_authenticated {
+        "READY"
+    } else {
+        "UNAVAILABLE"
+    }
+}
+
+fn bootstrap_boby_state(
+    queue_depth: usize,
+    runner_ready: bool,
+    session_authenticated: bool,
+) -> &'static str {
+    boby_role_state(queue_depth, false, runner_ready, session_authenticated)
+}
+
+fn latest_boby_session_id(jobs: &[Value]) -> Option<String> {
+    jobs.iter()
+        .enumerate()
+        .filter_map(|(index, job)| {
+            if job.pointer("/metadata/purpose").and_then(Value::as_str) != Some("BOBY_GUIDANCE") {
+                return None;
+            }
+            let session_id = job.pointer("/metadata/bobySessionId").and_then(Value::as_str)?;
+            if session_id.is_empty() || session_id.len() > 128 {
+                return None;
+            }
+            let metadata = job.get("metadata");
+            let timestamp = metadata
+                .and_then(|value| value.get("completedAtUnixMs"))
+                .and_then(Value::as_u64)
+                .or_else(|| metadata.and_then(|value| value.get("createdAtUnixMs")).and_then(Value::as_u64))
+                .unwrap_or(0);
+            Some((timestamp, index, session_id.to_string()))
+        })
+        .max_by_key(|(timestamp, index, _)| (*timestamp, *index))
+        .map(|(_, _, session_id)| session_id)
+}
+
+fn bootstrap_can_read_catalog(runtime: RuntimeMode) -> bool {
+    matches!(runtime, RuntimeMode::Online)
+}
+
 #[tauri::command]
-pub fn test_codex_runtime(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
+pub fn test_codex_runtime(
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
     let Some(executable) = codex_executable() else {
         return Ok(json!({
             "available": false,
@@ -1423,6 +1481,7 @@ pub fn test_codex_runtime(bridge: tauri::State<'_, EngineBridge>) -> Result<Valu
         .collect::<String>();
     let codex_home = bridge.codex_home();
     let authenticated = codex_authenticated(executable, codex_home.as_deref());
+    *write_lock(&state.codex_authenticated)? = Some(authenticated);
     let runner_ready = bridge
         .doctor()
         .ok()
@@ -1443,7 +1502,10 @@ pub fn test_codex_runtime(bridge: tauri::State<'_, EngineBridge>) -> Result<Valu
 }
 
 #[tauri::command]
-pub fn start_codex_login(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
+pub fn start_codex_login(
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
     let executable = codex_executable()
         .ok_or_else(|| CommandError::EngineUnavailable("CODEX_NOT_INSTALLED".into()))?;
     let mut command = Command::new(executable);
@@ -1451,6 +1513,9 @@ pub fn start_codex_login(bridge: tauri::State<'_, EngineBridge>) -> Result<Value
     if let Some(home) = bridge.codex_home() {
         command.env("CODEX_HOME", home);
     }
+    // A new login can change the session state. Do not show a stale green
+    // Boby status until the user runs the explicit bounded check again.
+    *write_lock(&state.codex_authenticated)? = None;
     command
         .arg("login")
         .stdin(Stdio::null())
@@ -1677,8 +1742,53 @@ fn migrate_legacy_site_connector_if_needed(
     Ok(Some(marker))
 }
 
+fn connector_state_for_runtime(runtime: RuntimeMode) -> Option<Value> {
+    if matches!(runtime, RuntimeMode::Online) {
+        return None;
+    }
+    // Connector configuration lives in the engine-owned encrypted store. An
+    // offline desktop must never wake that store merely to repaint setup or
+    // publishing controls: a truthful empty projection keeps those screens
+    // responsive and lets the explicit Doctor retry remain the recovery path.
+    Some(json!({
+        "sourceState": "ABSENT",
+        "mode": "LOCAL_ONLY",
+        "configured": false,
+        "config": {
+            "codex": { "accountLabel": "" },
+            "github": { "owner": "", "repository": "", "clientId": "" },
+            "site": { "repositoryPath": "", "publicSiteUrl": "", "mode": "LOCAL_ONLY" },
+            "deploy": { "workflowName": "", "requiredChecks": [] },
+            "backup": { "folder": "" }
+        },
+        "site": {
+            "repositoryPath": "",
+            "publicSiteUrl": "",
+            "adapterId": Value::Null,
+            "adapterVersion": Value::Null
+        },
+        "checks": {},
+        "migration": Value::Null,
+        "localReadiness": "NOT_CONFIGURED",
+        "externalReadiness": "NOT_CONFIGURED"
+    }))
+}
+
+// The prerequisite screen is opened specifically when recovery is needed.
+// Once Doctor has reported an offline runtime, it must not immediately wake
+// the encrypted store again just to render configuration-dependent checks.
+fn prerequisite_can_read_engine(runtime: RuntimeMode) -> bool {
+    workspace_can_read_engine(runtime)
+}
+
 #[tauri::command]
-pub fn get_connector_state(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
+pub fn get_connector_state(
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    if let Some(snapshot) = connector_state_for_runtime(*read_lock(&state.runtime)?) {
+        return Ok(snapshot);
+    }
     // Legacy catalog migration is opportunistic compatibility work. A normal
     // read must stay available when another local engine action advances the
     // cursor between migration writes; the next connector read retries it.
@@ -1928,36 +2038,45 @@ pub fn get_bootstrap_snapshot(
         .iter()
         .filter(|item| item.get("state").and_then(Value::as_str) == Some("APPROVED"))
         .count();
-    let source_count = engine_request(
-        &bridge,
-        json!({
-            "version": 1,
-            "id": format!("desktop-bootstrap-source-list-{}", std::process::id()),
-            "kind": "source.list"
-        }),
-    )
-    .ok()
-    .and_then(|result| {
-        result
-            .get("sources")
-            .and_then(Value::as_array)
-            .map(Vec::len)
-    })
-    .unwrap_or(0);
-    let candidates = engine_request(
-        &bridge,
-        json!({
-            "version": 1,
-            "id": format!("desktop-bootstrap-candidate-list-{}", std::process::id()),
-            "kind": "candidate.list"
-        }),
-    )
-    .ok()
-    .and_then(|result| result.get("candidates").and_then(Value::as_array).cloned())
-    .unwrap_or_default();
-    let editorial_mutations = read_engine_local_state(&bridge, "desktop.editorial")
-        .and_then(|value| value.get("mutations").and_then(Value::as_array).cloned())
+    // Doctor is the readiness boundary. Once it reports an offline runtime,
+    // additional catalog reads only create closed-pipe errors and can restart
+    // an unhealthy sidecar. Return the honest empty offline projection until
+    // the deliberate short bootstrap reconciliation retries Doctor.
+    let (source_count, candidates, editorial_mutations) = if bootstrap_can_read_catalog(runtime) {
+        let source_count = engine_request(
+            &bridge,
+            json!({
+                "version": 1,
+                "id": format!("desktop-bootstrap-source-list-{}", std::process::id()),
+                "kind": "source.list"
+            }),
+        )
+        .ok()
+        .and_then(|result| {
+            result
+                .get("sources")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+        .unwrap_or(0);
+        let candidates = engine_request(
+            &bridge,
+            json!({
+                "version": 1,
+                "id": format!("desktop-bootstrap-candidate-list-{}", std::process::id()),
+                "kind": "candidate.list"
+            }),
+        )
+        .ok()
+        .and_then(|result| result.get("candidates").and_then(Value::as_array).cloned())
         .unwrap_or_default();
+        let editorial_mutations = read_engine_local_state(&bridge, "desktop.editorial")
+            .and_then(|value| value.get("mutations").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        (source_count, candidates, editorial_mutations)
+    } else {
+        (0, Vec::new(), Vec::new())
+    };
     let scheduled_count = revision_queue
         .iter()
         .filter(|item| item.get("scheduledAt").and_then(Value::as_str).is_some())
@@ -1979,6 +2098,11 @@ pub fn get_bootstrap_snapshot(
             )
         })
         .count();
+    let codex_runner_ready = capabilities
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("CODEX.RUNNER")));
+    let codex_authenticated = read_lock(&state.codex_authenticated)?.unwrap_or(false);
+    let boby_state = bootstrap_boby_state(codex_waiting, codex_runner_ready, codex_authenticated);
     let (discovered_count, researching_count) =
         dashboard_pipeline_counts(&candidates, &editorial_mutations, &queue_jobs);
 
@@ -2003,8 +2127,8 @@ pub fn get_bootstrap_snapshot(
             "nextScanAt": Value::Null
         },
         "codex": {
-            "state": if codex_waiting > 0 { "WAITING" } else { "UNCONFIGURED" },
-            "accountLabel": "Codex bağlantısı Kurulum Merkezi'nden yapılandırılır",
+            "state": boby_state,
+            "accountLabel": if boby_state == "READY" { "Boby · Luna Low" } else if boby_state == "BUSY" { "Boby · Luna Low çalışıyor" } else { "Boby henüz hazır değil" },
             "queueDepth": codex_waiting,
             "lastRunAt": Value::Null
         },
@@ -2036,13 +2160,17 @@ pub fn get_prerequisite_status(
         .as_ref()
         .and_then(|value| value.get("queue").and_then(Value::as_str))
         == Some("ready");
-    *write_lock(&state.runtime)? = doctor_runtime_mode(engine_doctor.as_ref());
+    let runtime = doctor_runtime_mode(engine_doctor.as_ref());
+    *write_lock(&state.runtime)? = runtime;
     let checked_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let connectors =
-        read_engine_local_state(&bridge, "desktop.connectors").unwrap_or_else(|| json!({}));
+    let connectors = if prerequisite_can_read_engine(runtime) {
+        read_engine_local_state(&bridge, "desktop.connectors").unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
     let codex_configured = connectors
         .pointer("/codex/accountLabel")
         .and_then(Value::as_str)
@@ -2062,7 +2190,7 @@ pub fn get_prerequisite_status(
     // result. Do not even perform executable discovery here: that helper runs
     // `codex.cmd --version`, which is still an external process launch.
     let codex_available = codex_runner_ready || codex_configured;
-    let codex_authenticated = codex_runner_ready;
+    let codex_authenticated = read_lock(&state.codex_authenticated)?.unwrap_or(false);
     let github_configured = connectors
         .pointer("/github/owner")
         .and_then(Value::as_str)
@@ -2087,8 +2215,11 @@ pub fn get_prerequisite_status(
         .pointer("/backup/folder")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
-    let connector_checks =
-        read_engine_local_state(&bridge, "desktop.connectorChecks").unwrap_or_else(|| json!({}));
+    let connector_checks = if prerequisite_can_read_engine(runtime) {
+        read_engine_local_state(&bridge, "desktop.connectorChecks").unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
     let site_check_ready = connector_checks
         .pointer("/site/ready")
         .and_then(Value::as_bool)
@@ -2203,7 +2334,16 @@ pub fn get_prerequisite_status(
 }
 
 #[tauri::command]
-pub fn list_sources(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
+pub fn list_sources(
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    // Opening the content workspace must not re-open a sidecar that Doctor
+    // already marked offline. Returning the typed recovery state is more
+    // honest than presenting an empty catalog as if every source were gone.
+    if !workspace_can_read_engine(*read_lock(&state.runtime)?) {
+        return Err(CommandError::EngineUnavailable("OFFLINE_READ_ONLY".into()));
+    }
     let response = engine_request(
         &bridge,
         json!({
@@ -2311,15 +2451,33 @@ pub fn test_source(
             "source URL must use HTTPS".into(),
         ));
     }
-    let response = engine_request(
-        &bridge,
-        json!({
-            "version": 1,
-            "id": format!("desktop-source-test-{}", std::process::id()),
-            "kind": "source.test",
-            "url": url
-        }),
-    )?;
+    let response = bridge.request(json!({
+        "version": 1,
+        "id": format!("desktop-source-test-{}", std::process::id()),
+        "kind": "source.test",
+        "url": url
+    })).map_err(CommandError::EngineUnavailable)?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        // A guarded fetch can reject one remote source for DNS, TLS, timeout,
+        // or document-policy reasons. That is source health, not a failed
+        // local engine; keeping the error typed prevents one bad URL from
+        // turning the whole desktop into an offline workspace.
+        let error_message = response.get("message").and_then(Value::as_str).unwrap_or("");
+        let access_forbidden = error_message.contains("403") || error_message.to_ascii_lowercase().contains("forbidden");
+        return Ok(json!({
+            "url": url,
+            "kind": "SITE",
+            "title": if access_forbidden { "Kaynak otomatik erişimi engelledi" } else { "Kaynak doğrulanamadı" },
+            "reachable": false,
+            "statusCode": if access_forbidden { 403 } else { 0 },
+            "discoveredFeeds": [],
+            "recommendation": if access_forbidden {
+                "Bu site otomatik erişimi engelliyor (HTTP 403). Kaynağı daha sonra yeniden deneyin veya izin verilen RSS/birincil kaynak kullanın; diğer kaynaklar çalışmaya devam eder."
+            } else {
+                "Bu kaynak şu anda güvenli olarak doğrulanamadı. Adresi ve erişimi kontrol edin; diğer kaynaklar kullanılmaya devam eder."
+            }
+        }));
+    }
     let probe = response
         .get("probe")
         .ok_or_else(|| CommandError::EngineUnavailable("SOURCE_TEST_SHAPE_INVALID".into()))?;
@@ -2632,7 +2790,7 @@ fn read_revision_list(bridge: &EngineBridge) -> Result<Vec<Value>, CommandError>
 
 #[tauri::command]
 pub async fn check_unsigned_update(
-) -> Result<Option<crate::unsigned_updater::UnsignedUpdate>, CommandError> {
+) -> Result<crate::unsigned_updater::UnsignedUpdateCheck, CommandError> {
     crate::unsigned_updater::check_unsigned_update().await
 }
 
@@ -3040,7 +3198,8 @@ pub fn create_instant_draft(
         .unwrap_or("Editör")
         .trim()
         .to_string();
-    let version = read_engine_state(&bridge)?
+    let engine_state = read_engine_state(&bridge)?;
+    let version = engine_state
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
@@ -3090,6 +3249,95 @@ pub fn create_instant_draft(
         "id": queued.get("id").cloned().unwrap_or_else(|| json!(draft_id)),
         "state": if queue_state == "WAITING_CODEX" { "WAITING_CODEX" } else { "RESEARCHING" },
         "queueState": queue_state
+    }))
+}
+
+#[tauri::command]
+pub fn request_boby_guidance(
+    request: Value,
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    ensure_mutation_allowed(&state)?;
+    let question = request.get("question").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    let active_page = request.get("activePage").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    let runtime_state = request.get("runtimeState").and_then(Value::as_str).unwrap_or("");
+    let summary = request.get("safeWorkspaceSummary").and_then(Value::as_object);
+    let count = |key: &str| summary
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= 100_000)
+        .unwrap_or(0);
+    if question.is_empty() || question.len() > 600 || active_page.is_empty() || active_page.len() > 64
+        || !matches!(runtime_state, "ONLINE" | "DEGRADED" | "OFFLINE") {
+        return Err(CommandError::InvalidInput("Boby için kısa bir soru ve geçerli yerel durum gerekir".into()));
+    }
+    let engine_state = read_engine_state(&bridge)?;
+    let version = engine_state
+        .pointer("/snapshot/serverCursor")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
+    // A Boby conversation is a single local Codex thread. The persisted job
+    // metadata contains only the opaque thread id, never question text or
+    // model output, and lets the next message resume that same thread.
+    let session_id = engine_state
+        .pointer("/snapshot/jobs")
+        .and_then(Value::as_array)
+        .and_then(|jobs| latest_boby_session_id(jobs));
+    let guidance_id = format!("boby-{}", stable_source_key(&format!("{question}:{active_page}:{runtime_state}:{version}")));
+    let key = stable_source_key(&format!("boby-guidance:{guidance_id}:{version}"));
+    let response = engine_request(&bridge, json!({
+        "version": 1,
+        "id": key,
+        "kind": "command",
+        "command": {
+            "version": 1,
+            "requestId": key,
+            "idempotencyKey": key,
+            "expectedVersion": version,
+            "kind": "BOBY.GUIDE",
+            "payload": {
+                "guidanceId": guidance_id,
+                "sessionId": session_id,
+                "question": question,
+                "activePage": active_page,
+                "runtimeState": runtime_state,
+                "safeWorkspaceSummary": {
+                    "draftCount": count("draftCount"),
+                    "reviewCount": count("reviewCount"),
+                    "sourceCount": count("sourceCount")
+                }
+            }
+        }
+    }))?;
+    let queued = response.pointer("/result/value").ok_or_else(|| CommandError::EngineUnavailable("BOBY_GUIDANCE_SHAPE_INVALID".into()))?;
+    Ok(json!({
+        "id": queued.get("id").cloned().unwrap_or_else(|| json!(guidance_id)),
+        "state": queued.get("state").and_then(Value::as_str).unwrap_or("WAITING_CODEX")
+    }))
+}
+
+#[tauri::command]
+pub fn get_boby_guidance(
+    guidance_id: String,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    if !guidance_id.starts_with("boby-") || guidance_id.len() > 128 {
+        return Err(CommandError::InvalidInput("geçerli Boby rehberlik kimliği gerekir".into()));
+    }
+    let state = read_engine_state(&bridge)?;
+    let job = state.pointer("/snapshot/jobs").and_then(Value::as_array)
+        .and_then(|jobs| jobs.iter().find(|job| job.get("id").and_then(Value::as_str) == Some(guidance_id.as_str())))
+        .ok_or_else(|| CommandError::InvalidInput("Boby rehberlik isteği bulunamadı".into()))?;
+    if job.pointer("/metadata/purpose").and_then(Value::as_str) != Some("BOBY_GUIDANCE") {
+        return Err(CommandError::InvalidInput("Boby rehberlik isteği bulunamadı".into()));
+    }
+    let status = job.get("state").and_then(Value::as_str).unwrap_or("FAILED");
+    Ok(json!({
+        "id": guidance_id,
+        "state": status,
+        "reply": job.pointer("/metadata/bobyReply").cloned(),
+        "suggestedActions": job.pointer("/metadata/bobyActions").cloned().unwrap_or_else(|| json!([]))
     }))
 }
 
@@ -4338,7 +4586,13 @@ pub fn preview_publication(
 }
 
 #[tauri::command]
-pub fn get_operations(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
+pub fn get_operations(
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    if let Some(snapshot) = operations_for_runtime(*read_lock(&state.runtime)?) {
+        return Ok(snapshot);
+    }
     let state = read_engine_state(&bridge)?;
     let jobs = state
         .pointer("/snapshot/jobs")
@@ -4477,6 +4731,30 @@ pub fn get_operations(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, C
     }))
 }
 
+// Operations is also the recovery screen. When the sidecar is closed it must
+// remain usable for diagnostics instead of retrying encrypted state reads on
+// every tab activation. The explicit local-engine test is the only recovery
+// action that is allowed to re-probe the sidecar from this state.
+fn operations_for_runtime(runtime: RuntimeMode) -> Option<Value> {
+    if workspace_can_read_engine(runtime) {
+        return None;
+    }
+    Some(json!({
+        "events": [],
+        "schedule": [],
+        "worker": {
+            "state": "OFFLINE",
+            "queueDepth": 0,
+            "oldestJobMinutes": 0
+        },
+        "publisher": {
+            "state": "BLOCKED",
+            "outboxPending": 0,
+            "lastReconciledAt": Value::Null
+        }
+    }))
+}
+
 #[tauri::command]
 pub fn get_engine_diagnostics(
     bridge: tauri::State<'_, EngineBridge>,
@@ -4537,7 +4815,10 @@ fn write_redacted_diagnostic_copy(source: Option<&Path>, target: &Path) {
         .map(redact_diagnostic_line)
         .collect::<Vec<_>>()
         .join("\n");
-    let _ = std::fs::write(target, format!("{redacted}\n"));
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(target) {
+        let _ = writeln!(file, "{redacted}");
+    }
 }
 
 fn write_diagnostic_lines<F>(source: Option<&Path>, target: &Path, include: F)
@@ -4556,7 +4837,10 @@ where
         .map(redact_diagnostic_line)
         .collect::<Vec<_>>()
         .join("\n");
-    let _ = std::fs::write(target, format!("{redacted}\n"));
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(target) {
+        let _ = writeln!(file, "{redacted}");
+    }
 }
 
 fn diagnostic_file_size(path: &Path) -> u64 {
@@ -4566,15 +4850,16 @@ fn diagnostic_file_size(path: &Path) -> u64 {
 }
 
 fn read_recent_diagnostic_lines(path: Option<&Path>) -> Vec<String> {
-    path.and_then(|value| std::fs::read_to_string(value).ok())
-        .map(|text| {
-            text.lines()
-                .rev()
-                .take(500)
-                .map(redact_diagnostic_line)
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for variant in crate::engine_bridge::diagnostic_log_variants(path).into_iter().rev() {
+        if let Ok(text) = std::fs::read_to_string(variant) {
+            lines.extend(text.lines().map(redact_diagnostic_line));
+        }
+    }
+    lines.into_iter().rev().take(500).collect()
 }
 
 fn redact_diagnostic_line(line: &str) -> String {
@@ -4582,9 +4867,12 @@ fn redact_diagnostic_line(line: &str) -> String {
 }
 
 #[tauri::command]
-pub fn export_diagnostics(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
+pub fn export_diagnostics(
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
     let engine_path = bridge.diagnostic_log_path();
-    let operations = get_operations(bridge.clone()).unwrap_or_else(|_| {
+    let operations = get_operations(state, bridge.clone()).unwrap_or_else(|_| {
         json!({
             "events": [],
             "worker": {"state": "UNKNOWN"},
@@ -4619,12 +4907,26 @@ pub fn export_diagnostics(bridge: tauri::State<'_, EngineBridge>) -> Result<Valu
     std::fs::write(&path, &bytes).map_err(|error| {
         CommandError::EngineUnavailable(format!("Tanılama paketi yazılamadı: {error}"))
     })?;
-    write_redacted_diagnostic_copy(engine_path.as_deref(), &directory.join("engine.stderr.log"));
-    write_diagnostic_lines(
-        engine_path.as_deref(),
-        &directory.join("bridge-events.log"),
-        |line| line.starts_with("BRIDGE_") || line.starts_with("ENGINE_"),
-    );
+    let log_variants = engine_path
+        .as_deref()
+        .map(crate::engine_bridge::diagnostic_log_variants)
+        .unwrap_or_default();
+    for (index, source) in log_variants.iter().enumerate() {
+        let name = if index == 0 {
+            "engine.stderr.log".to_string()
+        } else {
+            format!("engine.stderr.log.{index}")
+        };
+        write_redacted_diagnostic_copy(Some(source), &directory.join(name));
+    }
+    let bridge_event_target = directory.join("bridge-events.log");
+    for source in log_variants.iter().rev() {
+        write_diagnostic_lines(
+            Some(source),
+            &bridge_event_target,
+            |line| line.starts_with("BRIDGE_") || line.starts_with("ENGINE_"),
+        );
+    }
     if let Some(startup) = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .map(|root| {
@@ -4635,15 +4937,19 @@ pub fn export_diagnostics(bridge: tauri::State<'_, EngineBridge>) -> Result<Valu
     {
         write_redacted_diagnostic_copy(Some(&startup), &directory.join("startup-state.log"));
     }
-    let files = [
-        "diagnostics.json",
-        "engine.stderr.log",
-        "bridge-events.log",
-        "startup-state.log",
-    ]
+    let mut file_names = vec!["diagnostics.json".to_string()];
+    file_names.extend((0..log_variants.len()).map(|index| {
+        if index == 0 {
+            "engine.stderr.log".to_string()
+        } else {
+            format!("engine.stderr.log.{index}")
+        }
+    }));
+    file_names.extend(["bridge-events.log".to_string(), "startup-state.log".to_string()]);
+    let files = file_names
     .into_iter()
     .filter_map(|name| {
-        let file = directory.join(name);
+        let file = directory.join(&name);
         file.is_file()
             .then(|| json!({ "name": name, "bytes": diagnostic_file_size(&file) }))
     })
@@ -4793,6 +5099,10 @@ fn workspace_engine_state(
     }
 }
 
+fn workspace_can_read_engine(runtime: RuntimeMode) -> bool {
+    matches!(runtime, RuntimeMode::Online)
+}
+
 fn has_publication_capability(capabilities: &Value) -> bool {
     capabilities
         .as_array()
@@ -4924,7 +5234,17 @@ pub fn get_editorial_workspace(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     let runtime = *read_lock(&state.runtime)?;
-    let engine_state = workspace_engine_state(runtime, read_engine_state(&bridge))?;
+    // Do not probe a sidecar after Doctor has already put this desktop into an
+    // offline projection. Rust evaluates function arguments eagerly, so the
+    // former workspace_engine_state(runtime, read_engine_state(...)) shape
+    // still issued a closed-pipe request even though the helper discarded it.
+    // The empty projection below keeps navigation responsive and reserves the
+    // next deliberate bootstrap retry as the only recovery probe.
+    let engine_state = if workspace_can_read_engine(runtime) {
+        workspace_engine_state(runtime, read_engine_state(&bridge))?
+    } else {
+        None
+    };
     let materializations = engine_state
         .as_ref()
         .and_then(|value| {
@@ -4984,36 +5304,43 @@ pub fn get_editorial_workspace(
         .find(|role| role.get("role").and_then(Value::as_str) == Some("DEFAULT"))
         .and_then(|role| role.get("queueDepth").and_then(Value::as_u64))
         .unwrap_or(0) as usize;
-    let connectors =
-        read_engine_local_state(&bridge, "desktop.connectors").unwrap_or_else(|| json!({}));
-    let connector_checks =
-        read_engine_local_state(&bridge, "desktop.connectorChecks").unwrap_or_else(|| json!({}));
+    let connectors = if workspace_can_read_engine(runtime) {
+        read_engine_local_state(&bridge, "desktop.connectors").unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    let connector_checks = if workspace_can_read_engine(runtime) {
+        read_engine_local_state(&bridge, "desktop.connectorChecks").unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
     let codex_configured = connectors
         .pointer("/codex/accountLabel")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
-    let codex_runner_ready = bridge
-        .doctor()
-        .ok()
-        .and_then(|value| value.get("capabilities").cloned())
-        .and_then(|value| value.as_array().cloned())
-        .is_some_and(|capabilities| {
-            capabilities
-                .iter()
-                .any(|item| item.as_str() == Some("CODEX.RUNNER"))
-        });
+    let codex_runner_ready = workspace_can_read_engine(runtime)
+        && bridge
+            .doctor()
+            .ok()
+            .and_then(|value| value.get("capabilities").cloned())
+            .and_then(|value| value.as_array().cloned())
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|item| item.as_str() == Some("CODEX.RUNNER"))
+            });
     // Workspace reads must remain local and bounded. Running codex.cmd --version
-    // and `login status` here blocks the Tauri command thread and opens a
-    // console window on Windows. The explicit Codex test command owns those
-    // checks; the engine capability is the truthful signal for this snapshot.
+    // and `login status` here blocks the Tauri command thread. The explicit
+    // test owns that probe; its last in-process result is the truthful session
+    // signal, while the engine capability only proves the runner is present.
     let codex_available = codex_runner_ready || codex_configured;
-    let codex_role_state = if codex_depth > 0 {
-        "BUSY"
-    } else if codex_configured && codex_available && codex_runner_ready {
-        "READY"
-    } else {
-        "UNAVAILABLE"
-    };
+    let codex_authenticated = read_lock(&state.codex_authenticated)?.unwrap_or(false);
+    let codex_role_state = boby_role_state(
+        codex_depth,
+        codex_configured,
+        codex_runner_ready,
+        codex_authenticated,
+    );
     let site_configured = connectors
         .pointer("/site/repositoryPath")
         .and_then(Value::as_str)
@@ -5031,20 +5358,27 @@ pub fn get_editorial_workspace(
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
     let checked_at = generated_at.clone();
-    let candidate_values = engine_request(
-        &bridge,
-        json!({
-            "version": 1,
-            "id": format!("desktop-candidate-list-{}", std::process::id()),
-            "kind": "candidate.list"
-        }),
-    )
-    .ok()
-    .and_then(|response| response.get("candidates").cloned())
-    .and_then(|value| value.as_array().cloned())
-    .unwrap_or_default();
-    let persisted_editorial =
-        read_engine_local_state(&bridge, "desktop.editorial").unwrap_or_else(|| json!({}));
+    let candidate_values = if workspace_can_read_engine(runtime) {
+        engine_request(
+            &bridge,
+            json!({
+                "version": 1,
+                "id": format!("desktop-candidate-list-{}", std::process::id()),
+                "kind": "candidate.list"
+            }),
+        )
+        .ok()
+        .and_then(|response| response.get("candidates").cloned())
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let persisted_editorial = if workspace_can_read_engine(runtime) {
+        read_engine_local_state(&bridge, "desktop.editorial").unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
     let candidate_mutations = persisted_editorial
         .get("mutations")
         .and_then(Value::as_array)
@@ -6159,24 +6493,24 @@ mod tests {
     #[cfg(windows)]
     use std::time::{Duration, Instant};
 
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         append_pending_draft_jobs, authorize_connector_directory, authorize_high_risk_consent,
         authorize_native_confirmation, build_approval_command, build_high_risk_approval_command,
         build_review_revision, build_revision_queue, build_source_scan_command,
-        candidate_draft_payload, candidate_workflow_state, configured_site_origin,
+        boby_role_state, bootstrap_boby_state, bootstrap_can_read_catalog, candidate_draft_payload, candidate_workflow_state, configured_site_origin,
         dashboard_pipeline_counts, doctor_runtime_mode, editorial_operation_events,
         ensure_mutation_allowed, ensure_trusted_local_dev, github_preview_payload,
         has_publication_capability, is_local_path, is_path_within_grant, is_reparse_point,
         local_dev_environment_with, materialize_preview_bundle_with,
-        migrate_legacy_site_connector_catalog, preview_file_bytes, preview_file_media_reference,
+        latest_boby_session_id, migrate_legacy_site_connector_catalog, preview_file_bytes, preview_file_media_reference,
         publication_observability, register_folder_grant, request_choice,
         require_granted_directory, require_granted_restore_target, retry_version_conflicted_draft,
         revision_edit_payload, scheduled_operation_items, valid_github_segment,
         valid_github_workflow, valid_hhmm, valid_recovery_key, valid_schedule_slot,
         valid_site_work_mode, validate_folder_selection, validate_local_dev_project,
-        workspace_engine_state, write_lock, CommandError, DesktopState, RuntimeMode,
+        connector_state_for_runtime, operations_for_runtime, prerequisite_can_read_engine, workspace_can_read_engine, workspace_engine_state, write_lock, CommandError, DesktopState, RuntimeMode,
     };
 
     #[cfg(windows)]
@@ -6205,6 +6539,92 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         (child, port)
+    }
+
+    #[test]
+    fn boby_is_not_marked_ready_until_its_app_owned_session_is_verified() {
+        assert_eq!(boby_role_state(0, true, true, false), "UNAVAILABLE");
+        assert_eq!(boby_role_state(0, true, true, true), "READY");
+        assert_eq!(boby_role_state(0, false, true, true), "READY");
+        assert_eq!(boby_role_state(1, true, true, false), "BUSY");
+    }
+
+    #[test]
+    fn bootstrap_exposes_the_verified_boby_session_state() {
+        assert_eq!(bootstrap_boby_state(0, true, false), "UNAVAILABLE");
+        assert_eq!(bootstrap_boby_state(0, true, true), "READY");
+        assert_eq!(bootstrap_boby_state(1, true, true), "BUSY");
+    }
+
+    #[test]
+    fn boby_resumes_the_latest_completed_session_not_job_id_order() {
+        let jobs = vec![
+            json!({
+                "id": "boby-z-old",
+                "metadata": {
+                    "purpose": "BOBY_GUIDANCE",
+                    "bobySessionId": "boby-old-session",
+                    "completedAtUnixMs": 100
+                }
+            }),
+            json!({
+                "id": "boby-a-new",
+                "metadata": {
+                    "purpose": "BOBY_GUIDANCE",
+                    "bobySessionId": "boby-new-session",
+                    "completedAtUnixMs": 200
+                }
+            }),
+        ];
+
+        assert_eq!(
+            latest_boby_session_id(&jobs).as_deref(),
+            Some("boby-new-session")
+        );
+    }
+
+    #[test]
+    fn offline_bootstrap_never_reads_catalog_projections() {
+        assert!(!bootstrap_can_read_catalog(RuntimeMode::OfflineReadOnly));
+        assert!(!bootstrap_can_read_catalog(RuntimeMode::Degraded));
+        assert!(bootstrap_can_read_catalog(RuntimeMode::Online));
+    }
+
+    #[test]
+    fn offline_editorial_workspace_never_probes_a_closed_engine() {
+        assert!(!workspace_can_read_engine(RuntimeMode::OfflineReadOnly));
+        assert!(!workspace_can_read_engine(RuntimeMode::Degraded));
+        assert!(workspace_can_read_engine(RuntimeMode::Online));
+    }
+
+    #[test]
+    fn offline_prerequisite_screen_never_reopens_the_encrypted_engine_store() {
+        assert!(!prerequisite_can_read_engine(RuntimeMode::OfflineReadOnly));
+        assert!(!prerequisite_can_read_engine(RuntimeMode::Degraded));
+        assert!(prerequisite_can_read_engine(RuntimeMode::Online));
+    }
+
+    #[test]
+    fn offline_operations_screen_returns_a_truthful_non_retrying_projection() {
+        let snapshot = operations_for_runtime(RuntimeMode::OfflineReadOnly).expect("offline projection");
+        assert_eq!(snapshot.pointer("/worker/state").and_then(Value::as_str), Some("OFFLINE"));
+        assert_eq!(snapshot.pointer("/publisher/state").and_then(Value::as_str), Some("BLOCKED"));
+        assert_eq!(snapshot.get("events").and_then(Value::as_array).map(Vec::len), Some(0));
+        assert!(operations_for_runtime(RuntimeMode::Online).is_none());
+    }
+
+    #[test]
+    fn offline_content_catalog_is_recovery_gated_before_sidecar_io() {
+        assert!(!workspace_can_read_engine(RuntimeMode::OfflineReadOnly));
+        assert!(!workspace_can_read_engine(RuntimeMode::Degraded));
+    }
+
+    #[test]
+    fn offline_connector_read_returns_the_safe_empty_snapshot() {
+        let snapshot = connector_state_for_runtime(RuntimeMode::OfflineReadOnly).expect("offline snapshot");
+        assert_eq!(snapshot.get("sourceState").and_then(Value::as_str), Some("ABSENT"));
+        assert_eq!(snapshot.get("mode").and_then(Value::as_str), Some("LOCAL_ONLY"));
+        assert_eq!(snapshot.pointer("/config/site/mode").and_then(Value::as_str), Some("LOCAL_ONLY"));
     }
 
     #[cfg(windows)]

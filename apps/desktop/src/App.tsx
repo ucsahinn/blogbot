@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import bobyAvatar from "./assets/boby-avatar-v2.webp";
 import { AppShell, type PageId } from "./components/AppShell.tsx";
 import { BobyAssistant } from "./components/BobyAssistant.tsx";
 import { canMutateLocally, hasRuntimeCapability } from "./app-model.ts";
@@ -76,25 +77,29 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         // otherwise ready desk empty on first launch.
         const coalescingBridge = createCoalescingBridge(runtimeBridge);
         const initialSnapshot = await coalescingBridge.getBootstrapSnapshot();
-        const [initialWorkspace, initialConnectorState] = await Promise.all([
-          coalescingBridge.getEditorialWorkspace(),
-          coalescingBridge.getConnectorState().catch((reason) => {
-          if (alive) {
-            setSyncError(
-              userFacingBridgeError(
-                reason,
-                "Bağlantı ayarları henüz okunamadı. Kurulum Merkezi'nden yeniden deneyin."
-              )
-            );
-          }
-          return fallbackConnectorState;
-          })
-        ]);
+        const initialWorkspace = await coalescingBridge.getEditorialWorkspace();
         if (alive) {
           setBridge(coalescingBridge);
           setSnapshot(initialSnapshot);
           setWorkspace(initialWorkspace);
-          setConnectorState(initialConnectorState);
+          // Connector state is useful only on setup/publishing surfaces. It
+          // must not keep the full local workspace behind a slow or broken
+          // external-configuration read at startup.
+          setConnectorState(fallbackConnectorState);
+        }
+        if (initialSnapshot.runtime === "ONLINE") {
+          void coalescingBridge.getConnectorState().then((initialConnectorState) => {
+            if (alive) setConnectorState(initialConnectorState);
+          }).catch((reason) => {
+            if (alive) {
+              setSyncError(
+                userFacingBridgeError(
+                  reason,
+                  "Bağlantı ayarları henüz okunamadı. Kurulum Merkezi'nden yeniden deneyin."
+                )
+              );
+            }
+          });
         }
         // The sidecar can recover a durable queue claim immediately after the
         // first Doctor response. Keep the first truthful workspace visible,
@@ -140,10 +145,10 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
           setSyncError("");
           void (async () => {
             const nextSnapshot = await bridge.getBootstrapSnapshot();
-            const [nextWorkspace, nextConnectorState] = await Promise.all([
-              bridge.getEditorialWorkspace(),
-              bridge.getConnectorState()
-            ]);
+            const nextWorkspace = await bridge.getEditorialWorkspace();
+            const nextConnectorState = nextSnapshot.runtime === "ONLINE"
+              ? await bridge.getConnectorState()
+              : fallbackConnectorState;
             setSnapshot(nextSnapshot);
             setWorkspace(nextWorkspace);
             setConnectorState(nextConnectorState);
@@ -168,7 +173,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
     return (
       <main className="fatal-state">
         <div role="alert" aria-live="assertive">
-          <span className="brand-mark" aria-hidden="true">B</span>
+          <img className="boot-avatar" src={bobyAvatar} alt="" />
           <p className="section-kicker">GÜVENLİ BAŞLATMA DURDU</p>
           <h1>Çalışma alanı açılamadı.</h1>
           <p>{error}</p>
@@ -184,7 +189,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   if (!bridge || !snapshot || !workspace || !connectorState) {
     return (
       <main className="boot-state" aria-busy="true">
-        <span className="brand-mark boot-mark" aria-hidden="true">B</span>
+        <img className="boot-avatar boot-mark" src={bobyAvatar} alt="" />
         <h1>Boby güvenli çalışma alanı hazırlanıyor</h1>
         <p role="status" aria-live="polite" aria-busy="true">Yerel köprü ve şifreli önbellek doğrulanıyor…</p>
       </main>
@@ -193,10 +198,10 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
 
   const refreshWorkspace = async () => {
     const nextSnapshot = await bridge.getBootstrapSnapshot();
-    const [nextWorkspace, nextConnectorState] = await Promise.all([
-      bridge.getEditorialWorkspace(),
-      bridge.getConnectorState()
-    ]);
+    const nextWorkspace = await bridge.getEditorialWorkspace();
+    const nextConnectorState = nextSnapshot.runtime === "ONLINE"
+      ? await bridge.getConnectorState()
+      : fallbackConnectorState;
     setSnapshot(nextSnapshot);
     setWorkspace(nextWorkspace);
     setConnectorState(nextConnectorState);
@@ -271,7 +276,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             connectorState={connectorState}
             onWorkspaceChange={setWorkspace}
             onRefreshWorkspace={refreshWorkspace}
-            onOpenSetup={() => navigate("setup-guide")}
+            onOpenBoby={() => setBobyOpen(true)}
             initialTab={activePage === "editorial-review" ? "review" : "drafts"}
             initialMessage={editorialNotice}
             {...(pendingEditorialDraft ? {
@@ -300,7 +305,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             onSnapshotChange={setSnapshot}
             onWorkspaceChange={setWorkspace}
             onConnectorStateChange={setConnectorState}
-            onOpenSetup={() => navigate("setup")}
+            onOpenSetup={() => navigate("setup-guide")}
             onOpenEditorial={() => navigate("editorial")}
           />
         ) : null}
@@ -318,7 +323,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
           />
         ) : null}
       </AppShell>
-      <BobyAssistant key={`${activePage}-${bobyOpen}`} activePage={activePage} snapshot={snapshot} workspace={workspace} open={bobyOpen} onClose={() => setBobyOpen(false)} onNavigate={navigate} />
+      <BobyAssistant key={`${activePage}-${bobyOpen}`} activePage={activePage} snapshot={snapshot} workspace={workspace} bridge={bridge} open={bobyOpen} onClose={() => setBobyOpen(false)} onNavigate={navigate} />
     </>
   );
 }

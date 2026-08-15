@@ -59,6 +59,49 @@ test("source.list derives capabilities from its already loaded source records", 
   }]);
 });
 
+test("source.list uses one catalog freshness projection when the repository provides it", async () => {
+  const sourceRepository = {
+    async listSources() {
+      return ["source-fast-1", "source-fast-2"].map((id) => ({
+        id,
+        url: `https://news.example/${id}.xml`,
+        kind: "RSS" as const,
+        status: "ACTIVE" as const,
+        trustStatus: "APPROVED" as const,
+        rightsStatus: "APPROVED" as const,
+        language: "en",
+        discoveredFeeds: [],
+        createdAt: "2026-08-14T10:00:00.000Z",
+        updatedAt: "2026-08-14T10:00:00.000Z",
+        version: 1
+      }));
+    },
+    async listLatestEntryDates() {
+      return new Map([
+        ["source-fast-1", "2026-08-14T12:00:00.000Z"],
+        ["source-fast-2", null]
+      ]);
+    },
+    async listEntriesBounded() {
+      throw new Error("SOURCE_LIST_MUST_NOT_FAN_OUT_PER_SOURCE_WHEN_BULK_FRESHNESS_EXISTS");
+    }
+  } as unknown as SourceRepository;
+  const handle = createEngineProtocol(undefined, "memory", { sourceRepository });
+
+  const response = await handle({ version: 1, id: "source-list-bulk-freshness", kind: "source.list" });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.kind, "source.list");
+  const catalog = response.sources as Array<{ id: string; lastItemAt: string | null }>;
+  assert.deepEqual(
+    catalog.map((source) => ({ id: source.id, lastItemAt: source.lastItemAt })),
+    [
+      { id: "source-fast-1", lastItemAt: "2026-08-14T12:00:00.000Z" },
+      { id: "source-fast-2", lastItemAt: null }
+    ]
+  );
+});
+
 test("candidate.list reads one globally bounded recent-entry slice instead of traversing every source feed", async () => {
   const sourceRepository = {
     async listSources() {
@@ -121,6 +164,13 @@ test("persistent engine lists local sources with trust and rights blockers", asy
     updatedAt: "2026-07-29T10:00:00.000Z",
     version: 1
   });
+  await sources.saveEntries("source-1", [{
+    externalId: "source-list-freshness-1",
+    title: "Catalog freshness projection",
+    summary: "The desktop catalog should read this timestamp without a per-source feed decrypt.",
+    url: "https://news.example/stories/catalog-freshness",
+    publishedAt: "2026-07-30T08:00:00.000Z"
+  }]);
   await backend.close();
 
   const runtime = await createPersistentEngineProtocol(dataDir);
@@ -146,7 +196,7 @@ test("persistent engine lists local sources with trust and rights blockers", asy
       createdAt: "2026-07-29T10:00:00.000Z",
       updatedAt: "2026-07-29T10:00:00.000Z",
       version: 1,
-      lastItemAt: null,
+      lastItemAt: "2026-07-30T08:00:00.000Z",
       capabilities: {
         canScan: true,
         canPublish: false,

@@ -1,7 +1,10 @@
 # Editör Boby kısa rehberi
 
-Boby, yerel Blogbot çalışma alanındaki kısa yol yardımcısıdır. Sohbetler
-cihaz içinde kalır; Boby kaynak, içerik veya kimlik bilgisini dışarı göndermez.
+Boby, yerel Blogbot çalışma alanındaki kısa yol yardımcısıdır. Yerel ekran
+rehberliği cihazda kalır. Kullanıcı açıkça Codex yardımını seçerse yalnızca
+sınırlı soru ve sır içermeyen ekran özeti izole Codex çalıştırıcısına verilir;
+kaynak metni, içerik gövdesi, kimlik bilgileri ve tanılama günlükleri
+gönderilmez.
 
 ## Günlük akış
 
