@@ -224,6 +224,26 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
   );
   assert.match(smokeScript, /editorial-review/u);
   assert.match(smokeScript, /expectedHeadings/u);
+  assert.match(
+    smokeScript,
+    /Boby · Yerel yayın merkezi/u,
+    "native smoke must wait for the current visible Boby window title"
+  );
+  assert.match(
+    smokeScript,
+    /WEBDRIVER_TITLE_UNAVAILABLE/u,
+    "native smoke must use a visible DOM readiness fallback when the Windows driver does not expose a window title"
+  );
+  assert.match(
+    smokeScript,
+    /Pazar · 1\. slot: Takvimde bu slotu düzenle/u,
+    "native smoke must select the compact Sunday slot before editing it"
+  );
+  assert.match(
+    smokeScript,
+    /catalogReadLatencyMs/u,
+    "native smoke must report catalog-read latency so navigation stalls cannot hide behind a green smoke result"
+  );
   assert.match(smokeScript, /waitForVisibleHeading/u);
   assert.match(smokeScript, /requiredNativeReadCommands/u);
   assert.match(
