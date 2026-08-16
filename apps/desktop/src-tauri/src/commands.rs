@@ -72,7 +72,7 @@ impl Default for DesktopState {
             publishing_paused: RwLock::new(false),
             editorial_mutations: RwLock::new(Vec::new()),
             preferences: RwLock::new(json!({
-                "author": "Blogbot Editorya",
+                "author": "OPE Editorya",
                 "reviewer": "Editör",
                 "notifications": true,
                 "emailDigest": false,
@@ -658,7 +658,7 @@ pub fn pick_local_folder(
             BROWSEINFOW,
         };
 
-        let title: Vec<u16> = "Blogbot için bir proje klasörü seçin"
+        let title: Vec<u16> = "OPE için bir proje klasörü seçin"
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -1240,7 +1240,7 @@ fn verify_native_confirmation(action: &str, fingerprint: &str) -> Result<(), Com
     let message = HSTRING::from(format!(
         "{action}\n\nDoğrulama bilgisi:\n{detail}\n\nBu işlemi gerçekten başlatmak istiyor musunuz?"
     ));
-    let title = HSTRING::from("Blogbot · Windows onayı");
+    let title = HSTRING::from("OPE · Windows onayı");
     let result = unsafe {
         MessageBoxW(
             None,
@@ -1497,7 +1497,7 @@ pub fn test_codex_runtime(
         "authenticated": authenticated,
         "runnerReady": runner_ready,
         "version": output,
-        "detail": if !authenticated { "Yazı üretimi aracı bulundu; hesap bağlantısı bekleniyor." } else if runner_ready { "Yazı üretimi aracı ve izole Blogbot runner hazır." } else { "Yazı üretimi hesabı hazır; izole Blogbot runner başlatılamadı." }
+        "detail": if !authenticated { "Yazı üretimi aracı bulundu; hesap bağlantısı bekleniyor." } else if runner_ready { "Yazı üretimi aracı ve izole OPE çalışma bileşeni hazır." } else { "Yazı üretimi hesabı hazır; izole OPE çalışma bileşeni başlatılamadı." }
     }))
 }
 
@@ -3188,7 +3188,7 @@ pub fn create_instant_draft(
         .get("author")
         .and_then(Value::as_str)
         .filter(|value| (2..=120).contains(&value.trim().len()))
-        .unwrap_or("Blogbot Editorya")
+        .unwrap_or("OPE Editorya")
         .trim()
         .to_string();
     let preferred_reviewer = editorial_preferences
@@ -3644,7 +3644,7 @@ fn verify_windows_user_consent(revision_hash: &str) -> Result<(), CommandError> 
     let suffix = revision_hash
         .get(revision_hash.len().saturating_sub(8)..)
         .unwrap_or(revision_hash);
-    let message = HSTRING::from(format!("Blogbot yüksek risk onayı · revizyon …{suffix}"));
+    let message = HSTRING::from(format!("OPE yüksek risk onayı · revizyon …{suffix}"));
     let result = UserConsentVerifier::RequestVerificationAsync(&message)
         .and_then(|operation| operation.get())
         .map_err(|error| {
@@ -5487,7 +5487,7 @@ pub fn get_editorial_workspace(
         .cloned()
         .unwrap_or_else(|| {
             json!({
-                "author": "Blogbot Editorya",
+                "author": "OPE Editorya",
                 "reviewer": "Editör",
                 "notifications": true,
                 "emailDigest": false,
@@ -6523,20 +6523,23 @@ mod tests {
         let script = format!(
             "import subprocess,sys,time; subprocess.Popen([sys.executable,'-m','http.server','{port}','--bind','127.0.0.1'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(300)"
         );
-        let child = Command::new("python")
+        let mut child = Command::new("python")
             .args(["-c", &script])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn fixture parent");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while TcpStream::connect(("127.0.0.1", port)).is_err() {
+            if let Ok(Some(status)) = child.try_wait() {
+                panic!("descendant HTTP fixture exited before listening: {status}");
+            }
             assert!(
                 Instant::now() < deadline,
-                "descendant HTTP server did not start"
+                "descendant HTTP server did not start within 30 seconds"
             );
-            thread::sleep(Duration::from_millis(25));
+            thread::sleep(Duration::from_millis(50));
         }
         (child, port)
     }

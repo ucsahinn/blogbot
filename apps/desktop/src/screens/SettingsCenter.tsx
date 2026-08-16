@@ -12,7 +12,7 @@ interface SettingsCenterProps {
 }
 
 const defaultPreferences: DesktopPreferences = {
-  author: "Boby Editorya",
+  author: "OPE Editorya",
   reviewer: "Editör",
   notifications: true,
   emailDigest: false,
@@ -93,7 +93,7 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
       setAutostart(result.enabled);
       setMessage(
         result.enabled
-          ? "Boby Windows oturum açılışında başlatılacak."
+          ? "OPE Windows oturum açılışında başlatılacak."
           : "Windows başlangıcında otomatik açılma kapatıldı."
       );
     } catch (reason) {
@@ -148,7 +148,7 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
           <label className="field"><span>Varsayılan bölüm</span><select value={form.defaultSection} disabled={readOnly || busy} onChange={(event) => setForm({ ...form, defaultSection: event.target.value as Section })}><option value="haberler">Haberler</option><option value="teknoloji">Teknoloji</option><option value="ekonomi">Ekonomi ve iş</option><option value="analiz">Analiz</option><option value="dosyalar">Dosyalar</option><option value="rehberler">Rehberler</option><option value="kultur">Kültür</option><option value="yasam">Yaşam</option></select></label>
         </div>
         <div className="preference-toggles">
-          <label><input type="checkbox" checked={autostart ?? false} disabled={readOnly || autostart === null || busy} aria-describedby={autostartStatusError ? "autostart-status-unavailable" : undefined} onChange={(event) => void toggleAutostart(event.target.checked)} /><span><strong>Windows ile başlat</strong><small>Boby oturum açılışında tepsiye hazır biçimde gelir; istediğiniz zaman kapatabilirsiniz.</small>{autostartStatusError ? <small id="autostart-status-unavailable" role="status">Windows başlangıç durumu okunamadı; bu ayar güvenle değiştirilemez.</small> : null}</span></label>
+          <label><input type="checkbox" checked={autostart ?? false} disabled={readOnly || autostart === null || busy} aria-describedby={autostartStatusError ? "autostart-status-unavailable" : undefined} onChange={(event) => void toggleAutostart(event.target.checked)} /><span><strong>Windows ile başlat</strong><small>OPE oturum açılışında tepsiye hazır biçimde gelir; istediğiniz zaman kapatabilirsiniz.</small>{autostartStatusError ? <small id="autostart-status-unavailable" role="status">Windows başlangıç durumu okunamadı; bu ayar güvenle değiştirilemez.</small> : null}</span></label>
           <label><input type="checkbox" checked={form.notifications} disabled={readOnly || busy} onChange={(event) => setForm({ ...form, notifications: event.target.checked })} /><span><strong>Windows bildirimleri</strong><small>Bu cihazdaki yerel bildirim kanalını açar; kapalıyken test bildirimi gönderilmez.</small></span></label>
           <label><input type="checkbox" checked={form.showSourceReferences !== false} disabled={readOnly || busy} onChange={(event) => setForm({ ...form, showSourceReferences: event.target.checked })} /><span><strong>Taslakta kaynak referanslarını öne çıkar</strong><small>İnceleme ekranında kullanılan kaynakların bağlantılarını ve iddia eşleşmelerini içeriğin yanında gösterir.</small></span></label>
         </div>

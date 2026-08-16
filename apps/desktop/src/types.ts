@@ -1,4 +1,4 @@
-import type { ArticleType as ContractArticleType, SiteSection } from "../../../packages/contracts/src/index.ts";
+﻿import type { ArticleType as ContractArticleType, SiteSection } from "../../../packages/contracts/src/index.ts";
 
 export type Section = SiteSection;
 export type ArticleType = ContractArticleType;
@@ -351,7 +351,7 @@ const SETUP_REQUIREMENT_CATALOG: ReadonlyArray<Omit<SetupRequirement, "state" | 
     label: "Bilgisayarınızdaki uygulama",
     kind: "LOCAL_INSTALL",
     scope: "APP",
-    detail: "Blogbot'un kendi bileşenleri kurulumla birlikte otomatik kontrol edilir.",
+    detail: "OPE'nin kendi bileşenleri kurulumla birlikte otomatik kontrol edilir.",
     secretField: false
   },
   {
@@ -375,7 +375,7 @@ const SETUP_REQUIREMENT_CATALOG: ReadonlyArray<Omit<SetupRequirement, "state" | 
     label: "Site klasörü ve adresi",
     kind: "EXTERNAL_AUTHORIZATION",
     scope: "PUBLISH",
-    detail: "Bilgisayarınızdaki site klasörü ve ziyaretçilerin gördüğü adres seçilir; Blogbot desteklenen formatı otomatik kontrol eder.",
+    detail: "Bilgisayarınızdaki site klasörü ve ziyaretçilerin gördüğü adres seçilir; OPE desteklenen formatı otomatik kontrol eder.",
     secretField: false
   },
   {

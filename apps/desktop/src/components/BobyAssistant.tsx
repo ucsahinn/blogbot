@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import bobyAvatar from "../assets/boby-avatar-v2.webp";
+import bobyAvatar from "../assets/boby-avatar-v3.webp";
 import { describeBobyAvailability } from "../boby-conversation.ts";
 import { userFacingBridgeError, type BlogbotBridge, type BobyGuidanceStatus } from "../bridge.ts";
 import { playFeedbackSound } from "../feedback-sounds.ts";
@@ -290,8 +290,8 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
       });
       setMessages((current) => [...current, { text: "Boby isteğini aldı. Yanıt hazır olduğunda burada göstereceğim.", origin: "system" }]);
       setPendingGuidanceId(queued.id);
-    } catch {
-      appendSystemFailure("Boby isteği başlatılamadı. Yerel rehberlik açık; ayrıntı için Operasyonlar'ı kontrol edebilirsin.");
+    } catch (reason) {
+      appendSystemFailure(userFacingBridgeError(reason, "Boby isteği başlatılamadı. Yerel rehberlik açık; ayrıntı için Operasyonlar'ı kontrol edebilirsin."));
     }
   };
 
@@ -299,7 +299,7 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
   return (
     <section className="boby-panel" role="dialog" aria-label="Editör Boby" aria-modal="false" aria-describedby="boby-purpose">
       <header className="boby-panel-header">
-        <img src={bobyAvatar} alt="" className="boby-mark-image" />
+        <img src={bobyAvatar} alt="" width="42" height="42" className="boby-mark-image" />
         <div><p className="section-kicker">BOBY · YEREL EDİTÖR REHBERİ</p><h2 id="boby-title">Ben Boby</h2></div>
         <button type="button" className="boby-close" aria-label="Editör Boby'yi kapat" onClick={onClose}>×</button>
       </header>

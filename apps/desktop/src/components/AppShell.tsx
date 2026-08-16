@@ -2,7 +2,8 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import desktopPackage from "../../package.json" with { type: "json" };
 
-import bobyAvatar from "../assets/boby-avatar-v2.webp";
+import bobyAvatar from "../assets/boby-avatar-v3.webp";
+import opeLogo from "../assets/ope-logo-v2.png";
 import { userFacingUpdateError, type BlogbotBridge, type UnsignedDesktopUpdate } from "../bridge.ts";
 import type { BootstrapSnapshot } from "../types.ts";
 
@@ -73,6 +74,7 @@ export function AppShell({
   const [aboutOpen, setAboutOpen] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<UnsignedDesktopUpdate | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [updatePhase, setUpdatePhase] = useState("idle");
   const [updateMessage, setUpdateMessage] = useState("");
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [diagnosticMessage, setDiagnosticMessage] = useState("");
@@ -100,26 +102,31 @@ export function AppShell({
 
   const checkForUpdate = async () => {
     if (!window.__TAURI_INTERNALS__) {
-      setUpdateMessage("Güncelleme denetimi yalnız paketlenmiş Boby uygulamasında yapılır.");
+      setUpdateMessage("Güncelleme denetimi yalnız paketlenmiş OPE uygulamasında yapılır.");
       return;
     }
     setUpdateBusy(true);
+    setUpdatePhase("checking");
     setPendingUpdate(null);
     setUpdateMessage("Güncellemeler güvenli bağlantıyla denetleniyor…");
     try {
       const result = await bridge.checkUnsignedUpdate();
       if (result.kind === "upToDate") {
-        setUpdateMessage(`Bu bilgisayardaki Boby, yayınlanmış ${result.latestVersion} sürümüyle güncel.`);
+        setUpdatePhase("idle");
+        setUpdateMessage(`Bu bilgisayardaki OPE, yayınlanmış ${result.latestVersion} sürümüyle güncel.`);
         return;
       }
       if (result.kind === "localBuildNewer") {
-        setUpdateMessage(`Bu bilgisayardaki Boby, yayınlanmış ${result.latestVersion} sürümünden daha yeni. Yeni bir yayın paketi henüz yok.`);
+        setUpdatePhase("idle");
+        setUpdateMessage(`Bu bilgisayardaki OPE, yayınlanmış ${result.latestVersion} sürümünden daha yeni. Yeni bir yayın paketi henüz yok.`);
         return;
       }
       const update = result.update;
       setPendingUpdate(update);
-      setUpdateMessage(`Boby ${update.version} hazır. İndirmeyi ve kurulumu siz başlatın.`);
+      setUpdatePhase("available");
+      setUpdateMessage(`OPE ${update.version} hazır. İndirmeyi ve kurulumu siz başlatın.`);
     } catch (reason) {
+      setUpdatePhase("error");
       setUpdateMessage(userFacingUpdateError(reason));
     } finally {
       setUpdateBusy(false);
@@ -129,11 +136,14 @@ export function AppShell({
   const installPendingUpdate = async () => {
     if (!pendingUpdate) return;
     setUpdateBusy(true);
+    setUpdatePhase("installing");
     try {
       setUpdateMessage("Güncelleme indiriliyor ve SHA-256 ile doğrulanıyor…");
       await bridge.installUnsignedUpdate(pendingUpdate);
-      setUpdateMessage("Güncelleme kurulumu başlatılıyor…");
+      setUpdatePhase("handoff");
+      setUpdateMessage("OPE kapanıyor. Kurulum sihirbazı birkaç saniye içinde açılacak; kurulum bitene kadar bu pencereyi kapatmayın.");
     } catch {
+      setUpdatePhase("error");
       setUpdateMessage("Güncelleme indirilemedi veya SHA-256 doğrulaması başarısız oldu. Kurulum başlatılmadı.");
     } finally {
       setUpdateBusy(false);
@@ -183,10 +193,10 @@ export function AppShell({
       <a className="skip-link" href="#main-workspace">Ana içeriğe geç</a>
       <aside className="sidebar" aria-label="Uygulama araçları">
         <div className="brand-lockup">
-          <img className="brand-avatar" src={bobyAvatar} alt="" />
+          <img className="brand-avatar ope-logo" src={opeLogo} alt="" width="42" height="42" />
           <span>
-            <strong>Boby</strong>
-            <small>Yerel yayın sistemi</small>
+            <strong>OPE</strong>
+            <small>OpenPostEditör</small>
           </span>
         </div>
 
@@ -239,11 +249,11 @@ export function AppShell({
           {diagnosticBusy ? "Tanı paketi hazırlanıyor…" : "Tanı paketi oluştur"}
         </button>
         {diagnosticMessage ? <small className="sidebar-feedback" role="status" aria-live="polite">{diagnosticMessage}</small> : null}
-        <section className="about-control" aria-label="Boby bilgileri">
+        <section className="about-control" aria-label="OPE bilgileri">
           <button
             className="about-toggle"
             type="button"
-            aria-label="Boby hakkında"
+            aria-label="OPE hakkında"
             aria-expanded={aboutOpen}
             aria-controls="blogbot-about-card"
             onClick={() => setAboutOpen((open) => !open)}
@@ -263,8 +273,17 @@ export function AppShell({
                   </button>
                 ) : null}
               </div>
-              {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
-              <strong>Boby · yerel yayın uygulaması</strong>
+              {updatePhase !== "idle" ? (
+                <div className={`update-progress update-progress-${updatePhase}`} role="status" aria-live="polite" aria-busy={updateBusy}>
+                  <strong>Güncelleme adımları</strong>
+                  <div className="update-progress-steps">
+                    <span className={updatePhase === "checking" ? "is-current" : updatePhase === "error" ? "is-error" : "is-done"}>1 Kontrol</span>
+                    <span className={updatePhase === "installing" ? "is-current" : updatePhase === "handoff" ? "is-done" : "is-waiting"}>2 İndirme + SHA-256</span>
+                    <span className={updatePhase === "handoff" ? "is-current" : "is-waiting"}>3 Kurulum sihirbazı</span>
+                  </div>
+                </div>
+              ) : null}              {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
+              <strong>OPE · OpenPostEditör</strong>
               <span>Sürüm {desktopPackage.version} · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
               <a
                 className="about-project-link"
@@ -305,7 +324,7 @@ export function AppShell({
         </div>
 
         <div className="operator-card">
-          <img className="operator-avatar" src={bobyAvatar} alt="" />
+          <img className="operator-avatar" src={bobyAvatar} alt="" width="38" height="38" />
           <span>
             <strong>Editör çalışma alanı</strong>
             <small>İnsan onayı zorunlu</small>
@@ -315,7 +334,7 @@ export function AppShell({
 
       <main className="workspace" id="main-workspace" tabIndex={-1}>{children}</main>
       <button type="button" className="boby-launcher" aria-label="Editör Boby'yi aç" onClick={onOpenBoby}>
-        <img src={bobyAvatar} alt="" />
+        <img src={bobyAvatar} alt="" width="32" height="32" />
         <strong>Editör Boby</strong>
       </button>
       {syncError ? (

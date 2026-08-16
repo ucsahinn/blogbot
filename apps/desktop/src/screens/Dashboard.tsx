@@ -114,7 +114,7 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
 
       <div className="automation-continuity" role="note">
         <span aria-hidden="true">↻</span>
-        <p><strong>Blogbot bilgisayarınız açıkken tepside çalışmaya devam eder.</strong> Uygulama kapanırsa işler bekler; yeniden açıldığında güvenli şekilde devam eder.</p>
+        <p><strong>OPE bilgisayarınız açıkken tepside çalışmaya devam eder.</strong> Uygulama kapanırsa işler bekler; yeniden açıldığında güvenli şekilde devam eder.</p>
       </div>
 
       <section className="status-strip" aria-label="Sistem durumu">

@@ -19,7 +19,7 @@ const desktopPublicDirectory = join(
   "public"
 );
 await mkdir(desktopPublicDirectory, { recursive: true });
-const avatarSource = join(repositoryRoot, "apps", "desktop", "src", "assets", "boby-avatar-v2.png");
+const avatarSource = join(repositoryRoot, "apps", "desktop", "src", "assets", "ope-logo-v2.png");
 const sizes = [32, 48, 64, 128, 256] as const;
 
 function createBitmapInfo(
@@ -100,7 +100,7 @@ await writeFile(
 console.log(
   JSON.stringify({
     ok: true,
-    source: "apps/desktop/src/assets/boby-avatar-v2.png",
+    source: "apps/desktop/src/assets/ope-logo-v2.png",
     generated: [
       ...sizes.map((size) => `icons/${size}x${size}.png`),
       "icons/icon.ico",

@@ -274,7 +274,7 @@ async function createQaBridge(): Promise<BlogbotBridge> {
       snapshot.runtime = "OFFLINE_READ_ONLY";
       snapshot.connection = {
         engineRunning: false,
-        engineLabel: "Blogbot Engine · bağlantı bekleniyor",
+        engineLabel: "OPE Engine · bağlantı bekleniyor",
         bridgeReady: false,
         latencyMs: null,
         storageLabel: "PGlite · son doğrulanmış yerel veri",
@@ -359,8 +359,8 @@ async function createQaBridge(): Promise<BlogbotBridge> {
     if (state === "publish-ready" && command === "get_connector_state") {
       const connector = structuredClone(value) as Record<string, unknown>;
       connector.mode = "PUBLISH";
-      connector.config = { ...(connector.config as Record<string, unknown>), site: { repositoryPath: "C:\\Blogbot-Demo", publicSiteUrl: "https://example.org", mode: "PUBLISH" } };
-      connector.site = { ...(connector.site as Record<string, unknown>), repositoryPath: "C:\\Blogbot-Demo", publicSiteUrl: "https://example.org", adapterId: "astro-generic", adapterVersion: "1" };
+      connector.config = { ...(connector.config as Record<string, unknown>), site: { repositoryPath: "C:\\OPE-Demo", publicSiteUrl: "https://example.org", mode: "PUBLISH" } };
+      connector.site = { ...(connector.site as Record<string, unknown>), repositoryPath: "C:\\OPE-Demo", publicSiteUrl: "https://example.org", adapterId: "astro-generic", adapterVersion: "1" };
       return connector;
     }
     return value;
@@ -369,5 +369,5 @@ async function createQaBridge(): Promise<BlogbotBridge> {
 }
 
 const root = document.getElementById("root");
-if (!root) throw new Error("Blogbot QA uygulama kökü bulunamadı.");
+if (!root) throw new Error("OPE QA uygulama kökü bulunamadı.");
 createRoot(root).render(<StrictMode><App bridgeFactory={createQaBridge} /></StrictMode>);

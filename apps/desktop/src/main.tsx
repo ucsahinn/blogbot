@@ -6,7 +6,7 @@ import "./styles.css";
 
 const root = document.getElementById("root");
 if (!root) {
-  throw new Error("Blogbot uygulama kökü bulunamadı.");
+  throw new Error("OPE uygulama kökü bulunamadı.");
 }
 
 createRoot(root).render(

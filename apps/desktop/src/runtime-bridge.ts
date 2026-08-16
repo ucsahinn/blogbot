@@ -20,6 +20,6 @@ export async function createRuntimeBridge(): Promise<BlogbotBridge> {
 
   throw new BridgeError(
     "BRIDGE_UNAVAILABLE",
-    "Blogbot yalnızca Windows masaüstü uygulaması içinde çalışır. Yerel geliştirme için Tauri çalışma zamanını başlatın."
+    "OPE yalnızca Windows masaüstü uygulaması içinde çalışır. Yerel geliştirme için Tauri çalışma zamanını başlatın."
   );
 }

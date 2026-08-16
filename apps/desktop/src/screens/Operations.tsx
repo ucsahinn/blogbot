@@ -246,8 +246,8 @@ export function Operations({
             <p className="section-kicker">YEREL SİSTEM</p>
           <h2>
               {snapshot.connection.engineRunning
-                ? "Blogbot çalışıyor"
-                : "Blogbot çalışmıyor"}
+                ? "OPE çalışıyor"
+                : "OPE çalışmıyor"}
           </h2>
           <dl>
             <div>

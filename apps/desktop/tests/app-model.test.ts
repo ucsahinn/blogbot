@@ -33,7 +33,7 @@ test("instant draft feedback distinguishes queued research from missing Codex", 
     waitingForCodex: false,
     kicker: "ARAŞTIRMA KUYRUKTA",
     title: "İş güvenli kuyruğa alındı.",
-    detail: "Blogbot araştırmayı yerel ve dayanıklı kuyruğunda sürdürecek."
+    detail: "OPE araştırmayı yerel ve dayanıklı kuyruğunda sürdürecek."
   });
   assert.deepEqual(describe?.({ id: "draft-2", state: "WAITING_CODEX", queueState: "WAITING_CODEX" }), {
     waitingForCodex: true,

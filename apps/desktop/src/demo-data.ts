@@ -96,7 +96,7 @@ const prerequisites: PrerequisiteSnapshot = {
     },
     {
       id: "local-engine",
-      label: "Paketlenmiş Blogbot Engine",
+      label: "Paketlenmiş OPE Engine",
       state: "READY",
       scope: "WRITE",
       detail: "Yerel engine bu Windows oturumunda çalışıyor.",
@@ -275,7 +275,7 @@ const bootstrap: BootstrapSnapshot = {
   runtime: "ONLINE",
   connection: {
     engineRunning: true,
-    engineLabel: "Blogbot Engine · bu bilgisayar",
+    engineLabel: "OPE Engine · bu bilgisayar",
     bridgeReady: true,
     latencyMs: 8,
     storageLabel: "PGlite · yerel ve şifreli",
@@ -344,7 +344,7 @@ const review: ReviewRevision = {
   state: "REVIEW_REQUIRED",
   section: "analiz",
   articleType: "analysis",
-  author: "Blogbot Editorya",
+  author: "OPE Editorya",
   tags: ["örnek", "geçiş", "uygulama"],
   scheduledAt: "2026-07-29T13:30:00.000Z",
   adapterVersion: "site-adapter@1.0.0",
@@ -685,17 +685,17 @@ export function createDemoTransport(): InvokeTransport {
       case "recover_local_workspace":
         return { ready: true, detail: "Yeni yerel çalışma alanı hazır." };
       case "pick_local_folder":
-        return "C:\\Blogbot-Demo";
+        return "C:\\OPE-Demo";
       case "local_dev_status":
         return { running: false, supported: true };
       case "start_local_dev":
-        return { running: true, directory: String(args?.path ?? "C:\\Blogbot-Demo") };
+        return { running: true, directory: String(args?.path ?? "C:\\OPE-Demo") };
       case "stop_local_dev":
         return { running: false };
       case "get_engine_diagnostics":
-        return { path: "C:\\Blogbot-Demo\\logs\\engine.stderr.log", lines: [] };
+        return { path: "C:\\OPE-Demo\\logs\\engine.stderr.log", lines: [] };
       case "export_diagnostics":
-        return { path: "C:\\Blogbot-Demo\\diagnostics\\blogbot-diagnostics-demo.json", directory: "C:\\Blogbot-Demo\\diagnostics\\blogbot-diagnostics-demo", bytes: 0, included: ["engine", "operations", "startup"], opened: true };
+        return { path: "C:\\OPE-Demo\\diagnostics\\blogbot-diagnostics-demo.json", directory: "C:\\OPE-Demo\\diagnostics\\blogbot-diagnostics-demo", bytes: 0, included: ["engine", "operations", "startup"], opened: true };
       case "test_codex_runtime":
         return { available: true, authenticated: true, runnerReady: true, version: "demo", detail: "Demo çalışma alanında Codex bağlantısı hazır görünüyor." };
       case "start_codex_login":
@@ -733,7 +733,7 @@ export function createDemoTransport(): InvokeTransport {
       case "github_device_flow_status":
         return { status: "authorized", writes: false, network: false, scopes: ["repo"], detail: "Demo GitHub bağlantısı hazır." };
       case "backup_create":
-        return { outputPath: String(args?.outputPath ?? "C:\\Blogbot-Demo\\blogbot.backup"), archiveSha256: "0".repeat(64), bytes: 0, entries: 0 };
+        return { outputPath: String(args?.outputPath ?? "C:\\OPE-Demo\\blogbot.backup"), archiveSha256: "0".repeat(64), bytes: 0, entries: 0 };
       case "backup_verify":
         return { archivePath: String(args?.archivePath ?? ""), sha256: "0".repeat(64), verified: true, entries: [] };
       case "backup_restore_preview":

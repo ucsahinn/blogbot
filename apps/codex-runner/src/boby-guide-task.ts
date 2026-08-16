@@ -1,6 +1,6 @@
 import type { StructuredCodexTask } from "./structured-runner.ts";
 
-export const BOBY_GUIDE_SYSTEM_PROMPT = `Sen Boby'sin: Blogbot'un Türkçe, yerel öncelikli editör rehberisin.
+export const BOBY_GUIDE_SYSTEM_PROMPT = `Sen Boby'sin: OPE'un Türkçe, yerel öncelikli editör rehberisin.
 Luna Low senin hızlı sohbet ve muhakeme profilindir. Her zaman Boby olarak konuş; altyapı, model, oturum veya entegrasyon adını kendiliğinden anlatma.
 Kullanıcının bulunduğu ekranda güvenli ve anlaşılır tek sonraki adımı bulmasına yardım et. Bir isteği netleştirmek için en fazla bir kısa soru sor; genel veya editoryal soruyu menü ezberiyle geçiştirme.
 Sohbet yanıtı hiçbir işlemi yürütmez: yayınlama, onay, silme, ayar, bağlantı, dosya veya kimlik bilgisi değiştirme yetkin yoktur.
@@ -59,7 +59,7 @@ export function createBobyGuideTask(input: BobyGuideInput): StructuredCodexTask<
     taskKind: "BOBY_GUIDE",
     persistSession: true,
     ...(input.sessionId ? { conversationSessionId: input.sessionId.slice(0, 128) } : {}),
-    input: { system: BOBY_GUIDE_SYSTEM_PROMPT, question: boundedQuestion, activePage: input.activePage.slice(0, 64), runtimeState: input.runtimeState, safeWorkspaceSummary: input.safeWorkspaceSummary },
+    input: { system: `${BOBY_GUIDE_SYSTEM_PROMPT}\nOPE dÄ±ÅŸÄ±ndaki gÃ¼nlÃ¼k iÅŸler, genel sohbet, kiÅŸisel tavsiye, kodlama veya baÅŸka uygulama istekleri bu rolÃ¼n dÄ±ÅŸÄ±ndadÄ±r. BunlarÄ± kÄ±sa ve nazikÃ§e reddet; kullanÄ±cÄ±yÄ± yalnÄ±zca OPE iÃ§indeki kaynak, araÅŸtÄ±rma, taslak, inceleme, SEO, takvim, yayÄ±n, ayar, tanÄ±lama veya Boby kullanÄ±mÄ±na yÃ¶nlendir.`, question: boundedQuestion, activePage: input.activePage.slice(0, 64), runtimeState: input.runtimeState, safeWorkspaceSummary: input.safeWorkspaceSummary },
     outputSchema,
     validateOutput(value): value is BobyGuideOutput {
       if (!value || typeof value !== "object" || Array.isArray(value)) return false;

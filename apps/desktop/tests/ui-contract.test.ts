@@ -15,7 +15,7 @@ test("desktop boot and fatal states expose truthful assistive-technology status"
   const app = await readFile(source("App.tsx"), "utf8");
 
   assert.match(app, /className="boot-state"\s+aria-busy="true"/u);
-  assert.match(app, /<h1>Boby güvenli çalışma alanı hazırlanıyor<\/h1>/u);
+  assert.match(app, /<h1>OPE güvenli çalışma alanı hazırlanıyor<\/h1>/u);
   assert.match(app, /aria-live="polite"/u);
   assert.match(app, /aria-busy="true"/u);
   assert.match(app, /className="fatal-state">\s*<div role="alert"/u);
@@ -94,7 +94,7 @@ test("first-start wizard is a non-blocking three-step flow with one semantic sta
   assert.match(setup, /summarizeGuidedStates/u);
   assert.match(setup, /Codex'i şimdilik atla/u);
   assert.match(setup, /guidedMode && guidedStep === 2/u);
-  assert.match(setup, /Blogbot’u bu hedefle kullan/u);
+  assert.match(setup, /OPE’yi bu hedefle kullan/u);
   assert.match(setup, /<h2 id="quickstart-title">Çıktı klasörünü seç<\/h2>/u);
   assert.doesNotMatch(setup, /quickstart-modes/u);
   assert.doesNotMatch(setup, /guided-progress-inline-meter/u);
@@ -144,31 +144,33 @@ test("collapsed and mobile navigation retain names and setup/settings entry poin
   assert.match(shell, /aria-label="Kurulum ve önkoşullar"/u);
 });
 
-test("Boby uses the dedicated assistant avatar in every persistent entry point", async () => {
+test("OPE uses its product logo while Boby keeps the dedicated assistant avatar", async () => {
   const app = await readFile(source("App.tsx"), "utf8");
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
   const assistant = await readFile(source("components", "BobyAssistant.tsx"), "utf8");
 
-  assert.match(app, /import bobyAvatar from "\.\/assets\/boby-avatar-v2\.webp"/u);
+  assert.match(app, /import bobyAvatar from "\.\/assets\/boby-avatar-v3\.webp"/u);
   assert.equal(
     [...app.matchAll(/src=\{bobyAvatar\}/gu)].length,
     2,
     "boot and safe-start failure states must not fall back to a letter mark"
   );
-  assert.match(shell, /import bobyAvatar from "\.\.\/assets\/boby-avatar-v2\.webp"/u);
+  assert.match(shell, /import bobyAvatar from "\.\.\/assets\/boby-avatar-v3\.webp"/u);
+  assert.match(shell, /import opeLogo from "\.\.\/assets\/ope-logo-v2\.png"/u);
+  assert.match(shell, /<strong>OPE<\/strong>/u);
   assert.equal(
     [...shell.matchAll(/src=\{bobyAvatar\}/gu)].length,
-    3,
-    "brand, operator presence, and the floating chat launcher must show the same Boby avatar"
+    2,
+    "operator presence and the floating Boby launcher keep the assistant avatar; the sidebar uses OPE logo"
   );
-  assert.match(assistant, /import bobyAvatar from "\.\.\/assets\/boby-avatar-v2\.webp"/u);
+  assert.match(assistant, /import bobyAvatar from "\.\.\/assets\/boby-avatar-v3\.webp"/u);
   assert.match(assistant, /src=\{bobyAvatar\}/u);
 });
 
 test("about control exposes the verified project identity and GitHub source", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
 
-  assert.match(shell, /aria-label="Boby hakkında"/u);
+  assert.match(shell, /aria-label="OPE hakkında"/u);
   assert.match(shell, /aria-expanded=\{aboutOpen\}/u);
   assert.match(shell, /https:\/\/github\.com\/ucsahinn\/blogbot/u);
   assert.match(shell, /target="_blank"/u);
@@ -353,7 +355,7 @@ test("backup restore never implies that the active local workspace was replaced"
   const setup = await readFile(source("screens", "SetupCenter.tsx"), "utf8");
 
   assert.match(setup, /Geri yükleme tamamlandı: \$\{result\.entries\} dosya yeni klasöre çıkarıldı\. Aktif çalışma alanı değiştirilmedi\./u);
-  assert.match(setup, /Yedek dosyaları çıkarır; Blogbot'un aktif çalışma alanını otomatik değiştirmez\./u);
+  assert.match(setup, /Yedek dosyaları çıkarır; OPE'nin aktif çalışma alanını otomatik değiştirmez\./u);
 });
 
 test("automatic local recovery snapshots are selectable without exposing their derived key", async () => {

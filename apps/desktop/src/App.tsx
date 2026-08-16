@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 
-import bobyAvatar from "./assets/boby-avatar-v2.webp";
+import bobyAvatar from "./assets/boby-avatar-v3.webp";
 import { AppShell, type PageId } from "./components/AppShell.tsx";
 import { BobyAssistant } from "./components/BobyAssistant.tsx";
 import { canMutateLocally, hasRuntimeCapability } from "./app-model.ts";
@@ -134,7 +134,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
       .catch((reason) => {
         if (alive) {
           setError(
-            userFacingBridgeError(reason, "Boby çalışma alanı açılamadı.")
+            userFacingBridgeError(reason, "OPE çalışma alanı açılamadı.")
           );
         }
       });
@@ -205,12 +205,12 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
     return (
       <main className="fatal-state">
         <div role="alert" aria-live="assertive">
-          <img className="boot-avatar" src={bobyAvatar} alt="" />
+          <img className="boot-avatar" src={bobyAvatar} alt="" width="64" height="64" />
           <p className="section-kicker">GÜVENLİ BAŞLATMA DURDU</p>
           <h1>Çalışma alanı açılamadı.</h1>
           <p>{error}</p>
           <small>
-            Boby'nin yerel çalışma bileşeni başlatılamadı. Uygulamayı yeniden başlatın veya Kurulum
+            OPE'nin yerel çalışma bileşeni başlatılamadı. Uygulamayı yeniden başlatın veya Kurulum
             Merkezi'ndeki "Önkoşul testi"ni çalıştırın.
           </small>
         </div>
@@ -221,8 +221,8 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   if (!bridge || !snapshot || !workspace || !connectorState) {
     return (
       <main className="boot-state" aria-busy="true">
-        <img className="boot-avatar boot-mark" src={bobyAvatar} alt="" />
-        <h1>Boby güvenli çalışma alanı hazırlanıyor</h1>
+        <img className="boot-avatar boot-mark" src={bobyAvatar} alt="" width="64" height="64" />
+        <h1>OPE güvenli çalışma alanı hazırlanıyor</h1>
         <p role="status" aria-live="polite" aria-busy="true">Yerel köprü ve şifreli önbellek doğrulanıyor…</p>
       </main>
     );

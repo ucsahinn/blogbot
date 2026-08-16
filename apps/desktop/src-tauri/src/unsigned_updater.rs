@@ -274,7 +274,7 @@ async fn fetch_update() -> Result<UnsignedUpdateCheck, CommandError> {
     let release_update_result = client
         .get(RELEASES_API_URL)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .header(reqwest::header::USER_AGENT, "Blogbot-update-check")
+        .header(reqwest::header::USER_AGENT, "OPE-update-check")
         .send()
         .await
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_UNAVAILABLE".into()))?
@@ -300,6 +300,7 @@ pub async fn check_unsigned_update() -> Result<UnsignedUpdateCheck, CommandError
 }
 
 fn configure_hidden_command(command: &mut Command) {
+    // The PowerShell launcher is hidden; the installer itself remains visible.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -318,7 +319,12 @@ fn deferred_installer_script(installer_path: &Path, parent_pid: u32) -> String {
     )
 }
 
+fn deferred_installer_script_visible(installer_path: &Path, parent_pid: u32) -> String {
+    deferred_installer_script(installer_path, parent_pid).replace("/S", "")
+}
+
 fn launch_installer_after_exit(installer_path: &Path, parent_pid: u32) -> Result<(), CommandError> {
+    let installer_script = deferred_installer_script_visible(installer_path, parent_pid);
     let mut launcher = Command::new("powershell.exe");
     configure_hidden_command(&mut launcher);
     launcher
@@ -329,7 +335,7 @@ fn launch_installer_after_exit(installer_path: &Path, parent_pid: u32) -> Result
             "Hidden",
             "-Command",
         ])
-        .arg(deferred_installer_script(installer_path, parent_pid));
+        .arg(installer_script);
     launcher
         .spawn()
         .map(|_| ())
@@ -351,7 +357,7 @@ fn create_installer_file(version: &str) -> Result<(PathBuf, std::fs::File), Comm
         .collect::<String>();
     for attempt in 0..32u32 {
         let path =
-            std::env::temp_dir().join(format!("Blogbot-{version}-{entropy}-{attempt}.setup.exe"));
+            std::env::temp_dir().join(format!("OPE-{version}-{entropy}-{attempt}.setup.exe"));
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -524,7 +530,7 @@ mod tests {
             notes: String::new(),
             platforms: super::WindowsPlatform {
                 windows_x86_64: super::WindowsArtifact {
-                    url: format!("https://github.com/ucsahinn/blogbot/releases/download/v{version}/Blogbot_{version}_x64-setup.exe"),
+                    url: format!("https://github.com/ucsahinn/blogbot/releases/download/v{version}/OPE_{version}_x64-setup.exe"),
                     sha256: "a".repeat(64),
                 },
             },
@@ -553,8 +559,8 @@ mod tests {
             "tag_name": format!("v{version}"),
             "body": "Daha hızlı yerel çalışma.",
             "assets": [{
-                "name": format!("Blogbot_{version}_x64-setup.exe"),
-                "browser_download_url": format!("https://github.com/ucsahinn/blogbot/releases/download/v{version}/Blogbot_{version}_x64-setup.exe"),
+                "name": format!("OPE_{version}_x64-setup.exe"),
+                "browser_download_url": format!("https://github.com/ucsahinn/blogbot/releases/download/v{version}/OPE_{version}_x64-setup.exe"),
                 "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }]
         })).unwrap();
@@ -595,7 +601,7 @@ mod tests {
             version: version.clone(),
             notes: "Official release".into(),
             url: format!(
-                "https://github.com/ucsahinn/blogbot/releases/download/v{version}/Blogbot_{version}_x64-setup.exe"
+                "https://github.com/ucsahinn/blogbot/releases/download/v{version}/OPE_{version}_x64-setup.exe"
             ),
             sha256: "a".repeat(64),
         };
@@ -616,7 +622,7 @@ mod tests {
             },
             InstallUnsignedUpdateRequest {
                 version: official.version.clone(),
-                url: official.url.replace("Blogbot_", "Forged_"),
+                url: official.url.replace("OPE_", "Forged_"),
                 sha256: official.sha256.clone(),
             },
             InstallUnsignedUpdateRequest {

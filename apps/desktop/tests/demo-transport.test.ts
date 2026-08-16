@@ -171,7 +171,7 @@ test("demo doctor and workspace expose only local runtime capabilities and logic
   );
   assert.deepEqual(bootstrap.connection, {
     engineRunning: true,
-    engineLabel: "Blogbot Engine · bu bilgisayar",
+    engineLabel: "OPE Engine · bu bilgisayar",
     bridgeReady: true,
     latencyMs: 8,
     storageLabel: "PGlite · yerel ve şifreli",

@@ -1,4 +1,4 @@
-use tauri::{
+﻿use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     App, Emitter, Manager,
@@ -33,7 +33,7 @@ pub fn install(app: &mut App) -> tauri::Result<()> {
         false,
         None::<&str>,
     )?;
-    let open = MenuItem::with_id(app, "open", "Blogbot'u aç", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "OPE'yi aç", true, None::<&str>)?;
     let sync = MenuItem::with_id(app, "sync", "Şimdi eşitle", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Güvenli biçimde çık", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -50,7 +50,7 @@ pub fn install(app: &mut App) -> tauri::Result<()> {
     )?;
 
     let mut builder = TrayIconBuilder::new()
-        .tooltip("Blogbot · Yerel yayın")
+        .tooltip("OPE · OpenPostEditör")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => {

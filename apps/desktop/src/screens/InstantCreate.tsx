@@ -206,7 +206,7 @@ export function InstantCreate({
       <header className="page-header">
         <div>
           <p className="section-kicker">AKILLI ANLIK OLUŞTUR</p>
-          <h1>Niyeti anlatın; kanıt sınırını Blogbot korusun.</h1>
+          <h1>Niyeti anlatın; kanıt sınırını OPE korusun.</h1>
           <p>
             Bu akış doğrudan yayın yapmaz. Her sonuç kaynak, iddia, iki dil,
             medya ve güvenlik kontrolleriyle inceleme kuyruğuna gelir.
@@ -316,7 +316,7 @@ export function InstantCreate({
                   ))}
                 {selectedSourcesNeedingReview.length > 0 ? (
                   <p className="inline-notice source-selection-note" role="note">
-                    Seçtiğiniz {selectedSourcesNeedingReview.length} kaynak yayın kanıtı olmadan önce değerlendirilmelidir. Blogbot bu kaynakları araştırma ipucu olarak kullanabilir; kalite kapıları tamamlanmadan içerik onaylanamaz.
+                    Seçtiğiniz {selectedSourcesNeedingReview.length} kaynak yayın kanıtı olmadan önce değerlendirilmelidir. OPE bu kaynakları araştırma ipucu olarak kullanabilir; kalite kapıları tamamlanmadan içerik onaylanamaz.
                   </p>
                 ) : null}
                 {!sources.length && !sourceLoadError ? (

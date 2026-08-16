@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color-scheme: light;
   font-family:
     "Segoe UI Variable Text",
@@ -1592,7 +1592,7 @@ strong {
   flex-direction: column;
   padding: 13px 17px;
   border: 1px solid #f0c4b5;
-  border-top: 3px solid var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
   border-radius: 10px;
   background: var(--surface);
   box-shadow: var(--shadow-tight);
@@ -1703,7 +1703,6 @@ strong {
   border-radius: 8px;
   background: var(--surface-raised);
   color: var(--ink);
-  outline: none;
   transition:
     border-color 150ms ease,
     box-shadow 150ms ease;
@@ -1792,6 +1791,14 @@ strong {
 .about-update-actions button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
 .about-update-actions button:disabled { cursor: progress; opacity: 0.7; }
 .about-card small { color: var(--ink-soft); line-height: 1.4; }
+.update-progress { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-muted); }
+.update-progress-installing, .update-progress-handoff { border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); }
+.update-progress-error { border-color: color-mix(in srgb, var(--red) 52%, var(--line)); background: var(--red-soft); }
+.update-progress-steps { display: grid; gap: 5px; font-size: 12px; }
+.update-progress-steps span { display: block; color: var(--ink-faint); }
+.update-progress-steps .is-done { color: var(--teal-dark, var(--teal)); font-weight: 750; }
+.update-progress-steps .is-current { color: var(--blue); font-weight: 800; }
+.update-progress-steps .is-error { color: var(--red); font-weight: 800; }
 
 .field input:focus-visible,
 .field textarea:focus-visible,
@@ -2054,7 +2061,7 @@ strong {
   height: 100%;
   border-radius: inherit;
   background: var(--teal);
-  transition: width 260ms ease-out;
+
 }
 
 .source-capability-note,
@@ -5017,7 +5024,7 @@ strong {
   height: 100%;
   border-radius: inherit;
   background: var(--teal);
-  transition: width 260ms ease-out;
+
 }
 
 .guided-progress button:disabled {
@@ -5186,7 +5193,7 @@ strong {
   margin: 0 0 14px;
   padding: 11px 13px;
   border: 1px solid var(--line);
-  border-left: 3px solid var(--teal);
+  border-color: color-mix(in srgb, var(--teal) 42%, var(--line));
   border-radius: 8px;
   background: var(--teal-soft);
   color: var(--ink-muted);
@@ -5437,7 +5444,7 @@ strong {
 
 .pending-draft-card {
   cursor: progress;
-  border-left: 3px solid var(--teal);
+  border-color: color-mix(in srgb, var(--teal) 42%, var(--line));
 }
 
 .draft-row:disabled {
@@ -5456,7 +5463,7 @@ strong {
   margin-top: 18px;
   padding: 16px;
   border: 1px solid #d6e1d8;
-  border-left: 4px solid var(--teal);
+  border-color: color-mix(in srgb, var(--teal) 42%, var(--line));
   border-radius: var(--radius-md);
   background: var(--surface-muted);
   color: var(--ink-muted);
@@ -5791,7 +5798,7 @@ strong {
 }
 
 .active-job-row {
-  border-left: 4px solid var(--teal);
+  border-color: color-mix(in srgb, var(--teal) 42%, var(--line));
 }
 
 .role-grid {
@@ -5808,7 +5815,7 @@ strong {
   margin-bottom: 14px;
   padding: 18px;
   border: 1px solid var(--line-strong);
-  border-left: 4px solid var(--blue);
+  border-color: color-mix(in srgb, var(--blue) 42%, var(--line));
   border-radius: 12px;
   background: var(--surface-raised);
 }
@@ -6193,6 +6200,43 @@ strong {
   color: var(--accent-dark);
 }
 
+.setup-task-card.state-ready {
+  border-color: color-mix(in srgb, var(--teal) 48%, var(--line));
+  background: color-mix(in srgb, var(--teal-soft) 58%, var(--surface-raised));
+}
+
+.setup-task-card.state-blocker {
+  border-color: color-mix(in srgb, var(--red) 48%, var(--line));
+  background: color-mix(in srgb, var(--red-soft) 48%, var(--surface-raised));
+}
+
+.setup-task-card.state-attention,
+.setup-task-card.state-optional {
+  border-color: color-mix(in srgb, var(--amber) 52%, var(--line));
+  background: color-mix(in srgb, var(--amber-soft) 50%, var(--surface-raised));
+}
+
+.setup-task-card.is-recommended {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 22%, transparent), 0 8px 22px rgb(20 36 41 / 0.08);
+}
+
+.setup-task-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  padding: 4px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px !important;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.setup-task-state.state-ready { color: var(--teal-dark, var(--teal)); background: var(--teal-soft); }
+.setup-task-state.state-blocker { color: var(--red); background: var(--red-soft); }
+.setup-task-state.state-attention,
+.setup-task-state.state-optional { color: var(--amber-dark, var(--amber)); background: var(--amber-soft); }
 .setup-task-card.is-optional {
   background: color-mix(in srgb, var(--surface-raised) 88%, var(--surface-muted));
 }
@@ -6200,7 +6244,7 @@ strong {
 .setup-task-card.is-recommended {
   border-color: var(--blue);
   background: var(--blue-soft);
-  box-shadow: inset 3px 0 0 var(--blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 18%, transparent), var(--shadow-tight);
 }
 
 .setup-task-kind {
@@ -6843,3 +6887,72 @@ strong {
     padding: 22px 18px 18px;
   }
 }
+
+/* Premium wizard stability: one scroll owner, predictable columns, no overlap. */
+.wizard-backdrop { overflow: auto; }
+.wizard { min-height: 0; height: min(760px, calc(100dvh - 48px)); }
+.wizard-content { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.wizard-panel { box-sizing: border-box; width: min(640px, calc(100% - 64px)); padding: 40px 0 28px; }
+.wizard-footer { flex: 0 0 auto; flex-wrap: wrap; gap: 12px; }
+.guided-setup { min-width: 0; grid-template-columns: minmax(190px, 0.75fr) minmax(0, 1.4fr) minmax(0, auto); align-items: start; }
+.guided-progress, .guided-actions { min-width: 0; flex-wrap: wrap; }
+.guided-actions { align-items: center; }
+.guided-next-hint { max-width: 32ch; }
+
+@media (max-width: 760px) {
+  .wizard-backdrop { padding: 10px; place-items: start center; }
+  .wizard { grid-template-columns: 1fr; width: 100%; height: auto; max-height: calc(100dvh - 20px); }
+  .wizard-rail { padding: 17px; }
+  .wizard-steps { flex-direction: row; gap: 7px; margin: 15px 0 0; overflow-x: auto; }
+  .wizard-steps li { flex: 1 0 110px; }
+  .wizard-steps li:not(:last-child)::after { display: none; }
+  .wizard-panel { width: min(100%, calc(100% - 32px)); padding: 26px 0 20px; }
+  .wizard-feature-list, .setup-summary { grid-template-columns: 1fr; }
+  .wizard-footer { padding: 12px 16px; }
+  .wizard-footer > div { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .guided-setup { grid-template-columns: 1fr; }
+  .guided-setup > small { grid-column: auto; }
+}/* Product-wide interaction contract. Keep the dense newsroom layout, but never trade legibility or state clarity for density. */
+:where(button, a, input, select, textarea) { touch-action: manipulation; }
+:where(button, a):focus-visible { outline: 3px solid color-mix(in srgb, var(--blue) 82%, white); outline-offset: 3px; }
+:where(button, a) { -webkit-tap-highlight-color: transparent; }
+.page { animation: page-enter 160ms ease-out; }
+.sidebar { scrollbar-width: thin; scrollbar-color: #365058 transparent; }
+.primary-nav { gap: 5px; }
+.primary-nav .nav-item { min-height: 46px; border-radius: 10px; font-size: 14px; transition: background-color 140ms ease, color 140ms ease, transform 140ms ease; }
+.primary-nav .nav-item:hover:not(:disabled) { transform: translateX(2px); }
+.button { min-height: 42px; font-size: 13px; }
+.button:disabled { transform: none; }
+.page-header-actions, .header-actions, .setup-actions, .setup-detail-actions, .guided-actions { flex-wrap: wrap; }
+.status-strip, .content-panel, .setup-task-hub, .setup-task-heading, .setup-task-detail, .setup-input-panel { min-width: 0; }
+/* Wizard readability: legacy compact rules must not shrink product text below a readable size. */
+.wizard-steps li, .wizard-promise strong, .wizard-promise p, .wizard-feature-list > div > span, .wizard-feature-list p, .wizard-feature-list strong, .connection-test-result strong, .connection-test-result small, .choice-card strong, .choice-card small, .acknowledgement, .setup-summary span, .setup-summary strong, .wizard-footer > span, .form-error { font-size: 12px; }
+.wizard-steps li > span { font-size: 11px; }
+.wizard-promise p, .wizard-feature-list p, .choice-card small, .acknowledgement, .wizard-footer > span, .form-error { line-height: 1.45; }
+.wizard-feature-list p { gap: 4px; }
+.wizard-feature-list strong, .choice-card strong, .setup-summary strong { font-size: 13px; }
+.wizard-lead { font-size: 14px; line-height: 1.6; }
+.wizard-panel { width: min(660px, calc(100% - 64px)); }
+.wizard-content { min-height: 0; overscroll-behavior: contain; }
+.wizard-footer { position: sticky; bottom: 0; z-index: 1; }
+.setup-task-card small { font-size: 13px; }
+.setup-task-card .setup-task-kind, .setup-task-card .setup-task-state { font-size: 11px; }
+.setup-task-card strong { line-height: 1.25; }
+.prerequisite-card p, .prerequisite-card em, .setup-input-panel p, .connector-card .field-help { line-height: 1.5; }
+.boby-panel { contain: layout paint; }
+.boby-messages { scrollbar-width: thin; overscroll-behavior: contain; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  .page, .primary-nav .nav-item:hover:not(:disabled), .button:hover:not(:disabled), .setup-task-card:hover { transform: none; }
+}
+@media (min-width: 1500px) { .page { padding-inline: clamp(40px, 4vw, 72px); } }
+@media (max-width: 760px) {
+  .page { padding: 24px 16px 24px; }
+  .page-header h1 { font-size: clamp(25px, 8vw, 32px); }
+  .wizard-panel { width: min(100%, calc(100% - 28px)); }
+}
+
+/* Final web-quality details: preserve layout, improve readability and CLS. */
+h1, h2, h3 { text-wrap: balance; }
+.article-meta, .status-strip, .setup-overview { font-variant-numeric: tabular-nums; }
+.article-hero-media img { display: block; width: 100%; height: auto; }

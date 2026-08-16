@@ -106,8 +106,8 @@ test("Windows bundle metadata is valid Turkish UTF-8 rather than mojibake", asyn
     config.bundle?.longDescription
   ].join(" ");
 
-  assert.match(metadata, /Yerel yayın merkezi/u);
-  assert.match(metadata, /Seçtiğiniz site/u);
+  assert.match(metadata, /OpenPostEdit\u00f6r/u);
+  assert.match(metadata, /Se\u00e7ti\u011finiz site/u);
   assert.doesNotMatch(metadata, /(?:Â|Ä|Ã|Å)/u, "installer metadata must not contain mojibake");
 });
 
@@ -135,22 +135,22 @@ test("Windows auto-update uses an unsigned HTTPS GitHub Release feed with SHA-25
   assert.doesNotMatch(releaseWorkflow, /UPDATER_SIGNATURE/u);
 });
 
-test("Windows installer exposes Boby as the product name while preserving the stable local data identifier", async () => {
+test("Windows installer exposes OPE as the product name while preserving the stable local data identifier", async () => {
   const [configText, releaseWorkflow] = await Promise.all([
     readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
     readFile(join(repositoryRoot, ".github", "workflows", "release-desktop.yml"), "utf8")
   ]);
   const config = JSON.parse(configText) as { productName?: string; identifier?: string };
 
-  assert.equal(config.productName, "Boby");
+  assert.equal(config.productName, "OPE");
   assert.equal(config.identifier, "app.blogbot.desktop");
-  assert.match(releaseWorkflow, /Boby_\$\(\$env:RELEASE_VERSION\)_x64-setup\.exe/u);
+  assert.match(releaseWorkflow, /OPE_\$\(\$env:RELEASE_VERSION\)_x64-setup\.exe/u);
 });
 
-test("desktop package icons are generated from the Boby avatar rather than a letter mark", async () => {
+test("desktop package icons are generated from the OPE logo rather than a letter mark", async () => {
   const iconScript = await readFile(join(repositoryRoot, "scripts", "generate-desktop-icons.ts"), "utf8");
 
-  assert.match(iconScript, /boby-avatar-v2\.png/u);
+  assert.match(iconScript, /ope-logo-v2\.png/u);
   assert.doesNotMatch(iconScript, /readFile\(join\(iconDirectory, "icon\.svg"\)\)/u);
 });
 

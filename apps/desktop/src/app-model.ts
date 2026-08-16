@@ -53,7 +53,7 @@ export function describeInstantDraftSubmission(submission: InstantDraftSubmissio
     waitingForCodex: false,
     kicker: "ARAŞTIRMA KUYRUKTA",
     title: "İş güvenli kuyruğa alındı.",
-    detail: "Blogbot araştırmayı yerel ve dayanıklı kuyruğunda sürdürecek."
+    detail: "OPE araştırmayı yerel ve dayanıklı kuyruğunda sürdürecek."
   };
 }
 

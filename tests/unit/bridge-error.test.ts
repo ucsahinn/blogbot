@@ -6,7 +6,7 @@ import { createInvokeBridge, userFacingBridgeError } from "../../apps/desktop/sr
 test("native engine module packaging failures name the repair action", () => {
   assert.equal(
     userFacingBridgeError(new Error("ENGINE_NATIVE_MODULES_MISSING")),
-    "Boby'nin paketlenmiş yerel engine bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun."
+    "OPE'nin paketlenmiş yerel engine bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun."
   );
 });
 

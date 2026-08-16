@@ -523,7 +523,7 @@ export function SourceCenter({
           </label>
           <div className="composer-actions">
             <span>
-              Blogbot ev/ofis ağınızdaki cihazlara bağlanmamak için yalnız herkese açık
+              OPE ev/ofis ağınızdaki cihazlara bağlanmamak için yalnız herkese açık
               web adreslerini kabul eder.
             </span>
             <button
@@ -553,7 +553,7 @@ export function SourceCenter({
         <div>
           <span aria-hidden="true">2</span>
           <strong>Tara</strong>
-          <p>Blogbot erişimi kontrol eder ve bulunan başlıkları listeler.</p>
+          <p>OPE erişimi kontrol eder ve bulunan başlıkları listeler.</p>
         </div>
         <div>
           <span aria-hidden="true">3</span>

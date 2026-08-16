@@ -248,14 +248,17 @@ export function userFacingBridgeError(
   reason: unknown,
   fallback = "İşlem tamamlanamadı. Lütfen yeniden deneyin."
 ): string {
-  const raw = reason instanceof Error ? reason.message.trim() : "";
+  const raw = reason instanceof Error ? reason.message.trim() : typeof reason === "string" ? reason.trim() : "";
   const code = raw.toUpperCase();
   if (!raw) return fallback;
   if (code.includes("ENGINE_NATIVE_MODULES_MISSING")) {
-    return "Boby'nin paketlenmiş yerel engine bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun.";
+    return "OPE'nin paketlenmiş yerel engine bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun.";
   }
   if (code.includes("LOCAL_DATA_KEY_RECOVERY_REQUIRED")) {
     return "Yerel şifreli çalışma alanı bu Windows kullanıcısının anahtarıyla açılamadı. Uygulamayı kapatıp yeniden açın; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun.";
+  }
+  if (code.includes("LOCAL_DATA_DECRYPT_FAILED") || code.includes("ENGINE_CLOSED_PIPE") || code.includes("ENGINE_PROTOCOL_FAULT") || code.includes("ENGINE_READ_FAILED")) {
+    return "Yerel şifreli çalışma alanı açılamadı. Kurulum Merkezi’ndeki Tanılama ve onarım bölümünden Yerel veri bütünlüğünü doğrula adımını çalıştırın; veri silinmez.";
   }
   if (code.includes("ENGINE_RESPONSE_TIMEOUT")) {
     return "Yerel çalışma bileşeni zamanında yanıt vermedi. Operasyonlar’dan yerel durumu yenileyin; sorun sürerse tanılama paketi oluşturun.";
@@ -312,7 +315,7 @@ export function userFacingUpdateError(reason: unknown): string {
   if (/(?:timeout|timed out|connect|network|dns|http|endpoint)/u.test(raw)) {
     return "Güncelleme kaynağına ulaşılamadı. İnternet bağlantınızı kontrol edip yeniden deneyin.";
   }
-  return "Güncelleme denetlenemedi. Boby imzasız GitHub release akışını kullanır; indirilen kurulum yalnızca HTTPS kaynağı ve SHA-256 özeti doğrulanırsa başlatılır. Bağlantıyı kontrol edip yeniden deneyin.";
+  return "Güncelleme denetlenemedi. OPE imzasız GitHub release akışını kullanır; indirilen kurulum yalnızca HTTPS kaynağı ve SHA-256 özeti doğrulanırsa başlatılır. Bağlantıyı kontrol edip yeniden deneyin.";
 }
 
 export function userFacingPublicationQueueError(reason: unknown): string {

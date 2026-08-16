@@ -80,11 +80,11 @@ function formatFolderPath(path: string): string {
 function explainFailure(reason: unknown, fallback: string, recovery: string): string {
   const raw = reason instanceof Error ? reason.message.trim() : "";
   const detail = raw.includes("CODEX_NOT_INSTALLED")
-    ? "Codex çalışma zamanı bu bilgisayarda bulunamadı. Blogbot bunu otomatik kurmaz; önce Codex'i kurup device login yapın."
+    ? "Codex çalışma zamanı bu bilgisayarda bulunamadı. OPE bunu otomatik kurmaz; önce Codex'i kurup device login yapın."
     : raw.includes("GITHUB_CLIENT_ID_REQUIRED")
       ? "GitHub OAuth istemci kimliği yapılandırılmadı. Kurulum Merkezi'ndeki GitHub alanına public client ID değerini girin; token veya private key girmeyin."
       : raw.includes("ENGINE") || raw.includes("engine")
-    ? "Blogbot'un yerel çalışma bileşeni hazır değil."
+    ? "OPE'nin yerel çalışma bileşeni hazır değil."
     : raw.includes("SOURCE")
       ? "Kaynak kontrolü tamamlanamadı."
       : raw.includes("BACKUP") || raw.includes("archive")
@@ -104,7 +104,7 @@ export function SetupCenter({
   onCompleted
 }: SetupCenterProps) {
   const [status, setStatus] = useState<PrerequisiteSnapshot | null>(null);
-  const deviceName = "Blogbot Editör PC";
+  const deviceName = "OPE Editör PC";
   const mode: OnboardingSettings["mode"] = "INGEST_ONLY";
   const scanIntervalMinutes = 30;
   const [acknowledged, setAcknowledged] = useState(false);
@@ -121,7 +121,7 @@ export function SetupCenter({
   const [backupOutputPath, setBackupOutputPath] = useState("");
   const [backupRelativePaths, setBackupRelativePaths] = useState("state.json");
   const [backupTargetParent, setBackupTargetParent] = useState("");
-  const [backupTargetName, setBackupTargetName] = useState("Blogbot-Geri-Yukleme");
+  const [backupTargetName, setBackupTargetName] = useState("OPE-Geri-Yukleme");
   const [backupRecoveryKey, setBackupRecoveryKey] = useState("");
   const [backupMessage, setBackupMessage] = useState("");
   const [automaticSnapshots, setAutomaticSnapshots] = useState<AutomaticBackupSnapshot[]>([]);
@@ -202,7 +202,7 @@ export function SetupCenter({
     {
       id: "codex",
       title: "Codex'i bağla ve test et",
-      detail: "Codex'i bu bilgisayarda bağlayıp test edebilirsiniz. Şimdilik atlarsanız Blogbot'un diğer yerel işlevleri kullanılabilir kalır.",
+      detail: "Codex'i bu bilgisayarda bağlayıp test edebilirsiniz. Şimdilik atlarsanız OPE'nin diğer yerel işlevleri kullanılabilir kalır.",
       checkIds: ["codex"]
     },
     {
@@ -341,6 +341,27 @@ export function SetupCenter({
     return { check: nextCheck, task: setupTasks.find((task) => task.id === taskId)! };
   }, [status, connectorDraft.site.mode]);
   const setupReadinessState = nextSetupTask?.check.state.toLowerCase() ?? "ready";
+  const setupTaskState = (taskId: Exclude<SetupTaskId, "overview">): { tone: "ready" | "blocker" | "attention" | "optional"; label: string } => {
+    const checkIds: Array<PrerequisiteSnapshot["checks"][number]["id"]> = taskId === "writing"
+      ? ["codex"]
+      : taskId === "publishing"
+        ? ["github", "site-adapter"]
+        : taskId === "backup"
+          ? ["backup"]
+          : taskId === "diagnostics"
+            ? ["local-engine", "local-database", "local-queue"]
+            : ["windows", "webview2", "secure-store", "local-engine", "local-database", "local-queue"];
+    const checks = checkIds.map((id) => checksById.get(id)).filter((check): check is NonNullable<typeof check> => Boolean(check));
+    if (taskId === "publishing" || taskId === "backup") {
+      return checks.length > 0 && checks.every((check) => check.state === "READY")
+        ? { tone: "ready", label: "Yapıldı" }
+        : { tone: "optional", label: "İsteğe bağlı" };
+    }
+    if (checks.length === 0) return { tone: "attention", label: "Test edilmedi" };
+    if (checks.every((check) => check.state === "READY")) return { tone: "ready", label: "Yapıldı" };
+    if (checks.some((check) => check.state === "BLOCKED" || check.state === "ATTENTION")) return { tone: "attention", label: "İnceleme gerekli" };
+    return { tone: "blocker", label: "Kurulum gerekli" };
+  };
   const save = async () => {
     if (connectorDraft.site.mode === "PUBLISH") {
       setSelectedTask("publishing");
@@ -356,7 +377,7 @@ export function SetupCenter({
         mode === "INGEST_ONLY"
           ? "Bu bilgisayarın temel uygulama önkoşulları hazır değil."
           : mode === "DRAFT_ONLY"
-            ? "Taslak üretimi için Blogbot'un yerel çalışma bileşenini hazırlayın."
+            ? "Taslak üretimi için OPE'nin yerel çalışma bileşenini hazırlayın."
             : "Onaylı yayın için yerel çalışma bileşeni, yazı üretimi hesabı ve yayın bağlantısı hazır olmalı."
       );
       return;
@@ -403,7 +424,7 @@ export function SetupCenter({
 
   const testConnection = async () => {
     setBusy(true);
-    setConnectionMessage("Blogbot'un yerel çalışma bileşeni ve iş kuyruğu test ediliyor…");
+    setConnectionMessage("OPE'nin yerel çalışma bileşeni ve iş kuyruğu test ediliyor…");
     try {
       const result = await bridge.testLocalEngine();
       setConnectionMessage(result.detail);
@@ -418,7 +439,7 @@ export function SetupCenter({
       // A timeout can be caused by long-running local maintenance. It must
       // never expose a one-click action that moves the active data directory.
       setConnectionMessage(
-        explainFailure(reason, "Blogbot'un yerel çalışma bileşeni test edilemedi.", "uygulamayı yeniden başlatıp testi tekrarlayın.")
+        explainFailure(reason, "OPE'nin yerel çalışma bileşeni test edilemedi.", "uygulamayı yeniden başlatıp testi tekrarlayın.")
       );
     } finally {
       setBusy(false);
@@ -546,7 +567,7 @@ export function SetupCenter({
         setConnectionMessage("Yedek kaynak klasörü seçildi.");
       } else if (target === "backupTarget") {
         setBackupTargetParent(selected);
-        setConnectionMessage("Geri yükleme üst klasörü seçildi. Blogbot bunun altında yeni ve boş bir klasör oluşturacak.");
+        setConnectionMessage("Geri yükleme üst klasörü seçildi. OPE bunun altında yeni ve boş bir klasör oluşturacak.");
       } else {
         const archivePath = `${selected.replace(/[\\/]+$/u, "")}\\blogbot.backup`;
         setBackupOutputPath(archivePath);
@@ -767,7 +788,7 @@ export function SetupCenter({
     {
       id: "codex",
       label: "Yazı üretimi hesabı",
-      description: "Taslak ve Türkçe/İngilizce yerelleştirme için bu bilgisayardaki Codex çalışma zamanını bağlarsınız. Blogbot parola veya token istemez; Codex kurulumu ve device login ayrı bir adımdır.",
+      description: "Taslak ve Türkçe/İngilizce yerelleştirme için bu bilgisayardaki Codex çalışma zamanını bağlarsınız. OPE parola veya token istemez; Codex kurulumu ve device login ayrı bir adımdır.",
       fields: [["accountLabel", "Hesabı ayırt etmek için görünen ad"]]
     },
     {
@@ -784,7 +805,7 @@ export function SetupCenter({
         : connectorDraft.site.mode === "LOCAL_DEV"
           ? "Bilgisayarınızdaki proje klasörü. package.json içindeki scripts.dev komutu isteğe bağlı olarak başlatılır."
           : "Yerel proje klasörü ve yayın adresi. GitHub alanları yalnız bu hedef seçildiğinde kullanılır.",
-      fields: [["repositoryPath", connectorDraft.site.mode === "LOCAL_ONLY" ? "Çıktı klasörü (ör. C:\\Blogbot-Cikti)" : "Proje klasörü (ör. C:\\Siteler\\benim-site)"], ["publicSiteUrl", "Public adres (yayın için)", false]]
+      fields: [["repositoryPath", connectorDraft.site.mode === "LOCAL_ONLY" ? "Çıktı klasörü (ör. C:\\OPE-Cikti)" : "Proje klasörü (ör. C:\\Siteler\\benim-site)"], ["publicSiteUrl", "Public adres (yayın için)", false]]
     },
     {
       id: "deploy",
@@ -811,7 +832,7 @@ export function SetupCenter({
             ? "GitHub giriş onayı bekliyor; tarayıcıdaki device login adımını tamamlayıp durumu yenileyin."
             : githubBrokerStatus === "logged-out"
               ? "GitHub cihaz girişini yalnız siz düğmeye bastığınızda başlatır. Kod hazır olduğunda sabit GitHub doğrulama adresi gösterilir; durum otomatik sorgulanmaz."
-              : "Giriş için yalnız public OAuth istemci kimliği gerekir. Token ve private key Blogbot ekranına yazılmaz; depo erişimi doğrulanmadan yayın kapalı kalır.";
+              : "Giriş için yalnız public OAuth istemci kimliği gerekir. Token ve private key OPE ekranına yazılmaz; depo erişimi doğrulanmadan yayın kapalı kalır.";
 
   return (
     <section className="page setup-page" aria-busy={busy}>
@@ -824,7 +845,7 @@ export function SetupCenter({
             isteğe bağlı bağlantılar, ancak onları kullanmak istediğinizde açılır.
           </p>
           <p className="setup-note">
-            Blogbot tamamen bu bilgisayarda çalışır. Siz yalnız kaynakları,
+            OPE tamamen bu bilgisayarda çalışır. Siz yalnız kaynakları,
             hedef bölümü ve yayın zamanını seçersiniz; teknik bağlantılar hazır
             değilse ilgili düğme güvenle kilitli kalır.
           </p>
@@ -864,7 +885,7 @@ export function SetupCenter({
           <div className={`setup-readiness-summary ${nextSetupTask ? `is-${setupReadinessState}` : "is-ready"}`} role="status" aria-live="polite">
             <div>
               <p className="section-kicker">ŞİMDİ YAPILACAK</p>
-              <strong>{nextSetupTask ? nextSetupTask.check.label : "Blogbot kullanıma hazır"}</strong>
+              <strong>{nextSetupTask ? nextSetupTask.check.label : "OPE kullanıma hazır"}</strong>
               <span>{nextSetupTask ? nextSetupTask.check.detail : `${summary.ready}/${summary.total} kontrol hazır. Hazır olmayan özellikler güvenle kapalı kalır.`}</span>
             </div>
             {nextSetupTask ? (
@@ -882,7 +903,7 @@ export function SetupCenter({
             {setupTasks.map((task, index) => (
               <button
                 key={task.id}
-                className={`setup-task-card ${task.id === "publishing" || task.id === "backup" ? "is-optional" : ""} ${task.id === nextSetupTask?.task.id ? "is-recommended" : ""}`}
+                className={`setup-task-card state-${(setupTaskState(task.id)).tone} ${task.id === nextSetupTask?.task.id ? "is-recommended" : ""}`}
                 type="button"
                 onClick={() => {
                   setSelectedTask(task.id);
@@ -894,6 +915,7 @@ export function SetupCenter({
                 <span>
                   {task.id === "publishing" || task.id === "backup" ? <small className="setup-task-kind">İsteğe bağlı</small> : null}
                   {task.id === nextSetupTask?.task.id ? <small className="setup-task-kind">Önerilen sonraki adım</small> : null}
+                  <small className={`setup-task-state state-${setupTaskState(task.id).tone}`}><span aria-hidden="true">{setupTaskState(task.id).tone === "ready" ? "✓" : setupTaskState(task.id).tone === "blocker" ? "!" : "•"}</span>{setupTaskState(task.id).label}</small>
                   <strong>{task.title}</strong>
                   <small>{task.detail}</small>
                 </span>
@@ -986,7 +1008,7 @@ export function SetupCenter({
         <div className="quickstart-heading">
           <p className="section-kicker">ÇIKTI HEDEFİ</p>
           <h2 id="quickstart-title">Çıktı klasörünü seç</h2>
-          <p>Blogbot onaylanan içerik paketini yalnız bu bilgisayardaki seçtiğiniz klasöre hazırlar.</p>
+          <p>OPE onaylanan içerik paketini yalnız bu bilgisayardaki seçtiğiniz klasöre hazırlar.</p>
         </div>
         <div className="quickstart-target">
           <label className="field">
@@ -995,12 +1017,12 @@ export function SetupCenter({
               value={formatFolderPath(connectorDraft.site.repositoryPath)}
               disabled={readOnly}
               readOnly
-              placeholder="Örn. C:\\Blogbot-Cikti"
+              placeholder="Örn. C:\\OPE-Cikti"
               aria-describedby="quickstart-target-help"
             />
             <button className="button button-secondary" type="button" disabled={readOnly || busy} onClick={() => void pickFolder("site")}>Bilgisayardan klasör seç</button>
           </label>
-          <small id="quickstart-target-help">Blogbot bu klasöre yalnız onaylanan içerik paketini yazar.</small>
+          <small id="quickstart-target-help">OPE bu klasöre yalnız onaylanan içerik paketini yazar.</small>
           {connectorDraft.site.repositoryPath.trim() ? (
             <div className="quickstart-selection" role="status" aria-live="polite">
               <div>
@@ -1023,7 +1045,7 @@ export function SetupCenter({
           <div className="quickstart-status is-warning" role="status">
             <div>
               <strong>Önce yerel çalışma bileşenini hazırla</strong>
-              <span>Bu bilgisayarda Blogbot motoru hazır olduğunda kaynak ve taslak işlemleri açılır.</span>
+              <span>Bu bilgisayarda OPE motoru hazır olduğunda kaynak ve taslak işlemleri açılır.</span>
             </div>
             <button className="button button-secondary" type="button" disabled={busy} onClick={() => void testConnection()}>
               {busy ? "Kontrol ediliyor…" : "Yerel bileşeni test et"}
@@ -1042,7 +1064,7 @@ export function SetupCenter({
             aria-describedby={quickstartActivationReason ? "quickstart-activation-prerequisite" : undefined}
             onClick={() => void save()}
           >
-            Blogbot’u bu hedefle kullan
+            OPE’yi bu hedefle kullan
           </button>
           {quickstartActivationReason ? <small id="quickstart-activation-prerequisite" className="action-unavailable-reason">{quickstartActivationReason}</small> : null}
         </div>
@@ -1139,7 +1161,7 @@ export function SetupCenter({
       <p className="section-kicker">SİZDEN İSTENEN BİLGİLER</p>
             <h2>Bu görev için yalnız gerekli bilgileri seçin.</h2>
             <p>
-            Blogbot verileri bu bilgisayarda tutar. Bu görevle ilgisi olmayan
+            OPE verileri bu bilgisayarda tutar. Bu görevle ilgisi olmayan
             alanlar gösterilmez; parola, token ve özel anahtar istenmez.
             </p>
         </div>
@@ -1191,7 +1213,7 @@ export function SetupCenter({
                   <span>İçeriğin nereye gideceği</span>
                   <div className="mode-choice-grid" role="radiogroup" aria-label="İçerik hedefi">
                     {([
-                      ["LOCAL_ONLY", "Klasöre yaz", "Bir klasör seçin; onaylı Blogbot içerik paketi ve manifest yalnızca oraya yazılır."],
+                      ["LOCAL_ONLY", "Klasöre yaz", "Bir klasör seçin; onaylı OPE içerik paketi ve manifest yalnızca oraya yazılır."],
                       ["LOCAL_DEV", "Yerel projeye gönder", "package.json içindeki npm run dev ile çalışan projenize yazar."],
                       ["PUBLISH", "Yayındaki siteye gönder", "GitHub deposu, CI ve projenizin yayın akışıyla gönderir; hesap bağlantısı gerekir."]
                     ] as const).map(([value, title, detail], index) => {
@@ -1215,7 +1237,7 @@ export function SetupCenter({
                     {connectorDraft.site.mode === "LOCAL_ONLY"
                       ? "Klasör seçiciyle bir hedef seçin. GitHub, hosting veya public adres gerekmez."
                       : connectorDraft.site.mode === "LOCAL_DEV"
-                        ? "Proje klasörünü seçin; Blogbot scripts.dev komutunu test eder ve isterse başlatır."
+                        ? "Proje klasörünü seçin; OPE scripts.dev komutunu test eder ve isterse başlatır."
                         : "Site deposu, public adres ve yayın workflow'u doğrulanmadan yayın düğmesi açılmaz."}
                   </small>
                 </label>
@@ -1281,7 +1303,7 @@ export function SetupCenter({
                       <small id="local-dev-unavailable">Yerel proje sunucusunun durumu okunamadı. Güvenlik nedeniyle başlatma kapalı tutuldu; durumu yeniden deneyin.</small>
                       <button className="button button-quiet" type="button" disabled={busy || localDevStatusChecking} onClick={() => void refreshLocalDevStatus()}>{localDevStatusChecking ? "Kontrol ediliyor…" : "Durumu yeniden dene"}</button>
                     </div>
-                  ) : <small id="local-dev-unavailable">{localDevSupported ? (localDevRunning ? "Çalışıyor; durdurmak için bu düğmeyi kullanın." : "Blogbot yalnız seçtiğiniz klasördeki komutu, daraltılmış bir ortamla ve çıktı günlüğünü uygulamaya aktarmadan çalıştırır.") : "Güvenli süreç aracısı bu sürümde hazır değil; Blogbot proje komutlarını genel kullanıcı yetkisiyle çalıştırmaz. Komutu seçtiğiniz projede kendiniz başlatabilirsiniz."}</small>}
+                  ) : <small id="local-dev-unavailable">{localDevSupported ? (localDevRunning ? "Çalışıyor; durdurmak için bu düğmeyi kullanın." : "OPE yalnız seçtiğiniz klasördeki komutu, daraltılmış bir ortamla ve çıktı günlüğünü uygulamaya aktarmadan çalıştırır.") : "Güvenli süreç aracısı bu sürümde hazır değil; OPE proje komutlarını genel kullanıcı yetkisiyle çalıştırmaz. Komutu seçtiğiniz projede kendiniz başlatabilirsiniz."}</small>}
                 </div>
               ) : null}
               <div className="button-row">
@@ -1320,7 +1342,7 @@ export function SetupCenter({
         </div>
         {selectedTask === "backup" ? <>
         <p className="inline-notice" id="backup-folder-grant" role="note">
-          <strong>Yedek dosya erişimi Windows seçimiyle sınırlandırılır.</strong> Blogbot yalnızca bu ekrandaki klasör seçiciyle izin verdiğiniz konumları kullanır; elle yazılmış başka yollar native katmanda reddedilir.
+          <strong>Yedek dosya erişimi Windows seçimiyle sınırlandırılır.</strong> OPE yalnızca bu ekrandaki klasör seçiciyle izin verdiğiniz konumları kullanır; elle yazılmış başka yollar native katmanda reddedilir.
         </p>
         <fieldset className="connector-card backup-action-card" aria-describedby="backup-folder-grant" disabled={readOnly}>
           <legend>Yerel kurtarma snapshot'ları</legend>
@@ -1391,7 +1413,7 @@ export function SetupCenter({
             <button className="button button-secondary" type="button" aria-label="Şifreli yedek geri yüklemesini önizle" disabled={busy || !backupArchivePath || !backupTargetPath || !restoreFolderNameValid || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => void previewBackup()}>Geri yüklemeyi önizle</button>
             <button className="button button-danger" type="button" disabled={busy || !backupArchivePath || !backupTargetPath || !restoreFolderNameValid || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => setRestoreConfirmationOpen(true)}>Yeni klasöre geri yükle</button>
           </div>
-          <small id="backup-help">Şifre anahtarı yalnızca engine belleğine gönderilir. Önizleme dosya yazmaz; geri yükleme yalnız açık onaydan sonra seçtiğiniz üst klasörün altında henüz var olmayan yeni klasörü oluşturur. Yedek dosyaları çıkarır; Blogbot'un aktif çalışma alanını otomatik değiştirmez.</small>
+          <small id="backup-help">Şifre anahtarı yalnızca engine belleğine gönderilir. Önizleme dosya yazmaz; geri yükleme yalnız açık onaydan sonra seçtiğiniz üst klasörün altında henüz var olmayan yeni klasörü oluşturur. Yedek dosyaları çıkarır; OPE'nin aktif çalışma alanını otomatik değiştirmez.</small>
           {backupMessage ? <p className="form-message" role="status" aria-live="polite">{backupMessage}</p> : null}
         </fieldset>
         </> : null}
@@ -1428,7 +1450,7 @@ export function SetupCenter({
       {automaticRestoreConfirmationOpen ? (
         <ConfirmationDialog
           title="Yerel snapshot çıkarılmasını onayla"
-          detail="Seçili yerel snapshot yalnızca yeni ve boş bir klasöre çıkarılacak. Aktif Blogbot çalışma alanı değiştirilmeyecek."
+          detail="Seçili yerel snapshot yalnızca yeni ve boş bir klasöre çıkarılacak. Aktif OPE çalışma alanı değiştirilmeyecek."
           confirmLabel="Yeni klasöre çıkar"
           busy={busy}
           onCancel={() => setAutomaticRestoreConfirmationOpen(false)}

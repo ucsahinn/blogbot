@@ -603,7 +603,7 @@ export function ReviewWorkspace({
         setLastPreview({ revisionId: revision.id, hash: previewHash });
       }
       const result = await bridge.materializeLocalPreview({ revisionId: revision.id, revisionHash: revision.revisionHash, previewHash, targetDirectory });
-      setNotice(`${result.written} dosya yerel proje klasörüne yazıldı. ${result.backupDirectory ? "Eski dosyalar Blogbot yedeğine alındı." : ""}`);
+      setNotice(`${result.written} dosya yerel proje klasörüne yazıldı. ${result.backupDirectory ? "Eski dosyalar OPE yedeğine alındı." : ""}`);
     } catch (reason) {
       setNotice(userFacingBridgeError(reason, "Yerel proje klasörüne yazılamadı."));
     } finally { setMaterializingLocal(false); }
@@ -902,6 +902,9 @@ export function ReviewWorkspace({
                             <figure className="article-hero-media">
                               <img
                                 src={heroDataUrl}
+                                width={heroMedia.width}
+                                height={heroMedia.height}
+                                loading="lazy"
                                 alt={contentLocale === "tr" ? heroMedia.altTr : heroMedia.altEn}
                               />
                               <figcaption>{heroMedia.filename} · {heroMedia.width} × {heroMedia.height} · {heroMedia.sha256.slice(0, 16)}…</figcaption>
@@ -1239,7 +1242,7 @@ export function ReviewWorkspace({
       {materializeConfirmationOpen ? (
         <ConfirmationDialog
           title="Yerel dosya yazımını onayla"
-          detail="Onaylı paketin dosyaları seçtiğiniz yerel hedefe yazılacak. Mevcut Blogbot çıktıları güvenli bir yedeğe alınır; bu işlem yayınlama veya dış sisteme gönderim yapmaz."
+          detail="Onaylı paketin dosyaları seçtiğiniz yerel hedefe yazılacak. Mevcut OPE çıktıları güvenli bir yedeğe alınır; bu işlem yayınlama veya dış sisteme gönderim yapmaz."
           confirmLabel="Dosyaları yerel hedefe yaz"
           busy={materializingLocal}
           onCancel={() => setMaterializeConfirmationOpen(false)}

@@ -276,7 +276,7 @@ test("setup shows the native Windows folder path without decorative separators",
   await page.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
 
   const selectedPath = page.getByRole("status").filter({ hasText: "Seçili klasör" });
-  await expect(selectedPath).toContainText("C:\\Blogbot-Demo");
+  await expect(selectedPath).toContainText("C:\\OPE-Demo");
   await expect(selectedPath).not.toContainText("›");
 });
 
@@ -284,16 +284,16 @@ test("guided setup keeps its output target in one compact final panel", async ({
   await page.goto("#setup");
   await advanceSetupToTarget(page);
   await page.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Seçili klasör" })).toContainText("C:\\Blogbot-Demo");
+  await expect(page.getByRole("status").filter({ hasText: "Seçili klasör" })).toContainText("C:\\OPE-Demo");
   await expect(page.getByRole("button", { name: "Klasörü test et" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Blogbot’u bu hedefle kullan" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "OPE’yi bu hedefle kullan" })).toBeVisible();
 });
 
 test("guided setup names the missing activation steps before its final action is available", async ({ page }) => {
   await page.goto("#setup-guide");
   await advanceSetupToTarget(page);
 
-  const finish = page.getByRole("button", { name: "Blogbot’u bu hedefle kullan" });
+  const finish = page.getByRole("button", { name: "OPE’yi bu hedefle kullan" });
   await expect(finish).toBeDisabled();
   await expect(finish).toHaveAttribute("aria-describedby", "quickstart-activation-prerequisite");
   await expect(page.getByText("Önce çıktı klasörünü seçin ve içerik değişirse yeniden onay gerektiğini onaylayın.")).toBeVisible();
@@ -393,7 +393,7 @@ test("settings save, cancel and defaults expose truthful state", async ({ page }
   await expect(page.getByRole("status")).toContainText("Windows test bildirimi gönderildi.");
   const autostart = page.getByRole("checkbox", { name: /Windows ile başlat/u });
   await autostart.check();
-  await expect(page.getByRole("status")).toContainText("Boby Windows oturum açılışında başlatılacak.");
+  await expect(page.getByRole("status")).toContainText("OPE Windows oturum açılışında başlatılacak.");
   await autostart.uncheck();
   await expect(page.getByRole("status")).toContainText("Windows başlangıcında otomatik açılma kapatıldı.");
   await page.goto("#instant");
@@ -401,7 +401,7 @@ test("settings save, cancel and defaults expose truthful state", async ({ page }
   await page.goto("#settings");
   await page.getByRole("button", { name: "Varsayılana dön" }).click();
   await expect(page.getByText("Varsayılanlar forma yüklendi; kalıcı olması için kaydedin.")).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Varsayılan yazar" })).toHaveValue("Boby Editorya");
+  await expect(page.getByRole("textbox", { name: "Varsayılan yazar" })).toHaveValue("OPE Editorya");
 });
 
 test("saved source-reference preference keeps review evidence visible beside the article", async ({ page }) => {
@@ -867,7 +867,7 @@ test("guided setup shows local readiness without turning it into a blocking wiza
 test("guided setup keeps final activation disabled until an output folder and approval are provided", async ({ page }) => {
   await page.goto("#setup");
   await advanceSetupToTarget(page);
-  const activation = page.getByRole("button", { name: "Blogbot’u bu hedefle kullan" });
+  const activation = page.getByRole("button", { name: "OPE’yi bu hedefle kullan" });
   await expect(activation).toBeDisabled();
   await expect(page.locator("#quickstart-activation-prerequisite")).toContainText("Önce çıktı klasörünü seçin");
 });
@@ -1128,7 +1128,7 @@ test("first start keeps the local output target focused instead of opening remot
   await advanceSetupToTarget(page);
   await expect(page.getByRole("heading", { name: "Çıktı klasörünü seç", exact: true })).toBeVisible();
   await expect(page.getByRole("radio", { name: /Yayındaki siteye gönder/u })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Blogbot’u bu hedefle kullan" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "OPE’yi bu hedefle kullan" })).toBeDisabled();
 });
 
 test("offline engine health has direct recovery and redacted diagnostics actions", async ({ page }) => {
@@ -1425,7 +1425,7 @@ test("saved local output target unlocks approved revision materialization", asyn
   await expect(materialize).toBeEnabled();
   await materialize.click();
   const materializeConfirmation = page.getByRole("alertdialog", { name: "Yerel dosya yazımını onayla" });
-  await expect(materializeConfirmation).toContainText("Mevcut Blogbot çıktıları güvenli bir yedeğe alınır;");
+  await expect(materializeConfirmation).toContainText("Mevcut OPE çıktıları güvenli bir yedeğe alınır;");
   await materializeConfirmation.getByRole("button", { name: "Dosyaları yerel hedefe yaz" }).click();
   await expect(page.getByRole("status")).toContainText("dosya yerel proje klasörüne yazıldı");
 });
@@ -1572,7 +1572,7 @@ test("setup explains security-gated external execution and filesystem actions", 
   const siteCard = page.getByRole("group", { name: "Yerel proje" });
   await expect(siteCard.getByRole("button", { name: "npm run dev sürecini başlat" })).toBeDisabled();
   await siteCard.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
-  await expect(siteCard.getByRole("textbox", { name: /Proje klasörü \(ör\. C:\\Siteler\\benim-site\)/u })).toHaveValue("C:\\Blogbot-Demo");
+  await expect(siteCard.getByRole("textbox", { name: /Proje klasörü \(ör\. C:\\Siteler\\benim-site\)/u })).toHaveValue("C:\\OPE-Demo");
   await expect(siteCard.getByRole("button", { name: "npm run dev sürecini başlat" })).toBeDisabled();
   await siteCard.getByRole("checkbox", { name: /Seçtiğim proje klasörüne/u }).check();
   await expect(siteCard.getByRole("button", { name: "npm run dev sürecini başlat" })).toBeEnabled();
@@ -1622,7 +1622,7 @@ test("local project setup explains when the safe process status cannot be checke
   await expect(page.getByRole("button", { name: /npm run dev sürecini başlat/u })).toBeDisabled();
   await page.getByRole("button", { name: "Durumu yeniden dene" }).click();
   await expect(page.getByText(/Yerel proje sunucusunun durumu okunamadı/u)).toHaveCount(0);
-  await expect(page.getByText(/Blogbot yalnız seçtiğiniz klasördeki komutu/u)).toBeVisible();
+  await expect(page.getByText(/OPE yalnız seçtiğiniz klasördeki komutu/u)).toBeVisible();
 });
 
 test("stopping a local project server names the stop failure and recovery action", async ({ page }) => {
@@ -1689,7 +1689,7 @@ test("unconfigured GitHub broker never offers a misleading login action", async 
 test("about panel shows the project signature and keeps update checks explicit", async ({ page }) => {
   await page.goto("#dashboard");
 
-  const about = page.getByRole("button", { name: "Boby hakkında" });
+  const about = page.getByRole("button", { name: "OPE hakkında" });
   await expect(about).toHaveAttribute("aria-expanded", "false");
   await about.click();
   await expect(about).toHaveAttribute("aria-expanded", "true");
@@ -1700,7 +1700,62 @@ test("about panel shows the project signature and keeps update checks explicit",
 
   await page.getByRole("button", { name: "Güncellemeleri denetle" }).click();
   await expect(page.getByRole("status")).toContainText(
-    "Güncelleme denetimi yalnız paketlenmiş Boby uygulamasında yapılır."
+    "Güncelleme denetimi yalnız paketlenmiş OPE uygulamasında yapılır."
   );
   await expect(page.getByRole("button", { name: /indir ve kur/u })).toHaveCount(0);
+});
+
+test("every desktop workspace exposes bounded, named controls without actionable collisions", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+
+  for (const [route, heading] of surfaces) {
+    await page.goto(`#${route}`);
+    await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+    await waitForPageTransition(page);
+
+    const report = await page.evaluate(() => {
+      const visible = (element: Element): element is HTMLElement => {
+        const node = element as HTMLElement;
+        const style = window.getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && !element.closest("details:not([open]), [hidden]") && rect.width > 0 && rect.height > 0;
+      };
+      const controls = Array.from(document.querySelectorAll("button, a[href], input, select, textarea")).filter(visible) as HTMLElement[];
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const outOfBounds = controls
+        .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+        .filter(({ rect }) => rect.left < -1 || rect.right > viewport.width + 1)
+        .map(({ element, rect }) => ({ tag: element.tagName, text: element.innerText || element.getAttribute("aria-label") || element.getAttribute("name") || "", left: Math.round(rect.left), right: Math.round(rect.right) }));
+      const unnamed = controls
+        .filter((element) => {
+          if (element.matches("input, select, textarea")) return !(element.getAttribute("aria-label") || element.getAttribute("aria-labelledby") || (element as HTMLInputElement).labels?.length);
+          return !(element.innerText?.trim() || element.getAttribute("aria-label") || element.getAttribute("title"));
+        })
+        .map((element) => element.outerHTML.slice(0, 180));
+      const collisions: Array<{ first: string; second: string }> = [];
+      const collisionControls = controls.filter((element) => !element.matches(".boby-launcher, .boby-panel, .boby-panel *"));
+      for (let index = 0; index < collisionControls.length; index += 1) {
+        const first = collisionControls[index]!;
+        const firstRect = first.getBoundingClientRect();
+        for (let next = index + 1; next < collisionControls.length; next += 1) {
+          const second = collisionControls[next]!;
+          if (first.contains(second) || second.contains(first)) continue;
+          const secondRect = second.getBoundingClientRect();
+          const overlapWidth = Math.min(firstRect.right, secondRect.right) - Math.max(firstRect.left, secondRect.left);
+          const overlapHeight = Math.min(firstRect.bottom, secondRect.bottom) - Math.max(firstRect.top, secondRect.top);
+          if (overlapWidth > 2 && overlapHeight > 2) {
+            collisions.push({
+              first: `${first.tagName}:${first.innerText?.trim() || first.getAttribute("aria-label") || "unnamed"} @ ${Math.round(firstRect.left)},${Math.round(firstRect.top)} ${Math.round(firstRect.width)}x${Math.round(firstRect.height)} parent=${first.parentElement?.className}`,
+              second: `${second.tagName}:${second.innerText?.trim() || second.getAttribute("aria-label") || "unnamed"} @ ${Math.round(secondRect.left)},${Math.round(secondRect.top)} ${Math.round(secondRect.width)}x${Math.round(secondRect.height)} parent=${second.parentElement?.className}`
+            });
+          }
+        }
+      }
+      return { outOfBounds, unnamed, collisions };
+    });
+
+    expect(report.outOfBounds, `${route}: controls escape the viewport`).toEqual([]);
+    expect(report.unnamed, `${route}: visible controls need an accessible name`).toEqual([]);
+    expect(report.collisions, `${route}: actionable controls overlap`).toEqual([]);
+  }
 });

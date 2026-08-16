@@ -306,7 +306,7 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
       }
     ],
     preferences: {
-      author: "Blogbot Editorya",
+      author: "OPE Editorya",
       reviewer: "Ulaş Şahin",
       notifications: true,
       emailDigest: false,
@@ -316,7 +316,7 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
     systemHealth: [
       {
         id: "engine",
-        label: "Yerel Blogbot Engine",
+        label: "Yerel OPE Engine",
         state: "HEALTHY",
         detail: "Paketlenmiş engine çalışıyor; stdio köprüsü yanıt veriyor.",
         checkedAt: "2026-07-29T14:00:00.000Z"

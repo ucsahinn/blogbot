@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Boby",
+  "productName": "OPE",
   "version": "0.1.31",
   "identifier": "app.blogbot.desktop",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Boby · Yerel yayın merkezi",
+        "title": "OPE · OpenPostEditör",
         "width": 1440,
         "height": 900,
         "minWidth": 960,
@@ -51,7 +51,7 @@
     "targets": ["msi", "nsis"],
     "category": "Productivity",
     "shortDescription": "Seçtiğiniz site için yerel editoryal otomasyon",
-    "longDescription": "Kaynak tarama, taslak, inceleme, onay ve GitHub yayın akışını kullanıcının Windows bilgisayarında çalıştıran yerel Boby uygulaması.",
+    "longDescription": "Kaynak tarama, taslak, inceleme, onay ve GitHub yayın akışını kullanıcının Windows bilgisayarında çalıştıran yerel OPE uygulaması.",
     "createUpdaterArtifacts": false,
     "windows": {
       "webviewInstallMode": {
