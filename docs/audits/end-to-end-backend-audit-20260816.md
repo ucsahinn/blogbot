@@ -82,3 +82,11 @@ Bu teslim yerel olarak doğrulanmış kaynak ve paket durumudur. Commit, push, G
 ## CI follow-up
 
 GitHub Verify run `31912997995` on `a95cdac` exposed two native fixture failures, both caused by a 10-second Python descendant startup timeout on the hosted Windows runner. The fixture now uses a bounded 30-second wait, checks whether the child exited early, and polls at 50 ms. Local verification after the fix: native tests 130/130 and clippy clean.
+## Published release evidence
+
+- Commit `1950609` passed Verify run `31960663074` after the native fixture fix.
+- Version commit `3c8b76e` passed Verify run `31961347663`.
+- GitHub Release: https://github.com/ucsahinn/blogbot/releases/tag/v0.1.32
+- Published asset: `OPE_0.1.32_x64-setup.exe`
+- GitHub asset SHA-256: `c7abd14b7c541e7ac83ccdd11a5585b67d78f4037df1c73fa2eb851369951437`
+- Updater manifest: `latest.json`, SHA-256 `b3a678178fd59b0723b3822a004fd11705514e551bdf833d47d86179f9b4e5b5`
