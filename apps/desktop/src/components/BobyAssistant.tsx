@@ -99,10 +99,11 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
     runtime: typeof snapshot.runtime;
     availability: ReturnType<typeof describeBobyAvailability>;
   } | null>(null);
-  const liveStatusMatchesSnapshot = liveStatus?.sourceRuntime === snapshot.runtime
-    && liveStatus?.sourceCodexState === snapshot.codex.state;
-  const liveRuntime = liveStatusMatchesSnapshot ? liveStatus.runtime : snapshot.runtime;
-  const liveAvailability = liveStatusMatchesSnapshot ? liveStatus.availability : availability;
+  // The native Codex probe is a fresher observation than the bootstrap snapshot
+  // captured before the probe. Keep that live result until the parent snapshot
+  // changes; otherwise a successful probe is immediately discarded as stale.
+  const liveRuntime = liveStatus?.runtime ?? snapshot.runtime;
+  const liveAvailability = liveStatus?.availability ?? availability;
   const canConnectBoby = liveRuntime === "ONLINE";
   const visibleAvailability = deliveryState === "queued"
     ? { tone: "attention" as const, label: "Boby düşünüyor · Luna Low", detail: "Yanıt hazır olduğunda bu sohbete eklenecek." }

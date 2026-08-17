@@ -314,3 +314,27 @@ test("local database rejects a schema newer than the running binary", async (t) 
     /LOCAL_MIGRATION_NEWER_THAN_BINARY/
   );
 });
+
+test("concurrently enqueueing the same PGlite publication is idempotent", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-pglite-outbox-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  t.after(() => repository.close());
+
+  const binding = {
+    previewHash: "b".repeat(64),
+    targetRepository: "owner/site",
+    baseBranch: "main",
+    targetBaseSha: "c".repeat(40),
+    adapterVersion: "astro-generic@2.0.0"
+  };
+  const results = await Promise.allSettled([
+    repository.enqueuePublication("revision-outbox-race", "a".repeat(64), binding),
+    repository.enqueuePublication("revision-outbox-race", "a".repeat(64), binding)
+  ]);
+
+  assert.equal(results.every((result) => result.status === "fulfilled"), true);
+  const effects = results.map((result) => result.status === "fulfilled" ? result.value : null);
+  assert.equal(effects[0]?.id, effects[1]?.id);
+  assert.equal((await repository.listOutbox()).length, 1);
+});

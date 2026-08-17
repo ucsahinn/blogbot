@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { FetchTransport } from "../../apps/fetcher/src/fetch-source.ts";
+import { FetchBoundaryError, type FetchTransport } from "../../apps/fetcher/src/fetch-source.ts";
 import { createPersistentEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
 import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
 import {
@@ -88,7 +88,7 @@ test("SOURCE.SCAN persists successful feed entries and exposes partial batch fai
     resolve: async () => ["93.184.216.34"],
     request: async (plan) => {
       if (plan.url.includes("b.example")) {
-        throw new Error("upstream unavailable");
+        throw new FetchBoundaryError("UNSUPPORTED_CONTENT_TYPE", "upstream returned an unsupported content type");
       }
       return {
         status: 200,
@@ -154,7 +154,7 @@ test("SOURCE.SCAN persists successful feed entries and exposes partial batch fai
   );
   assert.equal(
     settled.find((run) => run.sourceId === "source-b")?.error?.retryable,
-    true
+    false
   );
 
   const replay = await runtime.handle({
@@ -278,8 +278,39 @@ test("queued SOURCE.SCAN survives engine restart and is recovered by the local w
   const backend = await PGliteBackendRepository.open(dataDir);
   const repository = await PGliteSourceRepository.fromDatabase(
     backend.getDatabase()
+
   );
   assert.equal((await repository.listEntries("source-recovery")).length, 1);
   assert.equal((await repository.getSource("source-recovery")).version, 2);
+  await backend.close();
+});
+
+test("retryable source scan failures return to the durable queue", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-source-scan-retry-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await seedSources(dataDir, [source("source-retry", "https://retry.example/feed.xml")]);
+  const backend = await PGliteBackendRepository.open(dataDir);
+  const repository = await PGliteSourceRepository.fromDatabase(backend.getDatabase());
+  const [queued] = await repository.prepareScanBatch(
+    "engine:retryable-scan",
+    "fingerprint-retryable-scan",
+    [{ sourceId: "source-retry", expectedVersion: 1 }],
+    "2026-08-17T10:00:00.000Z"
+  );
+  assert.ok(queued);
+  const claimed = await repository.markScanRunning(queued.id, "2026-08-17T10:00:01.000Z");
+  assert.equal(claimed.claimed, true);
+  const retryable = await repository.failSourceScan(
+    queued.id,
+    { code: "TIMEOUT", message: "temporary timeout", retryable: true },
+    "2026-08-17T10:00:02.000Z"
+  );
+  assert.equal(retryable.state, "QUEUED");
+  assert.equal(retryable.error?.retryable, true);
+  assert.equal(retryable.completedAt, undefined);
+  const reclaimed = await repository.markScanRunning(queued.id, "2026-08-17T10:00:03.000Z");
+  assert.equal(reclaimed.claimed, true);
+  assert.equal(reclaimed.scan.attempts, 2);
   await backend.close();
 });

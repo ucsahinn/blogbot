@@ -63,6 +63,7 @@ test("draft.create persists a WAITING_CODEX local job when no runner is configur
     attempts: 0,
     lastError: "CODEX_RUNNER_UNAVAILABLE",
     metadata: {
+      progressStage: "WAITING_CODEX",
       candidateId: "candidate-1",
       candidateTitle: "Tedarik zinciri açığını araştır",
       instruction: "",

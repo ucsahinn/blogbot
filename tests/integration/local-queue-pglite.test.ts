@@ -192,6 +192,7 @@ test("local PGlite queue cannot finish startup after a concurrent stop request",
   const starting = runtime.start();
   await new Promise((resolve) => setTimeout(resolve, 0));
   const stopping = runtime.stop();
+
   releaseSchema?.();
   await Promise.all([starting, stopping]);
 
@@ -199,4 +200,27 @@ test("local PGlite queue cannot finish startup after a concurrent stop request",
     runtime.enqueue("blogbot.ingest", { trigger: "shutdown-race" }, "shutdown-race"),
     /Local queue runtime is not started/
   );
+});
+
+test("local PGlite queue atomically replays concurrent idempotent enqueues", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-race-"));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  const runtime = new LocalQueueRuntime(repository.getDatabase());
+  await runtime.start();
+
+  const results = await Promise.allSettled([
+    runtime.enqueue("blogbot.ingest", { trigger: "concurrent" }, "concurrent-idempotency-key"),
+    runtime.enqueue("blogbot.ingest", { trigger: "concurrent" }, "concurrent-idempotency-key")
+  ]);
+  assert.equal(results.every((result) => result.status === "fulfilled"), true);
+  const ids = results.map((result) => result.status === "fulfilled" ? result.value : "");
+  assert.equal(ids[0], ids[1]);
+
+  const rows = await repository.getDatabase().query<{ count: string }>(
+    "SELECT count(*)::text AS count FROM blogbot_local_queue_jobs"
+  );
+  assert.equal(rows.rows[0]?.count, "1");
+
+  await runtime.stop();
+  await repository.close();
 });

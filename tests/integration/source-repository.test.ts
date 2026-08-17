@@ -451,3 +451,39 @@ test("large source scan commits entries with a bounded number of database querie
   assert.ok(queryCount() <= 16, `expected batched scan writes, received ${queryCount()} transaction queries`);
   assert.equal((await repository.listEntries("source-batched")).length, 64);
 });
+
+test("concurrent source scan workers atomically claim one queued scan", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-scan-claim-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const repository = await PGliteSourceRepository.open(dataDir);
+  t.after(() => repository.close());
+  await repository.saveSource({
+    id: "source-claim",
+    url: "https://news.example/claim.xml",
+    kind: "RSS",
+    status: "ACTIVE",
+    trustStatus: "APPROVED",
+    rightsStatus: "APPROVED",
+    language: "en",
+    discoveredFeeds: [],
+    createdAt: "2026-08-15T00:00:00.000Z",
+    updatedAt: "2026-08-15T00:00:00.000Z",
+    version: 1
+  });
+  const [scan] = await repository.prepareScanBatch(
+    "engine:claim-scan",
+    "claim scan request",
+    [{ sourceId: "source-claim", expectedVersion: 1 }],
+    "2026-08-15T00:01:00.000Z"
+  );
+  assert.ok(scan);
+
+  const results = await Promise.all([
+    repository.markScanRunning(scan.id, "2026-08-15T00:01:01.000Z"),
+    repository.markScanRunning(scan.id, "2026-08-15T00:01:02.000Z")
+  ]);
+  assert.equal(results.filter((result) => result.claimed).length, 1);
+  assert.equal(results.filter((result) => !result.claimed).length, 1);
+  assert.equal(results.find((result) => result.claimed)?.scan.attempts, 1);
+  assert.equal((await repository.listScanRuns("engine:claim-scan"))[0]?.attempts, 1);
+});

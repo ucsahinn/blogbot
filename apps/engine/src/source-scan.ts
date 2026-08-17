@@ -117,10 +117,12 @@ export class SourceScanWorker {
   }
 
   private async process(job: SourceScanJobData): Promise<void> {
-    const running = await this.repository.markScanRunning(
+    const claim = await this.repository.markScanRunning(
       job.scanId,
       this.now().toISOString()
     );
+    if (!claim.claimed) return;
+    const running = claim.scan;
     if (running.state === "SUCCEEDED" || running.state === "REJECTED") {
       return;
     }

@@ -169,7 +169,7 @@ export interface SourceRepository {
   listScanRuns(batchKey: string): Promise<LocalSourceScan[]>;
   listRecoverableScanRuns(): Promise<LocalSourceScan[]>;
   attachScanJob(scanId: string, queueJobId: string, updatedAt: string): Promise<void>;
-  markScanRunning(scanId: string, startedAt: string): Promise<LocalSourceScan>;
+  markScanRunning(scanId: string, startedAt: string): Promise<{ claimed: boolean; scan: LocalSourceScan }>;
   completeSourceScan(
     scanId: string,
     input: CompletedSourceScanInput
@@ -869,12 +869,13 @@ export class PGliteSourceRepository implements SourceRepository {
   async markScanRunning(
     scanId: string,
     startedAt: string
-  ): Promise<LocalSourceScan> {
+  ): Promise<{ claimed: boolean; scan: LocalSourceScan }> {
     return this.database.transaction(async (transaction) => {
       const scan = await this.requireScan(transaction, scanId);
       if (scan.state === "SUCCEEDED" || scan.state === "REJECTED") {
-        return scan;
+        return { claimed: false, scan };
       }
+      if (scan.state !== "QUEUED") return { claimed: false, scan };
       const running: LocalSourceScan = {
         ...scan,
         state: "RUNNING",
@@ -884,8 +885,19 @@ export class PGliteSourceRepository implements SourceRepository {
       };
       delete running.completedAt;
       delete running.error;
-      await this.writeScan(transaction, running);
-      return running;
+      const updated = await transaction.query<{ id: string }>(
+        `UPDATE blogbot_source_scans
+            SET state = $2, value = $3::jsonb
+          WHERE id = $1 AND state = 'QUEUED'
+          RETURNING id`,
+        [
+          running.id,
+          running.state,
+          JSON.stringify(this.protector.seal(running, sourceScanContext(running.id)))
+        ]
+      );
+      if (updated.rows.length === 1) return { claimed: true, scan: running };
+      return { claimed: false, scan: await this.requireScan(transaction, scanId) };
     });
   }
 
@@ -988,12 +1000,16 @@ export class PGliteSourceRepository implements SourceRepository {
       }
       const failed: LocalSourceScan = {
         ...scan,
-        state: "FAILED",
+        state: error.retryable ? "QUEUED" : "FAILED",
         updatedAt: completedAt,
-        completedAt,
         error
       };
       await this.writeScan(transaction, failed);
+      if (error.retryable) {
+        delete failed.completedAt;
+      } else {
+        failed.completedAt = completedAt;
+      }
       return failed;
     });
   }

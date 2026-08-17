@@ -2159,6 +2159,7 @@ async function handleLocalWorkflowCommand(
             ...(options.codexCoordinator ? {} : { lastError: "CODEX_RUNNER_UNAVAILABLE" }),
             metadata: {
               createdAtUnixMs: Date.now(),
+              progressStage: options.codexCoordinator ? "RESEARCH_QUEUED" : "WAITING_CODEX",
               ...(typeof payload.candidateId === "string" ? { candidateId: payload.candidateId } : {}),
               ...(typeof payload.candidateTitle === "string" ? { candidateTitle: payload.candidateTitle.slice(0, 240) } : {}),
               instruction: typeof payload.instruction === "string" ? payload.instruction : "",
@@ -2251,7 +2252,28 @@ async function handleLocalWorkflowCommand(
           ? await collectDraftSourceEvidence(undefined, [], urls, options.sourceTransport)
           : [];
       const retainedEvidence = fallbackDraftSourceEvidence(payload.sources);
-      codex = await options.codexCoordinator.submit({
+      if (!createdDraft) throw new Error("DRAFT_JOB_MISSING");
+      const researchSnapshot = {
+        status: sourceEvidence.length > 0 ? "READY" : "NEEDS_SOURCE",
+        capturedAt: new Date().toISOString(),
+        sourceCount: sourceEvidence.length,
+        sources: sourceEvidence.map((source) => ({
+          id: typeof source.id === "string" ? source.id : "",
+          sourceId: typeof source.sourceId === "string" ? source.sourceId : "",
+          url: typeof source.url === "string" ? source.url : "",
+          title: typeof source.title === "string" ? source.title.slice(0, 400) : "",
+          contentHash: typeof source.contentHash === "string" ? source.contentHash : "",
+          ...(typeof source.evidenceVersionId === "string" ? { evidenceVersionId: source.evidenceVersionId } : {})
+        }))
+      };
+      await repository.saveJob({
+        ...createdDraft,
+        metadata: {
+          ...(createdDraft.metadata ?? {}),
+          progressStage: researchSnapshot.status === "READY" ? "RESEARCH_COMPLETE" : "RESEARCH_NEEDS_SOURCE",
+          researchSnapshot
+        }
+      });      codex = await options.codexCoordinator.submit({
         jobId: draftId,
         idempotencyKey: `draft:${idempotencyKey}`,
         definitionId: "DRAFT.CREATE",

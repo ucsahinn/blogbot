@@ -134,27 +134,26 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
   ): Promise<string> {
     this.assertStarted();
     const id = deterministicQueueJobId(idempotencyKey);
-    const existing = await this.database.query<QueueRow>(
-      "SELECT id, queue_name, payload, state, attempts, available_at_unix_ms FROM blogbot_local_queue_jobs WHERE id = $1",
-      [id]
-    );
-    if (existing.rows[0]) {
+    const now = Date.now();
+    return this.database.transaction(async (transaction) => {
+      await transaction.query(
+        `INSERT INTO blogbot_local_queue_jobs
+          (id, queue_name, payload, state, attempts, available_at_unix_ms, updated_at_unix_ms)
+         VALUES ($1, $2, $3::jsonb, 'created', 0, $4, $5)
+         ON CONFLICT (id) DO NOTHING`,
+        [id, name, JSON.stringify(data), now + Math.max(0, options?.startAfterSeconds ?? 0) * 1_000, now]
+      );
+      const existing = await transaction.query<QueueRow>(
+        "SELECT id, queue_name, payload, state, attempts, available_at_unix_ms FROM blogbot_local_queue_jobs WHERE id = $1",
+        [id]
+      );
       const row = existing.rows[0];
-      if (row.queue_name !== name || canonicalJson(row.payload) !== canonicalJson(data)) {
+      if (!row || row.queue_name !== name || canonicalJson(row.payload) !== canonicalJson(data)) {
         throw new Error("IDEMPOTENCY_KEY_REUSED: queue key already belongs to different payload");
       }
       return id;
-    }
-    const now = Date.now();
-    await this.database.query(
-      `INSERT INTO blogbot_local_queue_jobs
-        (id, queue_name, payload, state, attempts, available_at_unix_ms, updated_at_unix_ms)
-       VALUES ($1, $2, $3::jsonb, 'created', 0, $4, $5)`,
-      [id, name, JSON.stringify(data), now + Math.max(0, options?.startAfterSeconds ?? 0) * 1_000, now]
-    );
-    return id;
+    });
   }
-
   async getJob<T extends object>(name: LocalQueueName, id: string): Promise<LocalJob<T> | null> {
     this.assertStarted();
     const result = await this.database.query<QueueRow>(

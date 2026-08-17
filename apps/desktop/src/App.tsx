@@ -51,6 +51,21 @@ function pageFromHash(): PageId {
   return pageIds.includes(candidate) ? candidate : "dashboard";
 }
 
+const BOOTSTRAP_TIMEOUT_MS = 20_000;
+
+async function withBootstrapTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("BOOTSTRAP_TIMEOUT")), BOOTSTRAP_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 interface AppProps {
   bridgeFactory?: () => Promise<BlogbotBridge>;
 }
@@ -66,19 +81,20 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   const [editorialNotice, setEditorialNotice] = useState("");
   const [pendingEditorialDraft, setPendingEditorialDraft] = useState<{ id: string; title?: string } | undefined>();
   const [bobyOpen, setBobyOpen] = useState(false);
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
     let reconciliationTimer: number | undefined;
-    void bridgeFactory()
+    void withBootstrapTimeout(bridgeFactory())
       .then(async (runtimeBridge) => {
         // Bootstrap performs the Doctor handshake that changes the native
         // runtime from fail-closed to online. Reading the desk in parallel can
         // therefore capture the temporary offline projection and leave an
         // otherwise ready desk empty on first launch.
         const coalescingBridge = createCoalescingBridge(runtimeBridge);
-        const initialSnapshot = await coalescingBridge.getBootstrapSnapshot();
-        const initialWorkspace = await coalescingBridge.getEditorialWorkspace();
+        const initialSnapshot = await withBootstrapTimeout(coalescingBridge.getBootstrapSnapshot());
+        const initialWorkspace = await withBootstrapTimeout(coalescingBridge.getEditorialWorkspace());
         if (alive) {
           setBridge(coalescingBridge);
           setSnapshot(initialSnapshot);
@@ -144,7 +160,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         window.clearTimeout(reconciliationTimer);
       }
     };
-  }, [bridgeFactory]);
+  }, [bridgeFactory, bootstrapAttempt]);
 
   useEffect(() => {
     const handleHashChange = () => setActivePage(pageFromHash());
@@ -209,6 +225,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
           <p className="section-kicker">GÜVENLİ BAŞLATMA DURDU</p>
           <h1>Çalışma alanı açılamadı.</h1>
           <p>{error}</p>
+                    <button type="button" className="button button-primary" onClick={() => { setError(""); setBridge(null); setSnapshot(null); setWorkspace(null); setConnectorState(null); setBootstrapAttempt((attempt) => attempt + 1); }}>Yeniden dene</button>
           <small>
             OPE'nin yerel çalışma bileşeni başlatılamadı. Uygulamayı yeniden başlatın veya Kurulum
             Merkezi'ndeki "Önkoşul testi"ni çalıştırın.
@@ -229,6 +246,26 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   }
 
   const refreshWorkspace = async () => {
+    try {
+      const nextSnapshot = await bridge.getBootstrapSnapshot();
+      const nextWorkspace = await bridge.getEditorialWorkspace();
+      const nextConnectorState = nextSnapshot.runtime === "ONLINE"
+        ? await bridge.getConnectorState()
+        : fallbackConnectorState;
+      setSnapshot(nextSnapshot);
+      setWorkspace(nextWorkspace);
+      setConnectorState(nextConnectorState);
+      setSyncError("");
+    } catch (reason) {
+      setSyncError(userFacingBridgeError(reason, "Çalışma alanı yenilenemedi. Operasyonlar ekranından yerel durumu kontrol edin."));
+    }
+  };
+
+  // Source/candidate mutations need to distinguish a durable local success
+  // from a failed follow-up projection refresh so their own notice can explain
+  // the degraded state. Keep the general refresh action fail-soft, but let
+  // mutation callers observe the failure and preserve the accepted result.
+  const refreshWorkspaceForMutation = async () => {
     const nextSnapshot = await bridge.getBootstrapSnapshot();
     const nextWorkspace = await bridge.getEditorialWorkspace();
     const nextConnectorState = nextSnapshot.runtime === "ONLINE"
@@ -237,9 +274,8 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
     setSnapshot(nextSnapshot);
     setWorkspace(nextWorkspace);
     setConnectorState(nextConnectorState);
-  };
-
-  const readOnly =
+    setSyncError("");
+  };  const readOnly =
     !canMutateLocally(snapshot.connection);
   const navigate = (page: PageId) => {
     if (page !== "editorial") {
@@ -282,7 +318,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             workspace={workspace}
             initialTab={activePage === "instant" ? "instant" : activePage === "content-candidates" ? "candidates" : "sources"}
             onWorkspaceChange={setWorkspace}
-            onSourceCatalogChange={refreshWorkspace}
+            onSourceCatalogChange={refreshWorkspaceForMutation}
             onOpenEditorial={(notice, pendingDraftId, pendingDraftTitle) => {
               setEditorialNotice(notice ?? "");
               setPendingEditorialDraft(

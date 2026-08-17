@@ -364,18 +364,6 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
     binding: PublicationIntentBinding
   ): Promise<OutboxEffect> {
     const idempotencyKey = `publish:${revisionId}:${revisionHash}:${binding.previewHash}`;
-    const existing = await this.client.query<JsonRow>(
-      "SELECT id AS key, value FROM blogbot_outbox WHERE idempotency_key = $1",
-      [idempotencyKey]
-    );
-    if (existing.rows[0]) {
-      const row = existing.rows[0];
-      if (!row.key) throw new Error("LOCAL_DATA_IDENTITY_MISSING");
-      return this.protector.open<OutboxEffect>(
-        row.value,
-        backendContext("blogbot_outbox", row.key)
-      );
-    }
     const effect: OutboxEffect = {
       id: randomUUID(),
       type: "PUBLISH_REVISION",
@@ -386,9 +374,11 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
       state: "PENDING",
       attempts: 0
     };
-    await this.client.query(
+    const inserted = await this.client.query<{ id: string }>(
       `INSERT INTO blogbot_outbox (id, idempotency_key, value)
-       VALUES ($1, $2, $3::jsonb)`,
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id`,
       [
         effect.id,
         effect.idempotencyKey,
@@ -400,13 +390,25 @@ class PGliteTransactionRepository implements BackendRepositoryTransaction {
         )
       ]
     );
-    // Creation and later state transitions must be equally visible to the
-    // incremental desktop sync feed; otherwise a freshly queued publication
-    // can be invisible until an unrelated mutation happens.
-    await this.recordChange("EFFECT_UPDATED", effect.id);
-    return structuredClone(effect);
-  }
+    if (inserted.rows[0]) {
+      // Creation and later state transitions must be equally visible to the
+      // incremental desktop sync feed; otherwise a freshly queued publication
+      // can be invisible until an unrelated mutation happens.
+      await this.recordChange("EFFECT_UPDATED", effect.id);
+      return structuredClone(effect);
+    }
 
+    const existing = await this.client.query<JsonRow>(
+      "SELECT id AS key, value FROM blogbot_outbox WHERE idempotency_key = $1",
+      [idempotencyKey]
+    );
+    const row = existing.rows[0];
+    if (!row?.key) throw new Error("LOCAL_DATA_IDENTITY_MISSING");
+    return this.protector.open<OutboxEffect>(
+      row.value,
+      backendContext("blogbot_outbox", row.key)
+    );
+  }
   async listOutbox(): Promise<OutboxEffect[]> {
     const result = await this.client.query<JsonRow>(
       "SELECT id AS key, value FROM blogbot_outbox ORDER BY id"
