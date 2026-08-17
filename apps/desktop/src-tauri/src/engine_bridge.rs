@@ -61,7 +61,7 @@ fn configure_hidden_command(command: &mut Command) {
 // The engine starts with a deliberately scrubbed environment. On Windows a
 // resolved `codex.cmd` still needs these OS bootstrap values to invoke the
 // command interpreter safely. Keep this list explicit: user profile, auth,
-// proxy, and arbitrary application variables never cross the bridge.
+// proxy, and arbitrary application variables never cross the bridge. ImageGen is the single explicit opt-in exception.
 const SIDECAR_ENV_ALLOWLIST: &[&str] = &[
     "SystemRoot",
     "WINDIR",
@@ -71,6 +71,10 @@ const SIDECAR_ENV_ALLOWLIST: &[&str] = &[
     "TEMP",
     "TMP",
     "LOCALAPPDATA",
+    // Explicit opt-in only: this enables article-specific ImageGen visuals
+    // without persisting the key in the local database or settings.
+    "BLOGBOT_IMAGEGEN_API_KEY",
+    "BLOGBOT_IMAGEGEN_MODEL",
 ];
 
 fn sidecar_environment_with<F>(mut lookup: F) -> Vec<(&'static str, OsString)>
@@ -1398,19 +1402,23 @@ mod tests {
     }
 
     #[test]
-    fn scrubbed_sidecar_keeps_only_windows_process_bootstrap_variables() {
+    fn sidecar_environment_allows_only_bootstrap_and_explicit_imagegen_variables() {
         let environment = sidecar_environment_with(|key| match key {
             "SystemRoot" => Some("C:\\Windows".into()),
             "ComSpec" => Some("C:\\Windows\\System32\\cmd.exe".into()),
             "PATH" => Some("C:\\Windows\\System32".into()),
             "PATHEXT" => Some(".COM;.EXE;.BAT;.CMD".into()),
             "TEMP" => Some("C:\\Temp".into()),
+            "BLOGBOT_IMAGEGEN_API_KEY" => Some("configured-only".into()),
+            "BLOGBOT_IMAGEGEN_MODEL" => Some("gpt-image-1".into()),
             _ => None,
         });
-        assert_eq!(environment.len(), 5);
+        assert_eq!(environment.len(), 7);
         assert!(environment.iter().any(|(key, _)| *key == "ComSpec"));
         assert!(environment.iter().any(|(key, _)| *key == "PATH"));
         assert!(environment.iter().any(|(key, _)| *key == "PATHEXT"));
+        assert!(environment.iter().any(|(key, _)| *key == "BLOGBOT_IMAGEGEN_API_KEY"));
+        assert!(environment.iter().any(|(key, _)| *key == "BLOGBOT_IMAGEGEN_MODEL"));
         assert!(!environment.iter().any(|(key, _)| *key == "USERPROFILE"));
     }
 

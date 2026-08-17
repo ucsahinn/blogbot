@@ -317,21 +317,22 @@ fn deferred_installer_script_visible(installer_path: &Path, parent_pid: u32, app
     let app = powershell_single_quoted(&app_path.display().to_string());
     format!(
         r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
-$form = New-Object System.Windows.Forms.Form; $form.Text = 'OPE güncelleme'; $form.Width = 560; $form.Height = 220; $form.StartPosition = 'CenterScreen'; $form.TopMost = $true;
-$title = New-Object System.Windows.Forms.Label; $title.Text = 'OPE güncelleniyor'; $title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold); $title.AutoSize = $true; $title.Location = New-Object System.Drawing.Point(28, 24); $form.Controls.Add($title);
-$status = New-Object System.Windows.Forms.Label; $status.Text = 'Kurulum dosyası doğrulandı.'; $status.AutoSize = $true; $status.Location = New-Object System.Drawing.Point(30, 68); $form.Controls.Add($status);
-$bar = New-Object System.Windows.Forms.ProgressBar; $bar.Minimum = 0; $bar.Maximum = 100; $bar.Value = 35; $bar.Width = 490; $bar.Location = New-Object System.Drawing.Point(30, 105); $form.Controls.Add($bar);
-$detail = New-Object System.Windows.Forms.Label; $detail.Text = 'Bu pencere kapanana kadar bilgisayarı kapatmayın.'; $detail.AutoSize = $true; $detail.ForeColor = [System.Drawing.Color]::DimGray; $detail.Location = New-Object System.Drawing.Point(30, 140); $form.Controls.Add($detail);
-$form.Show(); [System.Windows.Forms.Application]::DoEvents(); $status.Text = 'OPE kapatılıyor; kurulum hazırlanıyor...'; $bar.Value = 45; [System.Windows.Forms.Application]::DoEvents();
-while (Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 250; [System.Windows.Forms.Application]::DoEvents() }}
-$status.Text = 'Kurulum sihirbazı başlatılıyor...'; $bar.Value = 60; [System.Windows.Forms.Application]::DoEvents();
-try {{ $installerProcess = Start-Process -FilePath '{installer}' -PassThru -WindowStyle Normal }} catch {{ $status.Text = 'Kurulum başlatılamadı: ' + $_.Exception.Message; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
-$status.Text = 'Kurulum devam ediyor...'; $bar.Value = 70; [System.Windows.Forms.Application]::DoEvents(); while (-not $installerProcess.HasExited) {{ if ($bar.Value -lt 95) {{ $bar.Value += 1 }}; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 350 }}
-if ($installerProcess.ExitCode -eq 0) {{ $status.Text = 'Kurulum tamamlandı. OPE yeniden başlatılıyor...'; $bar.Value = 100; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 800; Start-Process -FilePath '{app}' }} else {{ $status.Text = 'Kurulum hata koduyla sonlandı: ' + $installerProcess.ExitCode; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit $installerProcess.ExitCode }}
+$form = New-Object System.Windows.Forms.Form; $form.Text = 'OPE güncelleme'; $form.Width = 620; $form.Height = 330; $form.StartPosition = 'CenterScreen'; $form.TopMost = $true; $form.FormBorderStyle = 'FixedDialog'; $form.MaximizeBox = $false; $form.MinimizeBox = $false;
+$title = New-Object System.Windows.Forms.Label; $title.Text = 'OPE güncelleniyor'; $title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold); $title.AutoSize = $true; $title.Location = New-Object System.Drawing.Point(28, 20); $form.Controls.Add($title);
+$status = New-Object System.Windows.Forms.Label; $status.Text = 'Güncelleme paketi doğrulandı'; $status.AutoSize = $true; $status.Location = New-Object System.Drawing.Point(30, 62); $form.Controls.Add($status);
+$bar = New-Object System.Windows.Forms.ProgressBar; $bar.Minimum = 0; $bar.Maximum = 100; $bar.Value = 25; $bar.Width = 550; $bar.Location = New-Object System.Drawing.Point(30, 94); $form.Controls.Add($bar);
+$steps = New-Object System.Windows.Forms.Label; $steps.Font = New-Object System.Drawing.Font('Segoe UI', 10); $steps.AutoSize = $true; $steps.Location = New-Object System.Drawing.Point(30, 132); $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n○ Uygulama kapatılıyor`r`n○ Kurulum sihirbazı başlatılıyor`r`n○ Kurulum tamamlanacak ve OPE yeniden açılacak"; $form.Controls.Add($steps);
+$detail = New-Object System.Windows.Forms.Label; $detail.Text = 'Bu pencere kapanana kadar bilgisayarı kapatmayın.'; $detail.AutoSize = $true; $detail.ForeColor = [System.Drawing.Color]::DimGray; $detail.Location = New-Object System.Drawing.Point(30, 245); $form.Controls.Add($detail);
+$form.Show(); [System.Windows.Forms.Application]::DoEvents(); $status.Text = 'Uygulama kapatılıyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n→ Uygulama kapatılıyor`r`n○ Kurulum sihirbazı başlatılıyor`r`n○ Kurulum tamamlanacak ve OPE yeniden açılacak"; $bar.Value = 35; [System.Windows.Forms.Application]::DoEvents();
+$deadline = (Get-Date).AddSeconds(60); while ((Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 250; [System.Windows.Forms.Application]::DoEvents() }}
+if (Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) {{ $status.Text = 'OPE kapatılamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Uygulamayı kapatıp güncellemeyi yeniden başlatın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✗ Uygulama kapatılamadı`r`n○ Kurulum sihirbazı başlatılmadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
+$status.Text = 'Kurulum sihirbazı başlatılıyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n→ Kurulum sihirbazı başlatılıyor`r`n○ Kurulum tamamlanacak ve OPE yeniden açılacak"; $bar.Value = 50; [System.Windows.Forms.Application]::DoEvents();
+try {{ $installerProcess = Start-Process -FilePath '{installer}' -PassThru -WindowStyle Normal }} catch {{ $status.Text = 'Kurulum başlatılamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✗ Kurulum sihirbazı başlatılamadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
+$status.Text = 'Kurulum devam ediyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✓ Kurulum sihirbazı çalışıyor`r`n→ Kurulum tamamlanacak ve OPE yeniden açılacak"; $bar.Value = 65; [System.Windows.Forms.Application]::DoEvents(); while (-not $installerProcess.HasExited) {{ if ($bar.Value -lt 95) {{ $bar.Value += 1 }}; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 350 }}
+if ($installerProcess.ExitCode -eq 0) {{ $status.Text = 'Kurulum tamamlandı; OPE yeniden başlatılıyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✓ Kurulum tamamlandı`r`n✓ OPE yeniden açılıyor"; $bar.Value = 100; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 800; Start-Process -FilePath '{app}' }} else {{ $status.Text = 'Kurulum hata koduyla sonlandı: ' + $installerProcess.ExitCode; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✗ Kurulum hata ile sonlandı`r`n○ OPE yeniden başlatılmadı"; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit $installerProcess.ExitCode }}
 $form.Close();"#
     )
 }
-
 fn launch_installer_after_exit(installer_path: &Path, parent_pid: u32) -> Result<(), CommandError> {
     let app_path = std::env::current_exe()
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_APP_PATH_UNAVAILABLE".into()))?;
@@ -659,7 +660,12 @@ mod tests {
         );
         assert!(script.contains("System.Windows.Forms"));
         assert!(script.contains("ProgressBar"));
-        assert!(script.contains("while (Get-Process -Id 4242"));
+        assert!(script.contains("Güncelleme paketi doğrulandı"));
+        assert!(script.contains("Uygulama kapatılıyor"));
+        assert!(script.contains("Kurulum sihirbazı başlatılıyor"));
+        assert!(script.contains("Kurulum tamamlandı"));
+        assert!(script.contains("$deadline = (Get-Date).AddSeconds(60)"));
+        assert!(script.contains("while ((Get-Process -Id 4242"));
         assert!(script.contains("-PassThru -WindowStyle Normal"));
         assert!(script.contains("Start-Process -FilePath 'C:\\Program Files\\OPE\\OPE.exe'"));
         assert!(!script.contains("/S"));

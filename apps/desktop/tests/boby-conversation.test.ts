@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { describeBobyAvailability, shouldUseLocalBobyShortcut } from "../src/boby-conversation.ts";
+import { describeBobyAvailability, localBobyReply, shouldUseLocalBobyShortcut } from "../src/boby-conversation.ts";
 
 test("Boby presents its Luna Low mind as ready without exposing a Codex integration step", () => {
   assert.deepEqual(describeBobyAvailability({ runtime: "ONLINE", codexState: "READY" }), {
@@ -33,6 +33,17 @@ test("Boby never reports itself ready while the local engine is unavailable", ()
   });
 });
 
+test("offline Boby gives distinct app guidance instead of repeating one failure message", () => {
+  const source = localBobyReply("Kaynak nasıl eklenir?", "content");
+  const draft = localBobyReply("Taslak nasıl oluşturulur?", "content");
+  const seo = localBobyReply("SEO kontrolü nerede?", "publishing");
+
+  assert.notEqual(source, draft);
+  assert.match(source, /Kaynak/iu);
+  assert.match(source, /İçerik Akışı/iu);
+  assert.match(draft, /taslak/iu);
+  assert.match(seo, /SEO/iu);
+});
 test("Boby does not intercept editorial requests with a generic local answer", () => {
   assert.equal(shouldUseLocalBobyShortcut("naber"), false);
   assert.equal(shouldUseLocalBobyShortcut("bu konu hakkında ne düşünüyorsun?"), false);

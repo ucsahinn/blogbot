@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import bobyAvatar from "../assets/boby-avatar-v3.webp";
-import { describeBobyAvailability } from "../boby-conversation.ts";
+import { describeBobyAvailability, localBobyReply } from "../boby-conversation.ts";
 import { userFacingBridgeError, type BlogbotBridge, type BobyGuidanceStatus } from "../bridge.ts";
 import { playFeedbackSound } from "../feedback-sounds.ts";
 import type { BootstrapSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
@@ -269,9 +269,10 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
     setMessages((current) => [...current, { text: `Sen: ${question}` }]);
     playFeedbackSound("boby-reply");
     if (liveAvailability.tone === "blocker") {
+      setDeliveryState("idle");
       setMessages((current) => [...current, {
-        text: "Boby şu an yanıt üretemiyor. Paneldeki Boby'yi bağla düğmesiyle güvenli girişi başlat; hazır olduğunda sorularını aynı konuşmadan yanıtlayacak.",
-        origin: "system"
+        text: localBobyReply(question, activePage),
+        origin: "local"
       }]);
       return;
     }
