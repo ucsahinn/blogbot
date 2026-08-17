@@ -412,6 +412,11 @@ pub async fn install_unsigned_update(
     if !is_newer_version(&request.version)? {
         return Err(CommandError::InvalidInput("UPDATE_NOT_NEWER".into()));
     }
+    let (path, mut installer_file) = create_installer_file(&request.version)?;
+    if launch_installer_after_exit(&path, std::process::id()).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_START_FAILED".into()));
+    }
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -432,7 +437,6 @@ pub async fn install_unsigned_update(
             "UPDATE_DOWNLOAD_TOO_LARGE".into(),
         ));
     }
-    let (path, mut installer_file) = create_installer_file(&request.version)?;
     let mut digest = Sha256::new();
     let mut downloaded = 0u64;
     while let Some(chunk) = match response.chunk().await {
@@ -475,12 +479,6 @@ pub async fn install_unsigned_update(
         ));
     }
 
-    if launch_installer_after_exit(&path, std::process::id()).is_err() {
-        let _ = std::fs::remove_file(&path);
-        return Err(CommandError::UpdateUnavailable(
-            "UPDATE_INSTALLER_START_FAILED".into(),
-        ));
-    }
     app.exit(0);
     Ok(())
 }

@@ -1880,6 +1880,15 @@ pub fn get_connector_state(
     }))
 }
 
+fn configured_github_repository(bridge: &EngineBridge) -> Option<String> {
+    let connectors = read_engine_local_state(bridge, "desktop.connectors")?;
+    let owner = connectors.pointer("/github/owner").and_then(Value::as_str)?.trim();
+    let repository = connectors.pointer("/github/repository").and_then(Value::as_str)?.trim();
+    if !valid_github_segment(owner) || !valid_github_segment(repository) {
+        return None;
+    }
+    Some(format!("{owner}/{repository}"))
+}
 fn valid_github_segment(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
@@ -3875,11 +3884,18 @@ pub fn enqueue_publication(
         })
         .unwrap_or_else(|| "LOCAL_ONLY".to_string());
     let token_path = github_token_path(&app)?;
-    if connector_mode == "PUBLISH" && !state.github_broker.publication_ready(&token_path) {
-        return Err(CommandError::EngineUnavailable(
-            "GITHUB_CREDENTIAL_BROKER_UNAVAILABLE".into(),
-        ));
-    }
+    let trusted_repository = if connector_mode == "PUBLISH" {
+        if !state.github_broker.publication_ready(&token_path) {
+            return Err(CommandError::EngineUnavailable(
+                "GITHUB_CREDENTIAL_BROKER_UNAVAILABLE".into(),
+            ));
+        }
+        Some(configured_github_repository(&bridge).ok_or_else(|| {
+            CommandError::EngineUnavailable("GITHUB_REPOSITORY_NOT_CONFIGURED".into())
+        })?)
+    } else {
+        None
+    };
     let version = read_engine_state(&bridge)?
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
@@ -3905,7 +3921,12 @@ pub fn enqueue_publication(
         let effect_id = value.get("id").and_then(Value::as_str).ok_or_else(|| {
             CommandError::EngineUnavailable("PUBLICATION_EFFECT_ID_MISSING".into())
         })?;
-        let effects = state.github_broker.publication_effects(&token_path);
+        let effects = state.github_broker.publication_effects(
+            &token_path,
+            trusted_repository.as_deref().ok_or_else(|| {
+                CommandError::EngineUnavailable("GITHUB_REPOSITORY_NOT_CONFIGURED".into())
+            })?,
+        );
         return drive_publication_broker(effect_id, |request| bridge.request(request), &effects)
             .map_err(CommandError::EngineUnavailable);
     }
@@ -3923,6 +3944,10 @@ pub fn start_native_publication_drainer(app: tauri::AppHandle) {
             continue;
         }
         let bridge = app.state::<EngineBridge>();
+        let trusted_repository = match configured_github_repository(&bridge) {
+            Some(repository) => repository,
+            None => continue,
+        };
         let token_path = match github_token_path(&app) {
             Ok(path) if path.is_file() => path,
             _ => continue,
@@ -3949,7 +3974,7 @@ pub fn start_native_publication_drainer(app: tauri::AppHandle) {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let effects = state.github_broker.publication_effects(&token_path);
+        let effects = state.github_broker.publication_effects(&token_path, &trusted_repository);
         for effect_id in effect_ids.iter().filter_map(Value::as_str).take(16) {
             let _ =
                 drive_publication_broker(effect_id, |request| bridge.request(request), &effects);

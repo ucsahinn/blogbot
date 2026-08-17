@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import bobyAvatar from "./assets/boby-avatar-v3.webp";
 import { AppShell, type PageId } from "./components/AppShell.tsx";
@@ -355,7 +355,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
           />
         ) : null}
       </AppShell>
-      <BobyAssistant key={`${activePage}-${bobyOpen}`} activePage={activePage} snapshot={snapshot} workspace={workspace} bridge={bridge} open={bobyOpen} onClose={() => setBobyOpen(false)} onNavigate={navigate} />
+      <BobyAssistant activePage={activePage} snapshot={snapshot} workspace={workspace} bridge={bridge} open={bobyOpen} onClose={() => setBobyOpen(false)} onNavigate={navigate} />
     </>
   );
 }

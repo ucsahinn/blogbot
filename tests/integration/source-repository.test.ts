@@ -257,6 +257,38 @@ test("source updates enforce optimistic version checks", async (t) => {
   );
 });
 
+test("concurrent source updates use an atomic version compare-and-swap", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-cas-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const repository = await PGliteSourceRepository.open(dataDir);
+  t.after(() => repository.close());
+
+  const initial = {
+    id: "source-1",
+    url: "https://news.example/feed.xml",
+    kind: "RSS" as const,
+    status: "ACTIVE" as const,
+    trustStatus: "PENDING" as const,
+    rightsStatus: "PENDING" as const,
+    language: "en" as const,
+    discoveredFeeds: [],
+    createdAt: "2026-07-29T10:00:00.000Z",
+    updatedAt: "2026-07-29T10:00:00.000Z",
+    version: 1
+  };
+  await repository.saveSource(initial);
+
+  const [first, second] = await Promise.allSettled([
+    repository.saveSource({ ...initial, status: "DISABLED", updatedAt: "2026-07-29T11:00:00.000Z", version: 2 }, 1),
+    repository.saveSource({ ...initial, trustStatus: "APPROVED", updatedAt: "2026-07-29T12:00:00.000Z", version: 2 }, 1)
+  ]);
+  const outcomes = [first, second];
+  assert.equal(outcomes.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter((result) => result.status === "rejected").length, 1);
+  const rejected = outcomes.find((result) => result.status === "rejected");
+  assert.equal((rejected as PromiseRejectedResult).reason.code, "VERSION_CONFLICT");
+  assert.equal((await repository.getSource("source-1")).version, 2);
+});
 test("source ciphertext is bound to its row identity", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-binding-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));

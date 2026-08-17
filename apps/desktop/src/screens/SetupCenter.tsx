@@ -966,6 +966,7 @@ export function SetupCenter({
                 key={step.title}
                 className={index === guidedStep ? "is-active" : index < guidedStep ? "is-complete" : ""}
                 aria-label={`${index + 1}. ${step.title}`}
+                aria-current={index === guidedStep ? "step" : undefined}
                 disabled={busy}
                 onClick={() => setGuidedStep(index)}
               >

@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   color-scheme: light;
   font-family:
     "Segoe UI Variable Text",
@@ -1771,13 +1771,13 @@ strong {
 
 .about-card {
   display: grid;
-  gap: 5px;
+  gap: 7px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   color: var(--ink-soft);
   background: var(--surface-raised);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -1794,7 +1794,7 @@ strong {
 .update-progress { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-muted); }
 .update-progress-installing, .update-progress-handoff { border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); }
 .update-progress-error { border-color: color-mix(in srgb, var(--red) 52%, var(--line)); background: var(--red-soft); }
-.update-progress-steps { display: grid; gap: 5px; font-size: 12px; }
+.update-progress-steps { display: grid; gap: 5px; font-size: 13px; }
 .update-progress-steps span { display: block; color: var(--ink-faint); }
 .update-progress-steps .is-done { color: var(--teal-dark, var(--teal)); font-weight: 750; }
 .update-progress-steps .is-current { color: var(--blue); font-weight: 800; }
@@ -4516,6 +4516,23 @@ strong {
     padding: 0;
   }
 
+  .sidebar .about-control {
+    display: none;
+  }
+
+  .sidebar .about-control:has(.about-card) {
+    position: fixed;
+    right: 10px;
+    bottom: 70px;
+    left: 10px;
+    z-index: 25;
+    display: block;
+  }
+
+  .sidebar .about-card {
+    max-height: calc(100dvh - 100px);
+    overflow: auto;
+  }
   .primary-nav {
     width: 100%;
     margin-top: 35px;
@@ -4690,6 +4707,23 @@ strong {
     display: none;
   }
 
+  .sidebar .about-control {
+    display: none;
+  }
+
+  .sidebar .about-control:has(.about-card) {
+    position: fixed;
+    right: 10px;
+    bottom: 70px;
+    left: 10px;
+    z-index: 25;
+    display: block;
+  }
+
+  .sidebar .about-card {
+    max-height: calc(100dvh - 100px);
+    overflow: auto;
+  }
   .primary-nav {
     display: grid;
     grid-template-columns: repeat(5, 1fr);

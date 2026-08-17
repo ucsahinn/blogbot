@@ -229,6 +229,8 @@ export function AppShell({
           </button>
           <button type="button" aria-label="Kurulum ve önkoşullar" onClick={onOpenSetup}>
             <span aria-hidden="true">◇</span>
+          </button>          <button type="button" aria-label="OPE hakkında" aria-expanded={aboutOpen} onClick={() => setAboutOpen((open) => !open)}>
+            <span aria-hidden="true">i</span>
           </button>
         </nav>
 

@@ -31,3 +31,11 @@ test("unsigned updater uses the native HTTPS release bridge instead of Tauri sig
   assert.doesNotMatch(workflow, /TAURI_SIGNING_PRIVATE_KEY/u);
   assert.doesNotMatch(workflow, /UPDATER_SIGNATURE/u);
 });
+test("release notes never become PowerShell source in the release workflow", async () => {
+  const workflow = await readFile(join(desktopRoot, "..", "..", ".github", "workflows", "release-desktop.yml"), "utf8");
+
+  assert.match(workflow, /RELEASE_NOTES: \$\{\{ inputs\.notes \}\}/u);
+  assert.match(workflow, /Set-Content -LiteralPath release-notes\.txt -Value \$env:RELEASE_NOTES/u);
+  assert.match(workflow, /--notes-file release-notes\.txt/u);
+  assert.doesNotMatch(workflow, /--notes\s+"\$\{\{\s*inputs\.notes/u);
+});

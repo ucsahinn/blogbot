@@ -348,6 +348,9 @@ fn valid_identifier(value: &str, max: usize) -> bool {
         })
 }
 
+fn repository_matches_trusted(claimed: &str, trusted: &str) -> bool {
+    valid_repo(trusted) && claimed.eq_ignore_ascii_case(trusted)
+}
 fn valid_repo(value: &str) -> bool {
     let mut parts = value.split('/');
     matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(repo), None)
@@ -683,10 +686,15 @@ impl GitHubBroker {
         ))
     }
 
-    pub fn publication_effects<'a>(&'a self, token_path: &'a Path) -> NativePublicationEffects<'a> {
+    pub fn publication_effects<'a>(
+        &'a self,
+        token_path: &'a Path,
+        trusted_repository: &'a str,
+    ) -> NativePublicationEffects<'a> {
         NativePublicationEffects {
             store: self.store.as_ref(),
             token_path,
+            trusted_repository,
         }
     }
 
@@ -698,6 +706,7 @@ impl GitHubBroker {
 pub struct NativePublicationEffects<'a> {
     store: &'a dyn GitHubTokenStore,
     token_path: &'a Path,
+    trusted_repository: &'a str,
 }
 
 impl PublicationBrokerEffects for NativePublicationEffects<'_> {
@@ -706,6 +715,9 @@ impl PublicationBrokerEffects for NativePublicationEffects<'_> {
             .map_err(|_| "PUBLICATION_BROKER_CLAIM_SHAPE_INVALID".to_string())?;
         if !validate_claim(&claim) {
             return Err("PUBLICATION_BROKER_CLAIM_SHAPE_INVALID".into());
+        }
+        if !repository_matches_trusted(&claim.target_repository, self.trusted_repository) {
+            return Err("PUBLICATION_REPOSITORY_NOT_CONFIGURED".into());
         }
         let mut token_bytes = self.store.load(self.token_path)?;
         let token = String::from_utf8(token_bytes.clone()).map_err(|_| {
@@ -956,6 +968,13 @@ mod tests {
         assert_eq!(requests[1]["state"], "FAILED");
         assert_eq!(requests[1]["lastError"], "GITHUB_PUBLICATION_FAILED");
         assert!(!requests[1].to_string().contains("ghp_super_secret"));
+    }
+
+    #[test]
+    fn native_publication_requires_the_configured_repository() {
+        assert!(super::repository_matches_trusted("Owner/Site", "owner/site"));
+        assert!(!super::repository_matches_trusted("owner/other", "owner/site"));
+        assert!(!super::repository_matches_trusted("owner/site", ""));
     }
 
     fn valid_claim() -> serde_json::Value {

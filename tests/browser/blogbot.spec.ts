@@ -103,6 +103,20 @@ test("Editor Boby gives distinct in-panel guidance for two different questions",
   await expect(boby).toContainText("Bu konu için Yeni Taslak'ta");
 });
 
+test("Boby preserves its conversation when closed and reopened after navigation", async ({ page }) => {
+  await page.goto("#dashboard");
+  const launcher = page.getByRole("button", { name: "Editör Boby'yi aç" });
+  await launcher.click();
+  const boby = page.getByRole("dialog", { name: "Editör Boby" });
+  const question = boby.getByRole("textbox", { name: "Boby'ye sor" });
+  await question.fill("Kaynak ekleme adımı nerede?");
+  await boby.getByRole("button", { name: "Sor" }).click();
+  await expect(boby).toContainText("Kaynak ekleme adımı nerede?");
+  await boby.getByRole("button", { name: "Editör Boby'yi kapat" }).click();
+  await page.goto("#content");
+  await page.getByRole("button", { name: "Editör Boby'yi aç" }).click();
+  await expect(page.getByRole("dialog", { name: "Editör Boby" })).toContainText("Kaynak ekleme adımı nerede?");
+});
 test("primary navigation exposes exactly the five stable workspaces", async ({ page }) => {
   const destinations = [
     ["Genel Bakış", "#dashboard", "Yayın akışı kontrol altında."],
@@ -268,6 +282,7 @@ test("first-start guide uses a readable step rail and current-step panel", async
   await expect(page.locator(".guided-setup")).toHaveClass(/guided-setup-panel/u);
   await expect(page.locator(".guided-step-state").first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "Bu bilgisayarı kontrol et" })).toBeVisible();
+  await expect(page.locator(".guided-progress button").first()).toHaveAttribute("aria-current", "step");
 });
 
 test("setup shows the native Windows folder path without decorative separators", async ({ page }) => {
@@ -341,6 +356,7 @@ test("mobile utility destinations are exposed as a named navigation landmark", a
   await expect(utilityNavigation).toBeVisible();
   await expect(utilityNavigation.getByRole("button", { name: "Ayarlar" })).toBeVisible();
   await expect(utilityNavigation.getByRole("button", { name: "Kurulum ve önkoşullar" })).toBeVisible();
+  await expect(utilityNavigation.getByRole("button", { name: "OPE hakkında" })).toBeVisible();
 });
 
 test("global shortcuts do not navigate while an editor is entering form text", async ({ page }) => {
@@ -1758,4 +1774,18 @@ test("every desktop workspace exposes bounded, named controls without actionable
     expect(report.unnamed, `${route}: visible controls need an accessible name`).toEqual([]);
     expect(report.collisions, `${route}: actionable controls overlap`).toEqual([]);
   }
+});
+
+test("mobile About opens above the fixed utility navigation without overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("#dashboard");
+  await page.getByRole("navigation", { name: "İkincil menü" }).getByRole("button", { name: "OPE hakkında" }).click();
+  const about = page.locator(".about-card");
+  await expect(about).toBeVisible();
+  const box = await about.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(844);
 });

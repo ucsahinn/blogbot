@@ -73,6 +73,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_NOTES: ${{ inputs.notes }}
           UPDATER_ARCHIVE: ${{ steps.manifest.outputs.archive }}
         run: |
-          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE latest.json --title "OPE $env:RELEASE_VERSION" --notes "${{ inputs.notes }}"
+          Set-Content -LiteralPath release-notes.txt -Value $env:RELEASE_NOTES -Encoding utf8NoBOM
+          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE latest.json --title "OPE $env:RELEASE_VERSION" --notes-file release-notes.txt

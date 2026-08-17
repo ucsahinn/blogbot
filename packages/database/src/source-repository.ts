@@ -339,17 +339,25 @@ export class PGliteSourceRepository implements SourceRepository {
           `Source ${source.id} update must advance version ${existing.version} by one`
         );
       }
-      await this.database.query(
+      const updated = await this.database.query<{ id: string }>(
         `UPDATE blogbot_sources
             SET url = $2, version = $3, value = $4::jsonb
-          WHERE id = $1`,
+          WHERE id = $1 AND version = $5
+          RETURNING id`,
         [
           source.id,
           source.url,
           source.version,
-          JSON.stringify(this.protector.seal(source, sourceContext(source.id)))
+          JSON.stringify(this.protector.seal(source, sourceContext(source.id))),
+          existing.version
         ]
       );
+      if (updated.rows.length !== 1) {
+        throw new SourceRepositoryError(
+          "VERSION_CONFLICT",
+          `Source ${source.id} changed before version ${existing.version} could be saved`
+        );
+      }
       return structuredClone(source);
     }
 
@@ -439,17 +447,25 @@ export class PGliteSourceRepository implements SourceRepository {
             `Source ${source.id} update must advance version ${current.version} by one`
           );
         }
-        await transaction.query(
+        const updated = await transaction.query<{ id: string }>(
           `UPDATE blogbot_sources
               SET url = $2, version = $3, value = $4::jsonb
-            WHERE id = $1`,
+            WHERE id = $1 AND version = $5
+            RETURNING id`,
           [
             source.id,
             source.url,
             source.version,
-            JSON.stringify(this.protector.seal(source, sourceContext(source.id)))
+            JSON.stringify(this.protector.seal(source, sourceContext(source.id))),
+            current.version
           ]
         );
+        if (updated.rows.length !== 1) {
+          throw new SourceRepositoryError(
+            "VERSION_CONFLICT",
+            `Source ${source.id} changed before version ${current.version} could be saved`
+          );
+        }
       } else {
         if (expectedVersion !== 0 || source.version !== 1) {
           throw new SourceRepositoryError(
@@ -920,18 +936,26 @@ export class PGliteSourceRepository implements SourceRepository {
           entryCount: input.entries.length
         }
       };
-      await transaction.query(
+      const saved = await transaction.query<{ id: string }>(
         `UPDATE blogbot_sources
             SET version = $2, value = $3::jsonb
-          WHERE id = $1`,
+          WHERE id = $1 AND version = $4
+          RETURNING id`,
         [
           updated.id,
           updated.version,
           JSON.stringify(
             this.protector.seal(updated, sourceContext(updated.id))
-          )
+          ),
+          source.version
         ]
       );
+      if (saved.rows.length !== 1) {
+        throw new SourceRepositoryError(
+          "VERSION_CONFLICT",
+          `Source ${source.id} changed before scan ${scanId} could be completed`
+        );
+      }
 
       const entriesAdded = await this.writeSourceEntries(
         transaction,
