@@ -312,25 +312,36 @@ fn powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-fn deferred_installer_script(installer_path: &Path, parent_pid: u32) -> String {
+fn deferred_installer_script_visible(installer_path: &Path, parent_pid: u32, app_path: &Path) -> String {
     let installer = powershell_single_quoted(&installer_path.display().to_string());
+    let app = powershell_single_quoted(&app_path.display().to_string());
     format!(
-        "Wait-Process -Id {parent_pid} -ErrorAction SilentlyContinue; Start-Process -FilePath '{installer}' -ArgumentList @('/S')"
+        r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
+$form = New-Object System.Windows.Forms.Form; $form.Text = 'OPE güncelleme'; $form.Width = 560; $form.Height = 220; $form.StartPosition = 'CenterScreen'; $form.TopMost = $true;
+$title = New-Object System.Windows.Forms.Label; $title.Text = 'OPE güncelleniyor'; $title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold); $title.AutoSize = $true; $title.Location = New-Object System.Drawing.Point(28, 24); $form.Controls.Add($title);
+$status = New-Object System.Windows.Forms.Label; $status.Text = 'Kurulum dosyası doğrulandı.'; $status.AutoSize = $true; $status.Location = New-Object System.Drawing.Point(30, 68); $form.Controls.Add($status);
+$bar = New-Object System.Windows.Forms.ProgressBar; $bar.Minimum = 0; $bar.Maximum = 100; $bar.Value = 35; $bar.Width = 490; $bar.Location = New-Object System.Drawing.Point(30, 105); $form.Controls.Add($bar);
+$detail = New-Object System.Windows.Forms.Label; $detail.Text = 'Bu pencere kapanana kadar bilgisayarı kapatmayın.'; $detail.AutoSize = $true; $detail.ForeColor = [System.Drawing.Color]::DimGray; $detail.Location = New-Object System.Drawing.Point(30, 140); $form.Controls.Add($detail);
+$form.Show(); [System.Windows.Forms.Application]::DoEvents(); $status.Text = 'OPE kapatılıyor; kurulum hazırlanıyor...'; $bar.Value = 45; [System.Windows.Forms.Application]::DoEvents();
+while (Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 250; [System.Windows.Forms.Application]::DoEvents() }}
+$status.Text = 'Kurulum sihirbazı başlatılıyor...'; $bar.Value = 60; [System.Windows.Forms.Application]::DoEvents();
+try {{ $installerProcess = Start-Process -FilePath '{installer}' -PassThru -WindowStyle Normal }} catch {{ $status.Text = 'Kurulum başlatılamadı: ' + $_.Exception.Message; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
+$status.Text = 'Kurulum devam ediyor...'; $bar.Value = 70; [System.Windows.Forms.Application]::DoEvents(); while (-not $installerProcess.HasExited) {{ if ($bar.Value -lt 95) {{ $bar.Value += 1 }}; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 350 }}
+if ($installerProcess.ExitCode -eq 0) {{ $status.Text = 'Kurulum tamamlandı. OPE yeniden başlatılıyor...'; $bar.Value = 100; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 800; Start-Process -FilePath '{app}' }} else {{ $status.Text = 'Kurulum hata koduyla sonlandı: ' + $installerProcess.ExitCode; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit $installerProcess.ExitCode }}
+$form.Close();"#
     )
 }
 
-fn deferred_installer_script_visible(installer_path: &Path, parent_pid: u32) -> String {
-    deferred_installer_script(installer_path, parent_pid).replace("/S", "")
-}
-
 fn launch_installer_after_exit(installer_path: &Path, parent_pid: u32) -> Result<(), CommandError> {
-    let installer_script = deferred_installer_script_visible(installer_path, parent_pid);
+    let app_path = std::env::current_exe()
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_APP_PATH_UNAVAILABLE".into()))?;
+    let installer_script = deferred_installer_script_visible(installer_path, parent_pid, &app_path);
     let mut launcher = Command::new("powershell.exe");
     configure_hidden_command(&mut launcher);
     launcher
         .args([
             "-NoProfile",
-            "-NonInteractive",
+            "-STA",
             "-WindowStyle",
             "Hidden",
             "-Command",
@@ -640,12 +651,17 @@ mod tests {
     }
 
     #[test]
-    fn defers_the_silent_installer_until_the_current_process_has_exited() {
-        let script =
-            super::deferred_installer_script(Path::new(r"C:\Temp\Blogbot O'Brien.setup.exe"), 4242);
-
-        assert!(script.contains("Wait-Process -Id 4242"));
-        assert!(script.contains("Start-Process -FilePath 'C:\\Temp\\Blogbot O''Brien.setup.exe'"));
-        assert!(script.contains("-ArgumentList @('/S')"));
+    fn bootstrapper_shows_progress_and_starts_a_visible_installer_after_exit() {
+        let script = super::deferred_installer_script_visible(
+            Path::new(r"C:\Temp\OPE O'Brien.setup.exe"),
+            4242,
+            Path::new(r"C:\Program Files\OPE\OPE.exe"),
+        );
+        assert!(script.contains("System.Windows.Forms"));
+        assert!(script.contains("ProgressBar"));
+        assert!(script.contains("while (Get-Process -Id 4242"));
+        assert!(script.contains("-PassThru -WindowStyle Normal"));
+        assert!(script.contains("Start-Process -FilePath 'C:\\Program Files\\OPE\\OPE.exe'"));
+        assert!(!script.contains("/S"));
     }
 }
