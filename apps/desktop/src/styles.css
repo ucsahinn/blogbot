@@ -76,10 +76,10 @@
   right: 22px;
   bottom: 78px;
   z-index: 21;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   width: min(390px, calc(100vw - 32px));
   max-height: min(680px, calc(100dvh - 108px));
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
   gap: 12px;
   padding: 16px;
   overflow: hidden;
@@ -90,6 +90,7 @@
 }
 
 .boby-panel-header { display: flex; align-items: center; gap: 10px; }
+.boby-panel-header > div { min-width: 0; }
 .boby-mark-image { width: 42px; height: 42px; border-radius: 12px; object-fit: cover; background: var(--sidebar); }
 .boby-panel-header h2, .boby-panel-header p, .boby-purpose, .boby-message p { margin: 0; }
 .boby-panel-header h2 { font-size: 18px; }
@@ -106,8 +107,8 @@
 .boby-availability-attention > span { background: var(--amber); color: var(--surface-raised); }
 .boby-availability-blocker { border-color: color-mix(in srgb, var(--red) 48%, var(--line)); background: color-mix(in srgb, var(--red-soft) 72%, var(--surface)); color: var(--red); }
 .boby-availability-blocker > span { background: var(--red); color: var(--surface-raised); }
-.boby-purpose { color: var(--ink-soft); font-size: 12px; line-height: 1.45; }
-.boby-messages { display: grid; align-content: start; gap: 8px; overflow: auto; padding-right: 2px; }
+.boby-purpose { flex: 0 0 auto; color: var(--ink-soft); font-size: 12px; line-height: 1.45; }
+.boby-messages { display: grid; flex: 1 1 auto; min-height: 0; align-content: start; gap: 8px; overflow-x: hidden; overflow-y: auto; padding: 1px 2px 1px 0; }
 .boby-message { display: grid; gap: 7px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 13px; line-height: 1.45; }
 .boby-message-user { justify-self: end; max-width: 88%; border-color: color-mix(in srgb, var(--blue) 38%, var(--line)); background: var(--blue-soft); }
 .boby-message-local { border-color: color-mix(in srgb, var(--blue) 34%, var(--line)); background: color-mix(in srgb, var(--blue-soft) 58%, var(--surface)); }

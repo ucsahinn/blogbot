@@ -190,6 +190,15 @@ test("mobile fixed navigation cannot obscure focus and form focus remains visibl
   assert.match(styles, /@media \(max-width: 700px\)[\s\S]*?\.workspace\s*\{[\s\S]*?padding-bottom:\s*(?:8[4-9]|9\d|\d{3,})px/u);
 });
 
+test("Boby panel reserves message space without grid row collisions", async () => {
+  const styles = await readFile(source("styles.css"), "utf8");
+
+  assert.match(styles, /\.boby-panel\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex-direction:\s*column;/u);
+  assert.doesNotMatch(styles, /\.boby-panel\s*\{[^}]*grid-template-rows:/u);
+  assert.match(styles, /\.boby-messages\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?min-height:\s*0;[\s\S]*?overflow-y:\s*auto;/u);
+  assert.match(styles, /\.boby-panel-header > div\s*\{\s*min-width:\s*0;\s*\}/u);
+});
+
 test("focus indicators use an opaque semantic color with sufficient contrast", async () => {
   const styles = await readFile(source("styles.css"), "utf8");
 

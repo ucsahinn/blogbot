@@ -1118,7 +1118,7 @@ test("candidate promotion keeps an accepted job visible when the first editorial
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" })).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("yerel kuyruk işi kabul edildi");
+  await expect(page.locator(".inline-notice")).toContainText("yerel kuyruk işi kabul edildi");
   await expect(page.getByRole("button", { name: "Operasyonları aç" })).toHaveCount(0);
 });
 
@@ -1128,7 +1128,7 @@ test("candidate promotion keeps an accepted job visible when an inventory retry 
 
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   await expect(page.getByRole("article", { name: "Araştırma kuyruğundaki taslak" })).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("yerel kuyruk işi kabul edildi");
+  await expect(page.locator(".inline-notice")).toContainText("yerel kuyruk işi kabul edildi");
 });
 
 test("candidate dismissal stays truthful when the follow-up dashboard summary refresh fails", async ({ page }) => {
