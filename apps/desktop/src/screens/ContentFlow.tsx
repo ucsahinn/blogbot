@@ -357,7 +357,7 @@ export function ContentFlow({
                   <div className="candidate-source">
                     <small>İnceleme önceliği: {candidateScoreLabel(candidate.rankingScore)}</small>{" · "}
                     <small>{candidate.sourceCount} kaynak · {candidatePublicationLabel(candidate.publishedAt)}</small>{" · "}
-                    <small>Kaynak: {candidate.primarySource}</small>
+                    <small>Birincil kaynak: {candidate.primarySource}</small>
                   </div>
                   {dismissReason || researchReason ? (
                     <div className="candidate-action-reasons">

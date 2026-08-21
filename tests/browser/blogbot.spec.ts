@@ -926,7 +926,7 @@ test("guided setup back control returns to the previous focused step", async ({ 
 
 test("guided setup never offers destructive workspace recovery after an engine timeout", async ({ page }) => {
   await page.goto("?state=engine-timeout#setup");
-  await page.getByRole("button", { name: "Tanılama ve onarım" }).click();
+  await page.getByRole("button", { name: "Tanılama ve onarımı aç", exact: true }).click();
   await page.getByRole("button", { name: "Yerel bileşeni test et" }).click();
 
   await expect(page.getByRole("button", { name: "Yeni yerel çalışma alanıyla kurtar" })).toHaveCount(0);
@@ -935,7 +935,7 @@ test("guided setup never offers destructive workspace recovery after an engine t
 
 test("engine timeout keeps diagnostics available without offering workspace replacement", async ({ page }) => {
   await page.goto("?state=recovery-postsuccess-refresh-failure#setup");
-  await page.getByRole("button", { name: "Tanılama ve onarım" }).click();
+  await page.getByRole("button", { name: "Tanılama ve onarımı aç", exact: true }).click();
   await page.getByRole("button", { name: "Yerel bileşeni test et" }).click();
 
   await expect(page.getByRole("button", { name: "Tanı paketi oluştur" })).toBeVisible();
