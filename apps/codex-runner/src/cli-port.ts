@@ -21,7 +21,7 @@ const CODEX_SESSION_MAX_SCAN_ENTRIES = 512;
 const CODEX_SESSION_MAX_DIRECTORY_DEPTH = 8;
 const CODEX_CAPABILITY_PROBE_MAX_BYTES = 128_000;
 const CODEX_CAPABILITY_PROBE_MIN_TIMEOUT_MS = 5_000;
-const MINIMUM_CODEX_CLI_VERSION = [0, 148, 0] as const;
+const MINIMUM_CODEX_CLI_VERSION = [0, 147, 0] as const;
 
 export class CodexCliPortError extends Error {
   constructor(

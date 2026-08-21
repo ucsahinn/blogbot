@@ -77,9 +77,9 @@ export function EditorialDesk({
       const result = await bridge.hideDrafts(ids);
       setSelectedDraftIds(new Set());
       onWorkspaceChange(await bridge.getEditorialWorkspace());
-      setMessage(`${result.hidden} taslak masadan kaldırıldı. Kalıcı kayıtlar ve inceleme geçmişi silinmedi.`);
+      setMessage(`${result.hidden} taslak masadan gizlendi. Kalıcı kayıtlar ve inceleme geçmişi silinmedi.`);
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "Taslaklar masadan kaldırılamadı."));
+      setMessage(userFacingBridgeError(reason, "Taslaklar masadan gizlenemedi."));
     } finally {
       setHidingDrafts(false);
     }
@@ -249,7 +249,7 @@ export function EditorialDesk({
               <span>{selectedDraftIds.size} taslak seçildi</span>
               <button className="button button-secondary" type="button" disabled={hidingDrafts || selectedDraftIds.size === workspace.drafts.length} onClick={() => setSelectedDraftIds(new Set(workspace.drafts.map((draft) => draft.id)))}>Tümünü seç</button>
               <button className="button button-ghost" type="button" disabled={hidingDrafts || !selectedDraftIds.size} onClick={() => setSelectedDraftIds(new Set())}>Seçimi temizle</button>
-              <button className="button button-secondary" type="button" disabled={readOnly || hidingDrafts || !selectedDraftIds.size} onClick={() => void hideSelectedDrafts()}>{hidingDrafts ? "Kaldırılıyor…" : "Seçilenleri masadan kaldır"}</button>
+              <button className="button button-secondary" type="button" disabled={readOnly || hidingDrafts || !selectedDraftIds.size} onClick={() => void hideSelectedDrafts()}>{hidingDrafts ? "Gizleniyor…" : "Seçilenleri masadan gizle"}</button>
             </div>
           ) : null}
           {(workspace.hiddenDraftCount ?? 0) > 0 ? (

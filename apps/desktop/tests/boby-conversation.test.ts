@@ -31,8 +31,21 @@ test("Boby panel uses the existing Luna conversation bridge when it is ready", a
   assert.match(assistant, /requestBobyGuidance/u);
   assert.match(assistant, /getBobyGuidance/u);
   assert.match(assistant, /suggestedActions/u);
-  assert.match(assistant, /Merhaba, ben Boby/u);
+  assert.match(assistant, /const \[messages, setMessages\] = useState<BobyReply\[\]>\(\[\]\)/u);
   assert.match(assistant, /persistPendingBobyGuidance/u);
   assert.doesNotMatch(assistant, /localBobyReply/u);
   assert.doesNotMatch(assistant, /Yerel sırada/u);
+});
+test("Boby starts as a live conversation, not a pre-written page-specific answer", async () => {
+  const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");
+
+  assert.doesNotMatch(assistant, /function pageGuidance/u);
+  assert.doesNotMatch(assistant, /boby-quick-actions/u);
+  assert.match(assistant, /Boby yanıtı/u);
+});
+
+test("Boby renders a completed Luna message as a conversation reply, not a warning card", async () => {
+  const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");
+
+  assert.match(assistant, /finish\(\{ text: result\.reply, actions, origin: "boby" \}\)/u);
 });

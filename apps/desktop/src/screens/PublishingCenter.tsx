@@ -30,6 +30,19 @@ function slotLabel(slot: EditorialWorkspaceSnapshot["weeklySlots"][number]): str
   return `${slot.dayLabel} · ${position}. slot`;
 }
 
+
+type WeeklySlot = EditorialWorkspaceSnapshot["weeklySlots"][number];
+
+function groupSlotsByDay(slots: readonly WeeklySlot[]): Array<{ dayLabel: string; slots: WeeklySlot[] }> {
+  const groups = new Map<string, WeeklySlot[]>();
+  for (const slot of slots) {
+    const group = groups.get(slot.dayLabel) ?? [];
+    group.push(slot);
+    groups.set(slot.dayLabel, group);
+  }
+  return [...groups.entries()].map(([dayLabel, groupedSlots]) => ({ dayLabel, slots: groupedSlots }));
+}
+
 const publicationStateLabel: Record<"READY" | "BLOCKED" | "PUBLISHING", string> = {
   READY: "Yayın niyeti hazır",
   BLOCKED: "Yayın engellendi",
@@ -68,6 +81,7 @@ export function PublishingCenter({
   const [activeSlotId, setActiveSlotId] = useState("");
   const refreshRequestId = useRef(0);
   const siteMode = connectorState.mode;
+  const activeSlot = activeSlotId || workspace.weeklySlots[0]?.id;
 
   useEffect(() => {
     return () => {
@@ -176,14 +190,20 @@ export function PublishingCenter({
       </div>
       <section className="hub-panel" role="tabpanel" id={`publishing-panel-${tab}`} aria-labelledby={`publishing-tab-${tab}`}>
         {tab === "calendar" ? (
-          <div className="week-grid slot-picker" role="group" aria-label="Düzenlenecek haftalık slot">
-            {workspace.weeklySlots.map((slot) => {
+          <div className="week-grid slot-picker week-day-groups" role="group" aria-label="Düzenlenecek haftalık slot">
+            {groupSlotsByDay(workspace.weeklySlots).map(({ dayLabel, slots }) => (
+              <section className="week-day-group" key={dayLabel} aria-label={`${dayLabel} yayın slotları`}>
+                <header className="week-day-group-header">
+                  <div><strong>{dayLabel}</strong><small>{slots.filter((slot) => getSlotDraft(slot).enabled).length}/{slots.length} slot açık</small></div>
+                  <span>Bir saati seçip düzenleyin</span>
+                </header>
+                <div className="week-day-slots">
+                  {slots.map((slot) => {
               const actionReason = slotActionUnavailableReason(slot.id);
               const actionReasonId = `slot-action-unavailable-${slot.id}`;
               const legacyAssignment = slot.articleId || slot.articleTitle
                 ? `Geçmiş atama: ${slot.articleTitle ?? slot.articleId}. Bu bilgi yeni planlama yapmaz.`
                 : null;
-              const activeSlot = activeSlotId || workspace.weeklySlots[0]?.id;
               if (slot.id !== activeSlot) {
                 return (
                   <button
@@ -261,7 +281,10 @@ export function PublishingCenter({
                 {busyId === slot.id ? <div className="slot-progress" role="progressbar" aria-label={`${slot.dayLabel} slotu kaydediliyor`} aria-valuetext="Takvim ayarı kaydediliyor"><span /></div> : null}
               </article>
               );
-            })}
+                  })}
+                </div>
+              </section>
+            ))}
           </div>
         ) : null}
         {tab === "scheduled" ? (

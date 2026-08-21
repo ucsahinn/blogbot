@@ -106,6 +106,7 @@ export class SourceScanWorker {
     private readonly repository: SourceRepository,
     private readonly queue: LocalQueueRuntime,
     private readonly transport: FetchTransport,
+    private readonly onSucceeded?: () => void,
     private readonly now: () => Date = () => new Date()
   ) {}
 
@@ -154,6 +155,7 @@ export class SourceScanWorker {
         entries: analysis.entries,
         completedAt: this.now().toISOString()
       });
+      this.onSucceeded?.();
     } catch (error) {
       const classified = classifySourceScanError(error);
       await this.repository.failSourceScan(

@@ -71,6 +71,12 @@ export function ContentFlow({
   const [busyId, setBusyId] = useState("");
   const [message, setMessage] = useState("");
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
+  const [batchProgress, setBatchProgress] = useState<{
+    completed: number;
+    total: number;
+    currentTitle: string;
+    failed: number;
+  } | null>(null);
 
   const candidates = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("tr-TR");
@@ -208,12 +214,14 @@ export function ContentFlow({
     }
     setBusyId("batch");
     setMessage("");
+    setBatchProgress({ completed: 0, total: targets.length, currentTitle: targets[0]?.title ?? "", failed: 0 });
     const completed = new Set<string>();
     const failed: string[] = [];
     try {
       // The bridge is deliberately serialized: a 50-item selection must not
       // launch 50 simultaneous native/engine mutations or stale-version races.
       for (const candidate of targets) {
+        setBatchProgress({ completed: completed.size + failed.length, total: targets.length, currentTitle: candidate.title, failed: failed.length });
         try {
           if (action === "promote") await bridge.promoteCandidate(candidate.id);
           else await bridge.dismissCandidate(candidate.id);
@@ -221,6 +229,7 @@ export function ContentFlow({
         } catch {
           failed.push(candidate.title);
         }
+      setBatchProgress({ completed: completed.size + failed.length, total: targets.length, currentTitle: candidate.title, failed: failed.length });
       }
       const nextWorkspace = await bridge.getEditorialWorkspace();
       onWorkspaceChange(nextWorkspace);
@@ -321,12 +330,19 @@ export function ContentFlow({
             <span>{selectedCandidates.length} aday seçildi</span>
             <button className="button button-secondary" type="button" disabled={!candidates.length || Boolean(busyId)} onClick={selectVisibleCandidates}>Görünenleri seç</button>
             <button className="button button-ghost" type="button" disabled={!selectedCandidates.length || Boolean(busyId)} onClick={clearCandidateSelection}>Seçimi temizle</button>
-            <button className="button button-secondary" type="button" disabled={readOnly || !selectedCandidates.length || Boolean(busyId)} onClick={() => void mutateSelected("dismiss")}>Seçilenleri kapat</button>
+            <button className="button button-secondary" type="button" disabled={readOnly || !selectedCandidates.length || Boolean(busyId)} onClick={() => void mutateSelected("dismiss")}>Seçilenleri akıştan gizle</button>
             <button className="button button-primary" type="button" disabled={readOnly || !selectedCandidates.length || Boolean(busyId)} onClick={() => void mutateSelected("promote")}>Seçilmiş adayları araştır</button>
           </div>
+          {batchProgress ? (
+            <div className="candidate-batch-progress" role="progressbar" aria-label="Toplu işlem ilerlemesi" aria-valuemin={0} aria-valuemax={batchProgress.total} aria-valuenow={batchProgress.completed}>
+              <strong>{batchProgress.completed}/{batchProgress.total} aday işlendi</strong>
+              <span>{batchProgress.currentTitle}{batchProgress.failed ? ` · ${batchProgress.failed} aday değişmedi` : ""}</span>
+            </div>
+          ) : null}
           <div className="candidate-action-guidance" role="note">
             <strong>Araştırmaya almak yerel kuyruğu başlatır; hemen yayın yapmaz.</strong>
             <span>Yayın yalnızca hazır taslağı inceledikten sonra başlar; insan onayı olmadan hiçbir içerik gönderilmez.</span>
+          <button className="button button-ghost" type="button" disabled={Boolean(busyId)} onClick={() => setTab("sources")}>Yeni aday bul</button>
           </div>
           {candidates.length ? (
             <div className="candidate-grid">

@@ -88,15 +88,17 @@ test("all primary routes render without browser runtime errors", async ({ page }
   }
 });
 
-test("Editor Boby answers immediately in-panel without starting a queued task", async ({ page }) => {
+test("Editor Boby starts a clean live conversation without canned shortcuts", async ({ page }) => {
   await page.goto("#dashboard");
   await page.getByRole("button", { name: "Editör Boby'yi aç" }).click();
   const boby = page.getByRole("dialog", { name: "Editör Boby" });
-  await expect(boby).toContainText("Boby doğrudan yanıtlar ve gerekirse seni doğru yere götürür");
-  await boby.getByRole("button", { name: "Kaynak ekle" }).click();
+  await expect(boby).toContainText("Ne yapmak istediğini yaz.");
+  await expect(boby.getByRole("button", { name: "Kaynak ekle" })).toHaveCount(0);
+  const question = boby.getByRole("textbox", { name: "Boby'ye sor" });
+  await question.fill("Kaynak nasıl eklenir?");
+  await boby.getByRole("button", { name: "Sor" }).click();
   await expect(boby).toContainText("Kaynağı İçerik Akışı'nda ekle");
-  await expect(boby.getByRole("textbox", { name: "Boby'ye sor" })).toBeEnabled();
-  await expect(boby).not.toContainText("Boby düşünüyor");
+  await expect(question).toBeEnabled();
   await expect(boby).not.toContainText("sırada");
 });
 
@@ -1048,10 +1050,10 @@ test("editorial desk can hide a selected draft without deleting its immutable re
   await expect(draft).toBeVisible();
 
   await page.getByRole("checkbox", { name: /Yeni teknoloji geçişinde gözden kaçan üç risk taslağını seç/u }).check();
-  await page.getByRole("button", { name: "Seçilenleri masadan kaldır" }).click();
+  await page.getByRole("button", { name: "Seçilenleri masadan gizle" }).click();
 
   await expect(draft).toHaveCount(0);
-  await expect(page.getByRole("status")).toContainText("1 taslak masadan kaldırıldı");
+  await expect(page.getByRole("status")).toContainText("1 taslak masadan gizlendi");
 
   await page.getByRole("button", { name: "Gizlenen taslakları geri getir" }).click();
   await expect(draft).toBeVisible();
@@ -1115,7 +1117,7 @@ test("candidate triage presents a simple priority, source date, and accessible b
   await expect(page.getByRole("button", { name: "Görünenleri seç" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Seçimi temizle" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Seçilmiş adayları araştır" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Seçilenleri kapat" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Seçilenleri akıştan gizle" })).toBeVisible();
 });
 
 test("bulk research accepts every eligible selected candidate into the local queue", async ({ page }) => {

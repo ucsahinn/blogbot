@@ -5291,6 +5291,30 @@ strong {
   gap: 10px;
 }
 
+.candidate-batch-progress {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 10px;
+  align-items: baseline;
+  margin: 0 0 12px;
+  padding: 10px 13px;
+  border: 1px solid color-mix(in srgb, var(--blue) 40%, var(--line));
+  border-radius: 10px;
+  background: var(--blue-soft);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.candidate-batch-progress strong {
+  color: var(--ink);
+}
+
+.candidate-batch-progress span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .candidate-action-guidance {
   display: grid;
   gap: 4px;
@@ -5761,6 +5785,52 @@ strong {
   color: var(--ink-soft);
 }
 
+.week-day-groups {
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.week-day-group {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.week-day-group-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.week-day-group-header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.week-day-group-header strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.week-day-group-header small {
+  color: var(--ink-muted);
+}
+
+.week-day-slots {
+  display: grid;
+  gap: 8px;
+}
+
+.week-day-slots .slot-card {
+  min-height: 0;
+}
 .slot-picker {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   align-items: start;

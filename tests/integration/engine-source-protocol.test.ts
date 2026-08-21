@@ -295,7 +295,8 @@ test("candidate.list reads one globally bounded recent-entry slice instead of tr
         version: 1
       }];
     },
-    async listRecentEntriesBounded() {
+    async listRecentEntriesBounded(limit: number) {
+      assert.equal(limit, 80, "the interactive 50-candidate screen should not decrypt a 200-item feed slice");
       return [{
         sourceId: "source-candidate-catalog",
         externalId: "story-1",
@@ -367,6 +368,10 @@ test("candidate.list shares one cold catalog projection between concurrent deskt
   assert.equal(workspaceResponse.ok, true);
   assert.equal((bootstrapResponse.candidates as Array<{ title?: string }>)[0]?.title, "One cold catalog projection");
   assert.equal((workspaceResponse.candidates as Array<{ title?: string }>)[0]?.title, "One cold catalog projection");
+  await new Promise<void>((resolve) => setTimeout(resolve, 2_100));
+  const warmResponse = await handle({ version: 1, id: "candidate-list-warm-cache", kind: "candidate.list" });
+  assert.equal(warmResponse.ok, true);
+  assert.equal(recentEntryReads, 1, "a recent interactive refresh must reuse the projection instead of rebuilding it");
 });
 
 test("persistent engine lists local sources with trust and rights blockers", async (t) => {

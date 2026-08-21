@@ -528,6 +528,29 @@ test("draft.create with NEXT_SLOT binds the durable job to an enabled custom wee
   assert.ok(Date.parse(String(job.metadata?.scheduledAt)) > Date.now());
 });
 
+test("draft.create with NEXT_SLOT uses the visible default weekly rhythm before any calendar save", async () => {
+  const repository = new InMemoryBackendStore();
+  const handle = createEngineProtocol(repository);
+  const response = await handle(envelope({
+    version: 1,
+    requestId: "draft-next-slot-default-1",
+    idempotencyKey: "draft-next-slot-default-1",
+    expectedVersion: 0,
+    kind: "DRAFT.CREATE",
+    payload: {
+      draftId: "draft-next-slot-default-1",
+      instruction: "Varsayılan takvim ritmine göre içerik hazırla",
+      sourceIds: ["source-1"],
+      urls: [],
+      section: "haberler",
+      articleType: "news",
+      scheduleIntent: "NEXT_SLOT"
+    }
+  }));
+
+  assert.equal(response.ok, true);
+  assert.equal(typeof (await repository.getJob("draft-next-slot-default-1")).metadata?.scheduledAt, "string");
+});
 test("draft.create with NEXT_SLOT considers every enabled slot of the same weekday", async () => {
   const repository = new InMemoryBackendStore();
   await repository.setLocalState("desktop.editorial", {

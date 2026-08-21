@@ -105,7 +105,10 @@ const MAX_BACKUP_INPUT_BYTES = 128 * 1024 * 1024;
 // Candidate triage is a projection, not a full archive browser. Reading and
 // decrypting an unbounded feed catalog on every desktop refresh was the main
 // source of multi-second freezes on large local workspaces.
-const MAX_CANDIDATE_ENTRIES = 200;
+const MAX_CANDIDATE_ENTRIES = 80;
+// Cache the bounded projection across ordinary navigation. Successful scans bump
+// the epoch below, so source changes still become visible immediately.
+const CANDIDATE_CACHE_TTL_MS = 30_000;
 // `backup.restore` runs on the serialized mutation chain, so a restore writer
 // that never exits would freeze every later mutation and the graceful shutdown
 // that awaits them. Stay well inside the host's 5 minute maintenance budget so
@@ -1195,6 +1198,8 @@ export interface EngineProtocolOptions {
   sourceRepository?: SourceRepository;
   sourceTransport?: FetchTransport;
   sourceScanCoordinator?: SourceScanCoordinator;
+  /** Changes whenever a completed source scan makes candidate data stale. */
+  candidateRefreshEpoch?: () => number;
   codexCoordinator?: CodexWorkerCoordinator;
   /** Persistent runtimes provide an application-owned media directory. */
   mediaDataDir?: string;
@@ -1379,7 +1384,7 @@ export function createEngineProtocol(
   // The desktop asks for the same candidate projection from bootstrap,
   // workspace and the active-draft poll. Keep that read cheap and stable for
   // a short window; mutations still become visible on the next refresh.
-  let candidateCache: { expiresAt: number; candidates: Record<string, unknown>[] } | undefined;
+  let candidateCache: { expiresAt: number; epoch: number; candidates: Record<string, unknown>[] } | undefined;
   let candidateRefreshInFlight: Promise<Record<string, unknown>[]> | undefined;
   // Serializes native claims inside this engine process. The durable outbox
   // state prevents later reclaims; this guard closes the pre-update await gap.
@@ -1546,7 +1551,8 @@ export function createEngineProtocol(
         );
       }
       const now = Date.now();
-      if (candidateCache && candidateCache.expiresAt > now) {
+      const candidateRefreshEpoch = options.candidateRefreshEpoch?.() ?? 0;
+      if (candidateCache && candidateCache.expiresAt > now && candidateCache.epoch === candidateRefreshEpoch) {
         return {
           version: 1,
           id: input.id,
@@ -1684,7 +1690,7 @@ export function createEngineProtocol(
           scoreReasons: ranked.scoreReasons
         }))
         .slice(0, 50);
-      candidateCache = { expiresAt: Date.now() + 2_000, candidates };
+      candidateCache = { expiresAt: Date.now() + CANDIDATE_CACHE_TTL_MS, epoch: candidateRefreshEpoch, candidates };
       resolveRefresh(candidates);
       return {
         version: 1,
@@ -3257,9 +3263,23 @@ async function resolveNextSlot(
 ): Promise<string | undefined> {
   if (payload.scheduleIntent !== "NEXT_SLOT" || typeof payload.scheduledAt === "string") return undefined;
   const state = await repository.getLocalState("desktop.editorial");
-  const schedule = isRecord(state) && isRecord(state.schedule) && isRecord(state.schedule.slots)
+  const savedSchedule = isRecord(state) && isRecord(state.schedule) && isRecord(state.schedule.slots)
     ? state.schedule.slots
     : {};
+  // Keep the engine's first-use behavior aligned with the visible weekly
+  // calendar. A saved schedule always wins, while an empty local workspace
+  // uses one clearly enabled slot per day until the editor customizes it.
+  const schedule = Object.keys(savedSchedule).length > 0
+    ? savedSchedule
+    : {
+      "slot-mon-1": { enabled: true, time: "10:00" },
+      "slot-tue-1": { enabled: true, time: "16:30" },
+      "slot-wed-1": { enabled: true, time: "10:00" },
+      "slot-thu-1": { enabled: true, time: "16:30" },
+      "slot-fri-1": { enabled: true, time: "10:00" },
+      "slot-sat-1": { enabled: true, time: "11:00" },
+      "slot-sun-1": { enabled: true, time: "11:00" }
+    };
   const dayBySlot: Record<string, number> = {
     "slot-mon": 1, "slot-tue": 2, "slot-wed": 3, "slot-thu": 4,
     "slot-fri": 5, "slot-sat": 6, "slot-sun": 0
@@ -4254,6 +4274,7 @@ export async function createPersistentEngineProtocol(
   );
   let automaticBackupTimer: ReturnType<typeof setInterval> | undefined;
   let automaticBackupCatchUpTimer: ReturnType<typeof setTimeout> | undefined;
+  let candidateRefreshEpoch = 0;
   try {
     await queue.start();
     await sourceScanCoordinator.recover();
@@ -4261,7 +4282,8 @@ export async function createPersistentEngineProtocol(
       await new SourceScanWorker(
         sourceRepository,
         queue,
-        sourceTransport
+        sourceTransport,
+        () => { candidateRefreshEpoch += 1; }
       ).start();
     }
     if (options.startSourceScheduler === true) {
@@ -4546,6 +4568,7 @@ export async function createPersistentEngineProtocol(
     sourceRepository,
     sourceTransport,
     sourceScanCoordinator,
+    candidateRefreshEpoch: () => candidateRefreshEpoch,
     publicationReady,
     nativePublicationBroker: options.nativePublicationBroker === true,
     ...(options.nativePublicationRuntimeId ? { nativePublicationRuntimeId: options.nativePublicationRuntimeId } : {}),

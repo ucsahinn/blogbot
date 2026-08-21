@@ -24,7 +24,7 @@ export const defaultCodexRoleModels: CodexRoleModels = {
   // Codex CLI account entitlements decide the available model. Do not invent
   // role-specific model identifiers: an unavailable name makes a healthy
   // local runner fail before it can emit structured output.
-  FAST: "default",
+  FAST: "gpt-5.6-luna",
   DEFAULT: "default",
   DEEP_REVIEW: "default"
 };

@@ -110,6 +110,14 @@ test("SOURCE.SCAN persists successful feed entries and exposes partial batch fai
     }
   });
 
+  const beforeScanCandidates = await runtime.handle({
+    version: 1,
+    id: "scan-candidate-cache-before",
+    kind: "candidate.list"
+  });
+  assert.equal(beforeScanCandidates.ok, true);
+  assert.deepEqual(beforeScanCandidates.candidates, []);
+
   const command = {
     version: 1,
     requestId: "scan-batch-request-1",
@@ -140,6 +148,14 @@ test("SOURCE.SCAN persists successful feed entries and exposes partial batch fai
       runs.some((run) => run.state === "FAILED") &&
       runs.some((run) => run.state === "REJECTED")
   );
+  const afterScanCandidates = await runtime.handle({
+    version: 1,
+    id: "scan-candidate-cache-after",
+    kind: "candidate.list"
+  });
+  assert.equal(afterScanCandidates.ok, true);
+  assert.equal((afterScanCandidates.candidates as Array<{ sourceId: string }>).some((candidate) => candidate.sourceId === "source-a"), true);
+
   assert.deepEqual(
     settled.map(({ sourceId, state }) => ({ sourceId, state })),
     [

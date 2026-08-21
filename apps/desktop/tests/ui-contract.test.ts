@@ -241,6 +241,17 @@ test("weekly cadence configures only future NEXT_SLOT drafts and treats legacy a
   assert.doesNotMatch(publishing, /articleId: selectedPost/u);
 });
 
+test("weekly calendar groups the five editable slots under each day", async () => {
+  const publishing = await readFile(source("screens", "PublishingCenter.tsx"), "utf8");
+  const styles = await readFile(source("styles.css"), "utf8");
+
+  assert.match(publishing, /groupSlotsByDay/u);
+  assert.match(publishing, /week-day-groups/u);
+  assert.match(publishing, /week-day-group-header/u);
+  assert.match(styles, /\.week-day-groups\s*\{/u);
+  assert.match(styles, /\.week-day-group\s*\{/u);
+});
+
 test("candidate triage uses dense comparable rows and falls back cleanly on narrow screens", async () => {
   const styles = await readFile(source("styles.css"), "utf8");
 
@@ -254,10 +265,14 @@ test("candidate triage uses dense comparable rows and falls back cleanly on narr
 test("source flow explains one simple editorial path instead of treating checks as user gates", async () => {
   const sourceCenter = await readFile(source("screens", "SourceCenter.tsx"), "utf8");
   const flow = await readFile(source("screens", "ContentFlow.tsx"), "utf8");
+  const styles = await readFile(source("styles.css"), "utf8");
 
   assert.match(sourceCenter, /Kaynak ekle[\s\S]*?Tara[\s\S]*?Taslak hazırla[\s\S]*?İncele ve onayla/u);
   assert.match(flow, /Araştırmaya al/u);
   assert.match(flow, /Yayın yalnızca hazır taslağı inceledikten sonra başlar/u);
+  assert.match(flow, /role="progressbar"[\s\S]*?Toplu işlem ilerlemesi/u);
+  assert.match(flow, /Yeni aday bul/u);
+  assert.match(styles, /\.candidate-batch-progress\s*\{/u);
 });
 
 test("source catalog does not poll the local engine while the screen is idle", async () => {

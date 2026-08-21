@@ -35,7 +35,8 @@ if (isCapabilityProbe && capabilityFailureMarker && existsSync(capabilityFailure
 }
 
 if (args.includes("--version")) {
-  process.stdout.write(args.includes("--unsupported-version") ? "codex-cli 0.147.0\n" : "codex-cli 0.148.0\n");
+  const version = args.includes("--too-old-version") ? "0.146.0" : args.includes("--unsupported-version") ? "0.147.0" : "0.148.0";
+  process.stdout.write("codex-cli " + version + "\n");
   process.exit(0);
 }
 if (args.includes("--help") && args.includes("exec")) {

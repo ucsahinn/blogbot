@@ -21,7 +21,7 @@ interface BobyAssistantProps {
 interface BobyReply {
   text: string;
   actions?: Array<{ label: string; page: PageId }>;
-  origin?: "system";
+  origin?: "boby" | "system";
   kind?: "pending";
 }
 
@@ -35,22 +35,8 @@ const bobyActionPages: Record<string, PageId> = {
   OPEN_SETUP: "setup"
 };
 
-function pageGuidance(activePage: PageId): BobyReply {
-  if (activePage === "content" || activePage === "content-candidates" || activePage === "instant") {
-    return { text: "İçerik Akışı'ndasın. Kaynak, aday, araştırma ya da taslak konusunda ne yapmak istediğini yaz.", actions: [{ label: "Yeni taslak aç", page: "instant" }] };
-  }
-  if (activePage === "editorial" || activePage === "editorial-review") {
-    return { text: "Editoryal Masa'dasın. İnceleme, görsel, SEO ya da yeni revizyon için hemen yol gösterebilirim.", actions: [{ label: "İçerik Akışı'nı aç", page: "content" }] };
-  }
-  if (activePage === "publishing") {
-    return { text: "Takvim ve Yayın ekranındasın. Onaylı içeriği, zamanı veya yayın öncesi kontrolü sorabilirsin.", actions: [{ label: "İncelemeyi aç", page: "editorial-review" }] };
-  }
-  return { text: "Merhaba, ben Boby. Nerede kaldığını ya da ne üretmek istediğini yaz; birlikte netleştirelim.", actions: [{ label: "İçerik Akışı'nı aç", page: "content" }] };
-}
-
 export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, onClose, onNavigate }: BobyAssistantProps) {
-  const initialReply = useMemo(() => pageGuidance(activePage), [activePage]);
-  const [messages, setMessages] = useState<BobyReply[]>([initialReply]);
+  const [messages, setMessages] = useState<BobyReply[]>([]);
   const [prompt, setPrompt] = useState("");
   const [responding, setResponding] = useState(false);
   const [pendingGuidanceId, setPendingGuidanceId] = useState<string | null>(() => restorePendingBobyGuidance(window.sessionStorage));
@@ -84,7 +70,7 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
             const page = bobyActionPages[action.id];
             return page ? [{ label: action.label, page }] : [];
           });
-          finish({ text: result.reply, actions, origin: "system" });
+          finish({ text: result.reply, actions, origin: "boby" });
           return;
         }
         if (result.state === "FAILED") {
@@ -133,7 +119,7 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
       <div className={"boby-availability boby-availability-" + availability.tone} role="status" aria-live="polite">
         <span aria-hidden="true">✓</span><div><strong>{availability.label}</strong><small>{availability.detail}</small></div>
       </div>
-      <p id="boby-purpose" className="boby-purpose">Ne yapmak istediğini yaz; Boby doğrudan yanıtlar ve gerekirse seni doğru yere götürür.</p>
+      <p id="boby-purpose" className="boby-purpose">Ne yapmak istediğini yaz. Boby yanıtı bu konuşmada kalır; uygun olduğunda doğrudan ilgili ekranı da açabilir.</p>
       <div className="boby-messages" aria-live="polite">
         {messages.map((message, index) => (
           <div key={message.text + "-" + index} className={(message.text.startsWith("Sen:") ? "boby-message boby-message-user" : "boby-message") + (message.origin ? " boby-message-" + message.origin : "")}>
@@ -141,12 +127,6 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
             {message.actions?.map((action) => <button key={action.page + action.label} type="button" onClick={() => { onNavigate(action.page); onClose(); }}>{action.label}</button>)}
           </div>
         ))}
-      </div>
-      <div className="boby-quick-actions" aria-label="Boby hızlı yardımları">
-        <button type="button" disabled={responding || !!pendingGuidanceId} onClick={() => void respond("Kaynak eklemek istiyorum")}>Kaynak ekle</button>
-        <button type="button" disabled={responding || !!pendingGuidanceId} onClick={() => void respond("Bu ekranda sıradaki en iyi iş ne?")}>Sıradaki iş</button>
-        <button type="button" disabled={responding || !!pendingGuidanceId} onClick={() => void respond("Bu hafta yayın planımı düzenle")}>Planı düzenle</button>
-        <button type="button" disabled={responding || !!pendingGuidanceId} onClick={() => void respond("Taslağı incelemeye nasıl hazırlarım?")}>İncelemeye hazırla</button>
       </div>
       <form className="boby-composer" onSubmit={(event) => { event.preventDefault(); const question = prompt.trim(); if (!question) return; void respond(question); setPrompt(""); }}>
         <label htmlFor="boby-question">Boby'ye sor</label>

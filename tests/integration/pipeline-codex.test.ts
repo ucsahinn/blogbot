@@ -30,8 +30,8 @@ const isolatedCodexHome = join(tmpdir(), "blogbot-isolated-codex-home");
 const expectedRoles: ReadonlyArray<
   readonly [CodexTaskKind, "FAST" | "DEFAULT" | "DEEP_REVIEW", string]
 > = [
-  ["CLASSIFY", "FAST", "default"],
-  ["DEDUPE", "FAST", "default"],
+  ["CLASSIFY", "FAST", "gpt-5.6-luna"],
+  ["DEDUPE", "FAST", "gpt-5.6-luna"],
   ["RESEARCH", "DEFAULT", "default"],
   ["WRITE_TR", "DEFAULT", "default"],
   ["LOCALIZE_EN", "DEFAULT", "default"],
@@ -135,7 +135,7 @@ test("accepts schema-bound JSON from the real Codex agent_message event shape", 
   assert.deepEqual(result, {
     status: "COMPLETED",
     role: "FAST",
-    model: "default",
+    model: "gpt-5.6-luna",
     output: { kind: "news" }
   });
 });
@@ -251,19 +251,36 @@ test("Codex CLI port uses an isolated cwd, allowlisted environment, and final ou
   );
 });
 
-test("Codex CLI startup rejects an unsupported version before accepting task output", async () => {
+test("Codex CLI 0.147 runs when all required capabilities are present", async () => {
   const port = createCodexCliPort({
     command: process.execPath,
     commandPrefixArgs: [
       fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
       "--unsupported-version"
     ],
-    codexHome: await mkdtemp(join(tmpdir(), "blogbot-codex-unsupported-version-")),
+    codexHome: await mkdtemp(join(tmpdir(), "blogbot-codex-legacy-compatible-version-")),
+    timeoutMs: 5_000
+  });
+  const events = [];
+  for await (const event of port.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
+    events.push(event);
+  }
+  assert.ok(events.some((event) => event.type === "output.completed"));
+});
+
+test("Codex CLI 0.146 remains rejected even when probe output looks otherwise compatible", async () => {
+  const port = createCodexCliPort({
+    command: process.execPath,
+    commandPrefixArgs: [
+      fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
+      "--too-old-version"
+    ],
+    codexHome: await mkdtemp(join(tmpdir(), "blogbot-codex-too-old-version-")),
     timeoutMs: 5_000
   });
   await assert.rejects(async () => {
-    for await (const _event of port.run({ model: "default", input: {}, outputSchema: { type: "object" } })) {
-      // Startup must fail before task JSONL is consumed.
+    for await (const _event of port.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
+      // This runtime must fail before task JSONL is consumed.
     }
   }, (error: unknown) => error instanceof CodexCliPortError && error.code === "UNSUPPORTED_CLI");
 });
@@ -279,7 +296,7 @@ test("Codex CLI startup rejects a runtime missing a required disable capability"
     timeoutMs: 5_000
   });
   await assert.rejects(async () => {
-    for await (const _event of port.run({ model: "default", input: {}, outputSchema: { type: "object" } })) {
+    for await (const _event of port.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
       // Startup must fail before task JSONL is consumed.
     }
   }, (error: unknown) => error instanceof CodexCliPortError && error.code === "UNSUPPORTED_CLI");
@@ -321,7 +338,7 @@ test("session retention deletes only stale app-owned JSONL and resumes a recent 
     timeoutMs: 5_000
   });
   for await (const _event of port.run({
-    model: "default",
+    model: "gpt-5.6-luna",
     input: {},
     outputSchema: { type: "object" },
     persistSession: true,
@@ -341,7 +358,7 @@ test("session retention deletes only stale app-owned JSONL and resumes a recent 
   );
 
   for await (const _event of port.run({
-    model: "default",
+    model: "gpt-5.6-luna",
     input: {},
     outputSchema: { type: "object" },
     persistSession: true,
@@ -376,7 +393,7 @@ test("a new persistent session evicts the oldest app-owned record before reachin
     timeoutMs: 5_000
   });
   for await (const _event of port.run({
-    model: "default",
+    model: "gpt-5.6-luna",
     input: {},
     outputSchema: { type: "object" },
     persistSession: true
@@ -565,7 +582,7 @@ test("a transient capability probe failure is not cached across a later user ret
     });
     await assert.rejects(
       async () => {
-        for await (const _event of failedPort.run({ model: "default", input: {}, outputSchema: { type: "object" } })) {
+        for await (const _event of failedPort.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
           // The marker makes this first capability probe fail transiently.
         }
       },
@@ -580,7 +597,7 @@ test("a transient capability probe failure is not cached across a later user ret
       timeoutMs: 5_000
     });
     const events = [];
-    for await (const event of recoveredPort.run({ model: "default", input: {}, outputSchema: { type: "object" } })) {
+    for await (const event of recoveredPort.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
       events.push(event);
     }
     assert.ok(events.some((event) => event.type === "output.completed"));
@@ -609,7 +626,7 @@ test("concurrent capability probes with different bounded budgets do not share a
 
   const shortRun = assert.rejects(
     async () => {
-      for await (const _event of shortPort.run({ model: "default", input: {}, outputSchema: { type: "object" } })) {
+      for await (const _event of shortPort.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
         // The normalized five-second startup budget is intentionally too short.
       }
     },
@@ -618,7 +635,7 @@ test("concurrent capability probes with different bounded budgets do not share a
   await new Promise((resolve) => setTimeout(resolve, 100));
   const longRun = (async () => {
     const events = [];
-    for await (const event of longPort.run({ model: "default", input: {}, outputSchema: { type: "object" } })) {
+    for await (const event of longPort.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
       events.push(event);
     }
     assert.ok(events.some((event) => event.type === "output.completed"));
@@ -800,7 +817,7 @@ test("moves authentication and usage limits to WAITING_CODEX without a fallback 
       status: "WAITING_CODEX",
       reason: expectedReason,
       role: "FAST",
-      model: "default"
+      model: "gpt-5.6-luna"
     });
   }
 });

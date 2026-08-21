@@ -6552,6 +6552,12 @@ pub async fn get_editorial_workspace(
                 "articleType": candidate.get("articleType").cloned().unwrap_or(json!("news")),
                 "confidence": candidate.get("confidence").cloned().unwrap_or(json!(0)),
                 "duplicateScore": candidate.get("duplicateScore").cloned().unwrap_or(json!(0)),
+                "sourceSufficiencyScore": candidate.get("sourceSufficiencyScore").cloned().unwrap_or(Value::Null),
+                "freshnessScore": candidate.get("freshnessScore").cloned().unwrap_or(Value::Null),
+                "originalityScore": candidate.get("originalityScore").cloned().unwrap_or(Value::Null),
+                "topicFitScore": candidate.get("topicFitScore").cloned().unwrap_or(Value::Null),
+                "rankingScore": candidate.get("rankingScore").cloned().unwrap_or(Value::Null),
+                "scoreReasons": candidate.get("scoreReasons").cloned().unwrap_or_else(|| json!([])),
                 "publishedAt": candidate.get("publishedAt").cloned().unwrap_or(Value::Null),
                 "discoveredAt": candidate.get("discoveredAt").cloned().unwrap_or(Value::Null),
                 "state": state
