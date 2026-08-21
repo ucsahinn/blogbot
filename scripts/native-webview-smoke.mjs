@@ -64,7 +64,8 @@ const requiredNativeReadContracts = {
     optional: ["migration"]
   },
   get_editorial_workspace: {
-    required: ["sync", "today", "candidates", "drafts", "weeklySlots", "scheduled", "history", "failures", "codexRoles", "preferences", "systemHealth"]
+    required: ["sync", "today", "candidates", "drafts", "weeklySlots", "scheduled", "history", "failures", "codexRoles", "preferences", "systemHealth"],
+    optional: ["hiddenDraftCount"]
   },
   get_operations: { required: ["events", "schedule", "worker", "publisher"] },
   get_engine_diagnostics: { required: ["path", "lines", "bridgeError"] },

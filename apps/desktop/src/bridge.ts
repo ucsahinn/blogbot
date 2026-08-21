@@ -171,6 +171,9 @@ export interface BlogbotBridge {
     job: { id?: string } | null;
   }>;
   dismissCandidate(candidateId: string): Promise<{ ok: true }>;
+  /** Hides local desk rows without deleting their immutable editorial records. */
+  hideDrafts(draftIds: readonly string[]): Promise<{ ok: true; hidden: number }>;
+  restoreHiddenDrafts(): Promise<{ ok: true; restored: number }>;
   retryJob(jobId: string): Promise<{ ok: true }>;
   requestRevisionEdit(input: {
     revisionId: string;
@@ -452,6 +455,8 @@ export function createInvokeBridge(
       mutate("promote_candidate", { candidateId }),
     dismissCandidate: (candidateId) =>
       mutate("dismiss_candidate", { candidateId }),
+    hideDrafts: (draftIds) => mutate("hide_drafts", { draftIds }),
+    restoreHiddenDrafts: () => mutate("restore_hidden_drafts"),
     retryJob: (jobId) => mutate("retry_job", { jobId }),
     requestRevisionEdit: (input) => mutate("request_revision_edit", input),
     repairRevisionMedia: (revisionId) =>
@@ -627,7 +632,7 @@ export function createCoalescingBridge(
   const invalidatingMutations = new Set([
     "installUnsignedUpdate", "recoverLocalWorkspace", "startLocalDev",
     "stopLocalDev", "startCodexLogin", "saveSetupConnector", "startGitHubDeviceFlow", "setAutostart",
-    "sendTestNotification", "promoteCandidate", "dismissCandidate", "retryJob",
+    "sendTestNotification", "promoteCandidate", "dismissCandidate", "hideDrafts", "restoreHiddenDrafts", "retryJob",
     "requestRevisionEdit", "repairRevisionMedia", "updateScheduleSlot", "saveDesktopPreferences",
     "scanSource", "scanAllSources", "saveSources", "reviewSource",
     "createInstantDraft", "approveRevision", "revokeApproval", "approveHighRiskRevision",

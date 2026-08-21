@@ -6696,9 +6696,26 @@ strong {
 
 .draft-row-with-action {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
   align-items: stretch;
+}
+
+.draft-row-select {
+  display: grid;
+  place-items: center;
+  min-width: 36px;
+  padding: 0 2px;
+}
+
+.draft-row-select input {
+  inline-size: 18px;
+  block-size: 18px;
+  accent-color: var(--editorial-orange);
+}
+
+.editorial-bulk-actions {
+  margin-bottom: 12px;
 }
 
 .draft-row-with-action .draft-row {

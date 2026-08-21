@@ -47,6 +47,8 @@ fn main() {
         "get_editorial_workspace",
         "promote_candidate",
         "dismiss_candidate",
+        "hide_drafts",
+        "restore_hidden_drafts",
         "retry_job",
         "request_revision_edit",
         "update_schedule_slot",

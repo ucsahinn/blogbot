@@ -44,6 +44,9 @@ export function EditorialDesk({
     setTab(initialTab);
   }
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | undefined>();
+  const [selectedDraftIds, setSelectedDraftIds] = useState<ReadonlySet<string>>(new Set());
+  const [hidingDrafts, setHidingDrafts] = useState(false);
+  const [restoringDrafts, setRestoringDrafts] = useState(false);
   const [retryingDraftId, setRetryingDraftId] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState(initialMessage);
@@ -55,6 +58,46 @@ export function EditorialDesk({
     .filter((draft) => draft.state === "DRAFTING" || draft.state === "NEEDS_SOURCE")
     .map((draft) => `${draft.id}:${draft.state}:${draft.detail}:${draft.updatedAt}`)
     .join("|");
+
+  const toggleDraftSelection = (draftId: string, checked: boolean) => {
+    setSelectedDraftIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(draftId);
+      else next.delete(draftId);
+      return next;
+    });
+  };
+
+  const hideSelectedDrafts = async () => {
+    const ids = [...selectedDraftIds].filter((id) => workspace.drafts.some((draft) => draft.id === id));
+    if (!ids.length) return;
+    setHidingDrafts(true);
+    setMessage("");
+    try {
+      const result = await bridge.hideDrafts(ids);
+      setSelectedDraftIds(new Set());
+      onWorkspaceChange(await bridge.getEditorialWorkspace());
+      setMessage(`${result.hidden} taslak masadan kaldırıldı. Kalıcı kayıtlar ve inceleme geçmişi silinmedi.`);
+    } catch (reason) {
+      setMessage(userFacingBridgeError(reason, "Taslaklar masadan kaldırılamadı."));
+    } finally {
+      setHidingDrafts(false);
+    }
+  };
+
+  const restoreHiddenDrafts = async () => {
+    setRestoringDrafts(true);
+    setMessage("");
+    try {
+      const result = await bridge.restoreHiddenDrafts();
+      onWorkspaceChange(await bridge.getEditorialWorkspace());
+      setMessage(`${result.restored} gizlenen taslak yeniden masada gösteriliyor.`);
+    } catch (reason) {
+      setMessage(userFacingBridgeError(reason, "Gizlenen taslaklar geri getirilemedi."));
+    } finally {
+      setRestoringDrafts(false);
+    }
+  };
 
   useEffect(() => {
     if (!draftIdToSync) return;
@@ -201,6 +244,20 @@ export function EditorialDesk({
       </div>
       {tab === "drafts" ? (
         <section className="hub-panel" role="tabpanel" id="editorial-panel-drafts" aria-labelledby="editorial-tab-drafts">
+          {workspace.drafts.length ? (
+            <div className="candidate-bulk-actions editorial-bulk-actions" aria-label="Seçili taslak işlemleri">
+              <span>{selectedDraftIds.size} taslak seçildi</span>
+              <button className="button button-secondary" type="button" disabled={hidingDrafts || selectedDraftIds.size === workspace.drafts.length} onClick={() => setSelectedDraftIds(new Set(workspace.drafts.map((draft) => draft.id)))}>Tümünü seç</button>
+              <button className="button button-ghost" type="button" disabled={hidingDrafts || !selectedDraftIds.size} onClick={() => setSelectedDraftIds(new Set())}>Seçimi temizle</button>
+              <button className="button button-secondary" type="button" disabled={readOnly || hidingDrafts || !selectedDraftIds.size} onClick={() => void hideSelectedDrafts()}>{hidingDrafts ? "Kaldırılıyor…" : "Seçilenleri masadan kaldır"}</button>
+            </div>
+          ) : null}
+          {(workspace.hiddenDraftCount ?? 0) > 0 ? (
+            <div className="editorial-hidden-drafts">
+              <span>{workspace.hiddenDraftCount} taslak bu masadan gizlendi.</span>
+              <button className="button button-ghost" type="button" disabled={readOnly || restoringDrafts} onClick={() => void restoreHiddenDrafts()}>{restoringDrafts ? "Geri getiriliyor…" : "Gizlenen taslakları geri getir"}</button>
+            </div>
+          ) : null}
           <div className="draft-list">
             {hasPendingDraft ? (
               <article className="draft-row pending-draft-card" aria-label="Araştırma kuyruğundaki taslak" aria-busy="true">
@@ -220,6 +277,10 @@ export function EditorialDesk({
               const canRetry = !draft.reviewable && draft.nextAction === "RETRY";
               const status = executionLabel(draft);
               return <article className="draft-row-with-action" key={draft.id} aria-label={!draft.reviewable ? `${status}: ${draft.titleTr}` : undefined}>
+              <label className="draft-row-select">
+                <input type="checkbox" checked={selectedDraftIds.has(draft.id)} onChange={(event) => toggleDraftSelection(draft.id, event.target.checked)} aria-label={`${draft.titleTr} taslağını seç`} />
+                <span className="sr-only">{draft.titleTr} taslağını seç</span>
+              </label>
               <button
                 className="draft-row"
                 type="button"

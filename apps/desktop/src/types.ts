@@ -570,6 +570,8 @@ export interface EditorialWorkspaceSnapshot {
   today: TodayWorkItem[];
   candidates: CandidateView[];
   drafts: DraftView[];
+  /** Local-only count of immutable desk rows the editor chose to hide. */
+  hiddenDraftCount?: number;
   weeklySlots: WeeklySlotView[];
   scheduled: ScheduledPublicationView[];
   history: PublicationHistoryView[];

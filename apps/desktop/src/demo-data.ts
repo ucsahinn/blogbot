@@ -632,6 +632,7 @@ export function createDemoTransport(): InvokeTransport {
   const demoReview = structuredClone(review);
   const demoOperations = structuredClone(operations);
   const editorialWorkspace = createEditorialWorkspaceDemo();
+  const hiddenDrafts = new Map<string, (typeof editorialWorkspace.drafts)[number]>();
   const demoCandidateScores: Record<string, {
     sourceSufficiencyScore: number;
     freshnessScore: number;
@@ -1239,6 +1240,26 @@ export function createDemoTransport(): InvokeTransport {
         }
         editorialWorkspace.preferences = structuredClone(preferences);
         return { ok: true };
+      }
+      case "hide_drafts": {
+        const draftIds = Array.isArray(args?.draftIds)
+          ? args.draftIds.filter((value): value is string => typeof value === "string")
+          : [];
+        const selected = new Set(draftIds);
+        editorialWorkspace.drafts = editorialWorkspace.drafts.filter((draft) => {
+          if (selected.has(draft.id)) hiddenDrafts.set(draft.id, draft);
+          return !selected.has(draft.id);
+        });
+        editorialWorkspace.hiddenDraftCount = hiddenDrafts.size;
+        return { ok: true, hidden: draftIds.length };
+      }
+      case "restore_hidden_drafts": {
+        const restored = hiddenDrafts.size;
+        editorialWorkspace.drafts.push(...hiddenDrafts.values());
+        editorialWorkspace.drafts.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+        hiddenDrafts.clear();
+        editorialWorkspace.hiddenDraftCount = 0;
+        return { ok: true, restored };
       }
       case "complete_onboarding":
         demoBootstrap.onboardingComplete = true;

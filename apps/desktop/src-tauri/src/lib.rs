@@ -128,6 +128,8 @@ pub fn run() {
             commands::get_editorial_workspace,
             commands::promote_candidate,
             commands::dismiss_candidate,
+            commands::hide_drafts,
+            commands::restore_hidden_drafts,
             commands::retry_job,
             commands::request_revision_edit,
             commands::update_schedule_slot,

@@ -6545,6 +6545,21 @@ pub async fn get_editorial_workspace(
         })
         .collect::<Vec<_>>();
     drafts = append_pending_draft_jobs(drafts, &jobs);
+    // Hiding a row is a local desk preference, not deletion. Immutable
+    // revisions, durable jobs and their approval history remain available to
+    // Operations and can never be silently destroyed by a list action.
+    let hidden_draft_ids = persisted_editorial
+        .get("hiddenDraftIds")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<std::collections::HashSet<_>>())
+        .unwrap_or_default();
+    let hidden_draft_count = hidden_draft_ids.len();
+    drafts.retain(|draft| {
+        draft
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(|id| !hidden_draft_ids.contains(id))
+    });
     let health_state = if stale { "OFFLINE" } else { "HEALTHY" };
     // Schedule and preference commands are intentionally local-only until the
     // corresponding engine contracts exist. Rehydrate their durable desktop
@@ -6668,6 +6683,7 @@ pub async fn get_editorial_workspace(
         })).collect::<Vec<_>>(),
         "candidates": candidates,
         "drafts": drafts,
+        "hiddenDraftCount": hidden_draft_count,
         "weeklySlots": weekly_slots,
         "scheduled": revision_queue.iter().filter(|item| {
             item.get("state").and_then(Value::as_str) == Some("APPROVED")
@@ -7008,6 +7024,56 @@ pub fn dismiss_candidate(
     persist_editorial_state(&bridge, mutation.clone(), None)?;
     write_lock(&state.editorial_mutations)?.push(mutation);
     Ok(json!({ "ok": true, "state": "DISMISSED" }))
+}
+
+#[tauri::command]
+pub fn hide_drafts(
+    draft_ids: Vec<String>,
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    ensure_mutation_allowed(&state)?;
+    let ids = draft_ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty() && id.len() <= 128)
+        .collect::<std::collections::HashSet<_>>();
+    if ids.is_empty() || ids.len() > 100 {
+        return Err(CommandError::InvalidInput("select between 1 and 100 draft ids".into()));
+    }
+    let current_hidden = read_engine_local_state(&bridge, "desktop.editorial")
+        .and_then(|value| value.get("hiddenDraftIds").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .filter(|id| id.len() <= 128)
+        .collect::<std::collections::HashSet<_>>();
+    let hidden = current_hidden
+        .into_iter()
+        .chain(ids.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let stored = hidden.into_iter().take(500).collect::<Vec<_>>();
+    let mutation = json!({
+        "kind": "DRAFT.HIDE",
+        "draftIds": ids.iter().collect::<Vec<_>>()
+    });
+    persist_editorial_state(&bridge, mutation.clone(), Some(("hiddenDraftIds", json!(stored))))?;
+    write_lock(&state.editorial_mutations)?.push(mutation);
+    Ok(json!({ "ok": true, "hidden": ids.len() }))
+}
+
+#[tauri::command]
+pub fn restore_hidden_drafts(
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    ensure_mutation_allowed(&state)?;
+    let restored = read_engine_local_state(&bridge, "desktop.editorial")
+        .and_then(|value| value.get("hiddenDraftIds").and_then(Value::as_array).map(Vec::len))
+        .unwrap_or(0);
+    let mutation = json!({ "kind": "DRAFT.RESTORE_HIDDEN" });
+    persist_editorial_state(&bridge, mutation.clone(), Some(("hiddenDraftIds", json!([]))))?;
+    write_lock(&state.editorial_mutations)?.push(mutation);
+    Ok(json!({ "ok": true, "restored": restored }))
 }
 
 #[tauri::command]

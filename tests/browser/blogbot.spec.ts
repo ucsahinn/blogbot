@@ -1042,6 +1042,21 @@ test("editorial desk refreshes an active draft when the local engine changes its
   await expect(draft).toContainText("TR / EN incelemesine hazır.");
 });
 
+test("editorial desk can hide a selected draft without deleting its immutable record", async ({ page }) => {
+  await page.goto("#editorial");
+  const draft = page.getByRole("button", { name: /Yeni teknoloji geçişinde gözden kaçan üç risk/u });
+  await expect(draft).toBeVisible();
+
+  await page.getByRole("checkbox", { name: /Yeni teknoloji geçişinde gözden kaçan üç risk taslağını seç/u }).check();
+  await page.getByRole("button", { name: "Seçilenleri masadan kaldır" }).click();
+
+  await expect(draft).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText("1 taslak masadan kaldırıldı");
+
+  await page.getByRole("button", { name: "Gizlenen taslakları geri getir" }).click();
+  await expect(draft).toBeVisible();
+});
+
 test("a queued candidate offers a direct return to its editorial desk", async ({ page }) => {
   await page.goto("#content-candidates");
   await page.getByRole("button", { name: "Araştırmaya al" }).first().click();
