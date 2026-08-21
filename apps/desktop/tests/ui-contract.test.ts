@@ -29,33 +29,10 @@ test("Boby is a persistent local editor guide with a keyboard-accessible convers
   assert.match(app, /BobyAssistant/u);
   assert.match(app, /bridge=\{bridge\}/u);
   assert.match(shell, /onOpenBoby/u);
-  assert.match(assistant, /requestBobyGuidance/u);
-  assert.match(assistant, /getBobyGuidance/u);
   assert.match(assistant, /describeBobyAvailability/u);
-  assert.match(assistant, /Boby isteği başlatılamadı/u);
   assert.match(assistant, /boby-availability/u);
-  assert.match(assistant, /Yerel rehber/u);
-});
-
-test("Boby keeps one pending direct reply alive without a short false timeout", async () => {
-  const assistant = await readFile(source("components", "BobyAssistant.tsx"), "utf8");
-
-  assert.match(assistant, /const \[pendingGuidanceId, setPendingGuidanceId\]/u);
-  assert.match(assistant, /if \(!open \|\| !pendingGuidanceId\) return;/u);
-  assert.match(assistant, /BOBY_GUIDANCE_POLL_MS\s*=\s*2_000/u);
-  assert.match(assistant, /BOBY_GUIDANCE_TIMEOUT_MS\s*=\s*120_000/u);
-  assert.match(assistant, /disabled=\{effectiveDeliveryState !== "idle"\}/u);
-  assert.doesNotMatch(assistant, /attempt < 12/u);
-});
-
-test("Boby status refresh handles a rejected native probe without an unhandled promise", async () => {
-  const assistant = await readFile(source("components", "BobyAssistant.tsx"), "utf8");
-
-  assert.match(
-    assistant,
-    /onClick=\{\(\) => void refreshBobyRuntime\(\)\.catch\(/u,
-    "the visible refresh action must consume native probe failures"
-  );
+  assert.match(assistant, /text: localBobyReply\(question, activePage\)/u);
+  assert.doesNotMatch(assistant, /requestBobyGuidance|getBobyGuidance|testCodexRuntime|startCodexLogin/u);
 });
 
 test("notifications use local feedback sounds without speech synthesis", async () => {
@@ -170,7 +147,7 @@ test("OPE uses its product logo while Boby keeps the dedicated assistant avatar"
 test("about control exposes the verified project identity and GitHub source", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
 
-  assert.match(shell, /aria-label="OPE hakkında"/u);
+  assert.match(shell, /"OPE hakkında, yeni sürüm hazır"/u);
   assert.match(shell, /aria-expanded=\{aboutOpen\}/u);
   assert.match(shell, /https:\/\/github\.com\/ucsahinn\/blogbot/u);
   assert.match(shell, /target="_blank"/u);
@@ -217,11 +194,11 @@ test("settings separates saving, reversible changes, and notification diagnostic
   assert.match(settings, /settings-action-notification/u);
 });
 
-test("editorial drafts keep Boby's unavailable state human instead of exposing its runtime", async () => {
+test("editorial drafts open direct Boby help instead of a connection step", async () => {
   const desk = await readFile(new URL("../src/screens/EditorialDesk.tsx", import.meta.url), "utf8");
 
-  assert.match(desk, /Boby sohbeti açıldı. Bağlamak için Boby'yi bağla düğmesini kullan./u);
-  assert.match(desk, /"Boby'yi bağla"/u);
+  assert.match(desk, /Boby sohbeti açıldı. Ne yapmak istediğini yaz/u);
+  assert.match(desk, /"Boby'den yardım al"/u);
   assert.match(desk, /onOpenBoby\(\)/u);
   assert.doesNotMatch(desk, /Codex'i bağla/u);
 });
@@ -263,6 +240,8 @@ test("candidate triage uses dense comparable rows and falls back cleanly on narr
 
   assert.match(styles, /\.candidate-grid\s*\{[\s\S]*?grid-template-columns:\s*1fr/u);
   assert.match(styles, /\.candidate-card\s*\{[\s\S]*?grid-template-areas:/u);
+  assert.match(styles, /\.candidate-card\s*\{[\s\S]*?content-visibility:\s*auto/u);
+  assert.doesNotMatch(styles, /\.candidate-card\s+\.signal-grid\s*\{/u);
   assert.match(styles, /@media \(max-width: 700px\)[\s\S]*?\.candidate-card\s*\{[\s\S]*?grid-template-columns:\s*1fr/u);
 });
 
@@ -548,6 +527,25 @@ test("review approval is V3-only and collects a complete human declaration", asy
   assert.doesNotMatch(review, /evidenceExcerpt|evidenceAnchors/u);
   assert.match(bridge, /attestation: EditorialApprovalAttestationV3/u);
   assert.match(bridge, /REVISION_REVIEW_UPGRADE_REQUIRED/u);
+});
+
+test("review keeps source and publication checks understandable while technical hashes stay optional", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+
+  assert.match(review, /\{ id: "claims", label: "Kaynak kontrolü" \}/u);
+  assert.match(review, /\{ id: "gates", label: "Yayın kontrolü" \}/u);
+  assert.match(review, /<details className="snapshot-integrity">/u);
+  assert.match(review, /<summary>Teknik kayıt<\/summary>/u);
+  assert.doesNotMatch(review, /label: "İddialar ve kaynaklar"/u);
+});
+
+test("about checks for updates in the background and marks an available version before opening", async () => {
+  const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
+
+  assert.match(shell, /const UPDATE_CHECK_DELAY_MS\s*=\s*1_500/u);
+  assert.match(shell, /window\.setTimeout\(\(\) => \{\s*void checkForUpdate\(\);\s*\}, UPDATE_CHECK_DELAY_MS\)/u);
+  assert.match(shell, /Yeni sürüm hazır/u);
+  assert.match(shell, /"OPE hakkında, yeni sürüm hazır"/u);
 });
 
 test("review media uses bounded local thumbnails rather than dimension-only placeholders", async () => {

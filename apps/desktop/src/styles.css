@@ -1783,6 +1783,7 @@ strong {
 }
 
 .about-card strong { color: var(--ink); }
+.about-update-badge { margin-left: auto; padding: 2px 6px; border-radius: 999px; color: #124f43; background: color-mix(in srgb, var(--teal) 20%, white); font-size: 10px; font-weight: 800; white-space: nowrap; }
 .about-card a { width: fit-content; color: var(--blue); font-weight: 700; }
 .about-project-link { width: fit-content; padding: 0; border: 0; color: var(--blue); background: transparent; font: inherit; font-weight: 700; text-align: left; cursor: pointer; }
 .about-project-link:hover { color: var(--accent-dark); text-decoration: underline; }
@@ -3482,6 +3483,23 @@ strong {
 .snapshot-meta code {
   color: var(--ink-faint);
   font-size: 7px;
+}
+
+.snapshot-integrity {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.snapshot-integrity summary {
+  cursor: pointer;
+  text-align: right;
+}
+
+.snapshot-integrity[open] code {
+  display: block;
+  max-width: 18ch;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
 }
 
 .evidence-note {
@@ -5376,30 +5394,29 @@ strong {
 }
 
 .candidate-card {
-  grid-template-columns: minmax(0, 1fr) minmax(232px, 0.72fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(126px, auto);
   grid-template-areas:
-    "meta signals actions"
-    "title signals actions"
-    "summary signals actions"
-    "source signals actions"
-    "guidance signals actions";
+    "meta actions"
+    "title actions"
+    "summary actions"
+    "source actions"
+    "guidance actions";
   column-gap: 20px;
   row-gap: 7px;
-  align-items: center;
+  align-items: start;
   padding: 14px 16px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 172px;
 }
 
 .candidate-card .candidate-meta { grid-area: meta; }
 .candidate-card h2 { grid-area: title; font-size: 16px; }
 .candidate-card > p { grid-area: summary; font-size: 13px; line-height: 1.45; }
-.candidate-card .signal-grid { grid-area: signals; align-self: stretch; }
 .candidate-card .candidate-source { grid-area: source; min-width: 0; color: var(--ink-soft); font-size: 12px; overflow-wrap: anywhere; }
 .candidate-card .candidate-action-reasons { grid-area: guidance; display: grid; gap: 4px; min-width: 0; }
 .candidate-card .candidate-action-reasons .action-unavailable-reason { color: var(--amber); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .candidate-card .card-actions { grid-area: actions; flex-direction: column; align-items: stretch; min-width: 126px; }
 .candidate-card .card-actions .button { justify-content: center; }
-.candidate-card .signal-grid > div { min-width: 70px; padding: 9px; }
-.candidate-card .signal-grid dt { font-size: 12px; }
 
 @media (max-width: 700px) {
   .candidate-card {

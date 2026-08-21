@@ -88,10 +88,9 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
     let reconciliationTimer: number | undefined;
     void withBootstrapTimeout(bridgeFactory())
       .then(async (runtimeBridge) => {
-        // Bootstrap performs the Doctor handshake that changes the native
-        // runtime from fail-closed to online. Reading the desk in parallel can
-        // therefore capture the temporary offline projection and leave an
-        // otherwise ready desk empty on first launch.
+        // Doctor owns the initial runtime boundary. Reading the workspace
+        // before it completes sees DesktopState's conservative offline default
+        // and briefly paints a false red Operations health card.
         const coalescingBridge = createCoalescingBridge(runtimeBridge);
         const initialSnapshot = await withBootstrapTimeout(coalescingBridge.getBootstrapSnapshot());
         const initialWorkspace = await withBootstrapTimeout(coalescingBridge.getEditorialWorkspace());

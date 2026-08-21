@@ -318,6 +318,57 @@ test("candidate.list reads one globally bounded recent-entry slice instead of tr
   assert.equal((response.candidates as Array<{ title?: string }>)[0]?.title, "Recent patch release");
 });
 
+test("candidate.list shares one cold catalog projection between concurrent desktop requests", async () => {
+  let recentEntryReads = 0;
+  let releaseEntries: (() => void) | undefined;
+  const entriesReady = new Promise<void>((resolve) => {
+    releaseEntries = resolve;
+  });
+  const sourceRepository = {
+    async listSources() {
+      return [{
+        id: "source-shared-catalog",
+        url: "https://news.example/shared.xml",
+        kind: "RSS",
+        status: "ACTIVE",
+        trustStatus: "APPROVED",
+        rightsStatus: "APPROVED",
+        language: "en",
+        discoveredFeeds: [],
+        createdAt: "2026-08-14T10:00:00.000Z",
+        updatedAt: "2026-08-14T10:00:00.000Z",
+        version: 1
+      }];
+    },
+    async listRecentEntriesBounded() {
+      recentEntryReads += 1;
+      await entriesReady;
+      return [{
+        sourceId: "source-shared-catalog",
+        externalId: "shared-story",
+        title: "One cold catalog projection",
+        summary: "Concurrent desktop reads should reuse this projection.",
+        url: "https://news.example/stories/shared",
+        publishedAt: "2026-08-14T11:00:00.000Z"
+      }];
+    }
+  } as unknown as SourceRepository;
+  const handle = createEngineProtocol(undefined, "memory", { sourceRepository });
+
+  const bootstrapRequest = handle({ version: 1, id: "candidate-list-bootstrap", kind: "candidate.list" });
+  const workspaceRequest = handle({ version: 1, id: "candidate-list-workspace", kind: "candidate.list" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(recentEntryReads, 1, "concurrent reads must not decrypt the cold catalog twice");
+  releaseEntries?.();
+  const [bootstrapResponse, workspaceResponse] = await Promise.all([bootstrapRequest, workspaceRequest]);
+
+  assert.equal(bootstrapResponse.ok, true);
+  assert.equal(workspaceResponse.ok, true);
+  assert.equal((bootstrapResponse.candidates as Array<{ title?: string }>)[0]?.title, "One cold catalog projection");
+  assert.equal((workspaceResponse.candidates as Array<{ title?: string }>)[0]?.title, "One cold catalog projection");
+});
+
 test("persistent engine lists local sources with trust and rights blockers", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "blogbot-source-protocol-list-"));
   const dataDir = join(root, "pgdata");

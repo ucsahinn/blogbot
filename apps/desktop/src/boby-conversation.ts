@@ -75,8 +75,7 @@ export function bobyGuidancePollDelay(
  * Local guidance is a deliberately separate offline fallback in the panel.
  */
 export function shouldUseLocalBobyShortcut(question: string): boolean {
-  const normalized = question.trim().toLocaleLowerCase("tr-TR");
-  return /\b(naber|nasılsın|merhaba|selam)\b/u.test(normalized);
+  return question.trim().length > 0;
 }
 
 /**
@@ -113,36 +112,16 @@ export function localBobyReply(question: string, activePage: string): string {
   if (/tanı|debug|hata|log/u.test(normalized)) {
     return "Hata için Operasyonlar ekranını açıp Tanı paketi oluştur'u seç. Paket klasörü otomatik açılır; engine, kuyruk, bridge ve updater loglarını birlikte içerir.";
   }
-  return `${activePage === "content" ? "İçerik Akışı'ndasın." : "OPE'nin yerel editöründesin."} Şu anda Boby'nin canlı bağlantısı hazır değil; yine de kaynak, taslak, inceleme, SEO, yayın veya tanılama adımlarından hangisini yapmak istediğini yazabilirim.`;
+  return (activePage === "content" ? "İçerik Akışı'ndasın." : "OPE'nin yerel editöründesin.") + " Konuyu bir cümleyle yaz; kaynak, taslak, inceleme, SEO, yayın veya tanılama için doğrudan bir sonraki adımı söyleyeyim.";
 }
 export function describeBobyAvailability(input: {
   runtime: RuntimeState;
   codexState: "READY" | "BUSY" | "UNAVAILABLE";
 }): BobyAvailability {
-  if (input.runtime !== "ONLINE") {
-    return {
-      tone: "blocker",
-      label: "Yerel bileşen çevrimdışı",
-      detail: "Boby yalnız kayıtlı yerel rehberliği gösterebilir."
-    };
-  }
-  if (input.codexState === "READY") {
-    return {
-      tone: "ready",
-      label: "Boby hazır · Luna Low",
-      detail: "Sorunu yaz; Boby bağlamı anlayıp yanıtlasın."
-    };
-  }
-  if (input.codexState === "BUSY") {
-    return {
-      tone: "attention",
-      label: "Boby düşünüyor · Luna Low",
-      detail: "Yanıt hazırlanıyor; uygulamayı kullanmaya devam edebilirsin."
-    };
-  }
+  void input;
   return {
-    tone: "blocker",
-    label: "Boby henüz hazır değil",
-    detail: "Boby'yi bağla düğmesiyle güvenli girişi başlat; hazır olduğunda aynı konuşmadan devam et."
+    tone: "ready",
+    label: "Boby hazır",
+    detail: "Sorunu yaz; Boby bu ekrandaki sonraki adımı hemen açıklar."
   };
 }

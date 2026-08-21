@@ -2055,7 +2055,7 @@ fn prerequisite_can_read_engine(runtime: RuntimeMode) -> bool {
 }
 
 #[tauri::command]
-pub fn get_connector_state(
+pub async fn get_connector_state(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
@@ -2279,7 +2279,7 @@ fn request_section(
 }
 
 #[tauri::command]
-pub fn get_bootstrap_snapshot(
+pub async fn get_bootstrap_snapshot(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -6364,7 +6364,7 @@ fn codex_role_state_for_usage(
 }
 
 #[tauri::command]
-pub fn get_editorial_workspace(
+pub async fn get_editorial_workspace(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {

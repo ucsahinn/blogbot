@@ -29,8 +29,7 @@ test("application bootstrap renders the local workspace before a slow connector 
   const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
 
   assert.match(appSource, /const coalescingBridge = createCoalescingBridge\(runtimeBridge\);/u);
-  assert.match(appSource, /const initialSnapshot = await withBootstrapTimeout\(coalescingBridge\.getBootstrapSnapshot\(\)\);/u);
-  assert.match(appSource, /const initialWorkspace = await withBootstrapTimeout\(coalescingBridge\.getEditorialWorkspace\(\)\);/u);
+  assert.match(appSource, /const initialSnapshot = await withBootstrapTimeout\(coalescingBridge\.getBootstrapSnapshot\(\)\);[\s\S]*?const initialWorkspace = await withBootstrapTimeout\(coalescingBridge\.getEditorialWorkspace\(\)\);/u);
   assert.match(appSource, /setConnectorState\(fallbackConnectorState\);/u);
   assert.match(
     appSource,
@@ -64,6 +63,24 @@ test("application bootstrap renders the local workspace before a slow connector 
     /setConnectorState\(fallbackConnectorState\);[\s\S]*?if \(!alive\) return;[\s\S]*?if \(initialSnapshot\.runtime === "ONLINE"\)/u,
     "an async bootstrap completion must not schedule new work after the app has unmounted"
   );
+});
+
+test("application reads the Doctor snapshot before the first editorial workspace projection", async () => {
+  const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
+
+  assert.match(
+    appSource,
+    /const initialSnapshot = await withBootstrapTimeout\(coalescingBridge\.getBootstrapSnapshot\(\)\);[\s\S]*?const initialWorkspace = await withBootstrapTimeout\(coalescingBridge\.getEditorialWorkspace\(\)\);/u,
+    "the workspace must not read the initial offline runtime before Doctor reports the actual engine state"
+  );
+});
+
+test("native startup projections are asynchronous commands so sidecar I/O cannot hold the WebView thread", async () => {
+  const commands = await readFile(join(desktopRoot, "src-tauri", "src", "commands.rs"), "utf8");
+
+  assert.match(commands, /#\[tauri::command\]\s*pub async fn get_bootstrap_snapshot/u);
+  assert.match(commands, /#\[tauri::command\]\s*pub async fn get_editorial_workspace/u);
+  assert.match(commands, /#\[tauri::command\]\s*pub async fn get_connector_state/u);
 });
 
 test("Tauri sync listener is disposed even when dynamic import resolves after unmount", async () => {

@@ -88,18 +88,16 @@ test("all primary routes render without browser runtime errors", async ({ page }
   }
 });
 
-test("Editor Boby keeps the Luna Low conversation in-panel and routes the editor from its answer", async ({ page }) => {
+test("Editor Boby answers immediately in-panel without starting a queued task", async ({ page }) => {
   await page.goto("#dashboard");
   await page.getByRole("button", { name: "Editör Boby'yi aç" }).click();
   const boby = page.getByRole("dialog", { name: "Editör Boby" });
-  await expect(boby).toContainText("Konuşma bu panelde aynı yerde kalır");
+  await expect(boby).toContainText("Konuşma bu panelde kalır");
   await boby.getByRole("button", { name: "Kaynak ekle" }).click();
-  await expect(boby).toContainText("Boby düşünüyor; yanıtı burada hazırlıyorum.");
-  await expect(boby).toContainText("Boby · Luna Low");
-  await expect(boby).not.toContainText("Codex'e ilettim");
-  await boby.getByRole("button", { name: "Bunu aç" }).click();
-  await expect(page).toHaveURL(/#content$/u);
-  await expect(page.getByRole("heading", { name: "Kaynaklardan yayın fikrine tek çalışma alanı" })).toBeVisible();
+  await expect(boby).toContainText("Kaynak eklemek için İçerik Akışı'nı aç");
+  await expect(boby.getByRole("textbox", { name: "Boby'ye sor" })).toBeEnabled();
+  await expect(boby).not.toContainText("Boby düşünüyor");
+  await expect(boby).not.toContainText("sırada");
 });
 
 test("Editor Boby gives distinct in-panel guidance for two different questions", async ({ page }) => {
@@ -110,12 +108,12 @@ test("Editor Boby gives distinct in-panel guidance for two different questions",
 
   await question.fill("Kaynak nasıl eklenir?");
   await boby.getByRole("button", { name: "Sor" }).click();
-  await expect(boby).toContainText("Kaynağı İçerik Akışı'nda ekle");
+  await expect(boby).toContainText("Kaynak eklemek için İçerik Akışı'nı aç");
   await expect(question).toBeEnabled();
 
   await question.fill("Bu konu için post hazırla");
   await boby.getByRole("button", { name: "Sor" }).click();
-  await expect(boby).toContainText("Bu konu için Yeni Taslak'ta");
+  await expect(boby).toContainText("Taslak için adaydan Taslak oluştur'u seç");
 });
 
 test("Boby preserves its conversation when closed and reopened after navigation", async ({ page }) => {
@@ -454,7 +452,7 @@ test("saved source-reference preference keeps review evidence visible beside the
   const references = page.getByRole("region", { name: "Taslak kaynak referansları" });
   await expect(references).toBeVisible();
   await expect(references.getByRole("link", { name: /Birincil kaynak · Uygulama rehberi/i })).toHaveAttribute("href", "https://example.org/guides/primary");
-  await expect(references.getByText(/İddialar ve kaynaklar sekmesinde/i)).toBeVisible();
+  await expect(references.getByText(/Kaynak kontrolünde eşleşmeleri incele/i)).toBeVisible();
 });
 
 test("notification test waits until a changed notification preference is saved", async ({ page }) => {
@@ -1412,13 +1410,13 @@ test("review metadata is derived from the selected immutable revision", async ({
   await expect(page.getByText("2031", { exact: false })).toBeVisible();
   await expect(page.getByText("29 Temmuz · 16:30", { exact: true })).toHaveCount(0);
   await expect(page.getByText("8 dk okuma", { exact: true })).toHaveCount(0);
-  await page.getByRole("tab", { name: /İddialar ve kaynaklar/u }).click();
+  await page.getByRole("tab", { name: /Kaynak kontrolü/u }).click();
   await expect(page.getByText("Tümü kaynaklı", { exact: true })).toHaveCount(0);
   await expect(page.getByText("1 iddia kaynak bekliyor", { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: /Medya/u }).click();
   await expect(page.getByText("Medya eksik", { exact: true })).toBeVisible();
   await expect(page.getByText("2 / 2 uygun", { exact: true })).toHaveCount(0);
-  await page.getByRole("tab", { name: /SEO ve güvenlik/u }).click();
+  await page.getByRole("tab", { name: /Yayın kontrolü/u }).click();
   await expect(page.getByText(/engel nedeniyle onaya hazır değil/u)).toBeVisible();
   await expect(page.getByText(/sınırlarından geçti/u)).toHaveCount(0);
 });

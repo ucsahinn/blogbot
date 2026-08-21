@@ -151,6 +151,17 @@ test("Windows installer exposes OPE as the product name while preserving the sta
   assert.match(releaseWorkflow, /OPE_\$\(\$env:RELEASE_VERSION\)_x64-setup\.exe/u);
 });
 
+test("Windows installer declares one stable per-user upgrade identity for in-place updates", async () => {
+  const config = JSON.parse(
+    await readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8")
+  ) as {
+    bundle?: { windows?: { nsis?: { installMode?: string }; wix?: { upgradeCode?: string } } };
+  };
+
+  assert.equal(config.bundle?.windows?.nsis?.installMode, "currentUser");
+  assert.match(config.bundle?.windows?.wix?.upgradeCode ?? "", /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu);
+});
+
 test("desktop package icons are generated from the OPE logo rather than a letter mark", async () => {
   const iconScript = await readFile(join(repositoryRoot, "scripts", "generate-desktop-icons.ts"), "utf8");
 
@@ -621,6 +632,8 @@ test("native smoke fails a slow route instead of tolerating a minute-long frozen
   assert.match(smoke, /degraded: unreachableIndexes\.length > 0/u);
   assert.match(smoke, /unreachableSources/u);
   assert.doesNotMatch(smoke, /actual profile source checks failed/u);
+  assert.match(smoke, /verifyCodexRuntime/u);
+  assert.match(smoke, /test_codex_runtime/u);
 });
 
 test("desktop preflight verifies clean-machine installer inputs without building an installer", { skip: process.platform !== "win32" }, async () => {

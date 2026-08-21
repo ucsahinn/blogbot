@@ -34,7 +34,7 @@ def main() -> None:
         page.get_by_role("button", name="Editoryal Masa").click()
         page.get_by_role("tab", name="TR / EN inceleme").click()
         page.get_by_role("heading", name="Yayın kuyruğu").wait_for()
-        page.get_by_role("tab", name="SEO ve güvenlik").click()
+        page.get_by_role("tab", name="Yayın kontrolü").click()
         page.get_by_text("7/7").wait_for()
 
         page.get_by_role("button", name="Operasyonlar").click()

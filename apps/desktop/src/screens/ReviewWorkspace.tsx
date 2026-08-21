@@ -122,9 +122,9 @@ type PreviewCapableBridge = BlogbotBridge & {
 
 const tabLabels: Array<{ id: ReviewTab; label: string }> = [
   { id: "content", label: "İçerik" },
-  { id: "claims", label: "İddialar ve kaynaklar" },
+  { id: "claims", label: "Kaynak kontrolü" },
   { id: "media", label: "Medya" },
-  { id: "gates", label: "SEO ve güvenlik" },
+  { id: "gates", label: "Yayın kontrolü" },
   { id: "diff", label: "Değişiklikler" }
 ];
 
@@ -1292,7 +1292,7 @@ export function ReviewWorkspace({
                           })}
                         </ul>
                         <button type="button" className="text-button" onClick={() => setTab("claims")}>
-                          İddialar ve kaynaklar sekmesinde eşleşmeleri incele
+                          Kaynak kontrolünde eşleşmeleri incele
                         </button>
                       </section>
                     ) : null}
@@ -1336,8 +1336,8 @@ export function ReviewWorkspace({
                   <section>
                     <div className="review-section-heading">
                       <div>
-                        <p className="section-kicker">İDDİA DEFTERİ</p>
-                        <h2>{revision.claims.length} doğrulanabilir iddia</h2>
+                        <p className="section-kicker">İÇERİK KONTROLÜ</p>
+                        <h2>{revision.claims.length} önemli nokta</h2>
                       </div>
                       <span className={revision.claims.every((claim) => claim.status === "VERIFIED") ? "pass-label" : "warning-label"}>{claimEvidenceLabel(revision.claims)}</span>
                     </div>
@@ -1375,8 +1375,8 @@ export function ReviewWorkspace({
                   <section>
                     <div className="review-section-heading">
                       <div>
-                        <p className="section-kicker">KAYNAK ANLIK GÖRÜNTÜLERİ</p>
-                        <h2>{revision.sources.length} değişmez kanıt</h2>
+                        <p className="section-kicker">KAYNAKLAR</p>
+                        <h2>{revision.sources.length} kaynak kaydı</h2>
                       </div>
                     </div>
                     <div className="snapshot-list">
@@ -1395,7 +1395,10 @@ export function ReviewWorkspace({
                           </span>
                           <span className="snapshot-meta">
                             {source.primary ? <em>Birincil</em> : null}
-                            <code>{source.contentHash}</code>
+                            <details className="snapshot-integrity">
+                              <summary>Teknik kayıt</summary>
+                              <code>{source.contentHash}</code>
+                            </details>
                           </span>
                         </div>
                       ))}

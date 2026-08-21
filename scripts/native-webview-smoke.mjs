@@ -400,6 +400,24 @@ async function verifyNativeReadCommands(sessionId) {
   return results.map(({ command }) => command);
 }
 
+async function verifyCodexRuntime(sessionId) {
+  const codexRuntime = await execute(
+    sessionId,
+    `return window.__TAURI_INTERNALS__.invoke("test_codex_runtime")
+      .then((result) => ({ ok: true, result }))
+      .catch((error) => ({ ok: false, error: String(error) }));`
+  );
+  if (
+    !codexRuntime?.ok
+    || codexRuntime.result?.available !== true
+    || codexRuntime.result?.authenticated !== true
+    || codexRuntime.result?.runnerReady !== true
+  ) {
+    fail(`Codex runtime is not ready for direct Boby replies: ${JSON.stringify(codexRuntime)}`);
+  }
+  return codexRuntime.result;
+}
+
 async function measureCatalogReadLatency(sessionId) {
   const startedAt = performance.now();
   const catalog = await invoke(sessionId, "list_sources");
@@ -1508,6 +1526,7 @@ async function main() {
       const profileSourceChecks = testExistingProfileSources
         ? await verifyExistingProfileSources(sessionId)
         : undefined;
+      const codexRuntime = await verifyCodexRuntime(sessionId);
       const initialProfile = await inspectExistingProfileState(sessionId, localEngine.result);
       const retryJourney = retryBlockedActualProfile
         ? await retryFirstBlockedActualDraft(sessionId)
@@ -1531,7 +1550,8 @@ async function main() {
         nativeReadCommands,
         catalogRead,
         profileRoutePerformance,
-        profileSourceChecks
+        profileSourceChecks,
+        codexRuntime
       }, null, 2));
       return;
     }

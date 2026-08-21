@@ -587,6 +587,37 @@ test("paid fallback disabled remains a manual stop after restart", async () => {
   assert.equal((await repository.getJob("draft-paid-fallback-disabled")).state, "WAITING_CODEX");
 });
 
+test("unsupported Codex CLI remains a manual stop after restart", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-unsupported-cli",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 1,
+    lastError: "CODEX_CLI_UNSUPPORTED",
+    metadata: {
+      codexWaitReason: "RUNNER_REQUIRES_RETRY",
+      codexDiagnosticCode: "CODEX_CLI_UNSUPPORTED",
+      sourceIds: ["source-1"],
+      urls: []
+    }
+  });
+  const recoveredIds: string[] = [];
+  const coordinator = {
+    async submit() { throw new Error("not used"); },
+    async recoverInterrupted(jobId: string) {
+      recoveredIds.push(jobId);
+      return { recovered: true, snapshot: null };
+    },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  } as unknown as CodexWorkerCoordinator;
+
+  assert.equal(await recoverWaitingDraftJobs(repository, coordinator), 0);
+  assert.deepEqual(recoveredIds, []);
+  assert.equal((await repository.getJob("draft-unsupported-cli")).state, "WAITING_CODEX");
+});
+
 test("NEXT_SLOT reserves an already assigned time and chooses the next available slot", async () => {
   const repository = new InMemoryBackendStore();
   await repository.setLocalState("desktop.editorial", {

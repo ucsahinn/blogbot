@@ -105,7 +105,7 @@ const MAX_BACKUP_INPUT_BYTES = 128 * 1024 * 1024;
 // Candidate triage is a projection, not a full archive browser. Reading and
 // decrypting an unbounded feed catalog on every desktop refresh was the main
 // source of multi-second freezes on large local workspaces.
-const MAX_CANDIDATE_ENTRIES = 500;
+const MAX_CANDIDATE_ENTRIES = 200;
 // `backup.restore` runs on the serialized mutation chain, so a restore writer
 // that never exits would freeze every later mutation and the graceful shutdown
 // that awaits them. Stay well inside the host's 5 minute maintenance budget so
@@ -1380,6 +1380,7 @@ export function createEngineProtocol(
   // workspace and the active-draft poll. Keep that read cheap and stable for
   // a short window; mutations still become visible on the next refresh.
   let candidateCache: { expiresAt: number; candidates: Record<string, unknown>[] } | undefined;
+  let candidateRefreshInFlight: Promise<Record<string, unknown>[]> | undefined;
   // Serializes native claims inside this engine process. The durable outbox
   // state prevents later reclaims; this guard closes the pre-update await gap.
   const activeNativePublicationClaims = new Set<string>();
@@ -1554,6 +1555,29 @@ export function createEngineProtocol(
           candidates: structuredClone(candidateCache.candidates)
         };
       }
+      const activeRefresh = candidateRefreshInFlight;
+      if (activeRefresh) {
+        const candidates = await activeRefresh;
+        return {
+          version: 1,
+          id: input.id,
+          ok: true,
+          kind: "candidate.list",
+          candidates: structuredClone(candidates)
+        };
+      }
+      let resolveRefresh!: (candidates: Record<string, unknown>[]) => void;
+      let rejectRefresh!: (reason: unknown) => void;
+      const refresh = new Promise<Record<string, unknown>[]>((resolve, reject) => {
+        resolveRefresh = resolve;
+        rejectRefresh = reject;
+      });
+      candidateRefreshInFlight = refresh;
+      // The initiating request reports its own failure. Attach a rejection
+      // handler so a single failed refresh does not produce an unhandled
+      // promise rejection when no concurrent request joined it.
+      void refresh.catch(() => undefined);
+      try {
       const sources = await options.sourceRepository.listSources();
       const candidateByStory = new Map<string, {
         candidate: Record<string, unknown>;
@@ -1661,6 +1685,7 @@ export function createEngineProtocol(
         }))
         .slice(0, 50);
       candidateCache = { expiresAt: Date.now() + 2_000, candidates };
+      resolveRefresh(candidates);
       return {
         version: 1,
         id: input.id,
@@ -1668,6 +1693,12 @@ export function createEngineProtocol(
         kind: "candidate.list",
         candidates: structuredClone(candidates)
       };
+      } catch (error) {
+        rejectRefresh(error);
+        throw error;
+      } finally {
+        if (candidateRefreshInFlight === refresh) candidateRefreshInFlight = undefined;
+      }
     }
 
     if (input.kind === "local.state.get") {
@@ -3937,7 +3968,8 @@ export function isFinalCodexStopCondition(job: BackendJob): boolean {
   return metadata.codexWaitReason === "RUNNER_TIMEOUT"
     || metadata.codexWaitReason === "RETRY_LIMIT_REACHED"
     || metadata.codexWaitReason === "PAID_FALLBACK_DISABLED"
-    || metadata.codexDiagnosticCode === "CODEX_PROTOCOL_REJECTED";
+    || metadata.codexDiagnosticCode === "CODEX_PROTOCOL_REJECTED"
+    || metadata.codexDiagnosticCode === "CODEX_CLI_UNSUPPORTED";
 }
 
 async function updateJobWithCas(

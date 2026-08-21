@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import desktopPackage from "../../package.json" with { type: "json" };
 
@@ -32,6 +32,8 @@ const navigation: Array<{
   { id: "publishing", label: "Takvim ve Yayın", icon: "◫" },
   { id: "operations", label: "Operasyonlar", icon: "⋮" }
 ];
+
+const UPDATE_CHECK_DELAY_MS = 1_500;
 
 function NavIcon({ page }: { page: PageId }) {
   const path = page === "dashboard"
@@ -100,7 +102,7 @@ export function AppShell({
     }
   };
 
-  const checkForUpdate = async () => {
+  const checkForUpdate = useCallback(async () => {
     if (!window.__TAURI_INTERNALS__) {
       setUpdateMessage("Güncelleme denetimi yalnız paketlenmiş OPE uygulamasında yapılır.");
       return;
@@ -131,7 +133,7 @@ export function AppShell({
     } finally {
       setUpdateBusy(false);
     }
-  };
+  }, [bridge]);
 
   const installPendingUpdate = async () => {
     if (!pendingUpdate) return;
@@ -149,6 +151,14 @@ export function AppShell({
       setUpdateBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return;
+    const timer = window.setTimeout(() => {
+      void checkForUpdate();
+    }, UPDATE_CHECK_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [checkForUpdate]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -187,6 +197,7 @@ export function AppShell({
     activePage === page ||
     (page === "content" && ["content-candidates", "instant"].includes(activePage)) ||
     (page === "editorial" && activePage === "editorial-review");
+  const updateAvailable = updatePhase === "available" && pendingUpdate !== null;
 
   return (
     <div className="app-shell">
@@ -229,7 +240,7 @@ export function AppShell({
           </button>
           <button type="button" aria-label="Kurulum ve önkoşullar" onClick={onOpenSetup}>
             <span aria-hidden="true">◇</span>
-          </button>          <button type="button" aria-label="OPE hakkında" aria-expanded={aboutOpen} onClick={() => setAboutOpen((open) => !open)}>
+          </button>          <button type="button" aria-label={updateAvailable ? "OPE hakkında, yeni sürüm hazır" : "OPE hakkında"} aria-expanded={aboutOpen} onClick={() => setAboutOpen((open) => !open)}>
             <span aria-hidden="true">i</span>
           </button>
         </nav>
@@ -255,13 +266,14 @@ export function AppShell({
           <button
             className="about-toggle"
             type="button"
-            aria-label="OPE hakkında"
+            aria-label={updateAvailable ? "OPE hakkında, yeni sürüm hazır" : "OPE hakkında"}
             aria-expanded={aboutOpen}
             aria-controls="blogbot-about-card"
             onClick={() => setAboutOpen((open) => !open)}
           >
             <span aria-hidden="true">i</span>
             Hakkında
+            {updateAvailable ? <span className="about-update-badge">Yeni sürüm hazır</span> : null}
           </button>
           {aboutOpen ? (
             <div className="about-card" id="blogbot-about-card">
