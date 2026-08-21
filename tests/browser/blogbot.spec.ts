@@ -1102,7 +1102,7 @@ test("candidate triage presents a simple priority, source date, and accessible b
   await expect(candidate.getByRole("checkbox", { name: /adayını seç/u })).toBeVisible();
   await expect(page.getByRole("button", { name: "Görünenleri seç" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Seçimi temizle" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Seçilenleri araştırmaya al" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Seçilmiş adayları araştır" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Seçilenleri kapat" })).toBeVisible();
 });
 

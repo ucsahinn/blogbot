@@ -2777,7 +2777,12 @@ strong {
   display: grid;
   grid-template-columns: 284px minmax(0, 1fr);
   min-height: 100%;
-  animation: page-enter 220ms ease-out;
+  animation: review-page-enter 220ms ease-out;
+}
+
+@keyframes review-page-enter {
+  from { transform: translateY(4px); }
+  to { transform: translateY(0); }
 }
 
 .review-queue {

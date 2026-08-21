@@ -322,7 +322,7 @@ export function ContentFlow({
             <button className="button button-secondary" type="button" disabled={!candidates.length || Boolean(busyId)} onClick={selectVisibleCandidates}>Görünenleri seç</button>
             <button className="button button-ghost" type="button" disabled={!selectedCandidates.length || Boolean(busyId)} onClick={clearCandidateSelection}>Seçimi temizle</button>
             <button className="button button-secondary" type="button" disabled={readOnly || !selectedCandidates.length || Boolean(busyId)} onClick={() => void mutateSelected("dismiss")}>Seçilenleri kapat</button>
-            <button className="button button-primary" type="button" disabled={readOnly || !selectedCandidates.length || Boolean(busyId)} onClick={() => void mutateSelected("promote")}>Seçilenleri araştırmaya al</button>
+            <button className="button button-primary" type="button" disabled={readOnly || !selectedCandidates.length || Boolean(busyId)} onClick={() => void mutateSelected("promote")}>Seçilmiş adayları araştır</button>
           </div>
           <div className="candidate-action-guidance" role="note">
             <strong>Araştırmaya almak yerel kuyruğu başlatır; hemen yayın yapmaz.</strong>
