@@ -3,7 +3,7 @@
 Bu belge, Blogbot'un 2026-08-20 tarihli **yerel tamamlama referansıdır** ve
 2026-08-19 tarihli master indeks ile backend denetimini tarihsel başlangıç
 noktası olarak supersede eder. Kanıt matrisi 2026-08-21 tarihinde OPE 0.1.38
-release-candidate kaynak ve artifact sonuçlarıyla yenilenmiştir. Eski belgeler
+yerel kaynak kapıları, GitHub Release ve canlı updater sonuçlarıyla yenilenmiştir. Eski belgeler
 silinmedi veya yeniden yazılmadı.
 
 ## Sonuç
@@ -13,10 +13,13 @@ silinmedi veya yeniden yazılmadı.
 - Kalan 108 bulgunun tamamı bu çalışma alanında giderildi:
   **108/108 `CLOSED_LOCAL`** (1 kritik, 7 yüksek, 42 orta, 58 düşük).
 - Bu durum yalnız yerel kaynak, regresyon testi ve gözlenen yerel komut
-  kanıtıdır. Canlı sağlayıcı, hesap, GitHub, site, kurulum ve uzun süreli
-  zamanlayıcı kapıları ayrıca `UNVERIFIED_EXTERNAL` olarak tutulur.
-- OPE desktop sürümü 0.1.38'dir; yerel RC installer artifact'ları üretildi.
-- Commit, push, PR, merge, GitHub Release, publish veya deploy yapılmadı.
+  kanıtıdır. GitHub Release ve updater feed kanıtları ayrıca canlı doğrulanmıştır;
+  sağlayıcı, site, kurulum, deploy ve uzun süreli zamanlayıcı kapıları ayrı tutulur.
+- OPE desktop 0.1.38, target SHA `e28bd1336c7034d76c54746a5be52bb2c9b92c86` ile
+  [GitHub Release v0.1.38](https://github.com/ucsahinn/blogbot/releases/tag/v0.1.38) olarak yayınlandı.
+- [PR #1](https://github.com/ucsahinn/blogbot/pull/1) ve
+  [PR #2](https://github.com/ucsahinn/blogbot/pull/2) merge edildi; release ve updater
+  asset'ları yayınlandı. Deploy, production URL, Search Console veya installed kabul yapılmadı.
 
 `CLOSED_LOCAL`, code finding'in kaynakta giderildiği ve aşağıdaki regresyon
 ailesinin mevcut olduğu anlamına gelir; bir dış kapının çalıştırıldığı anlamına
@@ -170,8 +173,8 @@ gelmez. Dış kapısı olmayan satırlarda `Yok` yazılır.
 | Yüzey | Durum | 2026-08-20 final kanıtı | Kalan sınır |
 |---|---|---|---|
 | Canonical 108 bulgu | **108/108 `CLOSED_LOCAL`** | Kaynak ve regresyon aileleri yukarıda | Dış kapılar ayrı |
-| OPE desktop sürümü | **0.1.38 RC** | `apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml` ve `apps/desktop/src-tauri/tauri.conf.json` aynı sürümde | GitHub Release henüz oluşturulmadı |
-| Node testleri | **PASS** | Final RC `check:all`: 759 toplam; 758 pass; 0 fail; 1 kasıtlı optional live Codex skip; 77717.8632 ms | Skip yalnız canlı Codex hesabı gerektirir |
+| OPE desktop sürümü | **0.1.38 RELEASED** | Üç manifest aynı sürümde; [v0.1.38](https://github.com/ucsahinn/blogbot/releases/tag/v0.1.38) target/tag SHA `e28bd1336c7034d76c54746a5be52bb2c9b92c86` | Artifact `NotSigned`; installed/production kabul ayrı |
+| Node testleri | **PASS** | Final hotfix full suite: 762 toplam; 761 pass; 0 fail; 1 kasıtlı optional live Codex skip; 80794.3964 ms | Skip yalnız canlı Codex hesabı gerektirir |
 | Codex probe/deadline/cache | **PASS** | Pipeline 39 toplam; 38 pass; 0 fail; 1 kasıtlı live Codex skip; 17631.9225 ms; deadline/probe focused 3/3; cache recovery/budget-key focused 2/2 | `apps/codex-runner/src/cli-port.ts` task deadline'dan bağımsız 5–10 saniyelik bounded probe bütçesini cache key'e dahil eder; yalnız aynı rejected promise'ı silerek in-flight dedupe'u korur ve retry'a izin verir |
 | Browser testleri | **PASS** | Final full 142/142; 2.4 dakika | Installed kullanıcı profili kabulü değildir |
 | TypeScript typecheck | **PASS** | `npm.cmd run typecheck` | Yok |
@@ -189,18 +192,24 @@ gelmez. Dış kapısı olmayan satırlarda `Yok` yazılır.
 | RustSec audit | **PASS** | `cargo-audit` 0.22.2 Windows x64: 0 vulnerability; plist 1.10, quick-xml 0.41, time 0.3.55, quinn-proto 0.11.15 | 17 izinli informational warning; Windows graph'ında GTK/glib/proc-macro uyarıları yok; Tauri urlpattern zincirindeki UNIC unmaintained uyarıları non-vulnerability upstream residual |
 | Packaged native WebView smoke | **PASS** | Fresh `apps/desktop/src-tauri/target/release/blogbot.exe`: engine `READY`; local PGlite/durable queue, source review+scan, candidate/draft, instant-create, settings/schedule, pause/resume, diagnostics, setup ve tüm primary routes doğrulandı | Yerel paketli runtime kanıtıdır; production/dış kabul değildir |
 | Desktop preflight | **PASS** | Fresh koşumda tüm kontroller PASS | Installer artifact'larının publish edildiği anlamına gelmez |
-| Yerel RC artifact'ları | **PASS / `NotSigned`** | NSIS 62,788,316 bayt, SHA-256 `4cae40448cbdb42e0ffbc7b8ab0a03679aa50e155e46313d51674409593b299c`; MSI 91,384,132 bayt, SHA-256 `9882976f16009a85356b1143d7f98f1225e8db592973e6c437ea7ecc6afd5c41` | İki artifact da `NotSigned`; henüz GitHub Release yok |
+| Yerel prepared installer kanıtı | **PASS** | Prepared MSI/NSIS build tamamlandı; sidecar before/after bütünlüğü ayrı satırda doğrulandı | Yerel build dosyaları release provenance kimliği değildir; authoritative yayın asset'ı aşağıdaki canlı kanıttır |
+| GitHub merge/target | **VERIFIED_EXTERNAL** | [PR #1](https://github.com/ucsahinn/blogbot/pull/1) `MERGED` → `1915a588579fccaee8f60658c412d28d8978eb3e`; [PR #2](https://github.com/ucsahinn/blogbot/pull/2) `MERGED` → `e28bd1336c7034d76c54746a5be52bb2c9b92c86` | Product/release hotfix merge kanıtı; deploy değildir |
+| Main Verify | **VERIFIED_EXTERNAL** | [run 32442821205](https://github.com/ucsahinn/blogbot/actions/runs/32442821205) success; head SHA `e28bd1336c7034d76c54746a5be52bb2c9b92c86`; node 2m28s, browser 3m56s, native 18m29s | Uzak CI kanıtı; production kabul değildir |
+| Release execution | **VERIFIED_EXTERNAL** | İlk [run 32440419950](https://github.com/ucsahinn/blogbot/actions/runs/32440419950) `test:all` aşamasında fail etti ve tag/release bırakmadı; hotfix sonrası [run 32443949089](https://github.com/ucsahinn/blogbot/actions/runs/32443949089) 2026-08-21T03:35:52Z→04:07:00Z success, head SHA `e28bd1336c7034d76c54746a5be52bb2c9b92c86` | Secret-scan 7s ve release job success; canlı tag/release target SHA ile eşleşti |
 | Release provenance workflow | **PASS** | `gh release create ... --target "${{ github.sha }}"`; `cargo-audit` 0.22.2 pinli; focused provenance + RustSec contract 2/2 | Workflow kaynak sözleşmesi; uzak çalıştırma/yayın kanıtı değildir |
 | Final review repair kanıtı | **PASS** | GitHub base-SHA CAS/mutate ve truthful writes; merged publication current-base approved-file doğrulaması; token rotation authorization-latch temizliği; logical backup envelope/schema/finite guardları; FK-topological logical restore; visual temp+atomic no-replace; PGlite v5→v6 sequence replay | Fetcher guard ve V2 hero iddiaları source-backed false positive olarak kapatıldı |
+| Prepared sidecar bütünlüğü | **PASS** | Packaging 25/25; `BuildEngineScriptInvocations=1`, `PreparedDesktopInvocations=1`, `PreparedPreflightInvocations=1`; engine `fa7c2dcdeaac0eaf81cf5f17e9e384c4cf63a70f5e919ec3525516ae9431b408`, fetcher `bc6a9d7662679d05dd820a02633e039dcb4e18c31c1eacea6af06bc687485a3c`, restore `088995810f549bd0a0272f976f3b516bee2ef2c08f8daf28bf538aeb8f9778a5` before/after değişmedi | Prepared MSI/NSIS build PASS; imza sağlanmadı |
+| Yayınlanan updater/release asset'ları | **VERIFIED_EXTERNAL / `NotSigned`** | `latest.json`: 713 bayt, SHA-256 `e61e7d20eb8e399856a9f7076580242bba9d2f148d1f82071a0d5d9dccce811a`; EXE: 61,694,796 bayt, SHA-256 `9d8bda7bbc9b8fa2dc9c8e6a2a38243d890b1d292fd5e68520d14bf01bfbcd17` | HTTP 200 ve release asset byte-identity doğrulandı; `NotSigned`/SmartScreen riski açık |
 | Git Data P1 hardening | **PASS** | `apps/desktop/src-tauri/src/github_rest_adapter.rs`: 1–10 MiB dosyalarda Git Data API blob/tree/commit/non-force ref update ve Git blob read fallback; approved-path audit complete untruncated tree karşılaştırır, truncated tree'yi reddeder | TDD 4 RED; adapter 23/23 GREEN; full native 213/213 |
 | Backup prerequisite P2 | **PASS** | `apps/desktop/src-tauri/src/commands.rs`: verified ve restore-preview gözlemleri aynı engine kaynaklı 64-hex `archiveSha256` değerine bağlı; farklı SHA iki timestamp'i resetler, hashesiz legacy kayıt `READY` değildir | TDD RED: eksik `update_backup_verification_record`; focused 1/1 GREEN; commands 92/92 |
 | Restore FK-order P1 | **PASS** | `apps/engine/src/stdio-entrypoint.ts`: `applyLogicalRestore`, `pg_catalog` FK metadata'sından topological sıra kurar; `DELETE` child→parent, `INSERT` parent→child; scope dışı FK, duplicate veya cycle delete öncesi fail-closed | `tests/unit/engine-stdio.test.ts`: gerçek PGlite `sources`→`entry_versions`→`entry_latest` ve derived capabilities; focused 1/1, engine-stdio 49/49 |
 | Token audit | **PASS** | 6837 tahmini token | Yok |
-| Canonical `check:all` | **PASS** | Final RC zinciri: Node 759/758/0/1; lint; typecheck; web/desktop build; engine+fetcher smoke; security scan, npm audit, Rust cargo-audit ve Gitleaks; native 213/213; strict Clippy | Release/deploy kanıtı değildir |
+| Canonical `check:all` | **PASS** | Final hotfix zinciri: Node 762/761/0/1; lint; typecheck; web/desktop build; engine+fetcher smoke; security scan, npm audit, Rust cargo-audit ve Gitleaks; native 213/213; strict Clippy | GitHub Release ayrıca canlı doğrulandı; deploy kanıtı değildir |
 
-Scratch temizliği, canonical aggregate, Rust 1.88.0 MSRV, RustSec, yerel RC
-artifact üretimi ve packaged native smoke tamamlandı. Bunlar GitHub Release,
-yayın veya dış ortam kabulü değildir.
+Scratch temizliği, canonical aggregate, Rust 1.88.0 MSRV/RustSec, yerel prepared
+artifact ve packaged native smoke tamamlandı. GitHub `v0.1.38` Release, updater
+manifesti ve yayınlanan EXE ayrıca canlı doğrulandı. Bu kanıtlar temiz-VM installed
+kabulü, rollback, deploy veya production ortam kabulü değildir.
 Son koşum ayrıntıları
 [uçtan uca doğrulama raporunda](end-to-end-verification-20260820.md) tutulur.
 
@@ -210,14 +219,15 @@ Aşağıdakiler açık code finding değildir; gerçek hesap, makine, zaman veya
 hedef gerektiren kabul kapılarıdır:
 
 - canlı Codex/Luna ve ImageGen oturumları;
-- GitHub device auth, repository doğrulama, required checks, PR, merge ve deploy;
+- uygulama içi GitHub device auth, içerik publication akışı, ref cleanup ve deploy dispatch;
 - temiz Windows profilinde backup/restore ve PGlite kurtarma;
-- installer, updater/rollback ve installed native/WebView smoke;
+- temiz Windows VM'de installer, installed native/WebView smoke, update ve rollback;
 - kesintisiz 24 saat scheduler/retention gözlemi;
 - Search Console, DNS, public site ve production deploy doğrulaması.
 
-Bu kapılar yürütülmeden ürünün canlı yayında, yayınlanmış, kurulmuş veya belirli
-bir uzak hedefte çalışır olduğu iddia edilemez.
+GitHub `v0.1.38` Release ve updater feed yayını doğrulanmıştır. Kalan kapılar
+yürütülmeden ürünün installed, production'da çalışır veya deploy edilmiş olduğu
+iddia edilemez.
 
 ## Tarihsel zincir
 
