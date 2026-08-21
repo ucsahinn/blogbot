@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { isEngineMediaReference } from "./publication.ts";
 import type {
@@ -55,6 +56,19 @@ function assertConfig(config: GitHubPublicationConfig): void {
 function branchName(key: string): string {
   const normalized = key.replace(/[^A-Za-z0-9._/-]+/gu, "-").slice(0, 140);
   return `blogbot/${normalized}`;
+}
+
+function deployIntentId(input: { key: string; revisionId: string; mergeSha: string }): string {
+  if (
+    typeof input.key !== "string" || !input.key.trim() || input.key.length > 512 ||
+    typeof input.revisionId !== "string" || !input.revisionId.trim() || input.revisionId.length > 256 ||
+    !/^[a-f0-9]{40}$/iu.test(input.mergeSha)
+  ) {
+    throw new Error("GitHub deploy intent is invalid");
+  }
+  return createHash("sha256")
+    .update([input.key, input.revisionId, input.mergeSha.toLowerCase()].join("\0"))
+    .digest("hex");
 }
 
 function sha(value: unknown): string {
@@ -235,10 +249,58 @@ export class GitHubPublicationEffects implements PublicationEffectsPort {
     return value && typeof value === "object" ? value as DeployIntent : null;
   }
 
+  private async readDeployMarker(branch: string): Promise<string | null> {
+    const marker = await this.request(this.path(`/git/ref/heads/${branch}`));
+    if (marker.response.status === 404) return null;
+    if (!marker.response.ok) throw new Error(`GitHub deploy marker lookup failed (${marker.response.status})`);
+    return sha(object(object(marker.body).object).sha).toLowerCase();
+  }
+
+  private async ensureDeployMarker(branch: string, mergeSha: string): Promise<void> {
+    const existing = await this.readDeployMarker(branch);
+    if (existing !== null) {
+      if (existing !== mergeSha.toLowerCase()) throw new Error("GitHub deploy marker points at a different merge SHA");
+      return;
+    }
+    const created = await this.request(this.path("/git/refs"), "POST", { ref: `refs/heads/${branch}`, sha: mergeSha.toLowerCase() });
+    if (created.response.ok) return;
+    if (created.response.status === 422) {
+      const raced = await this.readDeployMarker(branch);
+      if (raced === mergeSha.toLowerCase()) return;
+    }
+    throw new Error(`GitHub deploy marker creation failed (${created.response.status})`);
+  }
+
+  private async matchingDeployRunExists(intentBranch: string, mergeSha: string): Promise<boolean> {
+    const runs = await this.request(this.path(`/actions/runs?event=workflow_dispatch&head_sha=${encodeURIComponent(mergeSha)}&per_page=100`));
+    if (!runs.response.ok) throw new Error(`GitHub deployment run lookup failed (${runs.response.status})`);
+    const values = object(runs.body).workflow_runs;
+    return Array.isArray(values) && values.some((value) => {
+      const run = object(value);
+      return string(run.head_branch) === intentBranch && string(run.head_sha)?.toLowerCase() === mergeSha.toLowerCase();
+    });
+  }
+
   async createDeployIntent(input: { key: string; revisionId: string; mergeSha: string }): Promise<DeployIntent> {
     if (!this.config.deployWorkflow) throw new Error("hosting workflow is not configured");
-    const dispatched = await this.request(this.path(`/actions/workflows/${encodeURIComponent(this.config.deployWorkflow)}/dispatches`), "POST", { ref: this.config.baseBranch, inputs: { release_id: input.key, merge_sha: input.mergeSha } });
-    if (!dispatched.response.ok) throw new Error(`GitHub deployment workflow dispatch failed (${dispatched.response.status})`);
+    const intentKey = deployIntentId(input);
+    const intentBranch = `blogbot/deploy-intents/${intentKey}`;
+    const dispatchedBranch = `blogbot/deploy-dispatched/${intentKey}`;
+    await this.ensureDeployMarker(intentBranch, input.mergeSha);
+    const alreadyMarked = await this.readDeployMarker(dispatchedBranch);
+    if (alreadyMarked !== null && alreadyMarked !== input.mergeSha.toLowerCase()) throw new Error("GitHub dispatched marker points at a different merge SHA");
+    if (alreadyMarked === null) {
+      const alreadyRunning = await this.matchingDeployRunExists(intentBranch, input.mergeSha);
+      if (!alreadyRunning) {
+        const dispatched = await this.request(
+          this.path(`/actions/workflows/${encodeURIComponent(this.config.deployWorkflow)}/dispatches`),
+          "POST",
+          { ref: intentBranch, inputs: { intent_key: intentKey, merge_sha: input.mergeSha.toLowerCase() } }
+        );
+        if (!dispatched.response.ok) throw new Error(`GitHub deployment workflow dispatch failed (${dispatched.response.status})`);
+      }
+      await this.ensureDeployMarker(dispatchedBranch, input.mergeSha);
+    }
     const intent = { key: input.key, revisionId: input.revisionId, mergeSha: input.mergeSha };
     await this.store?.set(`github.deploy:${input.key}`, intent);
     return intent;

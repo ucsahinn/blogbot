@@ -151,7 +151,15 @@ export class PGliteCodexJobStore implements CodexJobPersistencePort {
         definitionId: current.definitionId,
         payload: current.payload,
         state: "RUNNING",
-        version: current.version + 1
+        version: current.version + 1,
+        // The retry budget belongs to the job, not to one delivery. Dropping it
+        // here reset the count on every redelivery, so transientFailureCount
+        // could never exceed 1, RETRY_LIMIT_REACHED was unreachable, and a
+        // permanently failing Codex job retried forever at the shortest delay.
+        ...(current.transientFailureCount === undefined
+          ? {}
+          : { transientFailureCount: current.transientFailureCount }),
+        ...(current.retryAt === undefined ? {} : { retryAt: current.retryAt })
       };
       await this.compareAndSwap(transaction, current, next);
       return { claimed: true, snapshot: next };
@@ -268,6 +276,11 @@ export class PGliteCodexJobStore implements CodexJobPersistencePort {
         payload: current.payload,
         state: "QUEUED",
         version: current.version + 1,
+        // A restart must not hand the job a fresh retry budget, or a job that
+        // crashes the engine on every attempt would retry without limit.
+        ...(current.transientFailureCount === undefined
+          ? {}
+          : { transientFailureCount: current.transientFailureCount }),
         ...(current.state === "RUNNING" ? { lastFailure: "EXECUTION_FAILED" as const } : {})
       };
       await this.compareAndSwap(transaction, current, next);

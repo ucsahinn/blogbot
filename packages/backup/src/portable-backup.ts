@@ -130,10 +130,35 @@ export async function createPortableBackup(
   const createdAt = input.createdAt ?? new Date().toISOString();
   assertIsoTimestamp(createdAt);
 
+  // The restore path enforces these same three bounds. Enforcing them only there
+  // let this function report a successful backup that no verify or restore in
+  // this build can ever read back — a false success in the one path a user
+  // depends on for recovery.
+  if (paths.length > MAX_RESTORE_FILES) {
+    throw new BackupError(
+      "BACKUP_LIMIT_EXCEEDED",
+      "Backup holds more files than this build can restore"
+    );
+  }
+
   const manifestFiles: PortableBackupFileManifest[] = [];
   const payloadFiles: PortableBackupPayloadV1["files"] = [];
+  let decodedBytes = 0;
   for (const relativePath of paths) {
     const data = readBackupSourceFile(sourceDirectory, relativePath);
+    if (data.byteLength > MAX_RESTORE_FILE_BYTES) {
+      throw new BackupError(
+        "BACKUP_LIMIT_EXCEEDED",
+        "Backup holds a file larger than this build can restore"
+      );
+    }
+    decodedBytes += data.byteLength;
+    if (decodedBytes > MAX_RESTORE_DECODED_BYTES) {
+      throw new BackupError(
+        "BACKUP_LIMIT_EXCEEDED",
+        "Backup holds more data than this build can restore"
+      );
+    }
     manifestFiles.push({
       path: relativePath,
       size: data.byteLength,

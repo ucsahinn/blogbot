@@ -162,6 +162,13 @@ export interface SourceSnapshotView {
   primary: boolean;
 }
 
+export interface PublicationSourceView {
+  id: string;
+  title: string;
+  url: string;
+  role: "primary" | "independent" | "supporting";
+}
+
 export interface GateView {
   id: string;
   label: string;
@@ -202,6 +209,9 @@ export interface ReviewRevision {
   riskLevel?: "STANDARD" | "HIGH";
   editorialApproved?: boolean;
   highRiskApproved?: boolean;
+  packageVersion?: 3;
+  publicationSources?: PublicationSourceView[];
+  approvalRequirements?: Array<"EDITORIAL_REVIEW" | "EXPERT_REVIEW" | "ETHICS_REVIEW">;
   section: Section;
   articleType: ArticleType;
   author: string;
@@ -341,6 +351,14 @@ export interface ConnectorStateSnapshot {
     adapterVersion: string | null;
   };
   checks: Partial<Record<SetupConnectorId, SetupConnectorTestResult>>;
+  migration?: {
+    state:
+      | "NO_LEGACY_SITE_RECORD"
+      | "MIGRATED_REVALIDATION_REQUIRED"
+      | "ALREADY_EQUIVALENT"
+      | "MIGRATION_CONFLICT_REVIEW_REQUIRED";
+    completedAtUnixMs: number;
+  } | null;
   localReadiness: ConnectorReadiness;
   externalReadiness: ConnectorReadiness;
 }
@@ -440,6 +458,13 @@ export interface CandidateView {
   articleType: ArticleType;
   confidence: number;
   duplicateScore: number;
+  /** Four measured ranking dimensions. Optional only for legacy local snapshots. */
+  sourceSufficiencyScore?: number;
+  freshnessScore?: number;
+  originalityScore?: number;
+  topicFitScore?: number;
+  rankingScore?: number;
+  scoreReasons?: string[];
   discoveredAt: string;
   state: "NEW" | "NEEDS_SOURCE" | "ROUTING_REQUIRED" | "DISMISSED" | "PROMOTED" | "RESEARCH_QUEUED" | "RESEARCH_FAILED";
 }

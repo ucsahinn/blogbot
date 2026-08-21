@@ -524,7 +524,7 @@ test("instant create offers only publishable visual policies and explains their 
     [...instantCreate.matchAll(/<option value="(GENERATE|LOCAL_RENDERER|NONE)">/gu)].map((match) => match[1]),
     ["GENERATE", "LOCAL_RENDERER"]
   );
-  assert.match(instantCreate, /ImageGen kullan\u0131l\u0131r; kullan\u0131lamazsa veya \u00fcretim ba\u015far\u0131s\u0131z olursa g\u00f6rsel eklenmez/u);
+  assert.match(instantCreate, /\u00d6nce ImageGen denenir; kullan\u0131lamazsa veya \u00fcretim ba\u015far\u0131s\u0131z olursa yerel olu\u015fturucu metinsiz kapak ve \u00fc\u00e7 yay\u0131n oran\u0131 \u00fcretir/u);
   assert.match(instantCreate, /Yerel olu\u015fturucu d\u0131\u015f g\u00f6rsel \u00fcretimi \u00e7a\u011f\u0131rmaz; metinsiz kapak ve \u00fc\u00e7 yay\u0131n oran\u0131 \u00fcretir/u);
 });
 
@@ -533,4 +533,19 @@ test("Operations exposes a real retry action for a blocked active draft", async 
   assert.match(contents, /draft\.blockers > 0/u);
   assert.match(contents, /onClick=\{\(\) => void retry\(draft\.id\)\}/u);
   assert.match(contents, /Tekrar dene/u);
+});
+
+test("review approval is V3-only and collects a complete human declaration", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+  const bridge = await readFile(source("bridge.ts"), "utf8");
+
+  assert.match(review, /packageVersion: 3/u);
+  assert.match(review, /sourceRoles: approvalRevision\.publicationSources\.map/u);
+  assert.match(review, /Kaynak rol onayları/u);
+  assert.match(review, /requiresExpertReview/u);
+  assert.match(review, /requiresEthicsReview/u);
+  assert.match(review, /review-v3-upgrade-required/u);
+  assert.doesNotMatch(review, /evidenceExcerpt|evidenceAnchors/u);
+  assert.match(bridge, /attestation: EditorialApprovalAttestationV3/u);
+  assert.match(bridge, /REVISION_REVIEW_UPGRADE_REQUIRED/u);
 });

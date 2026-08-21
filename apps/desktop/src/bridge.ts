@@ -53,6 +53,40 @@ export interface AutomaticBackupSnapshot {
   createdAt: string;
 }
 
+export interface AutomaticBackupRestoreSummary {
+  archivePath: string;
+  createdAt: string;
+  tables: ReadonlyArray<{ name: string; rowCount: number }>;
+  rows: number;
+}
+
+export interface AutomaticBackupVerifyResult extends AutomaticBackupRestoreSummary {
+  verified: boolean;
+}
+
+export interface AutomaticBackupRestoreResult extends AutomaticBackupRestoreSummary {
+  restoredRows: number;
+}
+
+export type EditorialSourceRoleV3 = "primary" | "independent" | "supporting";
+
+export interface EditorialApprovalAttestationV3 {
+  editorialReview: {
+    reviewer: string;
+    sourceRoles: Array<{ sourceId: string; role: EditorialSourceRoleV3 }>;
+  };
+  expertReview: null | {
+    reviewer: string;
+    qualifications: string;
+    reviewScope: string;
+  };
+  ethicsReview: null | {
+    reviewer: string;
+    reviewScope: string;
+    rationale: string;
+  };
+}
+
 export type GitHubDeviceFlowStatus = "unconfigured" | "logged-out" | "pending" | "authorized" | "expired" | "access-denied" | "degraded";
 
 export interface GitHubDeviceFlowResult {
@@ -115,6 +149,14 @@ export interface BlogbotBridge {
   clearGitHubDeviceFlow(): Promise<GitHubDeviceFlowResult>;
   getGitHubDeviceFlowStatus(): Promise<GitHubDeviceFlowResult>;
   validateGitHubRepository(input: { owner: string; repository: string; workflow: string }): Promise<{ valid: boolean; repository: string; workflow: string; writes: false; detail?: string }>;
+  /**
+   * Reads the base-branch tip and stores it with the connector.
+   *
+   * Approval binds `targetBaseSha`, so a PUBLISH-mode revision cannot be
+   * approved until this has run at least once. It fails closed when GitHub is
+   * not authorized rather than reporting a SHA it never read.
+   */
+  captureGitHubBaseSha(input: { owner: string; repository: string; branch: string }): Promise<{ captured: boolean; repository?: string; branch?: string; baseSha?: string; reason?: string; detail?: string }>;
   previewGitHubPullRequest(input: { repository: string; workflow: string; revisionId: string; revisionHash: string }): Promise<{ mode: "dry-run"; writes: false; repository: string; workflow: string; steps: readonly string[] }>;
   getAutostartStatus(): Promise<{ enabled: boolean }>;
   setAutostart(enabled: boolean): Promise<{ enabled: boolean }>;
@@ -174,10 +216,22 @@ export interface BlogbotBridge {
     revisionId: string;
     expectedHash: string;
     warningSetHash: string;
+    packageVersion: 3;
+    attestation: EditorialApprovalAttestationV3;
   }): Promise<{
     approvedAt: string;
     revisionHash: string;
     state: "REVIEW_REQUIRED" | "APPROVED";
+  }>;
+  revokeApproval(input: {
+    revisionId: string;
+    expectedHash: string;
+    reason: string;
+  }): Promise<{
+    revokedAt: string;
+    revisionHash: string;
+    state: "REVIEW_REQUIRED";
+    recalledEffectIds: string[];
   }>;
   approveHighRiskRevision(input: {
     revisionId: string;
@@ -229,9 +283,12 @@ export interface BlogbotBridge {
     recoveryKey: string;
   }): Promise<BackupCreateResult>;
   listAutomaticBackups(): Promise<{ snapshots: AutomaticBackupSnapshot[] }>;
-  verifyAutomaticBackup(input: { backupName: string }): Promise<BackupVerifyResult>;
-  previewAutomaticBackupRestore(input: { backupName: string; targetDirectory: string }): Promise<BackupRestorePreview>;
-  restoreAutomaticBackup(input: { backupName: string; targetDirectory: string }): Promise<{ restored: true; targetDirectory: string; entries: number }>;
+  verifyAutomaticBackup(input: { backupName: string }): Promise<AutomaticBackupVerifyResult>;
+  previewAutomaticBackupRestore(input: { backupName: string }): Promise<AutomaticBackupVerifyResult>;
+  restoreAutomaticBackup(input: {
+    backupName: string;
+    confirmReplaceLocalData: true;
+  }): Promise<AutomaticBackupRestoreResult>;
 }
 
 function resultAs<T>(value: unknown): T {
@@ -268,6 +325,12 @@ export function userFacingBridgeError(
   }
   if (code.includes("VERSION_CONFLICT")) {
     return "Veriler siz işlem yaparken değişti. Ekranı yenileyip işlemi yeniden deneyin.";
+  }
+  if (code.includes("REVISION_REVIEW_UPGRADE_REQUIRED")) {
+    return "Bu eski revizyon yalnızca okunabilir. İnsan inceleme beyanı içeren V3 paketini oluşturup yeni revizyonu açın.";
+  }
+  if (code.includes("EDITORIAL_ATTESTATION")) {
+    return "İnsan inceleme beyanı tamamlanmadı. Editör adını, her kaynağın rol onayını ve gerekli uzman veya etik inceleme alanlarını doldurun.";
   }
   if (code.includes("CANDIDATE_SOURCE_MISSING")) {
     return "Bu adayın bağlı kaynağı artık bulunamadı. Kaynak envanterini yenileyip adayı yeniden tarayın.";
@@ -376,6 +439,7 @@ export function createInvokeBridge(
     clearGitHubDeviceFlow: () => mutate("github_device_flow_clear"),
     getGitHubDeviceFlowStatus: () => read("github_device_flow_status"),
     validateGitHubRepository: (input) => read("github_validate_repository", input),
+    captureGitHubBaseSha: (input) => read("github_capture_base_sha", input),
     previewGitHubPullRequest: (input) => read("github_preview_pull_request", input),
     getAutostartStatus: () => read("autostart_status"),
     setAutostart: (enabled) => mutate("set_autostart", { enabled }),
@@ -409,6 +473,7 @@ export function createInvokeBridge(
       read("get_review_revision", { revisionId }),
     readRevisionMedia: (input) => read("read_revision_media", input),
     approveRevision: (input) => mutate("approve_revision", input),
+    revokeApproval: (input) => mutate("revoke_revision_approval", input),
     approveHighRiskRevision: (input) => mutate("approve_high_risk_revision", { request: input }),
     enqueuePublication: (input) => mutate("enqueue_publication", input),
     materializeLocalPreview: (input) => mutate("materialize_local_preview", input),
@@ -564,7 +629,7 @@ export function createCoalescingBridge(
     "sendTestNotification", "promoteCandidate", "dismissCandidate", "retryJob",
     "requestRevisionEdit", "repairRevisionMedia", "updateScheduleSlot", "saveDesktopPreferences",
     "scanSource", "scanAllSources", "saveSources", "reviewSource",
-    "createInstantDraft", "approveRevision", "approveHighRiskRevision",
+    "createInstantDraft", "approveRevision", "revokeApproval", "approveHighRiskRevision",
     "enqueuePublication", "materializeLocalPreview", "completeOnboarding",
     "setRuntimePause", "restoreBackup", "createBackup", "restoreAutomaticBackup"
   ]);

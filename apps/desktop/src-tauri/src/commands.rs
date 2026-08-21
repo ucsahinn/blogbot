@@ -30,10 +30,8 @@ fn configure_hidden_command(command: &mut Command) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-#[allow(
-    dead_code,
-    reason = "engine handshake will construct online/degraded states"
-)]
+// The engine handshake will construct online/degraded states.
+#[allow(dead_code)]
 pub enum RuntimeMode {
     Online,
     Degraded,
@@ -69,7 +67,12 @@ impl Default for DesktopState {
             codex_authenticated: RwLock::new(None),
             onboarding_complete: RwLock::new(false),
             ingestion_paused: RwLock::new(false),
-            publishing_paused: RwLock::new(false),
+            // The native publication drainer is the only writer that runs
+            // without a user action, so it must stay closed until bootstrap has
+            // rehydrated the engine-owned automation flag. A `false` default let
+            // the drainer push real GitHub commits before the desktop had read
+            // any persisted automation state.
+            publishing_paused: RwLock::new(true),
             editorial_mutations: RwLock::new(Vec::new()),
             preferences: RwLock::new(json!({
                 "author": "OPE Editorya",
@@ -361,18 +364,27 @@ fn engine_request(bridge: &EngineBridge, request: Value) -> Result<Value, Comman
     if response.get("ok").and_then(Value::as_bool) == Some(true) {
         return Ok(response);
     }
-    Err(CommandError::EngineUnavailable(
-        response
-            .get("message")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                response
-                    .pointer("/result/error/message")
-                    .and_then(Value::as_str)
-            })
-            .unwrap_or("ENGINE_REQUEST_FAILED")
-            .to_string(),
-    ))
+    let message = response
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            response
+                .pointer("/result/error/message")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("ENGINE_REQUEST_FAILED");
+    // A reused idempotency key means the engine already owns a decision for this
+    // logical request; the caller must refresh instead of reading it as a
+    // transport fault. Surfacing the raw engine sentence made a duplicate click
+    // look like an unavailable engine.
+    if message.contains("IDEMPOTENCY_KEY_REUSED")
+        || message.contains("Idempotency key was already used")
+    {
+        return Err(CommandError::EngineUnavailable(
+            "REQUEST_ALREADY_APPLIED".into(),
+        ));
+    }
+    Err(CommandError::EngineUnavailable(message.to_string()))
 }
 
 fn read_engine_local_state(bridge: &EngineBridge, key: &str) -> Option<Value> {
@@ -440,38 +452,138 @@ fn read_engine_local_state_result(
     })
 }
 
+/// Runs one compare-and-set write, re-reading and re-applying the mutation on
+/// every attempt. Resending the value that was computed before a
+/// VERSION_CONFLICT overwrites whatever the conflicting writer committed, so the
+/// read has to live inside the retried attempt rather than outside it.
+fn local_state_write<R, V, M, S>(
+    read_version: R,
+    mut read_value: V,
+    mut mutate: M,
+    mut send: S,
+) -> Result<Value, CommandError>
+where
+    R: FnMut() -> Result<u64, CommandError>,
+    V: FnMut() -> Value,
+    M: FnMut(&mut Value) -> Result<(), CommandError>,
+    S: FnMut(u64, Value) -> Result<Value, CommandError>,
+{
+    retry_version_conflicted_draft(read_version, |version| {
+        let mut value = read_value();
+        mutate(&mut value)?;
+        send(version, value)
+    })
+}
+
+fn send_engine_local_state(
+    bridge: &EngineBridge,
+    key: &str,
+    version: u64,
+    value: Value,
+) -> Result<Value, CommandError> {
+    let request_id = stable_source_key(&format!("local-state:{key}:{version}"));
+    engine_request(
+        bridge,
+        json!({
+            "version": 1,
+            "id": request_id,
+            "kind": "command",
+            "command": {
+                "version": 1,
+                "requestId": request_id,
+                "idempotencyKey": request_id,
+                "expectedVersion": version,
+                "kind": "LOCAL_STATE.SET",
+                "payload": { "key": key, "value": value }
+            }
+        }),
+    )
+}
+
 fn write_engine_local_state(
     bridge: &EngineBridge,
     key: &str,
     value: Value,
 ) -> Result<Value, CommandError> {
-    retry_version_conflicted_draft(
+    local_state_write(
         || {
             read_engine_state(bridge)?
                 .pointer("/snapshot/serverCursor")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))
         },
-        |version| {
-            let request_id = stable_source_key(&format!("local-state:{key}:{version}"));
-            engine_request(
-                bridge,
-                json!({
-                    "version": 1,
-                    "id": request_id,
-                    "kind": "command",
-                    "command": {
-                        "version": 1,
-                        "requestId": request_id,
-                        "idempotencyKey": request_id,
-                        "expectedVersion": version,
-                        "kind": "LOCAL_STATE.SET",
-                        "payload": { "key": key, "value": value.clone() }
-                    }
-                }),
-            )
+        Value::default,
+        |current| {
+            *current = value.clone();
+            Ok(())
         },
+        |version, value| send_engine_local_state(bridge, key, version, value),
     )
+}
+
+/// Applies `mutate` to the currently stored document instead of to a snapshot
+/// the caller read earlier, so a retried attempt appends to the freshly read
+/// state.
+fn mutate_engine_local_state<M>(
+    bridge: &EngineBridge,
+    key: &str,
+    mut mutate: M,
+) -> Result<Value, CommandError>
+where
+    M: FnMut(&mut Value) -> Result<(), CommandError>,
+{
+    local_state_write(
+        || {
+            read_engine_state(bridge)?
+                .pointer("/snapshot/serverCursor")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))
+        },
+        || read_engine_local_state(bridge, key).unwrap_or_else(|| json!({})),
+        |current| mutate(current),
+        |version, value| send_engine_local_state(bridge, key, version, value),
+    )
+}
+
+/// `desktop.editorial` is one local-state document and the engine rejects any
+/// value over 256 000 units (`LOCAL_STATE_TOO_LARGE`). The mutation log was
+/// append-only, so a normally used workspace eventually crossed that limit and
+/// every later candidate, schedule and preference mutation failed permanently.
+const MAX_EDITORIAL_MUTATIONS: usize = 400;
+/// Byte budget kept comfortably under the engine limit. Rust measures UTF-8
+/// bytes while the engine measures UTF-16 units, and UTF-8 is never smaller for
+/// this content, so staying under this bound also stays under the engine's.
+const MAX_EDITORIAL_STATE_BYTES: usize = 192 * 1024;
+
+/// Drops the oldest mutations until the document is both short enough and small
+/// enough. Only the newest mutation per candidate decides candidate workflow
+/// state (`candidate_workflow_state`), and the operations feed shows recent
+/// activity, so trimming the oldest entries preserves both readers.
+fn bound_editorial_state(object: &mut serde_json::Map<String, Value>) {
+    if let Some(mutations) = object.get_mut("mutations").and_then(Value::as_array_mut) {
+        if mutations.len() > MAX_EDITORIAL_MUTATIONS {
+            let excess = mutations.len() - MAX_EDITORIAL_MUTATIONS;
+            mutations.drain(0..excess);
+        }
+    }
+    loop {
+        let size = serde_json::to_string(&Value::Object(object.clone()))
+            .map(|encoded| encoded.len())
+            .unwrap_or(0);
+        if size <= MAX_EDITORIAL_STATE_BYTES {
+            return;
+        }
+        let Some(mutations) = object.get_mut("mutations").and_then(Value::as_array_mut) else {
+            return;
+        };
+        if mutations.is_empty() {
+            // Nothing left to trim: the remaining fields are already oversized,
+            // and the engine's own limit stays the final guard.
+            return;
+        }
+        let drop = (mutations.len() / 4).max(1);
+        mutations.drain(0..drop);
+    }
 }
 
 fn persist_editorial_state(
@@ -479,21 +591,22 @@ fn persist_editorial_state(
     mutation: Value,
     field: Option<(&str, Value)>,
 ) -> Result<Value, CommandError> {
-    let mut state =
-        read_engine_local_state(bridge, "desktop.editorial").unwrap_or_else(|| json!({}));
-    let object = state
-        .as_object_mut()
-        .ok_or_else(|| CommandError::EngineUnavailable("EDITORIAL_STATE_INVALID".into()))?;
-    let mutations = object
-        .entry("mutations")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .ok_or_else(|| CommandError::EngineUnavailable("EDITORIAL_MUTATIONS_INVALID".into()))?;
-    mutations.push(mutation);
-    if let Some((key, value)) = field {
-        object.insert(key.to_string(), value);
-    }
-    write_engine_local_state(bridge, "desktop.editorial", Value::Object(object.clone()))
+    mutate_engine_local_state(bridge, "desktop.editorial", |state| {
+        let object = state
+            .as_object_mut()
+            .ok_or_else(|| CommandError::EngineUnavailable("EDITORIAL_STATE_INVALID".into()))?;
+        let mutations = object
+            .entry("mutations")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| CommandError::EngineUnavailable("EDITORIAL_MUTATIONS_INVALID".into()))?;
+        mutations.push(mutation.clone());
+        if let Some((key, value)) = field.clone() {
+            object.insert(key.to_string(), value);
+        }
+        bound_editorial_state(object);
+        Ok(())
+    })
 }
 
 fn read_engine_state(bridge: &EngineBridge) -> Result<Value, CommandError> {
@@ -705,13 +818,24 @@ pub fn pick_local_folder(
     }
 }
 
+/// Validation still touches the filesystem (site format, content model, git
+/// remote), so it may only ever inspect a folder the user picked through the
+/// native dialog. Without the grant check the WebView could probe any path on
+/// disk and read back the project's configured GitHub remote.
 #[tauri::command]
-pub fn engine_doctor(bridge: tauri::State<'_, EngineBridge>) -> Result<Value, CommandError> {
-    bridge.doctor().map_err(CommandError::EngineUnavailable)
+pub fn test_setup_connector(
+    connector: String,
+    config: Value,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Value, CommandError> {
+    test_setup_connector_with_grants(&state, connector, config)
 }
 
-#[tauri::command]
-pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, CommandError> {
+fn test_setup_connector_with_grants(
+    state: &DesktopState,
+    connector: String,
+    config: Value,
+) -> Result<Value, CommandError> {
     let allowed = ["codex", "github", "site", "deploy", "backup"];
     if !allowed.contains(&connector.as_str()) {
         return Err(CommandError::InvalidInput("unknown setup connector".into()));
@@ -780,6 +904,18 @@ pub fn test_setup_connector(connector: String, config: Value) -> Result<Value, C
             "state": "ATTENTION",
             "detail": "Gerekli gizli olmayan alanları doldurun."
         }));
+    }
+    // `save_setup_connector` refuses an ungranted folder; validation must not be
+    // the weaker door into the same paths, because the checks below stat the
+    // directory, read package.json and return the configured git remote.
+    match connector.as_str() {
+        "site" => {
+            require_granted_directory(state, text("repositoryPath").unwrap_or_default())?;
+        }
+        "backup" => {
+            require_granted_directory(state, text("folder").unwrap_or_default())?;
+        }
+        _ => {}
     }
     let semantic_error = match connector.as_str() {
         "github" => {
@@ -1062,6 +1198,123 @@ pub fn github_validate_repository(
     )
 }
 
+/// Captures the base-branch tip so a PUBLISH-mode revision can be approved.
+///
+/// `github_validate_repository` only checks the name grammar and never touches
+/// the network, so no code path ever learned a base SHA. Approval binds
+/// `targetBaseSha`, so without it the `publication-target` gate stayed NOT_RUN
+/// and PUBLISH mode was unreachable. This is an explicit, user-triggered read:
+/// it fails closed when GitHub is not authorized and writes only the verified
+/// GitHub connector fields into encrypted local state.
+/// Branch names are interpolated into GitHub API paths, so the grammar stays
+/// deliberately narrow.
+fn valid_github_branch(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value == value.trim()
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("..")
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
+fn valid_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn require_github_publication_readiness(
+    readiness: Result<(), String>,
+) -> Result<(), CommandError> {
+    readiness.map_err(CommandError::EngineUnavailable)
+}
+
+fn update_github_base_sha_state(
+    connectors: &mut Value,
+    owner: &str,
+    repository: &str,
+    branch: &str,
+    base_sha: &str,
+) -> Result<(), CommandError> {
+    let object = connectors
+        .as_object_mut()
+        .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_STATE_INVALID".into()))?;
+    let github = object.entry("github").or_insert_with(|| json!({}));
+    let github = github
+        .as_object_mut()
+        .ok_or_else(|| CommandError::EngineUnavailable("CONNECTOR_STATE_INVALID".into()))?;
+    github.insert("owner".into(), Value::String(owner.to_string()));
+    github.insert("repository".into(), Value::String(repository.to_string()));
+    github.insert("branch".into(), Value::String(branch.to_string()));
+    github.insert("baseSha".into(), Value::String(base_sha.to_string()));
+    Ok(())
+}
+
+fn github_base_sha_capture_result(repository: &str, branch: &str, base_sha: &str) -> Value {
+    json!({
+        "captured": true,
+        "repository": repository,
+        "branch": branch,
+        "baseSha": base_sha,
+        "writes": true,
+        "network": true
+    })
+}
+
+#[tauri::command]
+pub fn github_capture_base_sha(
+    owner: String,
+    repository: String,
+    branch: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    let owner = owner.trim().to_string();
+    let repository = repository.trim().to_string();
+    let branch = if branch.trim().is_empty() { "main".to_string() } else { branch.trim().to_string() };
+    if !valid_github_segment(&owner) || !valid_github_segment(&repository) {
+        return Err(CommandError::InvalidInput(
+            "GitHub depo adı güvenli değil.".into(),
+        ));
+    }
+    if !valid_github_branch(&branch) {
+        return Err(CommandError::InvalidInput(
+            "GitHub dal adı güvenli değil.".into(),
+        ));
+    }
+    let token_path = github_token_path(&app)?;
+    if let Err(reason) = state.github_broker.publication_readiness(&token_path) {
+        // Fail closed: never report a captured base SHA without a real read.
+        return Ok(json!({
+            "captured": false,
+            "reason": reason,
+            "detail": "Temel SHA okumak için GitHub yetkilendirmesi gerekir."
+        }));
+    }
+    let slug = format!("{owner}/{repository}");
+    let base_sha = state
+        .github_broker
+        .base_sha(&token_path, &slug, &branch)
+        .map_err(CommandError::EngineUnavailable)?;
+    if !valid_git_object_id(&base_sha) {
+        return Err(CommandError::EngineUnavailable(
+            "GITHUB_BASE_SHA_INVALID".into(),
+        ));
+    }
+    mutate_engine_local_state(&bridge, "desktop.connectors", |connectors| {
+        update_github_base_sha_state(
+            connectors,
+            &owner,
+            &repository,
+            &branch,
+            &base_sha,
+        )
+    })?;
+    Ok(github_base_sha_capture_result(&slug, &branch, &base_sha))
+}
+
 #[tauri::command]
 pub fn github_preview_pull_request(
     repository: String,
@@ -1225,6 +1478,18 @@ where
     verifier(action, fingerprint)
 }
 
+/// Truncates by characters, not bytes. The fingerprint is often a canonicalized
+/// project path, and Turkish folder names put multi-byte characters at arbitrary
+/// offsets; slicing `&fingerprint[..160]` panics on a non-boundary index, which
+/// the release profile turns into a silent process abort.
+fn native_confirmation_detail(fingerprint: &str) -> String {
+    if fingerprint.chars().count() > 160 {
+        format!("{}…", fingerprint.chars().take(160).collect::<String>())
+    } else {
+        fingerprint.to_string()
+    }
+}
+
 #[cfg(windows)]
 fn verify_native_confirmation(action: &str, fingerprint: &str) -> Result<(), CommandError> {
     use windows::core::{HSTRING, PCWSTR};
@@ -1232,11 +1497,7 @@ fn verify_native_confirmation(action: &str, fingerprint: &str) -> Result<(), Com
         MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO,
     };
 
-    let detail = if fingerprint.len() > 160 {
-        format!("{}…", &fingerprint[..160])
-    } else {
-        fingerprint.to_string()
-    };
+    let detail = native_confirmation_detail(fingerprint);
     let message = HSTRING::from(format!(
         "{action}\n\nDoğrulama bilgisi:\n{detail}\n\nBu işlemi gerçekten başlatmak istiyor musunuz?"
     ));
@@ -1347,9 +1608,11 @@ pub fn start_local_dev(
     Ok(json!({ "running": true, "directory": root }))
 }
 
+/// Terminating a child this process owns needs no engine, and a degraded runtime
+/// is exactly when the user needs the dev server stopped. Requiring
+/// mutation-allowed here left the npm tree running with no way to stop it.
 #[tauri::command]
 pub fn stop_local_dev(state: tauri::State<'_, DesktopState>) -> Result<Value, CommandError> {
-    ensure_mutation_allowed(&state)?;
     stop_local_dev_process(&state.local_dev_process)?;
     Ok(json!({ "running": false }))
 }
@@ -1540,7 +1803,7 @@ pub fn save_setup_connector(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
-    let validation = test_setup_connector(connector.clone(), config.clone())?;
+    let validation = test_setup_connector_with_grants(&state, connector.clone(), config.clone())?;
     if validation.get("ready").and_then(Value::as_bool) != Some(true) {
         return Ok(validation);
     }
@@ -1629,8 +1892,9 @@ fn safe_legacy_site_connector(value: &Value) -> Option<Value> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    if !public_site_url.is_empty()
-        && !(public_site_url.starts_with("https://") || public_site_url.starts_with("http://"))
+    if !(public_site_url.is_empty()
+        || public_site_url.starts_with("https://")
+        || public_site_url.starts_with("http://"))
     {
         return None;
     }
@@ -1975,8 +2239,39 @@ fn request_choice(
     }
 }
 
+/// Every site section declared by `SITE_SECTIONS` in packages/contracts.
+pub(crate) const SITE_SECTION_IDS: [&str; 8] = [
+    "haberler",
+    "analiz",
+    "dosyalar",
+    "rehberler",
+    "teknoloji",
+    "ekonomi",
+    "kultur",
+    "yasam",
+];
+
+/// The Instant Create renderer sends the chosen site section as `targetSection`
+/// (`InstantCreateCommand` in apps/desktop/src/types.ts). Reading only `section`
+/// silently discarded the editor's choice and filed every instant draft under
+/// the default section. `section` stays accepted so an older renderer payload is
+/// still honoured rather than falling back to the default.
+fn request_section(
+    request: &Value,
+    allowed: &[&str],
+    default: &str,
+) -> Result<String, CommandError> {
+    let field = if request.get("targetSection").is_some() {
+        "targetSection"
+    } else {
+        "section"
+    };
+    request_choice(request, field, allowed, default)
+}
+
 #[tauri::command]
 pub fn get_bootstrap_snapshot(
+    app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
@@ -2095,6 +2390,25 @@ pub fn get_bootstrap_snapshot(
         .and_then(|value| value.pointer("/snapshot/jobs").and_then(Value::as_array))
         .cloned()
         .unwrap_or_default();
+    let failure_count = queue_jobs
+        .iter()
+        .filter(|job| {
+            matches!(
+                job.get("state").and_then(Value::as_str),
+                Some("FAILED") | Some("DEAD_LETTER")
+            )
+        })
+        .count()
+        + engine_state
+            .as_ref()
+            .and_then(|value| value.pointer("/snapshot/outbox").and_then(Value::as_array))
+            .map(|effects| {
+                effects
+                    .iter()
+                    .filter(|effect| effect.get("state").and_then(Value::as_str) == Some("FAILED"))
+                    .count()
+            })
+            .unwrap_or(0);
     let codex_waiting = queue_jobs
         .iter()
         .filter(|job| {
@@ -2115,7 +2429,7 @@ pub fn get_bootstrap_snapshot(
     let (discovered_count, researching_count) =
         dashboard_pipeline_counts(&candidates, &editorial_mutations, &queue_jobs);
 
-    Ok(json!({
+    let snapshot = json!({
         "onboardingComplete": onboarding_complete,
         "runtime": runtime,
         "capabilities": capabilities,
@@ -2150,7 +2464,198 @@ pub fn get_bootstrap_snapshot(
         "queue": revision_queue,
         "sourceCount": source_count,
         "scheduledCount": scheduled_count
-    }))
+    });
+    let should_notify = crate::tray::update(
+        &app,
+        crate::tray::TrayProjection {
+            connected: matches!(runtime, RuntimeMode::Online),
+            review_count,
+            failure_count,
+            scheduled_count,
+        },
+    )
+    .unwrap_or(false);
+    if should_notify && notifications_enabled(&state, &bridge)? {
+        let _ = notifications::show_review_ready(
+            &app,
+            &format!("İncelemeye hazır taslak sayısı: {review_count}"),
+        );
+    }
+    Ok(snapshot)
+}
+
+/// The publication scheduler resolves slots against a hard-coded +03:00 offset.
+const PUBLISHING_UTC_OFFSET_MINUTES: i64 = 180;
+
+/// A check that was never executed must never render as done. Only the build
+/// architecture is observable here (ARM64 is out of support scope); there is no
+/// OS build probe, so the honest state is "not measured" with an action, not
+/// READY. `architecture` accepts either the Windows (`ARM64`) or the Rust
+/// (`aarch64`) spelling.
+fn windows_prerequisite_check(architecture: Option<&str>) -> Value {
+    let unsupported = architecture.is_some_and(|value| {
+        value.eq_ignore_ascii_case("aarch64") || value.eq_ignore_ascii_case("arm64")
+    });
+    json!({
+        "id": "windows",
+        "label": "Desteklenen Windows",
+        "state": if unsupported { "BLOCKED" } else { "ATTENTION" },
+        "scope": "APP",
+        "detail": if unsupported {
+            "Bu işlemci mimarisi (ARM64) desteklenmiyor."
+        } else {
+            "Windows sürüm ve mimari kontrolü bu sürümde çalıştırılmadı; hazır olarak işaretlenmedi."
+        },
+        "userAction": if unsupported {
+            json!("OPE'yi desteklenen bir x64 Windows 10 22H2 veya Windows 11 bilgisayarında çalıştırın.")
+        } else {
+            json!("Windows 10 22H2 veya Windows 11 x64 kullandığınızı elle doğrulayın.")
+        }
+    })
+}
+
+/// Windows reports the host architecture in `PROCESSOR_ARCHITEW6432` while a
+/// process runs under emulation, and in `PROCESSOR_ARCHITECTURE` otherwise; the
+/// compiled target is only the last resort, because an x64 build reports x86_64
+/// even on an ARM64 machine.
+fn windows_host_architecture_with<F>(mut lookup: F) -> String
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    lookup("PROCESSOR_ARCHITEW6432")
+        .or_else(|| lookup("PROCESSOR_ARCHITECTURE"))
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string())
+}
+
+/// `local_offset_minutes` is the measured local UTC offset. No local clock probe
+/// is wired into this binary yet, so `None` keeps the row honest instead of
+/// reporting a scheduling prerequisite nobody checked.
+fn clock_prerequisite_check(local_offset_minutes: Option<i64>) -> Value {
+    let state = match local_offset_minutes {
+        Some(offset) if offset == PUBLISHING_UTC_OFFSET_MINUTES => "READY",
+        _ => "ATTENTION",
+    };
+    json!({
+        "id": "clock",
+        "label": "Yerel zamanlayıcı",
+        "state": state,
+        "scope": "PUBLISH",
+        "detail": match local_offset_minutes {
+            Some(offset) if offset == PUBLISHING_UTC_OFFSET_MINUTES => "Yerel saat dilimi yayın zaman dilimiyle (+03:00) uyumlu.",
+            Some(_) => "Yerel saat dilimi yayın zaman diliminden (+03:00) farklı; planlanan yayınlar beklenen saatte çalışmaz.",
+            None => "Sistem saati ve saat dilimi kontrolü çalıştırılmadı; hazır olarak işaretlenmedi."
+        },
+        "userAction": if state == "READY" {
+            Value::Null
+        } else {
+            json!("Windows saatini otomatik eşitlemeye alın ve saat dilimini Europe/Istanbul (+03:00) olarak doğrulayın.")
+        }
+    })
+}
+
+/// A stored deploy form is not proof that the native setup check ran. Keep the
+/// PUBLISH prerequisite closed unless both the persisted workflow contract and
+/// its local validation record are present and valid. This check deliberately
+/// reports no live GitHub authorization or workflow-run claim.
+fn deploy_prerequisite_check(config: Option<&Value>, verification: Option<&Value>) -> Value {
+    let workflow_name = config
+        .and_then(|value| value.get("workflowName"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let required_checks_value = config.and_then(|value| value.get("requiredChecks"));
+    let required_checks = required_checks_value
+        .and_then(Value::as_array)
+        .map(|checks| {
+            checks
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let contract_valid =
+        valid_github_workflow(workflow_name) && valid_required_github_checks(required_checks_value);
+    let locally_checked = verification
+        .and_then(|value| value.get("ready"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let ready = contract_valid && locally_checked;
+    let configured = config.is_some();
+    json!({
+        "id": "deploy",
+        "checkPassed": ready,
+        "localValidationRecorded": locally_checked,
+        "workflowName": if workflow_name.is_empty() { Value::Null } else { json!(workflow_name) },
+        "requiredChecks": required_checks,
+        "authorizationState": "NOT_CHECKED",
+        "label": "GitHub Actions yayın sözleşmesi",
+        "state": if ready { "READY" } else if configured { "ATTENTION" } else { "BLOCKED" },
+        "scope": "PUBLISH",
+        "detail": if ready {
+            format!(
+                "{workflow_name} workflow'u ve {} zorunlu kontrol yerel olarak doğrulandı; canlı GitHub çalıştırma sonucu yayın sırasında ayrıca izlenir.",
+                required_checks.len()
+            )
+        } else if contract_valid {
+            "Yayın workflow sözleşmesi kaydedildi; yerel doğrulama kaydı bulunmadığı için hazır sayılmadı.".to_string()
+        } else if configured {
+            "Workflow dosyası ile benzersiz, boş olmayan zorunlu kontrol listesi geçerli değil.".to_string()
+        } else {
+            "GitHub Actions yayın workflow'u ve zorunlu kontroller henüz yapılandırılmadı.".to_string()
+        },
+        "userAction": if ready {
+            Value::Null
+        } else {
+            json!("Geçerli bir .yml/.yaml workflow dosyası ve en az bir benzersiz zorunlu kontrol girip yerel doğrulamayı yeniden çalıştırın.")
+        }
+    })
+}
+
+/// Configuration is not a passed check: the row only turns READY once a recovery
+/// key verification *and* a restore preview were actually recorded.
+fn backup_prerequisite_check(backup_configured: bool, verification: Option<&Value>) -> Value {
+    let archive_sha256 = verification
+        .and_then(|record| record.get("archiveSha256"))
+        .and_then(Value::as_str)
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let verified_at = verification
+        .and_then(|record| record.get("verifiedAtUnixMs"))
+        .and_then(Value::as_u64);
+    let restore_preview_at = verification
+        .and_then(|record| record.get("restorePreviewAtUnixMs"))
+        .and_then(Value::as_u64);
+    let complete = archive_sha256.is_some() && verified_at.is_some() && restore_preview_at.is_some();
+    json!({
+        "id": "backup",
+        "label": "İsteğe bağlı şifreli yedek",
+        "state": if complete {
+            "READY"
+        } else if backup_configured || verified_at.is_some() {
+            "ATTENTION"
+        } else {
+            "MISSING"
+        },
+        "scope": "APP",
+        "detail": if complete {
+            "Şifreli yedek recovery key ile doğrulandı ve geri yükleme testi tamamlandı."
+        } else if verified_at.is_some() {
+            "Yedek recovery key ile doğrulandı; boş klasöre geri yükleme testi bekleniyor."
+        } else if backup_configured {
+            "Yedek klasörü kaydedildi; recovery key ile doğrulama bekleniyor."
+        } else {
+            "Şifreli yedek klasörü henüz seçilmedi."
+        },
+        "userAction": if complete {
+            Value::Null
+        } else {
+            json!("Recovery key oluşturun ve boş klasöre geri yükleme testini tamamlayın.")
+        }
+    })
 }
 
 #[tauri::command]
@@ -2233,18 +2738,16 @@ pub fn get_prerequisite_status(
         .pointer("/site/ready")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let backup_verification = connector_checks.get("backupVerification");
+    let deploy_config = connectors.get("deploy");
+    let deploy_verification = connector_checks.get("deploy");
 
     Ok(json!({
         "checkedAtUnixMs": checked_at_unix_ms,
         "checks": [
-            {
-                "id": "windows",
-                "label": "Desteklenen Windows",
-                "state": "READY",
-                "scope": "APP",
-                "detail": "Windows masaüstü çalışma zamanı hazır.",
-                "userAction": null
-            },
+            windows_prerequisite_check(Some(&windows_host_architecture_with(|name| {
+                std::env::var_os(name)
+            }))),
             {
                 "id": "webview2",
                 "label": "Microsoft Edge WebView2",
@@ -2305,14 +2808,7 @@ pub fn get_prerequisite_status(
                 "detail": if !codex_configured { "Yazı üretimi hesabı henüz seçilmedi." } else if !codex_authenticated { "Codex bağlantısı henüz açıkça test edilmedi." } else if !codex_runner_ready { "Hesap hazır; izole yerel runner henüz başlatılmadı." } else { "Codex hesabı ve izole yerel runner hazır." },
                 "userAction": if codex_runner_ready && codex_authenticated && codex_configured { Value::Null } else { json!("Codex hesabını bağlayıp izole runner testini tamamlayın.") }
             },
-            {
-                "id": "clock",
-                "label": "Yerel zamanlayıcı",
-                "state": "READY",
-                "scope": "PUBLISH",
-                "detail": "Planlama bu Windows bilgisayarının yerel saatini kullanır.",
-                "userAction": Value::Null
-            },
+            clock_prerequisite_check(None),
             {
                 "id": "github",
                 "label": "GitHub yayın bağlantısı",
@@ -2321,14 +2817,7 @@ pub fn get_prerequisite_status(
                 "detail": if !github_configured { "GitHub depo hedefi henüz yapılandırılmadı." } else if github_authorized { "GitHub App broker ve depo yetkisi hazır." } else { "GitHub depo hedefi kaydedildi; GitHub App broker yapılandırılmadığı için yayın kilitli." },
                 "userAction": if github_configured && github_authorized { Value::Null } else { json!("GitHub App broker yapılandırması ve gerçek erişim için ayrı onay gerekir; aksi halde PR ve yayın işlemleri kilitli kalır.") }
             },
-            {
-                "id": "backup",
-                "label": "İsteğe bağlı şifreli yedek",
-                "state": "BLOCKED",
-                "scope": "APP",
-                "detail": if backup_configured { "Yedek klasörü kaydedildi; recovery key ile doğrulama bekleniyor." } else { "Şifreli yedek klasörü henüz seçilmedi." },
-                "userAction": json!("Recovery key oluşturun ve boş klasöre geri yükleme testini tamamlayın.")
-            },
+            backup_prerequisite_check(backup_configured, backup_verification),
             {
                 "id": "site-adapter",
                 "checkPassed": site_check_ready,
@@ -2337,7 +2826,8 @@ pub fn get_prerequisite_status(
                 "scope": "PUBLISH",
                 "detail": if site_check_ready { "Seçilen site adaptörü ve yayın sözleşmesi doğrulandı." } else if site_configured { "Site klasörü kaydedildi; format ve route dry-run doğrulaması bekleniyor." } else { "Yayın yapılacak site henüz seçilmedi." },
                 "userAction": if site_check_ready { Value::Null } else { json!("Yayın yapılacak siteyi seçin ve format/route dry-run testini çalıştırın.") }
-            }
+            },
+            deploy_prerequisite_check(deploy_config, deploy_verification)
         ]
     }))
 }
@@ -2545,6 +3035,23 @@ fn build_source_scan_command(
     }))
 }
 
+/// The token is the scan's idempotency key *and* its status handle. Two parallel
+/// scans used to share a millisecond, which made the engine reject the second
+/// batch as a reused key and made one scan's status page report the other's runs.
+/// Nanoseconds plus a process-local sequence keep every scan distinct.
+fn source_scan_request_token() -> Result<String, CommandError> {
+    static SCAN_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CommandError::StateUnavailable)?
+        .as_nanos();
+    let sequence = SCAN_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(format!(
+        "desktop-scan-{}-{nanos}-{sequence}",
+        std::process::id()
+    ))
+}
+
 fn scan_sources(
     selected_source_id: Option<&str>,
     state: &DesktopState,
@@ -2563,11 +3070,7 @@ fn scan_sources(
         .get("sources")
         .and_then(Value::as_array)
         .ok_or_else(|| CommandError::EngineUnavailable("SOURCE_LIST_SHAPE_INVALID".into()))?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| CommandError::StateUnavailable)?
-        .as_millis();
-    let request_token = format!("desktop-scan-{}-{timestamp}", std::process::id());
+    let request_token = source_scan_request_token()?;
     let command = build_source_scan_command(sources, selected_source_id, &request_token)?;
     let response = engine_request(
         bridge,
@@ -2719,7 +3222,7 @@ pub fn save_sources(
             .and_then(Value::as_str)
             .ok_or_else(|| CommandError::InvalidInput("içerik türü gereklidir".into()))?;
         let expected_version = source.get("version").and_then(Value::as_u64).unwrap_or(0);
-        let stable_key = stable_source_key(&format!("{expected_version}:{}", source));
+        let stable_key = stable_source_key(&format!("{expected_version}:{source}"));
         let response = engine_request(
             &bridge,
             json!({
@@ -2970,6 +3473,16 @@ fn dashboard_pipeline_counts(
 }
 
 fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
+    build_review_revision_with_predecessor(item, None)
+}
+
+/// `predecessor` is the materialization of the revision this one supersedes. Only
+/// a real predecessor may feed the review diff; the current content used to be
+/// emitted on both sides, so every diff showed identical removed and added text.
+fn build_review_revision_with_predecessor(
+    item: &Value,
+    predecessor: Option<&Value>,
+) -> Result<Value, CommandError> {
     let revision = item
         .get("revision")
         .ok_or_else(|| CommandError::EngineUnavailable("REVISION_SHAPE_INVALID".into()))?;
@@ -3019,7 +3532,6 @@ fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
                         "url": source.get("url").cloned().unwrap_or(Value::Null),
                         "fetchedAt": source.get("fetchedAt").cloned().unwrap_or(Value::Null),
                         "contentHash": source.get("contentHash").cloned().unwrap_or(Value::Null),
-                        "evidenceAnchors": source.get("evidenceAnchors").cloned().unwrap_or_else(|| json!([])),
                         "primary": index == 0
                     })
                 })
@@ -3096,8 +3608,18 @@ fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let predecessor_content = predecessor
+        .and_then(|materialization| materialization.get("revision"))
+        .and_then(|previous| {
+            let previous_tr = previous.get("tr")?;
+            let previous_en = previous.get("en")?;
+            Some(json!({
+                "tr": locale_content(previous_tr),
+                "en": locale_content(previous_en)
+            }))
+        });
 
-    Ok(json!({
+    let mut projected = json!({
         "id": revision.get("id").cloned().unwrap_or(Value::Null),
         "revisionHash": item.get("revisionHash").cloned().unwrap_or(Value::Null),
         "articleId": revision.get("translationKey").cloned().unwrap_or(Value::Null),
@@ -3113,12 +3635,86 @@ fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
         "adapterVersion": revision.get("adapterVersion").cloned().unwrap_or(Value::Null),
         "tr": locale_content(tr),
         "en": locale_content(en),
-        "previous": { "tr": locale_content(tr), "en": locale_content(en) },
+        // `hasPrevious` tells the review screen whether the diff pane describes a
+        // real predecessor. When it is false the `previous` fields only mirror the
+        // current content so the existing screen keeps rendering; they are not a
+        // diff and must not be presented as one.
+        "hasPrevious": predecessor_content.is_some(),
+        "previous": predecessor_content.unwrap_or_else(|| json!({
+            "tr": locale_content(tr),
+            "en": locale_content(en)
+        })),
         "claims": claims,
         "sources": sources,
         "gates": gates,
         "media": media
-    }))
+    });
+
+    match revision.get("packageVersion") {
+        None | Some(Value::Null) => {}
+        Some(version) if version.as_u64() == Some(3) => {
+            let public_sources = revision
+                .get("publicationSources")
+                .and_then(Value::as_array)
+                .ok_or_else(|| CommandError::EngineUnavailable("V3_PUBLICATION_SOURCES_MISSING".into()))?;
+            if public_sources.is_empty() {
+                return Err(CommandError::EngineUnavailable("V3_PUBLICATION_SOURCES_MISSING".into()));
+            }
+            let mut projected_sources = Vec::with_capacity(public_sources.len());
+            let mut source_ids = std::collections::HashSet::new();
+            for source in public_sources {
+                let id = source.get("id").and_then(Value::as_str).unwrap_or("");
+                let title = source.get("title").and_then(Value::as_str).unwrap_or("");
+                let url = source.get("url").and_then(Value::as_str).unwrap_or("");
+                let role = source.get("role").and_then(Value::as_str).unwrap_or("");
+                if id.is_empty()
+                    || id.len() > 128
+                    || !id.chars().all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
+                    || title.trim().is_empty()
+                    || title.len() > 4_096
+                    || url.trim().is_empty()
+                    || url.len() > 4_096
+                    || !matches!(role, "primary" | "independent" | "supporting")
+                    || !source_ids.insert(id.to_string())
+                {
+                    return Err(CommandError::EngineUnavailable("V3_PUBLICATION_SOURCE_INVALID".into()));
+                }
+                // Rebuild from the four public fields. Evidence excerpts,
+                // anchors, capture ids and hashes remain engine-owned.
+                projected_sources.push(json!({
+                    "id": id,
+                    "title": title,
+                    "url": url,
+                    "role": role
+                }));
+            }
+            let assessment = revision
+                .get("editorialAssessment")
+                .and_then(Value::as_object)
+                .ok_or_else(|| CommandError::EngineUnavailable("V3_EDITORIAL_ASSESSMENT_MISSING".into()))?;
+            let is_ymyl = assessment
+                .get("isYmyl")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| CommandError::EngineUnavailable("V3_EDITORIAL_ASSESSMENT_INVALID".into()))?;
+            let sensitive_topic = assessment
+                .get("sensitiveTopic")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| CommandError::EngineUnavailable("V3_EDITORIAL_ASSESSMENT_INVALID".into()))?;
+            let mut requirements = vec![json!("EDITORIAL_REVIEW")];
+            if is_ymyl {
+                requirements.push(json!("EXPERT_REVIEW"));
+            }
+            if sensitive_topic {
+                requirements.push(json!("ETHICS_REVIEW"));
+            }
+            projected["packageVersion"] = json!(3);
+            projected["publicationSources"] = Value::Array(projected_sources);
+            projected["approvalRequirements"] = Value::Array(requirements);
+        }
+        Some(_) => return Err(CommandError::EngineUnavailable("REVISION_PACKAGE_VERSION_INVALID".into())),
+    }
+
+    Ok(projected)
 }
 
 #[tauri::command]
@@ -3156,12 +3752,11 @@ pub fn create_instant_draft(
             "anlık içerik için talimat ve en az bir kaynak gerekir".into(),
         ));
     }
-    let section = request_choice(
-        &request,
-        "section",
-        &["haberler", "analiz", "dosyalar", "rehberler"],
-        "haberler",
-    )?;
+    // Must stay in step with `SITE_SECTIONS` in packages/contracts. Accepting
+    // only half of them rejected every draft filed under the other four, even
+    // though the renderer offers all eight. `site_sections_match_the_contract`
+    // in tests/unit/desktop-command-contract.test.ts pins this list.
+    let section = request_section(&request, &SITE_SECTION_IDS, "haberler")?;
     let article_type = request_choice(
         &request,
         "articleType",
@@ -3360,7 +3955,15 @@ pub fn get_review_revision(
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
     let materialization = read_revision_at_version(&bridge, expected_version, &revision_id)?;
-    build_review_revision(&materialization)
+    // The engine records the superseded revision id, so the review diff can be
+    // built from the real predecessor instead of from this revision's own text.
+    let predecessor = materialization
+        .pointer("/revision/supersedesRevisionId")
+        .and_then(Value::as_str)
+        .and_then(|previous_id| {
+            read_revision_at_version(&bridge, expected_version, previous_id).ok()
+        });
+    build_review_revision_with_predecessor(&materialization, predecessor.as_ref())
 }
 
 /// Reads one engine-owned image only for the active review surface. The bytes
@@ -3404,10 +4007,12 @@ pub fn read_revision_media(
             })
         })
         .ok_or_else(|| CommandError::InvalidInput("revizyon medyası bulunamadı".into()))?;
-    let byte_size = media
-        .get("byteSize")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_SIZE_MISSING".into()))?;
+    let byte_size = bounded_media_size(
+        media
+            .get("byteSize")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CommandError::EngineUnavailable("REVISION_MEDIA_SIZE_MISSING".into()))?,
+    )?;
     let bytes = read_engine_media_bytes(
         &bridge,
         &revision_id,
@@ -3506,6 +4111,7 @@ fn build_approval_command(
     revision_id: &str,
     expected_hash: &str,
     warning_set_hash: &str,
+    attestation: &Value,
     expected_version: u64,
 ) -> Result<Value, CommandError> {
     if revision_id.is_empty()
@@ -3526,7 +4132,17 @@ fn build_approval_command(
             "revizyon kimliği veya exact hash geçersiz".into(),
         ));
     }
-    let request_key = stable_source_key(&format!("{revision_id}:{expected_hash}"));
+    validate_editorial_attestation_v3(attestation)?;
+    // A changed warning acceptance or human attestation is a new logical
+    // approval even when the immutable revision and engine cursor are unchanged.
+    // Bind those values into the request key so a corrected form is not mistaken
+    // for an idempotent replay of an earlier, different decision.
+    let attestation_bytes = serde_json::to_vec(attestation)
+        .map_err(|_| CommandError::InvalidInput("EDITORIAL_ATTESTATION_INVALID".into()))?;
+    let attestation_digest = format!("{:x}", Sha256::digest(attestation_bytes));
+    let request_key = stable_source_key(&format!(
+        "{revision_id}:{expected_hash}:{warning_set_hash}:{attestation_digest}:{expected_version}"
+    ));
     Ok(json!({
         "version": 1,
         "requestId": request_key,
@@ -3534,12 +4150,182 @@ fn build_approval_command(
         "expectedVersion": expected_version,
         "kind": "APPROVAL.GRANT",
         "payload": {
+            "packageVersion": 3,
             "revisionId": revision_id,
             "revisionHash": expected_hash.to_ascii_lowercase(),
             "warningSetHash": warning_set_hash.to_ascii_lowercase(),
-            "deviceId": "windows-local-device-v1"
+            "deviceId": "windows-local-device-v1",
+            "attestation": attestation
         }
     }))
+}
+
+fn exact_json_keys(value: &serde_json::Map<String, Value>, expected: &[&str]) -> bool {
+    value.len() == expected.len() && expected.iter().all(|key| value.contains_key(*key))
+}
+
+fn bounded_human_text(value: Option<&Value>, maximum: usize) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty() && text.len() <= maximum)
+}
+
+fn validate_editorial_attestation_v3(attestation: &Value) -> Result<(), CommandError> {
+    let invalid = || CommandError::InvalidInput("EDITORIAL_ATTESTATION_INVALID".into());
+    let root = attestation.as_object().ok_or_else(invalid)?;
+    if !exact_json_keys(root, &["editorialReview", "expertReview", "ethicsReview"]) {
+        return Err(invalid());
+    }
+    let editorial = root
+        .get("editorialReview")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    if !exact_json_keys(editorial, &["reviewer", "sourceRoles"])
+        || !bounded_human_text(editorial.get("reviewer"), 256)
+    {
+        return Err(invalid());
+    }
+    let source_roles = editorial
+        .get("sourceRoles")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if source_roles.is_empty() || source_roles.len() > 1_000 {
+        return Err(invalid());
+    }
+    let mut source_ids = std::collections::HashSet::new();
+    for source_role in source_roles {
+        let source_role = source_role.as_object().ok_or_else(invalid)?;
+        let source_id = source_role.get("sourceId").and_then(Value::as_str).unwrap_or("");
+        let role = source_role.get("role").and_then(Value::as_str).unwrap_or("");
+        if !exact_json_keys(source_role, &["sourceId", "role"])
+            || source_id.is_empty()
+            || source_id.len() > 128
+            || !source_id.chars().all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
+            || !matches!(role, "primary" | "independent" | "supporting")
+            || !source_ids.insert(source_id.to_string())
+        {
+            return Err(invalid());
+        }
+    }
+
+    if let Some(expert) = root.get("expertReview").filter(|value| !value.is_null()) {
+        let expert = expert.as_object().ok_or_else(invalid)?;
+        if !exact_json_keys(expert, &["reviewer", "qualifications", "reviewScope"])
+            || !bounded_human_text(expert.get("reviewer"), 256)
+            || !bounded_human_text(expert.get("qualifications"), 1_000)
+            || !bounded_human_text(expert.get("reviewScope"), 2_000)
+        {
+            return Err(invalid());
+        }
+    }
+    if let Some(ethics) = root.get("ethicsReview").filter(|value| !value.is_null()) {
+        let ethics = ethics.as_object().ok_or_else(invalid)?;
+        if !exact_json_keys(ethics, &["reviewer", "reviewScope", "rationale"])
+            || !bounded_human_text(ethics.get("reviewer"), 256)
+            || !bounded_human_text(ethics.get("reviewScope"), 2_000)
+            || !bounded_human_text(ethics.get("rationale"), 4_000)
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn validate_editorial_attestation_for_revision_v3(
+    materialization: &Value,
+    attestation: &Value,
+) -> Result<(), CommandError> {
+    let invalid = || CommandError::InvalidInput("EDITORIAL_ATTESTATION_INVALID".into());
+    validate_editorial_attestation_v3(attestation)?;
+    let revision = materialization.get("revision").ok_or_else(invalid)?;
+    let public_sources = revision
+        .get("publicationSources")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    let acknowledged = attestation
+        .pointer("/editorialReview/sourceRoles")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if public_sources.len() != acknowledged.len() {
+        return Err(invalid());
+    }
+    let expected = public_sources
+        .iter()
+        .filter_map(|source| {
+            Some((
+                source.get("id")?.as_str()?.to_string(),
+                source.get("role")?.as_str()?.to_string(),
+            ))
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let actual = acknowledged
+        .iter()
+        .filter_map(|source| {
+            Some((
+                source.get("sourceId")?.as_str()?.to_string(),
+                source.get("role")?.as_str()?.to_string(),
+            ))
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if expected.len() != public_sources.len() || actual.len() != acknowledged.len() || expected != actual {
+        return Err(invalid());
+    }
+    let assessment = revision
+        .get("editorialAssessment")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    if assessment.get("isYmyl").and_then(Value::as_bool) == Some(true)
+        && matches!(attestation.get("expertReview"), None | Some(Value::Null))
+    {
+        return Err(invalid());
+    }
+    if assessment.get("sensitiveTopic").and_then(Value::as_bool) == Some(true)
+        && matches!(attestation.get("ethicsReview"), None | Some(Value::Null))
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn build_approval_revoke_command(
+    revision_id: &str,
+    expected_hash: &str,
+    reason: &str,
+    expected_version: u64,
+) -> Result<Value, CommandError> {
+    let reason = reason.trim();
+    if revision_id.is_empty()
+        || revision_id.len() > 128
+        || !revision_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
+        || expected_hash.len() != 64
+        || !expected_hash.chars().all(|character| character.is_ascii_hexdigit())
+        || reason.is_empty()
+        || reason.chars().count() > 512
+    {
+        return Err(CommandError::InvalidInput(
+            "APPROVAL_REVOCATION_INVALID".into(),
+        ));
+    }
+    let normalized_hash = expected_hash.to_ascii_lowercase();
+    let request_key = stable_source_key(&format!(
+        "approval-revoke:{revision_id}:{normalized_hash}:{reason}:{expected_version}"
+    ));
+    let request = json!({
+        "version": 1,
+        "requestId": request_key,
+        "idempotencyKey": request_key,
+        "expectedVersion": expected_version,
+        "kind": "APPROVAL.REVOKE",
+        "payload": {
+            "revisionId": revision_id,
+            "revisionHash": normalized_hash,
+            "deviceId": "windows-local-device-v1",
+            "reason": reason
+        }
+    });
+    Ok(request)
 }
 
 fn build_high_risk_approval_command(
@@ -3712,31 +4498,80 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, m, d)
 }
 
+/// Takes human consent first and reads the compare-and-set version afterwards.
+/// The Windows confirmation dialog blocks for as long as the reviewer takes, so a
+/// version captured before it opened is stale by the time the command is sent: any
+/// background engine activity during the wait turned a granted approval into
+/// VERSION_CONFLICT.
+fn command_after_consent<C, V, B>(
+    consent: C,
+    read_version: V,
+    build: B,
+) -> Result<Value, CommandError>
+where
+    C: FnOnce() -> Result<(), CommandError>,
+    V: FnOnce() -> Result<u64, CommandError>,
+    B: FnOnce(u64) -> Result<Value, CommandError>,
+{
+    consent()?;
+    build(read_version()?)
+}
+
 #[tauri::command]
 pub fn approve_revision(
     revision_id: String,
     expected_hash: String,
     warning_set_hash: String,
+    package_version: u8,
+    attestation: Value,
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
-    let engine_state = read_engine_state(&bridge)?;
-    let expected_version = engine_state
+    if package_version != 3 {
+        return Err(CommandError::InvalidInput("REVISION_REVIEW_UPGRADE_REQUIRED".into()));
+    }
+    let inspection_version = read_engine_state(&bridge)?
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
-    let command = build_approval_command(
-        &revision_id,
-        &expected_hash,
-        &warning_set_hash,
-        expected_version,
+    let materialization = read_revision_at_version(&bridge, inspection_version, &revision_id)?;
+    if materialization
+        .pointer("/revision/packageVersion")
+        .and_then(Value::as_u64)
+        != Some(3)
+    {
+        return Err(CommandError::InvalidInput("REVISION_REVIEW_UPGRADE_REQUIRED".into()));
+    }
+    validate_editorial_attestation_for_revision_v3(&materialization, &attestation)?;
+    let command = command_after_consent(
+        || {
+            authorize_native_confirmation(
+                "İncelediğiniz içerik revizyonunu onayla",
+                &expected_hash,
+                verify_native_confirmation,
+            )
+        },
+        || {
+            read_engine_state(&bridge)?
+                .pointer("/snapshot/serverCursor")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))
+        },
+        |expected_version| {
+            build_approval_command(
+                &revision_id,
+                &expected_hash,
+                &warning_set_hash,
+                &attestation,
+                expected_version,
+            )
+        },
     )?;
-    authorize_native_confirmation(
-        "İncelediğiniz içerik revizyonunu onayla",
-        &expected_hash,
-        verify_native_confirmation,
-    )?;
+    let expected_version = command
+        .get("expectedVersion")
+        .and_then(Value::as_u64)
+        .ok_or(CommandError::StateUnavailable)?;
     let request_id = command
         .get("requestId")
         .and_then(Value::as_str)
@@ -3778,6 +4613,61 @@ pub fn approve_revision(
         "approvedAt": approval.get("approvedAt").cloned().unwrap_or(Value::Null),
         "revisionHash": approval.get("revisionHash").cloned().unwrap_or(Value::Null),
         "state": review_revision.get("state").cloned().unwrap_or(json!("REVIEW_REQUIRED"))
+    }))
+}
+
+#[tauri::command]
+pub fn revoke_revision_approval(
+    revision_id: String,
+    expected_hash: String,
+    reason: String,
+    state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
+) -> Result<Value, CommandError> {
+    ensure_mutation_allowed(&state)?;
+    let command = command_after_consent(
+        || {
+            authorize_native_confirmation(
+                "Revizyon onayını geri çek",
+                &expected_hash,
+                verify_native_confirmation,
+            )
+        },
+        || {
+            read_engine_state(&bridge)?
+                .pointer("/snapshot/serverCursor")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))
+        },
+        |expected_version| {
+            build_approval_revoke_command(
+                &revision_id,
+                &expected_hash,
+                &reason,
+                expected_version,
+            )
+        },
+    )?;
+    let request_id = command
+        .get("requestId")
+        .and_then(Value::as_str)
+        .ok_or(CommandError::StateUnavailable)?
+        .to_string();
+    let response = engine_request(
+        &bridge,
+        json!({ "version": 1, "id": request_id, "kind": "command", "command": command }),
+    )?;
+    let result = response
+        .pointer("/result/value")
+        .ok_or_else(|| CommandError::EngineUnavailable("APPROVAL_REVOCATION_SHAPE_INVALID".into()))?;
+    let revocation = result
+        .get("revocation")
+        .ok_or_else(|| CommandError::EngineUnavailable("APPROVAL_REVOCATION_SHAPE_INVALID".into()))?;
+    Ok(json!({
+        "revokedAt": revocation.get("revokedAt").cloned().unwrap_or(Value::Null),
+        "revisionHash": revocation.get("revisionHash").cloned().unwrap_or(Value::Null),
+        "state": "REVIEW_REQUIRED",
+        "recalledEffectIds": result.get("recalledEffectIds").cloned().unwrap_or_else(|| json!([]))
     }))
 }
 
@@ -3855,7 +4745,26 @@ pub fn approve_high_risk_revision(
         .ok_or_else(|| CommandError::EngineUnavailable("HIGH_RISK_APPROVAL_SHAPE_INVALID".into()))
 }
 
-#[tauri::command]
+/// Publication is always a durable enqueue. GitHub reconciliation belongs only
+/// to the native background drainer because its round trips may block.
+fn ensure_publishing_active(publishing_paused: bool) -> Result<(), CommandError> {
+    if publishing_paused {
+        return Err(CommandError::EngineUnavailable("PUBLISHING_PAUSED".into()));
+    }
+    Ok(())
+}
+
+fn persist_publication_enqueue<F>(request: Value, mut persist: F) -> Result<Value, CommandError>
+where
+    F: FnMut(Value) -> Result<Value, CommandError>,
+{
+    persist(request)?
+        .get("value")
+        .cloned()
+        .ok_or_else(|| CommandError::EngineUnavailable("PUBLICATION_ENQUEUE_SHAPE_INVALID".into()))
+}
+
+#[tauri::command(async)]
 pub fn enqueue_publication(
     revision_id: String,
     revision_hash: String,
@@ -3865,6 +4774,10 @@ pub fn enqueue_publication(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
+    let publishing_paused = read_lock(&state.publishing_paused)
+        .map(|flag| *flag)
+        .unwrap_or(true);
+    ensure_publishing_active(publishing_paused)?;
     if revision_id.trim().is_empty()
         || !revision_hash.chars().all(|value| value.is_ascii_hexdigit())
         || revision_hash.len() != 64
@@ -3883,26 +4796,27 @@ pub fn enqueue_publication(
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| "LOCAL_ONLY".to_string());
-    let token_path = github_token_path(&app)?;
-    let trusted_repository = if connector_mode == "PUBLISH" {
-        if !state.github_broker.publication_ready(&token_path) {
-            return Err(CommandError::EngineUnavailable(
-                "GITHUB_CREDENTIAL_BROKER_UNAVAILABLE".into(),
-            ));
-        }
-        Some(configured_github_repository(&bridge).ok_or_else(|| {
+    if connector_mode == "PUBLISH" {
+        let token_path = github_token_path(&app)?;
+        require_github_publication_readiness(
+            state.github_broker.publication_readiness(&token_path),
+        )?;
+        configured_github_repository(&bridge).ok_or_else(|| {
             CommandError::EngineUnavailable("GITHUB_REPOSITORY_NOT_CONFIGURED".into())
-        })?)
-    } else {
-        None
-    };
+        })?;
+    }
     let version = read_engine_state(&bridge)?
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
-    let idempotency_key = stable_source_key(&format!("publication:{revision_id}:{revision_hash}"));
-    let response = engine_request(
-        &bridge,
+    // The engine fingerprints publication.enqueue with previewHash and
+    // expectedVersion, so both belong in the key. Without them a re-preview or a
+    // retry after a lost response reached the engine as the same key with a
+    // different request and was rejected outright.
+    let idempotency_key = stable_source_key(&format!(
+        "publication:{revision_id}:{revision_hash}:{preview_hash}:{version}"
+    ));
+    persist_publication_enqueue(
         json!({
             "version": 1,
             "id": idempotency_key,
@@ -3913,24 +4827,20 @@ pub fn enqueue_publication(
             "expectedVersion": version,
             "idempotencyKey": idempotency_key
         }),
-    )?;
-    let value = response.get("value").cloned().ok_or_else(|| {
-        CommandError::EngineUnavailable("PUBLICATION_ENQUEUE_SHAPE_INVALID".into())
-    })?;
-    if connector_mode == "PUBLISH" {
-        let effect_id = value.get("id").and_then(Value::as_str).ok_or_else(|| {
-            CommandError::EngineUnavailable("PUBLICATION_EFFECT_ID_MISSING".into())
-        })?;
-        let effects = state.github_broker.publication_effects(
-            &token_path,
-            trusted_repository.as_deref().ok_or_else(|| {
-                CommandError::EngineUnavailable("GITHUB_REPOSITORY_NOT_CONFIGURED".into())
-            })?,
-        );
-        return drive_publication_broker(effect_id, |request| bridge.request(request), &effects)
-            .map_err(CommandError::EngineUnavailable);
+        |request| engine_request(&bridge, request),
+    )
+}
+
+fn reconcile_pending_publications<F>(effect_ids: &[Value], mut reconcile: F)
+where
+    F: FnMut(&str) -> Result<Value, String>,
+{
+    for effect_id in effect_ids.iter().filter_map(Value::as_str).take(16) {
+        match reconcile(effect_id) {
+            Ok(_) => clear_broker_fault(effect_id),
+            Err(error) => record_broker_fault(effect_id, &error),
+        }
     }
-    Ok(value)
 }
 
 pub fn start_native_publication_drainer(app: tauri::AppHandle) {
@@ -3939,6 +4849,17 @@ pub fn start_native_publication_drainer(app: tauri::AppHandle) {
         let state = app.state::<DesktopState>();
         if read_lock(&state.publishing_paused)
             .map(|value| *value)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        // The durable outbox exists to finish already-approved publications, so
+        // this loop is not gated on mutation permission. It must still stop once
+        // Doctor has put the desktop into the offline projection: every UI action
+        // is refused in that state, and pushing commits from a background tick
+        // would contradict it.
+        if read_lock(&state.runtime)
+            .map(|value| matches!(*value, RuntimeMode::OfflineReadOnly))
             .unwrap_or(true)
         {
             continue;
@@ -3974,12 +4895,80 @@ pub fn start_native_publication_drainer(app: tauri::AppHandle) {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let effects = state.github_broker.publication_effects(&token_path, &trusted_repository);
-        for effect_id in effect_ids.iter().filter_map(Value::as_str).take(16) {
-            let _ =
-                drive_publication_broker(effect_id, |request| bridge.request(request), &effects);
-        }
+        let effects = state
+            .github_broker
+            .publication_effects(&token_path, &trusted_repository);
+        reconcile_pending_publications(&effect_ids, |effect_id| {
+            drive_publication_broker(effect_id, |request| bridge.request(request), &effects)
+        });
     });
+}
+
+/// Bounded, token-free record of background broker faults. The drainer used to
+/// drop every error, so a rejected claim or a lost completion left no trace at
+/// all — not in the log and not in the diagnostics bundle.
+static BROKER_FAULTS: OnceLock<Mutex<Vec<(String, String, u32)>>> = OnceLock::new();
+const MAX_BROKER_FAULTS: usize = 16;
+
+fn broker_faults() -> &'static Mutex<Vec<(String, String, u32)>> {
+    BROKER_FAULTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Keeps only the leading constant error code. Broker errors can carry engine
+/// sentences, and the diagnostics bundle must never grow a token-shaped value.
+fn broker_fault_code(error: &str) -> String {
+    error
+        .split(|character: char| character == ':' || character.is_whitespace())
+        .find(|token| {
+            !token.is_empty()
+                && token
+                    .chars()
+                    .all(|character| character.is_ascii_uppercase() || character == '_')
+        })
+        .unwrap_or("PUBLICATION_BROKER_FAILED")
+        .to_string()
+}
+
+fn record_broker_fault(effect_id: &str, error: &str) {
+    let code = broker_fault_code(error);
+    let Ok(mut faults) = broker_faults().lock() else {
+        return;
+    };
+    if let Some(entry) = faults
+        .iter_mut()
+        .find(|entry| entry.0 == effect_id && entry.1 == code)
+    {
+        entry.2 = entry.2.saturating_add(1);
+        return;
+    }
+    if faults.len() >= MAX_BROKER_FAULTS {
+        faults.remove(0);
+    }
+    faults.push((effect_id.to_string(), code, 1));
+}
+
+fn clear_broker_fault(effect_id: &str) {
+    if let Ok(mut faults) = broker_faults().lock() {
+        faults.retain(|entry| entry.0 != effect_id);
+    }
+}
+
+fn broker_fault_report() -> Vec<Value> {
+    broker_faults()
+        .lock()
+        .map(|faults| {
+            faults
+                .iter()
+                .map(|(effect_id, code, count)| {
+                    json!({
+                        "effectId": effect_id,
+                        "code": code,
+                        "consecutiveFailures": count
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -4109,12 +5098,25 @@ fn preview_file_media_reference(
     Ok(Some((sha256.to_ascii_lowercase(), byte_size)))
 }
 
+/// A record-supplied `byteSize` must be inside the engine media bound before it
+/// can size an allocation: `Vec::with_capacity` on a corrupt value aborts the
+/// process outright, because the release profile disables unwinding.
+fn bounded_media_size(expected_size: u64) -> Result<u64, CommandError> {
+    if expected_size == 0 || expected_size > ENGINE_MEDIA_MAX_BYTES {
+        return Err(CommandError::EngineUnavailable(
+            "REVISION_MEDIA_SIZE_INVALID".into(),
+        ));
+    }
+    Ok(expected_size)
+}
+
 fn read_engine_media_bytes(
     bridge: &EngineBridge,
     revision_id: &str,
     sha256: &str,
     expected_size: u64,
 ) -> Result<Vec<u8>, CommandError> {
+    let expected_size = bounded_media_size(expected_size)?;
     let mut output = Vec::with_capacity(expected_size as usize);
     let mut offset = 0u64;
     loop {
@@ -4351,10 +5353,10 @@ pub fn materialize_local_preview(
         .as_millis();
     if state_value.get("revisionHash").and_then(Value::as_str) != Some(revision_hash.as_str())
         || state_value.get("previewHash").and_then(Value::as_str) != Some(preview_hash.as_str())
-        || !state_value
+        || state_value
             .get("expiresAtUnixMs")
             .and_then(Value::as_u64)
-            .is_some_and(|expires_at| u128::from(expires_at) > preview_now_unix_ms)
+            .is_none_or(|expires_at| u128::from(expires_at) <= preview_now_unix_ms)
     {
         return Err(CommandError::InvalidInput(
             "önizleme artık onaylı revizyonla eşleşmiyor".into(),
@@ -4808,11 +5810,17 @@ fn diagnostic_bundle_path() -> Result<PathBuf, CommandError> {
     std::fs::create_dir_all(&root).map_err(|error| {
         CommandError::EngineUnavailable(format!("Tanılama klasörü açılamadı: {error}"))
     })?;
+    // One-second granularity let two exports share a directory, and the log
+    // copies below append, so each file received a second full copy while the
+    // manifest reported the doubled byte counts as one run.
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CommandError::EngineUnavailable(error.to_string()))?
-        .as_secs();
-    Ok(root.join(format!("blogbot-diagnostics-{stamp}")))
+        .as_millis();
+    Ok(root.join(format!(
+        "blogbot-diagnostics-{stamp}-{}",
+        std::process::id()
+    )))
 }
 
 fn reveal_diagnostic_directory(directory: &Path) -> Result<(), CommandError> {
@@ -4840,13 +5848,27 @@ fn write_redacted_diagnostic_copy(source: Option<&Path>, target: &Path) {
         .map(redact_diagnostic_line)
         .collect::<Vec<_>>()
         .join("\n");
+    append_diagnostic_text(target, &redacted, false);
+}
+
+/// `continued` distinguishes the first write to a bundle file from the further
+/// rotations that are deliberately concatenated into it. A plain append truncated
+/// nothing, so a second export into the same directory silently doubled every log.
+fn append_diagnostic_text(target: &Path, text: &str, continued: bool) {
     use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(target) {
-        let _ = writeln!(file, "{redacted}");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    if continued {
+        options.append(true);
+    } else {
+        options.truncate(true);
+    }
+    if let Ok(mut file) = options.open(target) {
+        let _ = writeln!(file, "{text}");
     }
 }
 
-fn write_diagnostic_lines<F>(source: Option<&Path>, target: &Path, include: F)
+fn write_diagnostic_lines<F>(source: Option<&Path>, target: &Path, continued: bool, include: F)
 where
     F: Fn(&str) -> bool,
 {
@@ -4862,10 +5884,7 @@ where
         .map(redact_diagnostic_line)
         .collect::<Vec<_>>()
         .join("\n");
-    use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(target) {
-        let _ = writeln!(file, "{redacted}");
-    }
+    append_diagnostic_text(target, &redacted, continued);
 }
 
 fn diagnostic_file_size(path: &Path) -> u64 {
@@ -4891,6 +5910,78 @@ fn redact_diagnostic_line(line: &str) -> String {
     crate::engine_bridge::redact_diagnostic_for_persistence(line)
 }
 
+/// A one-way correlation stub for a title that must not leave the workspace.
+fn diagnostic_title_digest(title: &str) -> String {
+    format!("{:x}", Sha256::digest(title.as_bytes()))
+        .chars()
+        .take(12)
+        .collect()
+}
+
+/// Projects the operations snapshot down to identifiers, states and timestamps.
+/// The snapshot carries the schedule straight from the revision queue, whose
+/// titles are the Turkish article headlines; splicing it verbatim put user article
+/// text into a bundle whose manifest promised none was included. A short digest
+/// keeps rows correlatable with the workspace without carrying the headline.
+fn diagnostic_operations_projection(operations: &Value) -> Value {
+    let events = operations
+        .get("events")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|event| {
+                    json!({
+                        "id": event.get("id").cloned().unwrap_or(Value::Null),
+                        "state": event.get("state").cloned().unwrap_or(Value::Null),
+                        "level": event.get("level").cloned().unwrap_or(Value::Null),
+                        "correlationId": event.get("correlationId").cloned().unwrap_or(Value::Null),
+                        // The persistence redactor, not the user-facing collapse:
+                        // event details are engine change kinds, entity ids and
+                        // already-sanitized job errors, and support needs them
+                        // readable.
+                        "detail": event
+                            .get("detail")
+                            .and_then(Value::as_str)
+                            .map(redact_diagnostic_line)
+                            .map(Value::from)
+                            .unwrap_or(Value::Null)
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let schedule = operations
+        .get("schedule")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    json!({
+                        "id": item.get("id").cloned().unwrap_or(Value::Null),
+                        "section": item.get("section").cloned().unwrap_or(Value::Null),
+                        "state": item.get("state").cloned().unwrap_or(Value::Null),
+                        "at": item.get("at").cloned().unwrap_or(Value::Null),
+                        "titleDigest": item
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .map(diagnostic_title_digest)
+                            .map(Value::from)
+                            .unwrap_or(Value::Null)
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "events": events,
+        "schedule": schedule,
+        "worker": operations.get("worker").cloned().unwrap_or(Value::Null),
+        "publisher": operations.get("publisher").cloned().unwrap_or(Value::Null)
+    })
+}
+
 #[tauri::command]
 pub fn export_diagnostics(
     state: tauri::State<'_, DesktopState>,
@@ -4913,7 +6004,8 @@ pub fn export_diagnostics(
             "engineRunning": bridge.is_running(),
             "bridgeError": bridge.last_error().map(|value| sanitize_operation_error(&value))
         },
-        "operations": operations,
+        "operations": diagnostic_operations_projection(&operations),
+        "publicationBrokerFaults": broker_fault_report(),
         "logs": {
             "engine": {
                 "path": engine_path.as_ref().and_then(|value| value.file_name().map(|name| name.to_string_lossy().into_owned())),
@@ -4925,7 +6017,9 @@ pub fn export_diagnostics(
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|error| CommandError::EngineUnavailable(error.to_string()))?;
     let directory = diagnostic_bundle_path()?;
-    std::fs::create_dir_all(&directory).map_err(|error| {
+    // `create_dir` on the leaf: a collision must fail loudly instead of merging two
+    // exports into one directory.
+    std::fs::create_dir(&directory).map_err(|error| {
         CommandError::EngineUnavailable(format!("Tanılama klasörü oluşturulamadı: {error}"))
     })?;
     let path = directory.join("diagnostics.json");
@@ -4945,10 +6039,11 @@ pub fn export_diagnostics(
         write_redacted_diagnostic_copy(Some(source), &directory.join(name));
     }
     let bridge_event_target = directory.join("bridge-events.log");
-    for source in log_variants.iter().rev() {
+    for (index, source) in log_variants.iter().rev().enumerate() {
         write_diagnostic_lines(
             Some(source),
             &bridge_event_target,
+            index > 0,
             |line| line.starts_with("BRIDGE_") || line.starts_with("ENGINE_"),
         );
     }
@@ -4988,8 +6083,9 @@ pub fn export_diagnostics(
         "files": files,
         "redaction": {
             "applied": true,
-            "policy": "Sensitive markers, opaque long values, identities and absolute paths are removed before persistence.",
-            "rawSourceIncluded": false
+            "policy": "Log lines pass the persistence redactor (sensitive markers, opaque long values, identities and absolute paths). The operations snapshot is projected to identifiers, states and timestamps; article titles are replaced by a short digest.",
+            "rawSourceIncluded": false,
+            "articleTextIncluded": false
         }
     });
     let _ = std::fs::write(
@@ -5173,6 +6269,10 @@ fn candidate_workflow_state(
         match job.get("state").and_then(Value::as_str) {
             Some("FAILED" | "DEAD_LETTER") => return "RESEARCH_FAILED",
             Some("SUCCEEDED") => return "PROMOTED",
+            // A live draft job is durable proof that this candidate was promoted.
+            // Deriving the state from the job keeps the card correct even when the
+            // separate local-state mutation write did not land.
+            Some("QUEUED" | "RUNNING" | "WAITING_CODEX") => return "RESEARCH_QUEUED",
             _ => {}
         }
     }
@@ -5596,6 +6696,28 @@ pub fn get_editorial_workspace(
     }))
 }
 
+/// The engine treats an absent `visualPolicy` as GENERATE, and GENERATE without a
+/// configured ImageGen key produces a revision with empty media, which forces the
+/// media quality gate to BLOCK and makes the draft permanently un-approvable. The
+/// engine receives its ImageGen key from this process's environment, so the same
+/// lookup decides the policy: fall back to the offline local renderer, which the
+/// manual Instant Create screen already selects.
+fn automated_visual_policy_with<F>(mut lookup: F) -> &'static str
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    let configured = lookup("BLOGBOT_IMAGEGEN_API_KEY").is_some_and(|value| !value.is_empty());
+    if configured {
+        "GENERATE"
+    } else {
+        "LOCAL_RENDERER"
+    }
+}
+
+fn automated_visual_policy() -> &'static str {
+    automated_visual_policy_with(|name| std::env::var_os(name))
+}
+
 fn candidate_draft_payload(candidate_id: &str, candidate: &Value) -> Result<Value, CommandError> {
     let source_ids = candidate
         .get("sourceIds")
@@ -5639,6 +6761,7 @@ fn candidate_draft_payload(candidate_id: &str, candidate: &Value) -> Result<Valu
         "instruction": "Bu adayı kaynak kanıtlarıyla araştır ve insan incelemesine hazırla.",
         "section": candidate.get("section").and_then(Value::as_str).unwrap_or("haberler"),
         "articleType": candidate.get("articleType").and_then(Value::as_str).unwrap_or("news"),
+        "visualPolicy": automated_visual_policy(),
         "scheduleIntent": "UNSCHEDULED"
     }))
 }
@@ -5807,7 +6930,6 @@ pub fn promote_candidate(
         CommandError::InvalidInput("aday yerel çalışma bileşeninde bulunamadı".into())
     })?;
     let payload = candidate_draft_payload(&candidate_id, &candidate)?;
-    let key = stable_source_key(&format!("candidate-draft:{candidate_id}"));
     let response = retry_version_conflicted_draft(
         || {
             read_engine_state(&bridge)?
@@ -5816,6 +6938,12 @@ pub fn promote_candidate(
                 .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))
         },
         |version| {
+            // The engine fingerprints DRAFT.CREATE with expectedVersion, so a
+            // version-free key made the retry below — and every later Promote
+            // click — arrive as the same key with a different request and be
+            // rejected as reused. Binding the key to the attempted version keeps
+            // each attempt a distinct logical request.
+            let key = stable_source_key(&format!("candidate-draft:{candidate_id}:{version}"));
             engine_request(
                 &bridge,
                 json!({
@@ -5825,7 +6953,7 @@ pub fn promote_candidate(
                     "command": {
                         "version": 1,
                         "requestId": key.clone(),
-                        "idempotencyKey": key.clone(),
+                        "idempotencyKey": key,
                         "expectedVersion": version,
                         "kind": "DRAFT.CREATE",
                         "payload": payload.clone()
@@ -5941,6 +7069,7 @@ fn revision_edit_payload(
         "candidateTitle": title,
         "section": base_revision.get("section").and_then(Value::as_str).unwrap_or("haberler"),
         "articleType": base_revision.get("articleType").and_then(Value::as_str).unwrap_or("news"),
+        "visualPolicy": automated_visual_policy(),
         "baseRevision": base_revision,
         "scheduleIntent": "UNSCHEDULED"
     }))
@@ -5985,7 +7114,12 @@ pub fn request_revision_edit(
         })?;
     let base_revision = build_review_revision(&materialized)?;
     let payload = revision_edit_payload(&revision_id, instruction.trim(), base_revision, title)?;
-    let key = stable_source_key(&format!("revision-edit:{revision_id}:{instruction}"));
+    // Includes the read version for the same reason as the other DRAFT.CREATE
+    // callers: the engine fingerprint carries expectedVersion, so a version-free
+    // key turns a retry into a permanent reused-key rejection.
+    let key = stable_source_key(&format!(
+        "revision-edit:{revision_id}:{instruction}:{version}"
+    ));
     let response = engine_request(
         &bridge,
         json!({
@@ -6234,25 +7368,52 @@ pub fn set_runtime_pause(
     Ok(json!({ "paused": paused }))
 }
 
-#[tauri::command]
-pub fn secure_store_status(app: tauri::AppHandle) -> secure_store::SecureStoreStatus {
-    secure_store::status(&app)
+fn notifications_enabled(
+    state: &DesktopState,
+    bridge: &EngineBridge,
+) -> Result<bool, CommandError> {
+    let persisted = read_engine_local_state(bridge, "desktop.editorial")
+        .and_then(|value| value.pointer("/preferences/notifications").cloned())
+        .and_then(|value| value.as_bool());
+    match persisted {
+        Some(value) => Ok(value),
+        None => state
+            .preferences
+            .read()
+            .map_err(|_| CommandError::StateUnavailable)
+            .map(|preferences| {
+                preferences
+                    .get("notifications")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            }),
+    }
 }
 
 #[tauri::command]
 pub fn send_test_notification(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
-    let preferences = state
-        .preferences
-        .read()
-        .map_err(|_| CommandError::StateUnavailable)?;
-    if !preferences
-        .get("notifications")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    // The in-memory copy is seeded with defaults on every start and is only
+    // written by `save_desktop_preferences`, so after a restart it claimed
+    // notifications were on again. The engine-persisted value is the truth;
+    // the in-memory copy is only the fallback when local state cannot be read.
+    let persisted = read_engine_local_state(&bridge, "desktop.editorial")
+        .and_then(|value| value.pointer("/preferences/notifications").cloned())
+        .and_then(|value| value.as_bool());
+    let enabled = match persisted {
+        Some(value) => value,
+        None => state
+            .preferences
+            .read()
+            .map_err(|_| CommandError::StateUnavailable)?
+            .get("notifications")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    if !enabled {
         return Err(CommandError::InvalidInput(
             "Windows bildirimleri ayarlardan kapalı".into(),
         ));
@@ -6337,7 +7498,7 @@ pub fn backup_verify(
         ));
     }
     let archive_path = require_granted_existing_file(&state, &archive_path)?;
-    engine_request(
+    let response = engine_request(
         &bridge,
         json!({
             "version": 1,
@@ -6345,7 +7506,80 @@ pub fn backup_verify(
             "kind": "backup.verify",
             "payload": { "archivePath": archive_path, "recoveryKey": recovery_key }
         }),
-    )
+    )?;
+    record_backup_check(&bridge, "verifiedAtUnixMs", &archive_path, &response);
+    Ok(response)
+}
+
+/// Records that a backup step actually ran, so the prerequisite row can be derived
+/// from an observation instead of being hard-coded. Only the archive file name and
+/// the timestamp are stored: the absolute path and the recovery key never enter
+/// local state. A failed record keeps the check unproven, which is the safe side.
+fn update_backup_verification_record(
+    record: &mut Value,
+    field: &str,
+    archive_name: &str,
+    archive_sha256: &str,
+    recorded_at: u64,
+) -> Result<(), CommandError> {
+    if !matches!(field, "verifiedAtUnixMs" | "restorePreviewAtUnixMs")
+        || archive_name.is_empty()
+        || archive_name.len() > 255
+        || archive_sha256.len() != 64
+        || !archive_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CommandError::EngineUnavailable(
+            "BACKUP_VERIFICATION_STATE_INVALID".into(),
+        ));
+    }
+    let record = record.as_object_mut().ok_or_else(|| {
+        CommandError::EngineUnavailable("BACKUP_VERIFICATION_STATE_INVALID".into())
+    })?;
+    let normalized_sha256 = archive_sha256.to_ascii_lowercase();
+    if record.get("archiveSha256").and_then(Value::as_str) != Some(normalized_sha256.as_str()) {
+        // Both observations are one proof only when the engine computed the
+        // same content digest. File names and paths can both be reused.
+        record.remove("verifiedAtUnixMs");
+        record.remove("restorePreviewAtUnixMs");
+    }
+    record.insert("archiveName".to_string(), json!(archive_name));
+    record.insert("archiveSha256".to_string(), json!(normalized_sha256));
+    record.insert(field.to_string(), json!(recorded_at));
+    Ok(())
+}
+
+fn record_backup_check(
+    bridge: &EngineBridge,
+    field: &str,
+    archive_path: &Path,
+    response: &Value,
+) {
+    let archive_name = archive_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some(archive_sha256) = response.get("archiveSha256").and_then(Value::as_str) else {
+        return;
+    };
+    let recorded_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let _ = mutate_engine_local_state(bridge, "desktop.connectorChecks", |checks| {
+        let object = checks.as_object_mut().ok_or_else(|| {
+            CommandError::EngineUnavailable("CONNECTOR_CHECK_STATE_INVALID".into())
+        })?;
+        let record = object
+            .entry("backupVerification")
+            .or_insert_with(|| json!({}));
+        update_backup_verification_record(
+            record,
+            field,
+            &archive_name,
+            archive_sha256,
+            recorded_at,
+        )
+    });
 }
 
 #[tauri::command]
@@ -6366,7 +7600,7 @@ pub fn backup_restore_preview(
     }
     let archive_path = require_granted_existing_file(&state, &archive_path)?;
     let target_directory = require_granted_restore_target(&state, &target_directory)?;
-    engine_request(
+    let response = engine_request(
         &bridge,
         json!({
             "version": 1,
@@ -6378,7 +7612,14 @@ pub fn backup_restore_preview(
                 "recoveryKey": recovery_key
             }
         }),
-    )
+    )?;
+    record_backup_check(
+        &bridge,
+        "restorePreviewAtUnixMs",
+        &archive_path,
+        &response,
+    );
+    Ok(response)
 }
 
 #[tauri::command]
@@ -6460,50 +7701,59 @@ pub fn automatic_backup_verify(
 #[tauri::command]
 pub fn automatic_backup_restore_preview(
     backup_name: String,
-    target_directory: String,
-    state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
-    if !valid_automatic_backup_name(&backup_name) || target_directory.trim().is_empty() {
+    if !valid_automatic_backup_name(&backup_name) {
         return Err(CommandError::InvalidInput(
-            "automatic backup selection and restore target are required".into(),
+            "automatic backup selection is invalid".into(),
         ));
     }
-    let target_directory = require_granted_restore_target(&state, &target_directory)?;
     engine_request(
         &bridge,
         json!({
             "version": 1,
             "id": format!("desktop-automatic-backup-preview-{}", std::process::id()),
             "kind": "backup.auto.restore.preview",
-            "payload": { "backupName": backup_name.trim(), "targetDirectory": target_directory }
+            "payload": { "backupName": backup_name.trim() }
         }),
     )
+}
+
+fn automatic_backup_restore_request(
+    backup_name: &str,
+    confirm_replace_local_data: bool,
+) -> Result<Value, CommandError> {
+    if !valid_automatic_backup_name(backup_name) {
+        return Err(CommandError::InvalidInput(
+            "automatic backup selection is invalid".into(),
+        ));
+    }
+    if !confirm_replace_local_data {
+        return Err(CommandError::InvalidInput(
+            "automatic backup restore requires explicit replacement confirmation".into(),
+        ));
+    }
+    Ok(json!({
+        "version": 1,
+        "id": format!("desktop-automatic-backup-restore-{}", std::process::id()),
+        "kind": "backup.auto.restore",
+        "payload": {
+            "backupName": backup_name.trim(),
+            "confirmReplaceLocalData": true
+        }
+    }))
 }
 
 #[tauri::command]
 pub fn automatic_backup_restore_apply(
     backup_name: String,
-    target_directory: String,
+    confirm_replace_local_data: bool,
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
-    if !valid_automatic_backup_name(&backup_name) || target_directory.trim().is_empty() {
-        return Err(CommandError::InvalidInput(
-            "automatic backup selection and restore target are required".into(),
-        ));
-    }
-    let target_directory = require_granted_restore_target(&state, &target_directory)?;
-    engine_request(
-        &bridge,
-        json!({
-            "version": 1,
-            "id": format!("desktop-automatic-backup-restore-{}", std::process::id()),
-            "kind": "backup.auto.restore",
-            "payload": { "backupName": backup_name.trim(), "targetDirectory": target_directory }
-        }),
-    )
+    let request = automatic_backup_restore_request(&backup_name, confirm_replace_local_data)?;
+    engine_request(&bridge, request)
 }
 
 #[cfg(test)]
@@ -6522,7 +7772,8 @@ mod tests {
 
     use super::{
         append_pending_draft_jobs, authorize_connector_directory, authorize_high_risk_consent,
-        authorize_native_confirmation, build_approval_command, build_high_risk_approval_command,
+        authorize_native_confirmation, build_approval_command, build_approval_revoke_command,
+        build_high_risk_approval_command,
         build_review_revision, build_revision_queue, build_source_scan_command,
         boby_role_state, bootstrap_boby_state, bootstrap_can_read_catalog, candidate_draft_payload, candidate_workflow_state, configured_site_origin,
         dashboard_pipeline_counts, doctor_runtime_mode, editorial_operation_events,
@@ -6530,7 +7781,9 @@ mod tests {
         has_publication_capability, is_local_path, is_path_within_grant, is_reparse_point,
         local_dev_environment_with, materialize_preview_bundle_with,
         latest_boby_session_id, migrate_legacy_site_connector_catalog, preview_file_bytes, preview_file_media_reference,
-        publication_observability, register_folder_grant, request_choice,
+        bound_editorial_state, publication_observability, register_folder_grant, request_choice,
+        request_section, valid_git_object_id, valid_github_branch, MAX_EDITORIAL_MUTATIONS,
+        MAX_EDITORIAL_STATE_BYTES, SITE_SECTION_IDS,
         require_granted_directory, require_granted_restore_target, retry_version_conflicted_draft,
         revision_edit_payload, scheduled_operation_items, valid_github_segment,
         valid_github_workflow, valid_hhmm, valid_recovery_key, valid_schedule_slot,
@@ -6779,6 +8032,154 @@ mod tests {
                 &["GENERATE", "LOCAL_RENDERER"],
                 "GENERATE"
             ),
+            Err(CommandError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn the_editorial_mutation_log_stays_inside_the_engine_local_state_limit() {
+        let mut object = serde_json::Map::new();
+        object.insert("author".into(), json!("Editör"));
+        let mutations: Vec<Value> = (0..5_000)
+            .map(|index| {
+                json!({
+                    "kind": "CANDIDATE.PROMOTE",
+                    "candidateId": format!("candidate-{index}"),
+                    "state": "RESEARCH_QUEUED",
+                    "detail": "Seçilen haber adayı kalıcı yerel kuyruğa yazıldı."
+                })
+            })
+            .collect();
+        object.insert("mutations".into(), Value::Array(mutations));
+
+        bound_editorial_state(&mut object);
+
+        let kept = object["mutations"].as_array().unwrap();
+        assert!(
+            kept.len() <= MAX_EDITORIAL_MUTATIONS,
+            "log must be bounded, kept {}",
+            kept.len()
+        );
+        assert!(!kept.is_empty(), "trimming must not empty the log");
+        // The newest mutation decides a candidate's workflow state, so the tail
+        // is what must survive.
+        assert_eq!(
+            kept.last().unwrap()["candidateId"].as_str(),
+            Some("candidate-4999")
+        );
+        assert_eq!(object["author"].as_str(), Some("Editör"));
+
+        let encoded = serde_json::to_string(&Value::Object(object)).unwrap();
+        assert!(
+            encoded.len() <= MAX_EDITORIAL_STATE_BYTES,
+            "document must fit the engine's 256 000 unit local-state limit, got {}",
+            encoded.len()
+        );
+    }
+
+    #[test]
+    fn base_sha_capture_only_accepts_a_safe_branch_and_a_real_object_id() {
+        // The branch is interpolated into a GitHub API path, so the grammar has
+        // to reject anything that could escape it.
+        for branch in ["main", "release/v1", "feature-1.2"] {
+            assert!(valid_github_branch(branch), "must accept: {branch}");
+        }
+        for branch in ["", " main", "/main", "main/", "a..b", "main?x", "main#1", "main branch"] {
+            assert!(!valid_github_branch(branch), "must reject: {branch}");
+        }
+
+        // Approval binds this value, so a response that is not an object id must
+        // never be written into the connector as if it were verified.
+        assert!(valid_git_object_id(&"a".repeat(40)));
+        assert!(valid_git_object_id(&"b".repeat(64)));
+        for invalid in ["", "abc", &"a".repeat(39), &"a".repeat(41), &"z".repeat(40)] {
+            assert!(!valid_git_object_id(invalid), "must reject: {invalid}");
+        }
+    }
+
+    #[test]
+    fn base_sha_capture_reapplies_to_the_latest_connectors_and_reports_a_write() {
+        let stored = std::cell::RefCell::new(json!({
+            "site": { "mode": "LOCAL_ONLY" },
+            "github": { "workflow": "deploy.yml" }
+        }));
+        let attempts = std::cell::Cell::new(0_u32);
+
+        let result = super::local_state_write(
+            || Ok(40),
+            || stored.borrow().clone(),
+            |connectors| {
+                super::update_github_base_sha_state(
+                    connectors,
+                    "owner",
+                    "site",
+                    "main",
+                    &"a".repeat(40),
+                )
+            },
+            |_version, value| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    *stored.borrow_mut() = json!({
+                        "site": { "mode": "PUBLISH" },
+                        "backup": { "folder": "D:\\Backups" },
+                        "github": { "workflow": "deploy.yml" }
+                    });
+                    return Err(CommandError::EngineUnavailable(
+                        "VERSION_CONFLICT:40:41".into(),
+                    ));
+                }
+                Ok(value)
+            },
+        )
+        .expect("base SHA connector mutation");
+
+        assert_eq!(result["site"]["mode"], "PUBLISH");
+        assert_eq!(result["backup"]["folder"], "D:\\Backups");
+        assert_eq!(result["github"]["workflow"], "deploy.yml");
+        assert_eq!(result["github"]["baseSha"], "a".repeat(40));
+
+        let response = super::github_base_sha_capture_result(
+            "owner/site",
+            "main",
+            &"a".repeat(40),
+        );
+        assert_eq!(response["writes"], true);
+        assert_eq!(response["network"], true);
+    }
+
+    #[test]
+    fn instant_create_keeps_the_section_the_editor_chose() {
+        let allowed = SITE_SECTION_IDS;
+
+        // Every contract section must be accepted. Half of them used to be
+        // rejected while the renderer still offered all eight.
+        assert_eq!(allowed.len(), 8);
+        for section in ["teknoloji", "ekonomi", "kultur", "yasam"] {
+            assert_eq!(
+                request_section(&json!({ "targetSection": section }), &allowed, "haberler").unwrap(),
+                section
+            );
+        }
+
+        // The renderer's field name is `targetSection`; reading only `section`
+        // filed every instant draft under the default section instead.
+        assert_eq!(
+            request_section(&json!({ "targetSection": "analiz" }), &allowed, "haberler").unwrap(),
+            "analiz"
+        );
+        // An older renderer payload is still honoured.
+        assert_eq!(
+            request_section(&json!({ "section": "dosyalar" }), &allowed, "haberler").unwrap(),
+            "dosyalar"
+        );
+        assert_eq!(
+            request_section(&json!({}), &allowed, "haberler").unwrap(),
+            "haberler"
+        );
+        // An untrusted value is still rejected rather than silently defaulted.
+        assert!(matches!(
+            request_section(&json!({ "targetSection": "../etc" }), &allowed, "haberler"),
             Err(CommandError::InvalidInput(_))
         ));
     }
@@ -7364,22 +8765,29 @@ mod tests {
 
     #[test]
     fn publish_deploy_connector_fails_closed_without_explicit_required_checks() {
-        let missing = super::test_setup_connector(
+        let state = DesktopState::default();
+        let missing = super::test_setup_connector_with_grants(
+            &state,
             "deploy".into(),
             json!({ "workflowName": "deploy.yml", "requiredChecks": [] }),
         )
         .expect("validation result");
         assert_eq!(missing["ready"], false);
 
-        let omitted =
-            super::test_setup_connector("deploy".into(), json!({ "workflowName": "deploy.yml" }))
-                .expect("validation result");
+        let omitted = super::test_setup_connector_with_grants(
+            &state,
+            "deploy".into(),
+            json!({ "workflowName": "deploy.yml" }),
+        )
+        .expect("validation result");
         assert_eq!(omitted["ready"], false);
     }
 
     #[test]
     fn publish_deploy_connector_accepts_only_unique_bounded_check_names() {
-        let valid = super::test_setup_connector(
+        let state = DesktopState::default();
+        let valid = super::test_setup_connector_with_grants(
+            &state,
             "deploy".into(),
             json!({ "workflowName": "deploy.yml", "requiredChecks": ["build", "test / windows"] }),
         )
@@ -7391,7 +8799,8 @@ mod tests {
             json!(["build", "  "]),
             json!(["x".repeat(201)]),
         ] {
-            let invalid = super::test_setup_connector(
+            let invalid = super::test_setup_connector_with_grants(
+                &state,
                 "deploy".into(),
                 json!({ "workflowName": "deploy.yml", "requiredChecks": required_checks }),
             )
@@ -7775,13 +9184,715 @@ mod tests {
 
     #[test]
     fn approval_command_is_exact_hash_and_version_bound() {
-        let command = build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), 7)
-            .expect("approval command");
+        let attestation = json!({
+            "editorialReview": {
+                "reviewer": "Deniz Editor",
+                "sourceRoles": [{ "sourceId": "source-1", "role": "primary" }]
+            },
+            "expertReview": null,
+            "ethicsReview": null
+        });
+        let command = build_approval_command(
+            "revision-1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &attestation,
+            7,
+        )
+        .expect("approval command");
         assert_eq!(command["kind"], "APPROVAL.GRANT");
         assert_eq!(command["expectedVersion"], 7);
+        assert_eq!(command["payload"]["packageVersion"], 3);
         assert_eq!(command["payload"]["revisionId"], "revision-1");
         assert_eq!(command["payload"]["revisionHash"], "a".repeat(64));
         assert_eq!(command["payload"]["warningSetHash"], "b".repeat(64));
         assert_eq!(command["payload"]["deviceId"], "windows-local-device-v1");
+        assert_eq!(command["payload"]["attestation"], attestation);
+        assert_eq!(command["payload"].as_object().map(|value| value.len()), Some(6));
+    }
+
+    #[test]
+    fn approval_revoke_command_is_exact_hash_bound_and_stable() {
+        let first = build_approval_revoke_command(
+            "revision-1",
+            &"A".repeat(64),
+            "  Kaynak doğrulaması yeniden yapılacak.  ",
+            7,
+        )
+        .expect("revoke command");
+        let replay = build_approval_revoke_command(
+            "revision-1",
+            &"a".repeat(64),
+            "Kaynak doğrulaması yeniden yapılacak.",
+            7,
+        )
+        .expect("replayed command");
+        assert_eq!(first, replay);
+        assert_eq!(first["kind"], json!("APPROVAL.REVOKE"));
+        assert_eq!(first["payload"], json!({
+            "revisionId": "revision-1",
+            "revisionHash": "a".repeat(64),
+            "deviceId": "windows-local-device-v1",
+            "reason": "Kaynak doğrulaması yeniden yapılacak."
+        }));
+        assert_eq!(first.as_object().map(|value| value.len()), Some(6));
+    }
+
+    #[test]
+    fn approval_revoke_command_rejects_unbounded_or_malformed_inputs() {
+        assert!(build_approval_revoke_command("../revision", &"a".repeat(64), "geçerli gerekçe", 1).is_err());
+        assert!(build_approval_revoke_command("revision-1", "short", "geçerli gerekçe", 1).is_err());
+        assert!(build_approval_revoke_command("revision-1", &"a".repeat(64), "   ", 1).is_err());
+        assert!(build_approval_revoke_command("revision-1", &"a".repeat(64), &"g".repeat(513), 1).is_err());
+    }
+
+    #[test]
+    fn approval_command_rejects_model_fields_and_duplicate_source_roles() {
+        let model_authored = json!({
+            "editorialReview": { "reviewer": "Deniz Editor", "sourceRoles": [{ "sourceId": "source-1", "role": "primary" }] },
+            "expertReview": null,
+            "ethicsReview": null,
+            "model": "codex"
+        });
+        assert!(build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &model_authored, 7).is_err());
+
+        let duplicate_source = json!({
+            "editorialReview": {
+                "reviewer": "Deniz Editor",
+                "sourceRoles": [
+                    { "sourceId": "source-1", "role": "primary" },
+                    { "sourceId": "source-1", "role": "supporting" }
+                ]
+            },
+            "expertReview": null,
+            "ethicsReview": null
+        });
+        assert!(build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &duplicate_source, 7).is_err());
+    }
+
+    #[test]
+    fn native_attestation_must_match_the_immutable_v3_source_roles_and_requirements() {
+        let materialization = json!({
+            "revision": {
+                "packageVersion": 3,
+                "publicationSources": [
+                    { "id": "source-1", "title": "Primary", "url": "https://example.com/1", "role": "primary" },
+                    { "id": "source-2", "title": "Independent", "url": "https://example.com/2", "role": "independent" }
+                ],
+                "editorialAssessment": { "isYmyl": true, "sensitiveTopic": false }
+            }
+        });
+        let complete = json!({
+            "editorialReview": {
+                "reviewer": "Deniz Editor",
+                "sourceRoles": [
+                    { "sourceId": "source-2", "role": "independent" },
+                    { "sourceId": "source-1", "role": "primary" }
+                ]
+            },
+            "expertReview": { "reviewer": "Dr. Ada", "qualifications": "Alan uzmani", "reviewScope": "Yuksek etkili iddialar" },
+            "ethicsReview": null
+        });
+        super::validate_editorial_attestation_for_revision_v3(&materialization, &complete)
+            .expect("same immutable source-role set is accepted regardless of display order");
+
+        let wrong_role = json!({
+            "editorialReview": {
+                "reviewer": "Deniz Editor",
+                "sourceRoles": [
+                    { "sourceId": "source-1", "role": "supporting" },
+                    { "sourceId": "source-2", "role": "independent" }
+                ]
+            },
+            "expertReview": complete["expertReview"].clone(),
+            "ethicsReview": null
+        });
+        assert!(super::validate_editorial_attestation_for_revision_v3(&materialization, &wrong_role).is_err());
+
+        let missing_expert = json!({
+            "editorialReview": complete["editorialReview"].clone(),
+            "expertReview": null,
+            "ethicsReview": null
+        });
+        assert!(super::validate_editorial_attestation_for_revision_v3(&materialization, &missing_expert).is_err());
+    }
+
+    #[test]
+    fn v3_review_projection_exposes_only_public_source_metadata_and_human_requirements() {
+        let materialization = json!({
+            "revision": {
+                "id": "revision-v3", "packageVersion": 3, "translationKey": "article-v3",
+                "section": "haberler", "articleType": "news", "author": "Yerel Editorya",
+                "tags": ["guvenlik"], "scheduledAt": "2026-08-20T12:00:00.000Z",
+                "adapterVersion": "astro-generic@1", "riskLevel": "STANDARD",
+                "tr": { "title": "TR", "description": "TR", "slug": "tr", "bodyMarkdown": "TR" },
+                "en": { "title": "EN", "description": "EN", "slug": "en", "bodyMarkdown": "EN" },
+                "claims": [{ "id": "claim-1", "text": "Olgu", "locale": "both", "status": "VERIFIED", "sourceIds": ["source-1"] }],
+                "sources": [{
+                    "id": "source-1", "title": "Private snapshot title", "url": "https://example.com/private",
+                    "fetchedAt": "2026-08-20T10:00:00.000Z", "contentHash": "c".repeat(64),
+                    "evidenceExcerpt": "must never reach the WebView",
+                    "evidenceAnchors": [{ "sourceId": "source-1", "quoteHash": "d".repeat(64) }]
+                }],
+                "publicationSources": [{
+                    "id": "source-1", "title": "Official report", "url": "https://example.com/report",
+                    "role": "primary", "evidenceExcerpt": "must be dropped", "contentHash": "c".repeat(64)
+                }],
+                "editorialAssessment": { "isYmyl": true, "sensitiveTopic": true },
+                "qualityGates": [{ "id": "claims", "state": "PASS", "detail": "ok", "group": "editorial", "policyVersion": "3" }],
+                "media": []
+            },
+            "revisionHash": "a".repeat(64), "editorialApproval": null, "highRiskApproval": null
+        });
+
+        let review = build_review_revision(&materialization).expect("V3 review projection");
+        assert_eq!(review["packageVersion"], 3);
+        assert_eq!(review["approvalRequirements"], json!(["EDITORIAL_REVIEW", "EXPERT_REVIEW", "ETHICS_REVIEW"]));
+        assert_eq!(review["publicationSources"], json!([{
+            "id": "source-1", "title": "Official report", "url": "https://example.com/report", "role": "primary"
+        }]));
+        assert_eq!(review["publicationSources"][0].as_object().map(|value| value.len()), Some(4));
+        assert!(review["sources"][0].get("evidenceExcerpt").is_none());
+        assert!(review["sources"][0].get("evidenceAnchors").is_none());
+        assert!(review.get("editorialContext").is_none());
+        assert!(review.get("editorialAssessment").is_none());
+        assert!(review.get("editorialApproval").is_none());
+    }
+    #[test]
+    fn diagnostics_bundle_never_carries_article_titles_or_headlines() {
+        let title = "X Bankası'nda doğrulanmamış sızıntı iddiası";
+        let operations = json!({
+            "events": [{
+                "id": "job-draft-1",
+                "at": "şimdi",
+                "title": "İş başarısız",
+                "detail": "JOB_UPDATED · draft-1",
+                "state": "BLOCKED",
+                "level": "ERROR",
+                "correlationId": "draft-1"
+            }],
+            "schedule": [{
+                "id": "rev-1",
+                "title": title,
+                "at": "2026-08-25T09:00:00.000Z",
+                "section": "haberler",
+                "state": "APPROVED"
+            }],
+            "worker": { "state": "HEALTHY", "queueDepth": 1 },
+            "publisher": { "state": "READY", "outboxPending": 0 }
+        });
+
+        let projected = super::diagnostic_operations_projection(&operations);
+        let encoded = serde_json::to_string(&projected).expect("projection encodes");
+
+        assert!(!encoded.contains("X Bankası"));
+        assert!(!encoded.contains(title));
+        assert!(!encoded.contains("İş başarısız"));
+        assert_eq!(projected["schedule"][0]["id"], "rev-1");
+        assert_eq!(projected["schedule"][0]["section"], "haberler");
+        assert_eq!(projected["schedule"][0]["at"], "2026-08-25T09:00:00.000Z");
+        assert_eq!(projected["schedule"][0]["state"], "APPROVED");
+        assert_eq!(
+            projected["schedule"][0]["titleDigest"],
+            json!(super::diagnostic_title_digest(title))
+        );
+        assert!(projected["schedule"][0].get("title").is_none());
+        assert_eq!(projected["events"][0]["correlationId"], "draft-1");
+        // The support-relevant part of an event stays readable; only the
+        // workspace's own text is withheld.
+        assert_eq!(projected["events"][0]["detail"], "JOB_UPDATED · draft-1");
+        assert_eq!(projected["worker"]["queueDepth"], 1);
+    }
+
+    #[test]
+    fn a_live_draft_job_projects_the_candidate_as_queued_without_a_mutation_record() {
+        let jobs = vec![json!({
+            "id": "draft-1",
+            "kind": "DRAFT",
+            "state": "QUEUED",
+            "metadata": { "candidateId": "c1" }
+        })];
+
+        assert_eq!(candidate_workflow_state("c1", &[], &jobs), "RESEARCH_QUEUED");
+        assert_eq!(candidate_workflow_state("c2", &[], &jobs), "NEW");
+    }
+
+    #[test]
+    fn unprobed_windows_and_clock_prerequisites_are_never_reported_ready() {
+        let windows = super::windows_prerequisite_check(Some("x86_64"));
+        assert_eq!(windows["id"], "windows");
+        assert_ne!(windows["state"], "READY");
+        assert!(!windows["userAction"].is_null());
+        assert_eq!(
+            super::windows_prerequisite_check(Some("aarch64"))["state"],
+            "BLOCKED"
+        );
+        // Windows reports the host architecture through the environment, so an
+        // emulated x64 build on an ARM64 machine is still detected as unsupported.
+        assert_eq!(
+            super::windows_host_architecture_with(|name| (name == "PROCESSOR_ARCHITEW6432")
+                .then(|| std::ffi::OsString::from("ARM64"))),
+            "ARM64"
+        );
+
+        let clock = super::clock_prerequisite_check(None);
+        assert_eq!(clock["id"], "clock");
+        assert_ne!(clock["state"], "READY");
+        assert!(!clock["userAction"].is_null());
+        assert_eq!(
+            super::clock_prerequisite_check(Some(super::PUBLISHING_UTC_OFFSET_MINUTES))["state"],
+            "READY"
+        );
+        assert_eq!(
+            super::clock_prerequisite_check(Some(60))["state"],
+            "ATTENTION"
+        );
+    }
+
+    #[test]
+    fn deploy_prerequisite_requires_a_valid_locally_checked_publish_contract() {
+        let absent = super::deploy_prerequisite_check(None, None);
+        assert_eq!(absent["id"], "deploy");
+        assert_eq!(absent["state"], "BLOCKED");
+
+        let config = json!({
+            "workflowName": "deploy.yml",
+            "requiredChecks": ["build", "test / windows"]
+        });
+        let unchecked = super::deploy_prerequisite_check(Some(&config), None);
+        assert_eq!(unchecked["state"], "ATTENTION");
+
+        let checked = json!({ "ready": true, "state": "DRY_RUN_READY" });
+        let ready = super::deploy_prerequisite_check(Some(&config), Some(&checked));
+        assert_eq!(ready["state"], "READY");
+        assert_eq!(ready["workflowName"], "deploy.yml");
+        assert_eq!(ready["requiredChecks"], json!(["build", "test / windows"]));
+        assert_eq!(ready["checkPassed"], true);
+
+        let duplicate_checks = json!({
+            "workflowName": "deploy.yml",
+            "requiredChecks": ["build", "build"]
+        });
+        let invalid =
+            super::deploy_prerequisite_check(Some(&duplicate_checks), Some(&checked));
+        assert_ne!(invalid["state"], "READY");
+        assert_eq!(invalid["checkPassed"], false);
+    }
+
+    #[test]
+    fn the_backup_prerequisite_follows_recorded_verifications_not_a_literal() {
+        assert_eq!(
+            super::backup_prerequisite_check(false, None)["state"],
+            "MISSING"
+        );
+        assert_eq!(
+            super::backup_prerequisite_check(true, None)["state"],
+            "ATTENTION"
+        );
+        assert_eq!(
+            super::backup_prerequisite_check(true, Some(&json!({ "verifiedAtUnixMs": 10_u64 })))
+                ["state"],
+            "ATTENTION"
+        );
+
+        let complete = super::backup_prerequisite_check(
+            true,
+            Some(&json!({
+                "archiveName": "blogbot-backup.opebak",
+                "archiveSha256": "a".repeat(64),
+                "verifiedAtUnixMs": 10_u64,
+                "restorePreviewAtUnixMs": 20_u64
+            })),
+        );
+        assert_eq!(complete["state"], "READY");
+        assert!(complete["userAction"].is_null());
+    }
+
+    #[test]
+    fn backup_observations_from_different_archives_never_combine_into_ready() {
+        let mut record = json!({});
+        super::update_backup_verification_record(
+            &mut record,
+            "verifiedAtUnixMs",
+            "first.opebak",
+            &"a".repeat(64),
+            10,
+        )
+        .expect("record first verification");
+        super::update_backup_verification_record(
+            &mut record,
+            "restorePreviewAtUnixMs",
+            "second.opebak",
+            &"b".repeat(64),
+            20,
+        )
+        .expect("record second preview");
+
+        assert_eq!(record["archiveSha256"], "b".repeat(64));
+        assert!(record.get("verifiedAtUnixMs").is_none());
+        assert_eq!(record["restorePreviewAtUnixMs"], 20);
+        assert_eq!(
+            super::backup_prerequisite_check(true, Some(&record))["state"],
+            "ATTENTION"
+        );
+    }
+
+    #[test]
+    fn automated_draft_payloads_always_declare_a_visual_policy() {
+        let candidate = candidate_draft_payload(
+            "c1",
+            &json!({ "sourceIds": ["src-1"], "title": "Aday", "section": "haberler" }),
+        )
+        .expect("candidate draft payload");
+        assert!(candidate
+            .get("visualPolicy")
+            .and_then(Value::as_str)
+            .is_some());
+
+        let edit = revision_edit_payload(
+            "rev-1",
+            "kaynakları genişlet",
+            json!({ "sources": [{ "url": "https://example.com/a" }] }),
+            None,
+        )
+        .expect("revision edit payload");
+        assert!(edit.get("visualPolicy").and_then(Value::as_str).is_some());
+
+        // Without a configured ImageGen key the engine defaults to GENERATE and
+        // produces a revision with no hero media, which can never be approved.
+        assert_eq!(
+            super::automated_visual_policy_with(|_| None),
+            "LOCAL_RENDERER"
+        );
+        assert_eq!(
+            super::automated_visual_policy_with(|name| (name == "BLOGBOT_IMAGEGEN_API_KEY")
+                .then(|| std::ffi::OsString::from("configured"))),
+            "GENERATE"
+        );
+    }
+
+    #[test]
+    fn a_retried_local_state_write_re_reads_the_state_the_conflict_invalidated() {
+        let stored = std::cell::RefCell::new(json!({ "mutations": ["m1"] }));
+        let attempts = std::cell::Cell::new(0_u32);
+        let sent = std::cell::RefCell::new(Vec::new());
+
+        let result = super::local_state_write(
+            || Ok(100),
+            || stored.borrow().clone(),
+            |value| {
+                value
+                    .get_mut("mutations")
+                    .and_then(Value::as_array_mut)
+                    .expect("mutations array")
+                    .push(json!("mA"));
+                Ok(())
+            },
+            |_version, value| {
+                sent.borrow_mut().push(value.clone());
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    // A concurrent writer commits while this attempt is rolled back.
+                    *stored.borrow_mut() = json!({ "mutations": ["m1", "mB"] });
+                    return Err(CommandError::EngineUnavailable(
+                        "VERSION_CONFLICT:100:102".into(),
+                    ));
+                }
+                Ok(json!({ "ok": true }))
+            },
+        )
+        .expect("retried local state write");
+
+        assert_eq!(result["ok"], true);
+        let last = sent.borrow().last().cloned().expect("second attempt");
+        assert_eq!(last["mutations"], json!(["m1", "mB", "mA"]));
+    }
+
+    #[test]
+    fn the_native_confirmation_detail_truncates_multi_byte_paths_by_character() {
+        let path = "ş".repeat(200);
+        let detail = super::native_confirmation_detail(&path);
+        assert_eq!(detail.chars().count(), 161);
+        assert!(detail.ends_with('…'));
+        assert_eq!(super::native_confirmation_detail("kısa"), "kısa");
+    }
+
+    #[test]
+    fn publishing_starts_paused_like_the_offline_runtime_default() {
+        let state = DesktopState::default();
+        assert!(*state.publishing_paused.read().expect("publishing flag"));
+        assert_eq!(
+            *state.runtime.read().expect("runtime"),
+            RuntimeMode::OfflineReadOnly
+        );
+    }
+
+    #[test]
+    fn manual_publication_is_rejected_while_publishing_is_paused() {
+        assert!(super::ensure_publishing_active(false).is_ok());
+        let error = super::ensure_publishing_active(true).expect_err("paused publication");
+        assert_eq!(error.to_string(), "ENGINE_UNAVAILABLE: PUBLISHING_PAUSED");
+    }
+
+    #[test]
+    fn publication_enqueue_returns_before_the_blocking_transport_and_drainer_runs_it_later() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc,
+        };
+
+        let transport_calls = Arc::new(AtomicUsize::new(0));
+        let request = json!({
+            "kind": "publication.enqueue",
+            "revisionId": "revision-1"
+        });
+        let value = super::persist_publication_enqueue(request, |request| {
+            assert_eq!(request["kind"], "publication.enqueue");
+            Ok(json!({
+                "ok": true,
+                "value": { "id": "effect-1", "state": "PENDING" }
+            }))
+        })
+        .expect("durable enqueue");
+
+        assert_eq!(value["id"], "effect-1");
+        assert_eq!(transport_calls.load(Ordering::SeqCst), 0);
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let drainer_calls = Arc::clone(&transport_calls);
+        let drainer = std::thread::spawn(move || {
+            super::reconcile_pending_publications(&[json!("effect-1")], |effect_id| {
+                assert_eq!(effect_id, "effect-1");
+                drainer_calls.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).expect("transport started");
+                release_rx.recv().expect("release blocking transport");
+                Ok(json!({ "id": effect_id, "state": "SUCCEEDED" }))
+            });
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("background drainer reached transport");
+        assert_eq!(transport_calls.load(Ordering::SeqCst), 1);
+        release_tx.send(()).expect("release transport");
+        drainer.join().expect("drainer thread");
+    }
+
+    #[test]
+    fn approval_keys_differ_per_attempt_so_a_retry_is_not_a_reused_key() {
+        let attestation = json!({
+            "editorialReview": { "reviewer": "Deniz Editor", "sourceRoles": [{ "sourceId": "source-1", "role": "primary" }] },
+            "expertReview": null,
+            "ethicsReview": null
+        });
+        let first = build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &attestation, 7)
+            .expect("first approval command");
+        let second = build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &attestation, 8)
+            .expect("retried approval command");
+        assert_ne!(first["idempotencyKey"], second["idempotencyKey"]);
+        assert_eq!(
+            first["payload"]["revisionHash"],
+            second["payload"]["revisionHash"]
+        );
+        let changed_attestation = json!({
+            "editorialReview": { "reviewer": "Baska Editor", "sourceRoles": [{ "sourceId": "source-1", "role": "primary" }] },
+            "expertReview": null,
+            "ethicsReview": null
+        });
+        let changed = build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &changed_attestation, 7)
+            .expect("changed human approval command");
+        assert_ne!(first["idempotencyKey"], changed["idempotencyKey"]);
+    }
+
+    #[test]
+    fn the_approval_version_is_read_after_the_blocking_consent_dialog() {
+        let cursor = std::cell::Cell::new(100_u64);
+        let command = super::command_after_consent(
+            || {
+                // The engine advances its cursor while the dialog is open.
+                cursor.set(cursor.get() + 1);
+                Ok(())
+            },
+            || Ok(cursor.get()),
+            |version| Ok(json!({ "expectedVersion": version })),
+        )
+        .expect("consented command");
+
+        assert_eq!(command["expectedVersion"], 101);
+    }
+
+    #[test]
+    fn the_review_diff_only_describes_a_real_predecessor() {
+        let materialization = json!({
+            "revisionHash": "c".repeat(64),
+            "revision": {
+                "id": "rev-2",
+                "tr": { "title": "Yeni başlık", "description": "Yeni", "slug": "yeni", "bodyMarkdown": "Yeni gövde" },
+                "en": { "title": "New title", "description": "New", "slug": "new", "bodyMarkdown": "New body" }
+            }
+        });
+        let predecessor = json!({
+            "revision": {
+                "id": "rev-1",
+                "tr": { "title": "Eski başlık", "description": "Eski", "slug": "eski", "bodyMarkdown": "Eski gövde" },
+                "en": { "title": "Old title", "description": "Old", "slug": "old", "bodyMarkdown": "Old body" }
+            }
+        });
+
+        let without = build_review_revision(&materialization).expect("review revision");
+        assert_eq!(without["hasPrevious"], false);
+
+        let with =
+            super::build_review_revision_with_predecessor(&materialization, Some(&predecessor))
+                .expect("review revision with predecessor");
+        assert_eq!(with["hasPrevious"], true);
+        assert_eq!(with["previous"]["tr"]["title"], "Eski başlık");
+        assert_ne!(with["previous"]["tr"]["title"], with["tr"]["title"]);
+    }
+
+    #[test]
+    fn a_corrupt_media_size_never_reaches_the_allocation() {
+        assert!(super::bounded_media_size(u64::MAX).is_err());
+        assert!(super::bounded_media_size(0).is_err());
+        assert_eq!(
+            super::bounded_media_size(super::ENGINE_MEDIA_MAX_BYTES).expect("maximum media size"),
+            super::ENGINE_MEDIA_MAX_BYTES
+        );
+        assert!(super::bounded_media_size(super::ENGINE_MEDIA_MAX_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn source_scan_tokens_are_unique_per_invocation() {
+        let first = super::source_scan_request_token().expect("first scan token");
+        let second = super::source_scan_request_token().expect("second scan token");
+        assert_ne!(first, second);
+        assert!(first.starts_with("desktop-scan-"));
+    }
+
+    #[test]
+    fn broker_faults_are_recorded_as_token_free_codes_with_a_failure_counter() {
+        super::clear_broker_fault("effect-fault-test");
+        // Preserve a realistic runtime token shape without storing a
+        // secret-looking credential literal in repository source.
+        let simulated_token = ["gh", "p_", "0123456789", "abcdefghij"].concat();
+        let simulated_fault = format!("PUBLICATION_BROKER_CLAIM_FAILED: {simulated_token}");
+        super::record_broker_fault(
+            "effect-fault-test",
+            &simulated_fault,
+        );
+        super::record_broker_fault(
+            "effect-fault-test",
+            &simulated_fault,
+        );
+
+        let report = super::broker_fault_report();
+        let entry = report
+            .iter()
+            .find(|entry| entry["effectId"] == "effect-fault-test")
+            .cloned()
+            .expect("recorded broker fault");
+        assert_eq!(entry["code"], "PUBLICATION_BROKER_CLAIM_FAILED");
+        assert_eq!(entry["consecutiveFailures"], 2);
+        assert!(!serde_json::to_string(&entry)
+            .expect("fault encodes")
+            .contains("ghp_"));
+
+        super::clear_broker_fault("effect-fault-test");
+        assert!(!super::broker_fault_report()
+            .iter()
+            .any(|entry| entry["effectId"] == "effect-fault-test"));
+    }
+
+    #[test]
+    fn connector_validation_refuses_a_folder_the_user_never_granted() {
+        let state = DesktopState::default();
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-ungranted-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary project directory");
+
+        let error = super::test_setup_connector_with_grants(
+            &state,
+            "site".into(),
+            json!({
+                "repositoryPath": directory.to_string_lossy(),
+                "mode": "LOCAL_ONLY"
+            }),
+        )
+        .expect_err("ungranted folder must not be probed");
+
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(matches!(error, CommandError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn a_second_diagnostics_export_never_doubles_a_log_copy() {
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-diagnostics-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary diagnostics directory");
+        let source = directory.join("engine.stderr.source.log");
+        std::fs::write(&source, "BRIDGE_START ok\nENGINE_READY ok\n").expect("write source log");
+        let target = directory.join("engine.stderr.log");
+
+        super::write_redacted_diagnostic_copy(Some(&source), &target);
+        let first = super::diagnostic_file_size(&target);
+        super::write_redacted_diagnostic_copy(Some(&source), &target);
+        let second = super::diagnostic_file_size(&target);
+
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(first > 0);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn automatic_restore_request_replaces_live_data_only_after_explicit_confirmation() {
+        let request = super::automatic_backup_restore_request(
+            "automatic-2026-08-20T09-30-00-000Z.backup",
+            true,
+        )
+        .expect("confirmed automatic restore request");
+
+        assert_eq!(request["kind"], "backup.auto.restore");
+        assert_eq!(
+            request["payload"],
+            json!({
+                "backupName": "automatic-2026-08-20T09-30-00-000Z.backup",
+                "confirmReplaceLocalData": true
+            })
+        );
+        assert!(request["payload"].get("targetDirectory").is_none());
+
+        let error = super::automatic_backup_restore_request(
+            "automatic-2026-08-20T09-30-00-000Z.backup",
+            false,
+        )
+        .expect_err("unconfirmed automatic restore must fail closed");
+        assert!(matches!(error, CommandError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn publication_readiness_preserves_the_reauthorization_error_code() {
+        let error = super::require_github_publication_readiness(Err(
+            "GITHUB_REAUTHORIZATION_REQUIRED".to_string(),
+        ))
+        .expect_err("reauthorization must block publication");
+
+        assert!(matches!(
+            error,
+            CommandError::EngineUnavailable(code)
+                if code == "GITHUB_REAUTHORIZATION_REQUIRED"
+        ));
     }
 }

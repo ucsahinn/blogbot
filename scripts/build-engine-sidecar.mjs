@@ -87,7 +87,10 @@ await build({
   target: "node24",
   sourcemap: false,
   minify: false,
-  legalComments: "none"
+  legalComments: "none",
+  define: {
+    __BLOGBOT_FETCHER_SEA__: "true"
+  }
 });
 
 await writeFile(

@@ -204,6 +204,61 @@ export interface SourceReviewInputV1 {
   rationale: string;
 }
 
+export interface ApprovalGrantLegacyInputV1 {
+  revisionId: string;
+  revisionHash: string;
+  deviceId: string;
+  warningSetHash: string;
+}
+
+export interface ApprovalGrantV3InputV1 extends ApprovalGrantLegacyInputV1 {
+  packageVersion: 3;
+  attestation: EditorialApprovalAttestationV3;
+}
+
+export interface ApprovalRevokeInputV1 {
+  revisionId: string;
+  revisionHash: string;
+  deviceId: string;
+  reason: string;
+}
+
+export interface DraftCreateInputV1 {
+  draftId: string;
+  candidateId?: string;
+  candidateTitle?: string;
+  candidateUrl?: string | null;
+  instruction?: string;
+  sourceIds?: string[];
+  urls?: string[];
+  sources?: unknown[];
+  section?: SiteSection;
+  articleType?: ArticleType;
+  urgency?: "normal" | "urgent";
+  tone?: "neutral" | "technical";
+  length?: "standard" | "deep";
+  visualPolicy?: "GENERATE" | "LOCAL_RENDERER" | "NONE";
+  scheduleIntent?: "NEXT_SLOT" | "UNSCHEDULED";
+  scheduledAt?: string;
+  revisionId?: string;
+  baseRevision?: unknown;
+  preferredAuthor?: string;
+  preferredReviewer?: string;
+}
+
+export interface BobyGuideInputV1 {
+  guidanceId: string;
+  question: string;
+  activePage: string;
+  runtimeState: "ONLINE" | "DEGRADED" | "OFFLINE";
+  sessionId?: string | null;
+  safeWorkspaceSummary: {
+    draftCount: number;
+    reviewCount: number;
+    sourceCount: number;
+  };
+}
+
 export type EngineCommandV1 =
   | EngineCommandBaseV1<
       "AUTOMATION.SET",
@@ -215,19 +270,19 @@ export type EngineCommandV1 =
       "SOURCE.SCAN",
       { targets: SourceScanTargetV1[] }
     >
-  | EngineCommandBaseV1<"REVISION.SAVE", { revision: RevisionPackageV2 }>
+  | EngineCommandBaseV1<"REVISION.SAVE", { revision: RevisionPackageV2 | RevisionPackageV3 }>
   | EngineCommandBaseV1<"REVISION.LIST", { summaryOnly?: boolean }>
   | EngineCommandBaseV1<"REVISION.GET", { revisionId: string }>
   | EngineCommandBaseV1<"REVISION.REPAIR_MEDIA", { revisionId: string }>
   | EngineCommandBaseV1<
       "APPROVAL.GRANT",
-      {
-        revisionId: string;
-        revisionHash: string;
-        deviceId: string;
-        warningSetHash: string;
-      }
+      ApprovalGrantLegacyInputV1 | ApprovalGrantV3InputV1
     >
+  | EngineCommandBaseV1<"APPROVAL.REVOKE", ApprovalRevokeInputV1>
+  | EngineCommandBaseV1<"DRAFT.CREATE", DraftCreateInputV1>
+  | EngineCommandBaseV1<"BOBY.GUIDE", BobyGuideInputV1>
+  | EngineCommandBaseV1<"JOB.RETRY", { jobId: string }>
+  | EngineCommandBaseV1<"LOCAL_STATE.SET", { key: string; value: unknown }>
   | EngineCommandBaseV1<
       "APPROVAL.GRANT_HIGH_RISK",
       {
@@ -252,6 +307,14 @@ export type EngineCommandErrorCodeV1 =
   | "WARNING_NOT_ALLOWLISTED"
   | "WARNING_ACCEPTANCE_MISMATCH"
   | "EDITORIAL_APPROVAL_REQUIRED"
+  | "REVISION_REVIEW_UPGRADE_REQUIRED"
+  | "EDITORIAL_ATTESTATION_REQUIRED"
+  | "EDITORIAL_ATTESTATION_INVALID"
+  | "EDITORIAL_QUALITY_NOT_READY"
+  | "APPROVAL_REVOKED"
+  | "APPROVAL_NOT_FOUND"
+  | "APPROVAL_ALREADY_REVOKED"
+  | "INVALID_APPROVAL_REVOCATION"
   | "ENGINE_OPERATION_FAILED";
 
 export interface EngineCommandErrorV1 {
@@ -306,8 +369,138 @@ function isIdentifier(value: unknown, maximumLength: number): value is string {
   );
 }
 
+function hasAllowedKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[]
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isOptionalBoundedText(value: unknown, maximumLength: number): boolean {
+  return value === undefined || (typeof value === "string" && value.length <= maximumLength);
+}
+
+function isIdentifierList(value: unknown): value is string[] {
+  return Array.isArray(value) &&
+    value.length <= 1_000 &&
+    value.every((item) => isIdentifier(item, 128));
+}
+
+function isBoundedTextList(value: unknown, maximumItemLength: number): value is string[] {
+  return Array.isArray(value) &&
+    value.length <= 1_000 &&
+    value.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= maximumItemLength);
+}
+
+function isSafeWorkspaceSummaryV1(value: unknown): value is BobyGuideInputV1["safeWorkspaceSummary"] {
+  if (!isRecord(value) || !hasExactKeys(value, ["draftCount", "reviewCount", "sourceCount"])) return false;
+  return [value.draftCount, value.reviewCount, value.sourceCount].every((count) =>
+    typeof count === "number" && Number.isSafeInteger(count) && count >= 0 && count <= 100_000
+  );
+}
+
+function isDraftCreateInputV1(value: unknown): value is DraftCreateInputV1 {
+  if (!isRecord(value) || !hasAllowedKeys(value, ["draftId"], [
+    "candidateId", "candidateTitle", "candidateUrl", "instruction", "sourceIds", "urls", "sources",
+    "section", "articleType", "urgency", "tone", "length", "visualPolicy", "scheduleIntent",
+    "scheduledAt", "revisionId", "baseRevision", "preferredAuthor", "preferredReviewer"
+  ])) return false;
+  if (!isIdentifier(value.draftId, 128)) return false;
+  if (value.candidateId !== undefined && !isIdentifier(value.candidateId, 128)) return false;
+  if (!isOptionalBoundedText(value.candidateTitle, 400) || !isOptionalBoundedText(value.instruction, 20_000)) return false;
+  if (value.candidateUrl !== null && !isOptionalBoundedText(value.candidateUrl, 8_192)) return false;
+  if (value.sourceIds !== undefined && !isIdentifierList(value.sourceIds)) return false;
+  if (value.urls !== undefined && !isBoundedTextList(value.urls, 8_192)) return false;
+  if (value.sources !== undefined && (!Array.isArray(value.sources) || value.sources.length > 1_000 || !isBoundedJson(value.sources, 1_000_000))) return false;
+  const hasSource = (Array.isArray(value.sourceIds) && value.sourceIds.length > 0) ||
+    (Array.isArray(value.urls) && value.urls.length > 0);
+  if (!hasSource) return false;
+  if (value.section !== undefined && !SITE_SECTIONS[value.section as SiteSection]) return false;
+  if (value.articleType !== undefined && !["news", "analysis", "deep_dive", "guide"].includes(value.articleType as string)) return false;
+  if (value.urgency !== undefined && value.urgency !== "normal" && value.urgency !== "urgent") return false;
+  if (value.tone !== undefined && value.tone !== "neutral" && value.tone !== "technical") return false;
+  if (value.length !== undefined && value.length !== "standard" && value.length !== "deep") return false;
+  if (value.visualPolicy !== undefined && !["GENERATE", "LOCAL_RENDERER", "NONE"].includes(value.visualPolicy as string)) return false;
+  if (value.scheduleIntent !== undefined && value.scheduleIntent !== "NEXT_SLOT" && value.scheduleIntent !== "UNSCHEDULED") return false;
+  if (value.scheduledAt !== undefined && !isExactIsoDate(value.scheduledAt)) return false;
+  if (value.revisionId !== undefined && !isIdentifier(value.revisionId, 128)) return false;
+  if (value.baseRevision !== undefined && !isBoundedJson(value.baseRevision, 1_000_000)) return false;
+  if (!isOptionalBoundedText(value.preferredAuthor, 256) || !isOptionalBoundedText(value.preferredReviewer, 256)) return false;
+  return isBoundedJson(value, 1_000_000);
+}
+
+function isBobyGuideInputV1(value: unknown): value is BobyGuideInputV1 {
+  if (!isRecord(value) || !hasAllowedKeys(value,
+    ["guidanceId", "question", "activePage", "runtimeState", "safeWorkspaceSummary"],
+    ["sessionId"]
+  )) return false;
+  return isIdentifier(value.guidanceId, 128) &&
+    isBoundedHumanText(value.question, 600) &&
+    isBoundedHumanText(value.activePage, 64) &&
+    (value.runtimeState === "ONLINE" || value.runtimeState === "DEGRADED" || value.runtimeState === "OFFLINE") &&
+    (value.sessionId === undefined || value.sessionId === null || isIdentifier(value.sessionId, 128)) &&
+    isSafeWorkspaceSummaryV1(value.safeWorkspaceSummary);
+}
+
 function isExactIsoDate(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(Date.parse(value)).toISOString() === value;
+}
+
+function isBoundedHumanText(value: unknown, maximumLength = 512): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= maximumLength;
+}
+
+function isEditorialSourceRoleAttestationV3(value: unknown): value is EditorialSourceRoleAttestationV3 {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["sourceId", "role"]) &&
+    isIdentifier(value.sourceId, 128) &&
+    (value.role === "primary" || value.role === "independent" || value.role === "supporting")
+  );
+}
+
+function isEditorialApprovalAttestationV3(value: unknown): value is EditorialApprovalAttestationV3 {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["editorialReview", "expertReview", "ethicsReview"]) ||
+    !isRecord(value.editorialReview) ||
+    !hasExactKeys(value.editorialReview, ["reviewer", "sourceRoles"]) ||
+    !isBoundedHumanText(value.editorialReview.reviewer, 256) ||
+    !Array.isArray(value.editorialReview.sourceRoles) ||
+    value.editorialReview.sourceRoles.length === 0 ||
+    value.editorialReview.sourceRoles.length > 1_000 ||
+    !value.editorialReview.sourceRoles.every(isEditorialSourceRoleAttestationV3)
+  ) {
+    return false;
+  }
+  const sourceIds = value.editorialReview.sourceRoles.map((source) => source.sourceId);
+  if (new Set(sourceIds).size !== sourceIds.length) return false;
+
+  const expertReview = value.expertReview;
+  if (
+    expertReview !== null &&
+    (
+      !isRecord(expertReview) ||
+      !hasExactKeys(expertReview, ["reviewer", "qualifications", "reviewScope"]) ||
+      !isBoundedHumanText(expertReview.reviewer, 256) ||
+      !isBoundedHumanText(expertReview.qualifications, 1_000) ||
+      !isBoundedHumanText(expertReview.reviewScope, 2_000)
+    )
+  ) {
+    return false;
+  }
+
+  const ethicsReview = value.ethicsReview;
+  return ethicsReview === null || (
+    isRecord(ethicsReview) &&
+    hasExactKeys(ethicsReview, ["reviewer", "reviewScope", "rationale"]) &&
+    isBoundedHumanText(ethicsReview.reviewer, 256) &&
+    isBoundedHumanText(ethicsReview.reviewScope, 2_000) &&
+    isBoundedHumanText(ethicsReview.rationale, 4_000)
+  );
 }
 
 function isAutomationSettingsV1(
@@ -428,6 +621,41 @@ function isLocalizedArticle(value: unknown): boolean {
         (value[key] as string).length <=
           (key === "bodyMarkdown" ? 500_000 : 4_096)
     )
+  );
+}
+
+const MAX_REVISION_MEDIA_BYTES = 32 * 1024 * 1024;
+
+function isRevisionMediaV2(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!hasExactKeys(value, [
+    "role",
+    "path",
+    "sha256",
+    "width",
+    "height",
+    ...(value.byteSize === undefined ? [] : ["byteSize"]),
+    ...(value.contentBase64 === undefined ? [] : ["contentBase64"]),
+    ...(value.source === undefined ? [] : ["source"])
+  ])) return false;
+  return (
+    (value.role === "hero" || value.role === "inline") &&
+    typeof value.path === "string" &&
+    value.path.length > 0 &&
+    value.path.length <= 4_096 &&
+    typeof value.sha256 === "string" &&
+    /^[a-f0-9]{64}$/iu.test(value.sha256) &&
+    Number.isSafeInteger(value.width) &&
+    Number(value.width) > 0 &&
+    Number.isSafeInteger(value.height) &&
+    Number(value.height) > 0 &&
+    (value.byteSize === undefined || (
+      Number.isSafeInteger(value.byteSize) &&
+      Number(value.byteSize) > 0 &&
+      Number(value.byteSize) <= MAX_REVISION_MEDIA_BYTES
+    )) &&
+    (value.contentBase64 === undefined || typeof value.contentBase64 === "string") &&
+    (value.source === undefined || value.source === "IMAGEGEN" || value.source === "LOCAL_RENDERER")
   );
 }
 
@@ -628,24 +856,29 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
           source.rightsStatus === "APPROVED" ||
           source.rightsStatus === "REJECTED")
     ) &&
-    revision.media.every(
-      (media) =>
-        isRecord(media) &&
-        hasExactKeys(media, ["role", "path", "sha256", "width", "height"]) &&
-        (media.role === "hero" || media.role === "inline") &&
-        typeof media.path === "string" &&
-        media.path.length > 0 &&
-        media.path.length <= 4_096 &&
-        typeof media.sha256 === "string" &&
-        /^[a-f0-9]{64}$/iu.test(media.sha256) &&
-        Number.isSafeInteger(media.width) &&
-        media.width > 0 &&
-        Number.isSafeInteger(media.height) &&
-        media.height > 0
-    ) &&
+    revision.media.some((media) => isRecord(media) && media.role === "hero") &&
+    revision.media.every(isRevisionMediaV2) &&
     validateRevisionPackageV2(revision) &&
     validateClaimEvidence(revision)
   );
+}
+
+function isRevisionPackageV3(value: unknown): value is RevisionPackageV3 {
+  if (!isRecord(value) || !isBoundedJson(value, 1_000_000)) return false;
+  const keys = [
+    "id",
+    ...(value.supersedesRevisionId === undefined ? [] : ["supersedesRevisionId"]),
+    "translationKey", "state", "tr", "en", "section", "articleType", "author",
+    "tags", "claims", "sources", "media", "scheduledAt", "adapterVersion",
+    "editorialDesk", "riskLevel", "translationParity", "editorialPolicyHash",
+    "editorialReviewReportHash", "targetRepository", "targetBaseBranch",
+    "targetBaseSha", "generatedFiles", "qualityGates", "packageVersion",
+    "editorialContext", "editorialAssessment", "publicationSources",
+    "deployWorkflow", "requiredChecks"
+  ];
+  return hasExactKeys(value, keys) &&
+    validateRevisionPackageV3(value as unknown as ArticleRevision) &&
+    validateClaimEvidence(value as unknown as ArticleRevision);
 }
 
 function isBoundedJson(value: unknown, maximumBytes: number): boolean {
@@ -773,11 +1006,77 @@ export function validateEngineCommandV1(
       }
     };
   }
+  if (value.kind === "DRAFT.CREATE") {
+    if (!isDraftCreateInputV1(value.payload)) return invalid("DRAFT.CREATE payload is invalid");
+    return {
+      valid: true,
+      command: {
+        version: 1,
+        requestId: value.requestId,
+        idempotencyKey: value.idempotencyKey,
+        expectedVersion: value.expectedVersion,
+        kind: "DRAFT.CREATE",
+        payload: structuredClone(value.payload)
+      }
+    };
+  }
+  if (value.kind === "BOBY.GUIDE") {
+    if (!isBobyGuideInputV1(value.payload)) return invalid("BOBY.GUIDE payload is invalid");
+    return {
+      valid: true,
+      command: {
+        version: 1,
+        requestId: value.requestId,
+        idempotencyKey: value.idempotencyKey,
+        expectedVersion: value.expectedVersion,
+        kind: "BOBY.GUIDE",
+        payload: structuredClone(value.payload)
+      }
+    };
+  }
+  if (value.kind === "JOB.RETRY") {
+    if (!isRecord(value.payload) || !hasExactKeys(value.payload, ["jobId"]) || !isIdentifier(value.payload.jobId, 128)) {
+      return invalid("JOB.RETRY payload is invalid");
+    }
+    return {
+      valid: true,
+      command: {
+        version: 1,
+        requestId: value.requestId,
+        idempotencyKey: value.idempotencyKey,
+        expectedVersion: value.expectedVersion,
+        kind: "JOB.RETRY",
+        payload: { jobId: value.payload.jobId }
+      }
+    };
+  }
+  if (value.kind === "LOCAL_STATE.SET") {
+    if (
+      !isRecord(value.payload) ||
+      !hasExactKeys(value.payload, ["key", "value"]) ||
+      !isIdentifier(value.payload.key, 128) ||
+      !isBoundedJson(value.payload.value, 256_000)
+    ) {
+      return invalid("LOCAL_STATE.SET payload is invalid");
+    }
+    return {
+      valid: true,
+      command: {
+        version: 1,
+        requestId: value.requestId,
+        idempotencyKey: value.idempotencyKey,
+        expectedVersion: value.expectedVersion,
+        kind: "LOCAL_STATE.SET",
+        payload: { key: value.payload.key, value: structuredClone(value.payload.value) }
+      }
+    };
+  }
   if (value.kind === "REVISION.SAVE") {
     if (
       !isRecord(value.payload) ||
       !hasExactKeys(value.payload, ["revision"]) ||
-      !isRevisionPackageV2(value.payload.revision)
+      !isRevisionPackageV2(value.payload.revision) &&
+      !isRevisionPackageV3(value.payload.revision)
     ) {
       return invalid("REVISION.SAVE payload is invalid");
     }
@@ -856,22 +1155,49 @@ export function validateEngineCommandV1(
     };
   }
   if (value.kind === "APPROVAL.GRANT") {
+    const legacyKeys = ["revisionId", "revisionHash", "deviceId", "warningSetHash"] as const;
+    const v3Keys = [...legacyKeys, "packageVersion", "attestation"] as const;
     if (
       !isRecord(value.payload) ||
-      !hasExactKeys(value.payload, [
-        "revisionId",
-        "revisionHash",
-        "deviceId",
-        "warningSetHash"
-      ]) ||
+      (!hasExactKeys(value.payload, legacyKeys) && !hasExactKeys(value.payload, v3Keys)) ||
       !isIdentifier(value.payload.revisionId, 128) ||
       typeof value.payload.revisionHash !== "string" ||
       !/^[a-f0-9]{64}$/iu.test(value.payload.revisionHash) ||
       !isIdentifier(value.payload.deviceId, 128) ||
       typeof value.payload.warningSetHash !== "string" ||
-      !/^[a-f0-9]{64}$/iu.test(value.payload.warningSetHash)
+      !/^[a-f0-9]{64}$/iu.test(value.payload.warningSetHash) ||
+      (
+        hasExactKeys(value.payload, v3Keys) &&
+        (
+          value.payload.packageVersion !== 3 ||
+          !isEditorialApprovalAttestationV3(value.payload.attestation)
+        )
+      )
     ) {
       return invalid("APPROVAL.GRANT payload is invalid");
+    }
+    const common = {
+      revisionId: value.payload.revisionId,
+      revisionHash: value.payload.revisionHash.toLowerCase(),
+      deviceId: value.payload.deviceId,
+      warningSetHash: value.payload.warningSetHash.toLowerCase()
+    };
+    if (hasExactKeys(value.payload, v3Keys)) {
+      return {
+        valid: true,
+        command: {
+          version: 1,
+          requestId: value.requestId,
+          idempotencyKey: value.idempotencyKey,
+          expectedVersion: value.expectedVersion,
+          kind: "APPROVAL.GRANT",
+          payload: {
+            ...common,
+            packageVersion: 3,
+            attestation: structuredClone(value.payload.attestation as EditorialApprovalAttestationV3)
+          }
+        }
+      };
     }
     return {
       valid: true,
@@ -881,11 +1207,35 @@ export function validateEngineCommandV1(
         idempotencyKey: value.idempotencyKey,
         expectedVersion: value.expectedVersion,
         kind: "APPROVAL.GRANT",
+        payload: common
+      }
+    };
+  }
+  if (value.kind === "APPROVAL.REVOKE") {
+    if (
+      !isRecord(value.payload) ||
+      !hasExactKeys(value.payload, ["revisionId", "revisionHash", "deviceId", "reason"]) ||
+      !isIdentifier(value.payload.revisionId, 128) ||
+      typeof value.payload.revisionHash !== "string" ||
+      !/^[a-f0-9]{64}$/iu.test(value.payload.revisionHash) ||
+      !isIdentifier(value.payload.deviceId, 128) ||
+      !isBoundedHumanText(value.payload.reason)
+    ) {
+      return invalid("APPROVAL.REVOKE payload is invalid");
+    }
+    return {
+      valid: true,
+      command: {
+        version: 1,
+        requestId: value.requestId,
+        idempotencyKey: value.idempotencyKey,
+        expectedVersion: value.expectedVersion,
+        kind: "APPROVAL.REVOKE",
         payload: {
           revisionId: value.payload.revisionId,
           revisionHash: value.payload.revisionHash.toLowerCase(),
           deviceId: value.payload.deviceId,
-          warningSetHash: value.payload.warningSetHash.toLowerCase()
+          reason: value.payload.reason.trim()
         }
       }
     };
@@ -938,5 +1288,12 @@ export function validateEngineCommandV1(
 import {
   validateClaimEvidence,
   validateRevisionPackageV2,
-  type RevisionPackageV2
+  validateRevisionPackageV3,
+  type ArticleRevision,
+  type RevisionPackageV2,
+  type RevisionPackageV3
 } from "../../editorial/src/revision.ts";
+import type {
+  EditorialApprovalAttestationV3,
+  EditorialSourceRoleAttestationV3
+} from "../../editorial/src/quality-gates.ts";

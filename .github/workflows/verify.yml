@@ -43,9 +43,14 @@ jobs:
           node-version-file: package.json
           cache: npm
       - run: npm ci
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: npm.cmd run security:rust
       - run: npm.cmd run build:engine
+      - run: npm.cmd run smoke:engine
+      - run: npm.cmd run smoke:fetcher
       - run: npm.cmd run native:test
       - run: npm.cmd run native:lint
+      - run: npm.cmd run desktop:preflight:json
 
   browser:
     runs-on: windows-latest

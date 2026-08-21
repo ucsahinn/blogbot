@@ -1,7 +1,6 @@
 fn main() {
     const COMMANDS: &[&str] = &[
         "get_bootstrap_snapshot",
-        "engine_doctor",
         "get_prerequisite_status",
         "test_setup_connector",
         "save_setup_connector",
@@ -11,6 +10,7 @@ fn main() {
         "github_device_flow_clear",
         "github_device_flow_status",
         "github_validate_repository",
+        "github_capture_base_sha",
         "github_preview_pull_request",
         "test_codex_runtime",
         "start_codex_login",
@@ -36,6 +36,7 @@ fn main() {
         "read_revision_media",
         "repair_revision_media",
         "approve_revision",
+        "revoke_revision_approval",
         "approve_high_risk_revision",
         "enqueue_publication",
         "materialize_local_preview",
@@ -52,7 +53,6 @@ fn main() {
         "save_desktop_preferences",
         "complete_onboarding",
         "set_runtime_pause",
-        "secure_store_status",
         "send_test_notification",
         "autostart_status",
         "set_autostart",

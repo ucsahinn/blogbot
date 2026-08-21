@@ -514,6 +514,44 @@ test("unexpected runner failure is retained and retried once after the first dur
   });
 });
 
+test("unsupported CLI and exhausted app-owned session retention stop automatic retry", async () => {
+  for (const [runnerCode, diagnosticCode] of [
+    ["UNSUPPORTED_CLI", "CODEX_CLI_UNSUPPORTED"],
+    ["SESSION_RETENTION_FAILED", "CODEX_SESSION_RETENTION_FAILED"]
+  ] as const) {
+    const store = new MemoryCodexJobStore();
+    const queue = new MemoryCodexQueue();
+    const diagnostics: string[] = [];
+    const coordinator = createCodexWorkerCoordinator({
+      persistence: store,
+      queue,
+      taskResolver: taskResolver(validTask),
+      codex: {
+        run() {
+          return {
+            [Symbol.asyncIterator]() {
+              return {
+                async next(): Promise<IteratorResult<CodexEvent>> {
+                  throw Object.assign(new Error(runnerCode), { code: runnerCode });
+                }
+              };
+            }
+          };
+        }
+      },
+      onWaiting: async ({ diagnosticCode: observed }) => {
+        if (observed) diagnostics.push(observed);
+      }
+    });
+    await coordinator.submit({ ...submission, jobId: `job-${runnerCode}`, idempotencyKey: `key-${runnerCode}` });
+    const waiting = await coordinator.process(queue.messages[0]!);
+    assert.equal(waiting.state, "WAITING_CODEX");
+    assert.equal(waiting.reason, "RUNNER_REQUIRES_RETRY");
+    assert.deepEqual(diagnostics, [diagnosticCode]);
+    assert.equal(queue.messages.length, 1);
+  }
+});
+
 test("startup recovery clears a stale active queue reservation even when the Codex record is already queued", async () => {
   const store = new MemoryCodexJobStore();
   const queue = new MemoryCodexQueue();

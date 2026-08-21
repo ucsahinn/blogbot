@@ -41,6 +41,15 @@ function fileDigest(file: PublicationFile): { path: string; sha256: string; byte
   return { path: file.path, ...publicationFileDigest(file) };
 }
 
+export function comparePublicationPaths(
+  left: string | { path: string },
+  right: string | { path: string }
+): number {
+  const leftPath = typeof left === "string" ? left : left.path;
+  const rightPath = typeof right === "string" ? right : right.path;
+  return Buffer.compare(Buffer.from(leftPath, "utf8"), Buffer.from(rightPath, "utf8"));
+}
+
 /**
  * Perform the no-write publication preflight used by the local engine.
  *
@@ -105,7 +114,7 @@ export function buildPublicationPreview(input: PublicationPreviewInput): Publica
       bundlePolicy: input.bundlePolicy,
       requiredChecks: input.requiredChecks,
       deployWorkflow: input.deployWorkflow,
-      files: input.files.map(fileDigest).sort((a, b) => a.path.localeCompare(b.path)),
+      files: input.files.map(fileDigest).sort(comparePublicationPaths),
       plan
     }), "utf8")
     .digest("hex");

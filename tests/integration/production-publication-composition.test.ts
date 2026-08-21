@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { createPersistentEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
 import type { PublicationEffectsPort, PublicationFile, PullRequestState } from "../../apps/publisher/src/publication.ts";
-import { computeRevisionHash, computeWarningSetHash, type RevisionPackageV2 } from "../../packages/editorial/src/revision.ts";
+import { computeRevisionHash, computeWarningSetHash, type RevisionPackageV3 } from "../../packages/editorial/src/revision.ts";
 
 function command(kind: string, payload: Record<string, unknown>, expectedVersion: number, suffix: string) {
   return {
@@ -55,7 +55,8 @@ test("production composition resolves approved engine media before durable PR, c
     })),
     { path: mediaPublicationPath, sha256: mediaHash, size: mediaBytes.byteLength }
   ];
-  const revision: RevisionPackageV2 = {
+  const editorialInstruction = "Doğrulanmış kaynaktan özgün, iki dilli bir üretim haberi hazırla.";
+  const revision: RevisionPackageV3 = {
     id: revisionId,
     translationKey: "story-production-media",
     state: "REVIEW_REQUIRED",
@@ -77,7 +78,7 @@ test("production composition resolves approved engine media before durable PR, c
     }],
     media: [{
       role: "hero", path: `media/${revisionId}/production.webp`, sha256: mediaHash,
-      width: 1600, height: 900
+      width: 1600, height: 900, byteSize: mediaBytes.byteLength
     }],
     scheduledAt: new Date(Date.now() - 60_000).toISOString(),
     adapterVersion: "test@1",
@@ -96,8 +97,45 @@ test("production composition resolves approved engine media before durable PR, c
       { id: "bilingual-parity", group: "editorial", state: "PASS", detail: "checked", policyVersion: "2", reasonCode: "CHECKED" },
       { id: "markdown-safety", group: "security", state: "PASS", detail: "checked", policyVersion: "2", reasonCode: "CHECKED" },
       { id: "seo", group: "seo", state: "PASS", detail: "checked", policyVersion: "2", reasonCode: "CHECKED" },
-      { id: "media", group: "media", state: "PASS", detail: "checked", policyVersion: "2", reasonCode: "CHECKED" }
-    ]
+      { id: "media", group: "media", state: "PASS", detail: "checked", policyVersion: "2", reasonCode: "CHECKED" },
+      { id: "editorial-policy", group: "editorial", state: "PASS", detail: "checked", policyVersion: "3", reasonCode: "CHECKED" }
+    ],
+    packageVersion: 3,
+    editorialContext: {
+      instruction: editorialInstruction,
+      instructionHash: createHash("sha256").update(editorialInstruction, "utf8").digest("hex"),
+      contentOrigin: "CODEX_ASSISTED",
+      aiDisclosure: "GENERATED_WITH_AI"
+    },
+    editorialAssessment: {
+      articleType: "news",
+      intentSatisfied: true,
+      titleIsHonest: true,
+      originalValuePresent: true,
+      allClaimsVerified: true,
+      sources: [{ sourceId: "source-1", cited: true, official: true, role: "primary" }],
+      singleOfficialSourceRationale: "Bu haber için tek yetkili ve birincil kayıt budur.",
+      authorTransparent: true,
+      aiDisclosureMatchesUsage: true,
+      isYmyl: false,
+      leadHasFiveWOneH: true,
+      unverifiedClaimsClearlyLabeled: true,
+      newsSchemaComplete: true,
+      sensitiveTopic: false,
+      clusterKey: null,
+      aboveFoldAnswersIntent: true,
+      headingHierarchyValid: true,
+      internalLinkCount: 0,
+      internalLinkOmissionRationale: null
+    },
+    publicationSources: [{
+      id: "source-1",
+      title: "Report",
+      url: "https://example.com/report",
+      role: "primary"
+    }],
+    deployWorkflow: "deploy.yml",
+    requiredChecks: ["ci/test"]
   };
   const revisionHash = computeRevisionHash(revision);
   await mkdir(join(dataDir, "media", revisionId), { recursive: true });
@@ -141,9 +179,32 @@ test("production composition resolves approved engine media before durable PR, c
   const saved = await runtime.handle(command("REVISION.SAVE", { revision }, 0, "save"));
   assert.equal(saved.ok, true, JSON.stringify(saved));
   const approved = await runtime.handle(command("APPROVAL.GRANT", {
-    revisionId, revisionHash, deviceId: "windows-local-device-v1", warningSetHash: computeWarningSetHash(revision.qualityGates)
+    revisionId,
+    revisionHash,
+    deviceId: "windows-local-device-v1",
+    warningSetHash: computeWarningSetHash(revision.qualityGates),
+    packageVersion: 3,
+    attestation: {
+      editorialReview: {
+        reviewer: "Ulaş Şahin",
+        sourceRoles: [{ sourceId: "source-1", role: "primary" }]
+      },
+      expertReview: null,
+      ethicsReview: null
+    }
   }, 1, "approve"));
   assert.equal(approved.ok, true, JSON.stringify(approved));
+  const unpaused = await runtime.handle(command("AUTOMATION.SET", {
+    settings: {
+      mode: "PUBLISH_APPROVED",
+      onboardingComplete: true,
+      ingestionPaused: false,
+      publishingPaused: false,
+      timezone: "Europe/Istanbul",
+      scanIntervalMinutes: 30
+    }
+  }, 2, "unpause"));
+  assert.equal(unpaused.ok, true, JSON.stringify(unpaused));
 
   const manifestPath = `.blogbot/manifests/${revisionId}.json`;
   const previewFiles: PublicationFile[] = [
@@ -155,7 +216,7 @@ test("production composition resolves approved engine media before durable PR, c
   ];
   const preview = await runtime.handle({
     version: 1, id: "production-preview", kind: "publication.preview", revisionId, revisionHash,
-    expectedVersion: 2, idempotencyKey: "production-preview-key",
+    expectedVersion: 3, idempotencyKey: "production-preview-key",
     payload: {
       targetRepository: "owner/site", baseBranch: "main", siteOrigin: "", contentRoot: "C:\\Blogbot-Test", now: new Date().toISOString(),
       files: [...previewFiles, {
@@ -172,7 +233,7 @@ test("production composition resolves approved engine media before durable PR, c
   const previewHash = (preview.value as { previewHash: string }).previewHash;
   const enqueued = await runtime.handle({
     version: 1, id: "production-enqueue", kind: "publication.enqueue", revisionId, revisionHash, previewHash,
-    idempotencyKey: "production-enqueue-key", expectedVersion: 3
+    idempotencyKey: "production-enqueue-key", expectedVersion: 4
   });
   assert.equal(enqueued.ok, true, JSON.stringify(enqueued));
 

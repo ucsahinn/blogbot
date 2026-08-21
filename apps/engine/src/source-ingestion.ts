@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  fetchSource,
   type FetchSourceOptions,
+  type FetchedSource,
   type FetchTransport
 } from "../../fetcher/src/fetch-source.ts";
 import type {
@@ -10,8 +10,13 @@ import type {
   SourceLanguage,
   SourceRepository
 } from "../../../packages/database/src/source-repository.ts";
-import { analyzeSourceDocument } from "../../../packages/security/src/source-document.ts";
+import type { SourceDocumentAnalysis } from "../../../packages/security/src/source-document.ts";
 import { assertSafeSourceUrl } from "../../../packages/security/src/url-policy.ts";
+import {
+  collectSourceDocument,
+  DEFAULT_SITEMAP_CRAWL_LIMITS,
+  type SitemapCrawlLimits
+} from "./sitemap-crawl.ts";
 
 export interface SourceTestRequest {
   url: string;
@@ -26,11 +31,13 @@ export interface SourceTestResult {
 export interface SourceIngestionDependencies {
   now?: () => Date;
   createId?: () => string;
+  sitemapLimits?: SitemapCrawlLimits;
 }
 
 export class SourceIngestionService {
   private readonly now: () => Date;
   private readonly createId: () => string;
+  private readonly sitemapLimits: SitemapCrawlLimits;
 
   constructor(
     private readonly repository: SourceRepository,
@@ -40,20 +47,17 @@ export class SourceIngestionService {
   ) {
     this.now = dependencies.now ?? (() => new Date());
     this.createId = dependencies.createId ?? randomUUID;
+    this.sitemapLimits = dependencies.sitemapLimits ?? DEFAULT_SITEMAP_CRAWL_LIMITS;
   }
 
   async testAndSave(request: SourceTestRequest): Promise<SourceTestResult> {
     const normalizedUrl = assertSafeSourceUrl(request.url);
-    const fetched = await fetchSource(
+    const { fetched, analysis } = await collectSourceDocument(
       normalizedUrl,
       this.transport,
-      this.fetchOptions
+      this.fetchOptions,
+      this.sitemapLimits
     );
-    const analysis = analyzeSourceDocument({
-      finalUrl: fetched.finalUrl,
-      contentType: fetched.contentType,
-      body: fetched.body
-    });
     const testedAt = this.now().toISOString();
     const existing = await this.repository.findSourceByUrl(normalizedUrl);
     const source: LocalSource = existing
@@ -79,8 +83,8 @@ export class SourceIngestionService {
   private newSource(
     url: string,
     language: SourceLanguage,
-    analysis: ReturnType<typeof analyzeSourceDocument>,
-    fetched: Awaited<ReturnType<typeof fetchSource>>,
+    analysis: SourceDocumentAnalysis,
+    fetched: FetchedSource,
     testedAt: string
   ): LocalSource {
     return {
@@ -107,8 +111,8 @@ export class SourceIngestionService {
 
   private updatedSource(
     existing: LocalSource,
-    analysis: ReturnType<typeof analyzeSourceDocument>,
-    fetched: Awaited<ReturnType<typeof fetchSource>>,
+    analysis: SourceDocumentAnalysis,
+    fetched: FetchedSource,
     testedAt: string
   ): LocalSource {
     return {

@@ -516,6 +516,38 @@ export function SetupCenter({
       setConnectorMessages((current) => ({ ...current, [connector]: detail }));
     } finally { setBusy(false); }
   };
+  /**
+   * Reads the base-branch tip for the configured repository.
+   *
+   * Returns a message rather than throwing: failing to capture a SHA must not
+   * lose the connector settings the user just saved.
+   */
+  const captureBaseSha = async (): Promise<string> => {
+    const owner = connectorDraft.github.owner.trim();
+    const repository = connectorDraft.github.repository.trim();
+    if (!owner || !repository) return "";
+    try {
+      const captured = await bridge.captureGitHubBaseSha({
+        owner,
+        repository,
+        // The setup form does not expose a base branch yet, and the engine
+        // already treats "main" as the PUBLISH default. The command accepts any
+        // valid branch, so a future field can pass it through unchanged.
+        branch: "main"
+      });
+      if (!captured.captured) {
+        return captured.detail
+          ?? "Temel SHA okunamadı; canlı yayın onayı bu doğrulama tamamlanana kadar kapalı kalır.";
+      }
+      return `Temel SHA doğrulandı (${String(captured.baseSha).slice(0, 12)}); canlı yayın onayı açılabilir.`;
+    } catch (reason) {
+      return explainFailure(
+        reason,
+        "Temel SHA okunamadı; canlı yayın onayı kapalı kalır.",
+        "GitHub yetkilendirmesini tamamlayıp yeniden kaydedin."
+      );
+    }
+  };
   const saveConnector = async (connector: SetupConnectorId) => {
     const label = setupConnectorLabel(connector);
     setBusy(true); setConnectionMessage(`${label} ayarları yerel olarak kaydediliyor…`);
@@ -523,8 +555,17 @@ export function SetupCenter({
     try {
       const saved = await bridge.saveSetupConnector({ connector, config: connectorDraft[connector] });
       result = saved;
-      setConnectionMessage(saved.detail);
-      setConnectorMessages((current) => ({ ...current, [connector]: saved.detail }));
+      let detail = saved.detail;
+      if (connector === "github") {
+        // Approval binds the revision to `targetBaseSha`, and that value has to
+        // exist before a draft is materialized. Nothing captured it, so the
+        // publication-target quality gate stayed NOT_RUN and no revision could
+        // be approved in PUBLISH mode. Read it here, and say plainly when the
+        // read could not happen instead of implying the target is ready.
+        detail = `${detail} ${await captureBaseSha()}`.trim();
+      }
+      setConnectionMessage(detail);
+      setConnectorMessages((current) => ({ ...current, [connector]: detail }));
       try {
         setStatus(await bridge.getPrerequisiteStatus());
         await refreshConnectorState();
@@ -756,7 +797,7 @@ export function SetupCenter({
     setBusy(true); setBackupMessage("Yerel kurtarma snapshot'ı doğrulanıyor…");
     try {
       const result = await bridge.verifyAutomaticBackup({ backupName: selectedAutomaticBackupName });
-      setBackupMessage(result.verified ? `Yerel kurtarma snapshot'ı doğrulandı: ${result.entries?.length ?? 0} dosya.` : "Yerel kurtarma snapshot'ı doğrulanamadı.");
+      setBackupMessage(result.verified ? `Yerel kurtarma snapshot'ı doğrulandı: ${result.tables.length} tablo ve ${result.rows} satır.` : "Yerel kurtarma snapshot'ı doğrulanamadı.");
     } catch (reason) {
       setBackupMessage(explainFailure(reason, "Yerel kurtarma snapshot'ı doğrulanamadı.", "snapshot listesini yenileyip tekrar deneyin."));
     } finally { setBusy(false); }
@@ -764,19 +805,20 @@ export function SetupCenter({
   const previewAutomaticBackup = async () => {
     setBusy(true); setBackupMessage("Yerel kurtarma snapshot'ı için geri yükleme önizlemesi hazırlanıyor…");
     try {
-      const result = await bridge.previewAutomaticBackupRestore({ backupName: selectedAutomaticBackupName, targetDirectory: backupTargetPath });
-      setBackupMessage(`Geri yükleme önizlemesi hazır: ${result.entries.length} dosya; hiçbir dosya yazılmadı.`);
+      const result = await bridge.previewAutomaticBackupRestore({ backupName: selectedAutomaticBackupName });
+      setBackupMessage(`Geri yükleme önizlemesi hazır: ${result.tables.length} tablo ve ${result.rows} satır mevcut yerel verinin yerini alacak; henüz hiçbir veri değiştirilmedi.`);
     } catch (reason) {
-      setBackupMessage(explainFailure(reason, "Geri yükleme önizlemesi alınamadı.", "boş hedef klasörü ve snapshot seçimini kontrol edin."));
+      setBackupMessage(explainFailure(reason, "Geri yükleme önizlemesi alınamadı.", "snapshot seçimini doğrulayıp tekrar deneyin."));
     } finally { setBusy(false); }
   };
   const restoreAutomaticBackup = async () => {
-    setBusy(true); setBackupMessage("Yerel kurtarma snapshot'ı yeni klasöre çıkarılıyor…");
+    setBusy(true); setBackupMessage("Yerel çalışma alanı doğrulanmış snapshot'tan geri yükleniyor…");
     try {
-      const result = await bridge.restoreAutomaticBackup({ backupName: selectedAutomaticBackupName, targetDirectory: backupTargetPath });
-      setBackupMessage(`Yerel kurtarma snapshot'ı çıkarıldı: ${result.entries} dosya yeni klasöre yazıldı. Aktif çalışma alanı değiştirilmedi.`);
+      const result = await bridge.restoreAutomaticBackup({ backupName: selectedAutomaticBackupName, confirmReplaceLocalData: true });
+      await onCompleted();
+      setBackupMessage(`Yerel çalışma alanı geri yüklendi: ${result.restoredRows} satır snapshot verisiyle değiştirildi.`);
     } catch (reason) {
-      setBackupMessage(explainFailure(reason, "Yerel kurtarma snapshot'ı çıkarılamadı.", "boş hedef klasörünü ve snapshot seçimini kontrol edin."));
+      setBackupMessage(explainFailure(reason, "Yerel çalışma alanı geri yüklenemedi.", "snapshot seçimini doğrulayıp tekrar deneyin."));
     } finally { setBusy(false); }
   };
   const connectorFields: Array<{
@@ -1360,10 +1402,10 @@ export function SetupCenter({
           </div>
           <div className="button-row">
             <button className="button button-secondary" type="button" disabled={busy || !selectedAutomaticBackupName} onClick={() => void verifyAutomaticBackup()}>Snapshot'ı doğrula</button>
-            <button className="button button-secondary" type="button" aria-label="Yerel snapshot geri yüklemesini önizle" disabled={busy || !selectedAutomaticBackupName || !backupTargetPath || !restoreFolderNameValid} onClick={() => void previewAutomaticBackup()}>Geri yüklemeyi önizle</button>
-            <button className="button button-danger" type="button" disabled={busy || !selectedAutomaticBackupName || !backupTargetPath || !restoreFolderNameValid} onClick={() => setAutomaticRestoreConfirmationOpen(true)}>Yeni klasöre çıkar</button>
+            <button className="button button-secondary" type="button" aria-label="Yerel snapshot geri yüklemesini önizle" disabled={busy || !selectedAutomaticBackupName} onClick={() => void previewAutomaticBackup()}>Geri yüklemeyi önizle</button>
+            <button className="button button-danger" type="button" disabled={busy || !selectedAutomaticBackupName} onClick={() => setAutomaticRestoreConfirmationOpen(true)}>Yerel veriyi geri yükle</button>
           </div>
-          <small>Önizleme ve çıkarma için aşağıdaki “Geri yükleme üst klasörü” ile yeni klasör adını kullanın. Aktif çalışma alanı otomatik değiştirilmez.</small>
+          <small>Otomatik snapshot, dosya çıkarmak yerine uygulamanın yerel veritabanını geri yükler. Önizleme veri değiştirmez; geri yükleme yalnızca açık onayınızdan sonra mevcut yerel verinin tamamını değiştirir.</small>
         </fieldset>
         <fieldset className="connector-card backup-action-card" aria-describedby="backup-folder-grant" disabled={readOnly}>
           <legend>Yeni şifreli yedek oluştur</legend>
@@ -1450,9 +1492,9 @@ export function SetupCenter({
       ) : null}
       {automaticRestoreConfirmationOpen ? (
         <ConfirmationDialog
-          title="Yerel snapshot çıkarılmasını onayla"
-          detail="Seçili yerel snapshot yalnızca yeni ve boş bir klasöre çıkarılacak. Aktif OPE çalışma alanı değiştirilmeyecek."
-          confirmLabel="Yeni klasöre çıkar"
+          title="Yerel verinin değiştirilmesini onayla"
+          detail="Seçili snapshot'taki tablolar mevcut OPE yerel verisinin tamamının yerini alacak. Bu işlem yalnızca şimdi verdiğiniz açık onayla başlatılır."
+          confirmLabel="Yerel veriyi geri yükle"
           busy={busy}
           onCancel={() => setAutomaticRestoreConfirmationOpen(false)}
           onConfirm={() => {

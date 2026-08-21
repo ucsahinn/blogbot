@@ -37,6 +37,44 @@ test("AES-256-GCM envelope tampering fails closed", () => {
   );
 });
 
+test("legacy plaintext is only accepted when it matches the expected record", () => {
+  const protector = new JsonProtector(key);
+
+  assert.deepEqual(
+    protector.openLegacy<{ id: string }>({ id: "record-a" }, (candidate) =>
+      typeof candidate === "object" && candidate !== null && (candidate as { id?: unknown }).id === "record-a"),
+    { id: "record-a" }
+  );
+  assert.throws(
+    () => protector.openLegacy({ id: "injected" }, (candidate) =>
+      typeof candidate === "object" && candidate !== null && (candidate as { id?: unknown }).id === "record-a"),
+    /LOCAL_DATA_LEGACY_UNVERIFIABLE/
+  );
+});
+
+test("a v2 envelope is never resealed through the legacy path", () => {
+  const protector = new JsonProtector(key);
+  const envelope = protector.seal({ id: "record-a" }, context);
+
+  assert.throws(
+    () => protector.openLegacy(envelope, () => true),
+    /LOCAL_DATA_LEGACY_UNVERIFIABLE/
+  );
+});
+
+test("a row sealed under another data key reports a key mismatch, not tampering", () => {
+  const envelope = new JsonProtector(key).seal({ id: "record-a" }, context);
+  const otherKey = Buffer.from(
+    "1f2e3d4c5b6a798807162534435261708f9eadbccbdae9f80f1e2d3c4b5a6978",
+    "hex"
+  );
+
+  assert.throws(
+    () => new JsonProtector(otherKey).open(envelope, context),
+    /LOCAL_DATA_KEY_MISMATCH/
+  );
+});
+
 test("AES-256-GCM envelope is bound to its record identity", () => {
   const protector = new JsonProtector(key);
   const envelope = protector.seal({ id: "record-a" }, context);

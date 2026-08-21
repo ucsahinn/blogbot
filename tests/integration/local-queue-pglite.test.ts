@@ -224,3 +224,86 @@ test("local PGlite queue atomically replays concurrent idempotent enqueues", asy
   await runtime.stop();
   await repository.close();
 });
+
+test("re-enqueueing a dead-lettered key hands back work a worker can actually claim", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-deadletter-"));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  const runtime = new LocalQueueRuntime(repository.getDatabase());
+  await runtime.start();
+
+  const id = await runtime.enqueue("blogbot.ingest", { trigger: "manual" }, "revive-me");
+  // Drive the row to the terminal dead-letter state the same way a permanently
+  // failing handler would.
+  await repository.getDatabase().query(
+    "UPDATE blogbot_local_queue_jobs SET state = 'failed', attempts = 9 WHERE id = $1",
+    [id]
+  );
+
+  // A recovery path re-enqueues the same deterministic key. This used to return
+  // the dead job id and report success, while no worker could ever claim it.
+  const revivedId = await runtime.enqueue("blogbot.ingest", { trigger: "manual" }, "revive-me");
+  assert.equal(revivedId, id);
+  const revived = await runtime.getJob("blogbot.ingest", id);
+  assert.equal(revived?.state, "created", "a re-enqueued dead letter must be claimable again");
+  const attempts = await repository.getDatabase().query<{ attempts: number }>(
+    "SELECT attempts FROM blogbot_local_queue_jobs WHERE id = $1",
+    [id]
+  );
+  assert.equal(Number(attempts.rows[0]?.attempts), 0, "reviving must reset the spent attempt budget");
+
+  await runtime.stop();
+  await repository.close();
+});
+
+test("re-enqueueing a completed key never silently redoes finished work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-completed-"));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  const runtime = new LocalQueueRuntime(repository.getDatabase());
+  await runtime.start();
+
+  const id = await runtime.enqueue("blogbot.ingest", { trigger: "manual" }, "already-done");
+  await repository.getDatabase().query(
+    "UPDATE blogbot_local_queue_jobs SET state = 'completed' WHERE id = $1",
+    [id]
+  );
+
+  const replayId = await runtime.enqueue("blogbot.ingest", { trigger: "manual" }, "already-done");
+  assert.equal(replayId, id);
+  const job = await runtime.getJob("blogbot.ingest", id);
+  assert.equal(job?.state, "completed", "finished work must stay finished");
+
+  await runtime.stop();
+  await repository.close();
+});
+
+test("queue retention removes only terminal rows past the window", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-retention-"));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  const runtime = new LocalQueueRuntime(repository.getDatabase());
+  await runtime.start();
+
+  const stale = await runtime.enqueue("blogbot.ingest", { n: 1 }, "stale-terminal");
+  const recent = await runtime.enqueue("blogbot.ingest", { n: 2 }, "recent-terminal");
+  const pending = await runtime.enqueue("blogbot.ingest", { n: 3 }, "still-pending");
+  const longAgo = Date.now() - 400 * 24 * 60 * 60 * 1_000;
+  await repository.getDatabase().query(
+    "UPDATE blogbot_local_queue_jobs SET state = 'completed', updated_at_unix_ms = $2 WHERE id = $1",
+    [stale, longAgo]
+  );
+  await repository.getDatabase().query(
+    "UPDATE blogbot_local_queue_jobs SET state = 'failed' WHERE id = $1",
+    [recent]
+  );
+
+  const removed = await runtime.pruneTerminated();
+
+  assert.equal(removed, 1, "only the row past the retention window may be removed");
+  assert.equal(await runtime.getJob("blogbot.ingest", stale), null);
+  // A terminal row inside the window must survive: its deterministic key becomes
+  // enqueueable again once it is gone.
+  assert.ok(await runtime.getJob("blogbot.ingest", recent));
+  assert.equal((await runtime.getJob("blogbot.ingest", pending))?.state, "created");
+
+  await runtime.stop();
+  await repository.close();
+});

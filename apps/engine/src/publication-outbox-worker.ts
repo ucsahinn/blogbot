@@ -1,4 +1,8 @@
-import type { BackendRepository, OutboxEffect } from "../../../packages/database/src/backend-repository.ts";
+import {
+  BackendStoreError,
+  type BackendRepository,
+  type OutboxEffect
+} from "../../../packages/database/src/backend-repository.ts";
 
 export interface PublicationEffectProcessor {
   process(effect: OutboxEffect): Promise<{
@@ -44,6 +48,10 @@ function isRetryDue(effect: OutboxEffect, nowMs: number): boolean {
   return !Number.isFinite(deadlineMs) || deadlineMs <= nowMs;
 }
 
+function isWriteVersionConflict(error: unknown): boolean {
+  return error instanceof BackendStoreError && error.code === "WRITE_VERSION_CONFLICT";
+}
+
 /**
  * Reconciles durable publication intents without ever creating a second
  * effect for the same idempotency key. The real GitHub/hosting connector is
@@ -83,11 +91,65 @@ export function startPublicationOutboxWorker(
       // IN_PROGRESS is reclaimable after a process crash because the worker
       // is single-writer and the external processor is idempotency-keyed.
       const nowMs = Date.now();
-      for (const effect of effects.filter((item) => isRetryDue(item, nowMs))) {
+      for (const listedEffect of effects.filter((item) => isRetryDue(item, nowMs))) {
         if (!running) break;
-        const claimed = await repository.updateOutbox({ ...effect, state: "IN_PROGRESS", attempts: effect.attempts + 1 });
+        if (!repository.getOutboxVersion) {
+          throw new Error("OUTBOX_CAS_UNAVAILABLE");
+        }
+
+        // Read the row version before refreshing the listed value. This
+        // ordering makes the value/token pair safe: a concurrent transition
+        // before or after the refresh either becomes visible here or makes
+        // the compare-and-set fail. Pairing a stale listed row with a newer
+        // token could otherwise resurrect a terminal effect.
+        const observedVersion = await repository.getOutboxVersion(listedEffect.id);
+        const current = (await repository.listOutbox()).find((effect) => effect.id === listedEffect.id);
+        if (!current || !isRetryDue(current, Date.now())) continue;
+
+        let claimed: OutboxEffect;
         try {
-          const result = await processor.process(claimed);
+          claimed = await repository.updateOutbox(
+            { ...current, state: "IN_PROGRESS", attempts: current.attempts + 1 },
+            observedVersion
+          );
+        } catch (error) {
+          if (isWriteVersionConflict(error)) continue;
+          throw error;
+        }
+        // Both durable repository implementations increment the row version
+        // exactly once for a successful compare-and-set claim. Never re-read
+        // it after the claim: another worker may already have moved the row,
+        // and using that newer token would authorize this stale processor.
+        const claimedVersion = observedVersion + 1;
+
+        let result: Awaited<ReturnType<PublicationEffectProcessor["process"]>>;
+        try {
+          result = await processor.process(claimed);
+        } catch (error) {
+          const { nextAttemptAt: _previousRetryDeadline, ...withoutPreviousRetryDeadline } = claimed;
+          const terminalFailure = claimed.attempts >= MAX_TRANSIENT_PUBLICATION_ATTEMPTS;
+          const nextAttemptAt = terminalFailure
+            ? undefined
+            : new Date(Date.now() + retryDelayMs(claimed.attempts, undefined, retryBaseMs)).toISOString();
+          try {
+            await repository.updateOutbox({
+              ...withoutPreviousRetryDeadline,
+              // A process crash or transient connector outage must be visible
+              // and reclaimable after restart. The idempotency key prevents the
+              // retry from creating a duplicate external effect. Bound retries
+              // so a persistent programming or configuration error becomes an
+              // explicit terminal failure instead of an endless tight loop.
+              state: terminalFailure ? "FAILED" : "UNKNOWN",
+              ...(nextAttemptAt ? { nextAttemptAt } : {}),
+              lastError: error instanceof Error ? error.message.slice(0, 512) : "Publication processor failed"
+            }, claimedVersion);
+          } catch (storageError) {
+            if (!isWriteVersionConflict(storageError)) throw storageError;
+          }
+          continue;
+        }
+
+        try {
           const { nextAttemptAt: _previousRetryDeadline, ...withoutPreviousRetryDeadline } = claimed;
           const connectorRequestedRetry = Number.isSafeInteger(result.retryAfterMs) && result.retryAfterMs! >= 0;
           const terminalUnknown = result.state === "UNKNOWN"
@@ -103,24 +165,9 @@ export function startPublicationOutboxWorker(
             ...(result.resultRef ? { resultRef: result.resultRef } : {}),
             ...(result.lastError ? { lastError: result.lastError } : {}),
             ...(result.state === "SUCCEEDED" ? { completedAt: new Date().toISOString() } : {})
-          });
+          }, claimedVersion);
         } catch (error) {
-          const { nextAttemptAt: _previousRetryDeadline, ...withoutPreviousRetryDeadline } = claimed;
-          const terminalFailure = claimed.attempts >= MAX_TRANSIENT_PUBLICATION_ATTEMPTS;
-          const nextAttemptAt = terminalFailure
-            ? undefined
-            : new Date(Date.now() + retryDelayMs(claimed.attempts, undefined, retryBaseMs)).toISOString();
-          await repository.updateOutbox({
-            ...withoutPreviousRetryDeadline,
-            // A process crash or transient connector outage must be visible
-            // and reclaimable after restart. The idempotency key prevents the
-            // retry from creating a duplicate external effect. Bound retries
-            // so a persistent programming or configuration error becomes an
-            // explicit terminal failure instead of an endless tight loop.
-            state: terminalFailure ? "FAILED" : "UNKNOWN",
-            ...(nextAttemptAt ? { nextAttemptAt } : {}),
-            lastError: error instanceof Error ? error.message.slice(0, 512) : "Publication processor failed"
-          });
+          if (!isWriteVersionConflict(error)) throw error;
         }
       }
     } finally {

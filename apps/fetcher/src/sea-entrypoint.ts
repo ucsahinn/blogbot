@@ -1,7 +1,18 @@
 import { createInterface } from "node:readline";
 
 import { createNodeFetchTransport } from "./node-transport.ts";
-import type { FetchRequestPlan } from "./fetch-source.ts";
+import {
+  assertSafeSourceUrl,
+  validateResolvedAddresses
+} from "../../../packages/security/src/url-policy.ts";
+import {
+  MAX_FETCH_RESPONSE_BYTES,
+  MAX_FETCH_TIMEOUT_MS,
+  type FetchRequestPlan,
+  type FetchTransport
+} from "./fetch-source.ts";
+
+declare const __BLOGBOT_FETCHER_SEA__: boolean | undefined;
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 
@@ -19,7 +30,62 @@ function isRequest(value: unknown): value is FetchRequest {
     (record.kind === "resolve" || record.kind === "request");
 }
 
-async function handle(line: string): Promise<Record<string, unknown>> {
+export function normalizeFetchRequestPlan(value: unknown): FetchRequestPlan | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const plan = value as Record<string, unknown>;
+  if (
+    typeof plan.url !== "string" || plan.url.length === 0 || plan.url.length > 4_096 ||
+    !Array.isArray(plan.approvedAddresses) || plan.approvedAddresses.length === 0 || plan.approvedAddresses.length > 16 ||
+    plan.approvedAddresses.some((address) => typeof address !== "string" || address.length === 0 || address.length > 64) ||
+    plan.redirect !== "manual" ||
+    !Number.isSafeInteger(plan.timeoutMs) || Number(plan.timeoutMs) < 1 || Number(plan.timeoutMs) > MAX_FETCH_TIMEOUT_MS ||
+    !Number.isSafeInteger(plan.maxResponseBytes) || Number(plan.maxResponseBytes) < 1 || Number(plan.maxResponseBytes) > MAX_FETCH_RESPONSE_BYTES
+  ) {
+    return null;
+  }
+  if (plan.deadlineAtMs !== undefined) {
+    if (!Number.isSafeInteger(plan.deadlineAtMs) || Number(plan.deadlineAtMs) < 1) return null;
+    if (Number(plan.deadlineAtMs) > Date.now() + Number(plan.timeoutMs) + 1_000) return null;
+  }
+  try {
+    const url = assertSafeSourceUrl(plan.url);
+    const approvedAddresses = validateResolvedAddresses(plan.approvedAddresses as string[]);
+    return {
+      url,
+      approvedAddresses,
+      redirect: "manual",
+      timeoutMs: Number(plan.timeoutMs),
+      ...(plan.deadlineAtMs === undefined ? {} : { deadlineAtMs: Number(plan.deadlineAtMs) }),
+      maxResponseBytes: Number(plan.maxResponseBytes)
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function validateFetchRequestPlan(value: unknown): value is FetchRequestPlan {
+  return normalizeFetchRequestPlan(value) !== null;
+}
+
+function normalizeResolveHostname(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 253 || value !== value.trim()) {
+    throw new Error("invalid hostname");
+  }
+  const normalizedUrl = assertSafeSourceUrl(`https://${value}/`);
+  const hostname = new URL(normalizedUrl).hostname;
+  const comparableInput = value.toLowerCase().endsWith(".")
+    ? value.toLowerCase().slice(0, -1)
+    : value.toLowerCase();
+  if (hostname.toLowerCase() !== comparableInput) {
+    throw new Error("invalid hostname");
+  }
+  return hostname;
+}
+
+export async function handleFetcherRequestLine(
+  line: string,
+  transport: FetchTransport = createNodeFetchTransport()
+): Promise<Record<string, unknown>> {
   if (Buffer.byteLength(line, "utf8") > MAX_REQUEST_BYTES) {
     return { ok: false, code: "FETCHER_REQUEST_TOO_LARGE", message: "Fetcher request exceeds the safe bound" };
   }
@@ -33,13 +99,14 @@ async function handle(line: string): Promise<Record<string, unknown>> {
     return { ok: false, code: "FETCHER_REQUEST_INVALID", message: "Fetcher request shape is invalid" };
   }
   try {
-    const transport = createNodeFetchTransport();
     if (input.kind === "resolve") {
-      if (typeof input.hostname !== "string" || input.hostname.length === 0 || input.hostname.length > 253) throw new Error("invalid hostname");
-      return { id: input.id, ok: true, addresses: await transport.resolve(input.hostname) };
+      const hostname = normalizeResolveHostname(input.hostname);
+      const addresses = validateResolvedAddresses(await transport.resolve(hostname));
+      return { id: input.id, ok: true, addresses };
     }
-    if (!input.plan || typeof input.plan.url !== "string" || !Array.isArray(input.plan.approvedAddresses)) throw new Error("invalid request plan");
-    const result = await transport.request(input.plan);
+    const plan = normalizeFetchRequestPlan(input.plan);
+    if (!plan) throw new Error("invalid request plan");
+    const result = await transport.request(plan);
     return {
       id: input.id,
       ok: true,
@@ -58,11 +125,13 @@ async function handle(line: string): Promise<Record<string, unknown>> {
 async function run(): Promise<void> {
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of input) {
-    process.stdout.write(`${JSON.stringify(await handle(line))}\n`);
+    process.stdout.write(`${JSON.stringify(await handleFetcherRequestLine(line))}\n`);
   }
 }
 
-void run().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : "fetcher failure"}\n`);
-  process.exitCode = 1;
-});
+if (typeof __BLOGBOT_FETCHER_SEA__ !== "undefined" && __BLOGBOT_FETCHER_SEA__) {
+  void run().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : "fetcher failure"}\n`);
+    process.exitCode = 1;
+  });
+}

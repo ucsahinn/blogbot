@@ -92,3 +92,66 @@ test("review publication manifest binds engine-owned media by immutable referenc
     bytes: 5
   });
 });
+
+test("review publication materialization rejects an adapter that is not in the production registry", async () => {
+  const revision: ReviewRevision = {
+    id: "revision-unknown-adapter",
+    revisionHash: "c".repeat(64),
+    articleId: "article-unknown-adapter",
+    state: "APPROVED",
+    section: "haberler",
+    articleType: "news",
+    author: "Yerel Editorya",
+    tags: [],
+    scheduledAt: "2026-08-04T12:00:00.000Z",
+    adapterVersion: "custom-site-v2@1",
+    tr: { title: "Baslik", description: "Aciklama", slug: "baslik", bodyMarkdown: "Icerik" },
+    en: { title: "Title", description: "Description", slug: "title", bodyMarkdown: "Content" },
+    previous: {
+      tr: { title: "Baslik", description: "Aciklama", slug: "baslik", bodyMarkdown: "Icerik" },
+      en: { title: "Title", description: "Description", slug: "title", bodyMarkdown: "Content" }
+    },
+    claims: [],
+    sources: [],
+    gates: [],
+    media: []
+  };
+
+  await assert.rejects(
+    () => buildPublicationFiles(revision, "PUBLISH", "custom-site-v2"),
+    (error: unknown) => error instanceof Error &&
+      (error as Error & { code?: string }).code === "SITE_ADAPTER_UNKNOWN" &&
+      error.message === "SITE_ADAPTER_UNKNOWN: custom-site-v2"
+  );
+});
+
+test("review publication materialization binds connector config to the approved adapter identity", async () => {
+  const revision: ReviewRevision = {
+    id: "revision-adapter-mismatch",
+    revisionHash: "d".repeat(64),
+    articleId: "article-adapter-mismatch",
+    state: "APPROVED",
+    section: "haberler",
+    articleType: "news",
+    author: "Yerel Editorya",
+    tags: [],
+    scheduledAt: "2026-08-04T12:00:00.000Z",
+    adapterVersion: "custom-site-v2@1",
+    tr: { title: "Baslik", description: "Aciklama", slug: "baslik", bodyMarkdown: "Icerik" },
+    en: { title: "Title", description: "Description", slug: "title", bodyMarkdown: "Content" },
+    previous: {
+      tr: { title: "Baslik", description: "Aciklama", slug: "baslik", bodyMarkdown: "Icerik" },
+      en: { title: "Title", description: "Description", slug: "title", bodyMarkdown: "Content" }
+    },
+    claims: [],
+    sources: [],
+    gates: [],
+    media: []
+  };
+
+  await assert.rejects(
+    () => buildPublicationFiles(revision, "PUBLISH", "astro-generic"),
+    (error: unknown) => error instanceof Error &&
+      (error as Error & { code?: string }).code === "SITE_ADAPTER_IDENTITY_MISMATCH"
+  );
+});

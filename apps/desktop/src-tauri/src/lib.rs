@@ -16,6 +16,21 @@ fn startup_diagnostic_detail(startup_error: Option<&str>) -> String {
     format!("startup_handshake=deferred\nlast_error={startup_error}\n")
 }
 
+/// Stop every process this desktop owns before the event loop ends.
+/// `AppHandle::exit` (tray quit and the unsigned update install) terminates the
+/// loop without unwinding, so managed state is never dropped and neither
+/// `EngineProcess::drop` nor `DesktopState::drop` runs. Without this the engine
+/// sidecar and the npm dev-server tree outlive the window, and the next launch
+/// would open a second engine over the same encrypted pgdata directory.
+pub(crate) fn shutdown_owned_processes(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<commands::DesktopState>() {
+        let _ = commands::stop_local_dev(state);
+    }
+    if let Some(bridge) = app.try_state::<engine_bridge::EngineBridge>() {
+        bridge.stop();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -67,7 +82,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::open_project_page,
             commands::get_bootstrap_snapshot,
-            commands::engine_doctor,
             commands::get_prerequisite_status,
             commands::test_setup_connector,
             commands::save_setup_connector,
@@ -77,6 +91,7 @@ pub fn run() {
             commands::github_device_flow_clear,
             commands::github_device_flow_status,
             commands::github_validate_repository,
+            commands::github_capture_base_sha,
             commands::github_preview_pull_request,
             commands::test_codex_runtime,
             commands::start_codex_login,
@@ -102,6 +117,7 @@ pub fn run() {
             commands::read_revision_media,
             commands::repair_revision_media,
             commands::approve_revision,
+            commands::revoke_revision_approval,
             commands::approve_high_risk_revision,
             commands::enqueue_publication,
             commands::materialize_local_preview,
@@ -118,7 +134,6 @@ pub fn run() {
             commands::save_desktop_preferences,
             commands::complete_onboarding,
             commands::set_runtime_pause,
-            commands::secure_store_status,
             commands::send_test_notification,
             commands::autostart_status,
             commands::set_autostart,
@@ -139,8 +154,13 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("Blogbot desktop runtime failed");
+        .build(tauri::generate_context!())
+        .expect("Blogbot desktop runtime failed")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                shutdown_owned_processes(app);
+            }
+        });
 }
 
 #[cfg(test)]

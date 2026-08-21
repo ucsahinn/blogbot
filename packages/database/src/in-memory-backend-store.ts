@@ -2,11 +2,14 @@ import type { AutomationSettings } from "../../editorial/src/automation.ts";
 import {
   canonicalJson,
   type Approval,
+  type ApprovalV3,
   type ArticleRevision,
   type HighRiskApproval
 } from "../../editorial/src/revision.ts";
 import {
+  assertValidApprovalRevocation,
   BackendStoreError,
+  type ApprovalRevocation,
   type BackendChange,
   type BackendChangeKind,
   type BackendJob,
@@ -28,10 +31,14 @@ interface StoreState {
   cursor: number;
   automation: AutomationSettings;
   revisions: Map<string, ArticleRevision>;
-  approvals: Map<string, Approval>;
+  approvals: Map<string, Approval | ApprovalV3>;
+  approvalRevocations: Map<string, ApprovalRevocation>;
   highRiskApprovals: Map<string, HighRiskApproval>;
   outbox: Map<string, OutboxEffect>;
   jobs: Map<string, BackendJob>;
+  /** Compare-and-set tokens, kept beside the records the way a column would. */
+  outboxVersions: Map<string, number>;
+  jobVersions: Map<string, number>;
   localState: Map<string, unknown>;
   changes: BackendChange[];
   idempotentResults: Map<
@@ -53,9 +60,12 @@ function initialState(): StoreState {
     },
     revisions: new Map(),
     approvals: new Map(),
+    approvalRevocations: new Map(),
     highRiskApprovals: new Map(),
     outbox: new Map(),
     jobs: new Map(),
+    outboxVersions: new Map(),
+    jobVersions: new Map(),
     localState: new Map(),
     changes: [],
     idempotentResults: new Map()
@@ -72,6 +82,9 @@ function cloneState(state: StoreState): StoreState {
     approvals: new Map(
       [...state.approvals].map(([key, value]) => [key, structuredClone(value)])
     ),
+    approvalRevocations: new Map(
+      [...state.approvalRevocations].map(([key, value]) => [key, structuredClone(value)])
+    ),
     highRiskApprovals: new Map(
       [...state.highRiskApprovals].map(([key, value]) => [
         key,
@@ -84,6 +97,8 @@ function cloneState(state: StoreState): StoreState {
     jobs: new Map(
       [...state.jobs].map(([key, value]) => [key, structuredClone(value)])
     ),
+    outboxVersions: new Map(state.outboxVersions),
+    jobVersions: new Map(state.jobVersions),
     localState: new Map(
       [...state.localState].map(([key, value]) => [key, structuredClone(value)])
     ),
@@ -254,16 +269,21 @@ export class InMemoryBackendStore implements BackendRepository {
     return structuredClone(revision);
   }
 
-  async getApproval(revisionId: string): Promise<Approval | null> {
+  async getApproval(revisionId: string): Promise<Approval | ApprovalV3 | null> {
     const approval = this.state.approvals.get(revisionId);
     return approval ? structuredClone(approval) : null;
   }
 
-  async saveApproval(approval: Approval): Promise<Approval> {
+  async getApprovalRevocation(revisionId: string): Promise<ApprovalRevocation | null> {
+    const revocation = this.state.approvalRevocations.get(revisionId);
+    return revocation ? structuredClone(revocation) : null;
+  }
+
+  async saveApproval<T extends Approval | ApprovalV3>(approval: T): Promise<T> {
     const existing = this.state.approvals.get(approval.revisionId);
     if (existing) {
       if (canonicalJson(existing) === canonicalJson(approval)) {
-        return structuredClone(existing);
+        return structuredClone(existing) as T;
       }
       throw new BackendStoreError(
         "REVISION_ALREADY_APPROVED",
@@ -273,6 +293,37 @@ export class InMemoryBackendStore implements BackendRepository {
     const saved = structuredClone(approval);
     this.state.approvals.set(approval.revisionId, saved);
     this.recordChange("REVISION_APPROVED", approval.revisionId);
+    return structuredClone(saved) as T;
+  }
+
+  async revokeApproval(revocation: ApprovalRevocation): Promise<ApprovalRevocation> {
+    assertValidApprovalRevocation(revocation);
+    const approval = this.state.approvals.get(revocation.revisionId);
+    if (!approval) {
+      throw new BackendStoreError(
+        "APPROVAL_NOT_FOUND",
+        `Revision ${revocation.revisionId} does not have an editorial approval`
+      );
+    }
+    if (approval.revisionHash !== revocation.revisionHash) {
+      throw new BackendStoreError(
+        "APPROVAL_HASH_MISMATCH",
+        `Revision ${revocation.revisionId} approval hash does not match the revocation`
+      );
+    }
+    const existing = this.state.approvalRevocations.get(revocation.revisionId);
+    if (existing) {
+      if (canonicalJson(existing) === canonicalJson(revocation)) {
+        return structuredClone(existing);
+      }
+      throw new BackendStoreError(
+        "APPROVAL_ALREADY_REVOKED",
+        `Revision ${revocation.revisionId} already has an immutable revocation`
+      );
+    }
+    const saved = structuredClone(revocation);
+    this.state.approvalRevocations.set(revocation.revisionId, saved);
+    this.recordChange("APPROVAL_REVOKED", revocation.revisionId);
     return structuredClone(saved);
   }
 
@@ -319,6 +370,11 @@ export class InMemoryBackendStore implements BackendRepository {
       attempts: 0
     };
     this.state.outbox.set(effect.id, effect);
+    this.state.outboxVersions.set(effect.id, 1);
+    // Creation and later state transitions must be equally visible to the
+    // incremental desktop sync feed; otherwise a freshly queued publication
+    // can be invisible until an unrelated mutation happens.
+    this.recordChange("EFFECT_UPDATED", effect.id);
     return structuredClone(effect);
   }
 
@@ -328,14 +384,38 @@ export class InMemoryBackendStore implements BackendRepository {
     );
   }
 
-  async updateOutbox(effect: OutboxEffect): Promise<OutboxEffect> {
+  async getOutboxEffect(effectId: string): Promise<{ effect: OutboxEffect; version: number }> {
+    const effect = this.state.outbox.get(effectId);
+    if (!effect) throw new Error(`Outbox effect ${effectId} was not found`);
+    return {
+      effect: structuredClone(effect),
+      version: this.state.outboxVersions.get(effectId) ?? 1
+    };
+  }
+
+  async updateOutbox(effect: OutboxEffect, expectedVersion: number): Promise<OutboxEffect> {
     if (!this.state.outbox.has(effect.id)) {
       throw new Error(`Outbox effect ${effect.id} was not found`);
     }
+    const current = this.state.outboxVersions.get(effect.id) ?? 1;
+    if (expectedVersion !== current) {
+      throw new BackendStoreError(
+        "WRITE_VERSION_CONFLICT",
+        `Outbox effect ${effect.id} changed from version ${expectedVersion} to ${current}`
+      );
+    }
     const saved = structuredClone(effect);
     this.state.outbox.set(effect.id, saved);
+    this.state.outboxVersions.set(effect.id, current + 1);
     this.recordChange("EFFECT_UPDATED", effect.id);
     return structuredClone(saved);
+  }
+
+  async getOutboxVersion(effectId: string): Promise<number> {
+    if (!this.state.outbox.has(effectId)) {
+      throw new Error(`Outbox effect ${effectId} was not found`);
+    }
+    return this.state.outboxVersions.get(effectId) ?? 1;
   }
 
   async createJob(job: BackendJob): Promise<BackendJob> {
@@ -344,26 +424,49 @@ export class InMemoryBackendStore implements BackendRepository {
     }
     const saved = structuredClone(job);
     this.state.jobs.set(job.id, saved);
+    this.state.jobVersions.set(job.id, 1);
     this.recordChange("JOB_UPDATED", job.id);
     return structuredClone(saved);
   }
 
   async getJob(jobId: string): Promise<BackendJob> {
+    return (await this.getJobRecord(jobId)).job;
+  }
+
+  async getJobRecord(jobId: string): Promise<{ job: BackendJob; version: number }> {
     const job = this.state.jobs.get(jobId);
     if (!job) {
       throw new Error(`Job ${jobId} was not found`);
     }
-    return structuredClone(job);
+    return {
+      job: structuredClone(job),
+      version: this.state.jobVersions.get(jobId) ?? 1
+    };
   }
 
-  async saveJob(job: BackendJob): Promise<BackendJob> {
+  async saveJob(job: BackendJob, expectedVersion: number): Promise<BackendJob> {
     if (!this.state.jobs.has(job.id)) {
       throw new Error(`Job ${job.id} was not found`);
     }
+    const current = this.state.jobVersions.get(job.id) ?? 1;
+    if (expectedVersion !== current) {
+      throw new BackendStoreError(
+        "WRITE_VERSION_CONFLICT",
+        `Job ${job.id} changed from version ${expectedVersion} to ${current}`
+      );
+    }
     const saved = structuredClone(job);
     this.state.jobs.set(job.id, saved);
+    this.state.jobVersions.set(job.id, current + 1);
     this.recordChange("JOB_UPDATED", job.id);
     return structuredClone(saved);
+  }
+
+  async getJobVersion(jobId: string): Promise<number> {
+    if (!this.state.jobs.has(jobId)) {
+      throw new Error(`Job ${jobId} was not found`);
+    }
+    return this.state.jobVersions.get(jobId) ?? 1;
   }
 
   async listJobs(): Promise<BackendJob[]> {

@@ -32,7 +32,18 @@ export interface RasterVariant {
 export interface RenderedCoverArtifact extends RasterVariant {
   absolutePath: string;
   sha256: string;
-  byteSize?: number;
+  /**
+   * Size of the exact bytes that produced `sha256`. Callers used to read this
+   * back from disk separately, so the digest and the size of one hash-bound
+   * media record came from two different reads of the same file.
+   */
+  byteSize: number;
+  /**
+   * Which renderer produced the file. A provider-generated bitmap cannot be
+   * checked against the art-direction policy, so the caller has to be able to
+   * tell the two apart when it records the media entry.
+   */
+  source: "IMAGEGEN" | "LOCAL_RENDERER";
 }
 
 const allowedMotifs = new Set<CoverMotif>([
@@ -165,34 +176,87 @@ export async function renderCoverVariants(
   }
   const root = resolve(outputDirectory);
   await mkdir(root, { recursive: true });
-  const artifacts: RenderedCoverArtifact[] = [];
   const sharp = loadSharp();
 
-  for (const variant of planRasterVariants(baseName)) {
-    const target = resolve(join(root, variant.path));
-    if (!target.startsWith(`${root}\\`) && !target.startsWith(`${root}/`)) {
-      throw new Error("Visual output escaped its target directory");
+  return renderVariantBatch(
+    root,
+    baseName,
+    "LOCAL_RENDERER",
+    async (variant, temporaryPath) => {
+      const svg = buildSafeCoverSvg(direction, {
+        width: variant.width,
+        height: variant.height
+      });
+      await sharp(Buffer.from(svg, "utf8"), {
+        density: 72,
+        limitInputPixels: variant.width * variant.height
+      })
+        .resize(variant.width, variant.height, { fit: "fill" })
+        .webp({ quality: 88, effort: 5, smartSubsample: true })
+        .toFile(temporaryPath);
     }
-    const svg = buildSafeCoverSvg(direction, {
-      width: variant.width,
-      height: variant.height
-    });
-    await sharp(Buffer.from(svg, "utf8"), {
-      density: 72,
-      limitInputPixels: variant.width * variant.height
-    })
-      .resize(variant.width, variant.height, { fit: "fill" })
-      .webp({ quality: 88, effort: 5, smartSubsample: true })
-      .toFile(target);
-    const bytes = await readFile(target);
-    artifacts.push({
-      ...variant,
-      absolutePath: target,
-      sha256: createHash("sha256").update(bytes).digest("hex")
-    });
-  }
+  );
+}
 
-  return artifacts;
+/** Stages all ratios before committing any no-replace publication target. */
+interface PendingVariant {
+  artifact: RenderedCoverArtifact;
+  targetPath: string;
+  temporaryPath: string;
+}
+
+async function renderVariantBatch(
+  root: string,
+  baseName: string,
+  source: RenderedCoverArtifact["source"],
+  render: (variant: RasterVariant, temporaryPath: string) => Promise<void>
+): Promise<RenderedCoverArtifact[]> {
+  const pending: PendingVariant[] = [];
+  const temporaryPaths: string[] = [];
+  const committedTargets: string[] = [];
+
+  try {
+    for (const variant of planRasterVariants(baseName)) {
+      const targetPath = resolve(join(root, variant.path));
+      if (!targetPath.startsWith(`${root}\\`) && !targetPath.startsWith(`${root}/`)) {
+        throw new Error("Visual output escaped its target directory");
+      }
+      const temporaryPath = resolve(
+        join(root, `.${variant.path}.${randomUUID()}.tmp.webp`)
+      );
+      temporaryPaths.push(temporaryPath);
+      await render(variant, temporaryPath);
+      const bytes = await readFile(temporaryPath);
+      pending.push({
+        artifact: {
+          ...variant,
+          absolutePath: targetPath,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          byteSize: bytes.byteLength,
+          source
+        },
+        targetPath,
+        temporaryPath
+      });
+    }
+
+    for (const variant of pending) {
+      // A hard link is an atomic, same-volume, no-replace commit. Existing
+      // valid variants therefore make the batch fail without being touched.
+      await link(variant.temporaryPath, variant.targetPath);
+      committedTargets.push(variant.targetPath);
+    }
+    await Promise.all(temporaryPaths.map((path) => rm(path)));
+    return pending.map(({ artifact }) => artifact);
+  } catch (error) {
+    await discardAttemptFiles([...temporaryPaths, ...committedTargets]);
+    throw error;
+  }
+}
+
+/** Removes only temporary files and targets created by the aborted attempt. */
+async function discardAttemptFiles(paths: readonly string[]): Promise<void> {
+  await Promise.allSettled(paths.map((path) => rm(path, { force: true })));
 }
 
 /** Converts one generated raster image into the three locally published ratios. */
@@ -209,30 +273,23 @@ export async function renderGeneratedImageVariants(
   }
   const root = resolve(outputDirectory);
   await mkdir(root, { recursive: true });
-  const artifacts: RenderedCoverArtifact[] = [];
   const sharp = loadSharp();
 
-  for (const variant of planRasterVariants(baseName)) {
-    const target = resolve(join(root, variant.path));
-    if (!target.startsWith(`${root}\\`) && !target.startsWith(`${root}/`)) {
-      throw new Error("Visual output escaped its target directory");
+  return renderVariantBatch(
+    root,
+    baseName,
+    "IMAGEGEN",
+    async (variant, temporaryPath) => {
+      await sharp(source, { limitInputPixels: 40_000_000, failOn: "error" })
+        .rotate()
+        .resize(variant.width, variant.height, { fit: "cover", position: "attention" })
+        .webp({ quality: 88, effort: 5, smartSubsample: true })
+        .toFile(temporaryPath);
     }
-    await sharp(source, { limitInputPixels: 40_000_000, failOn: "error" })
-      .rotate()
-      .resize(variant.width, variant.height, { fit: "cover", position: "attention" })
-      .webp({ quality: 88, effort: 5, smartSubsample: true })
-      .toFile(target);
-    const bytes = await readFile(target);
-    artifacts.push({
-      ...variant,
-      absolutePath: target,
-      sha256: createHash("sha256").update(bytes).digest("hex")
-    });
-  }
-  return artifacts;
+  );
 }
-import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { link, mkdir, readFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
 import type sharp from "sharp";

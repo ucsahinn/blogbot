@@ -54,19 +54,28 @@ const expectedHeadings = {
   setup: "Yerel çalışma durumu",
   "setup-guide": "Yerel çalışma durumu"
 };
-const requiredNativeReadCommands = [
-  "get_bootstrap_snapshot",
-  "get_prerequisite_status",
-  "get_connector_state",
-  "get_editorial_workspace",
-  "get_operations",
-  "get_engine_diagnostics",
-  "list_sources",
-  "local_dev_status",
-  "github_device_flow_status",
-  "autostart_status"
-];
-
+const requiredNativeReadContracts = {
+  get_bootstrap_snapshot: {
+    required: ["onboardingComplete", "runtime", "capabilities", "connection", "automation", "codex", "pipeline", "queue", "sourceCount", "scheduledCount"]
+  },
+  get_prerequisite_status: { required: ["checkedAtUnixMs", "checks"] },
+  get_connector_state: {
+    required: ["sourceState", "mode", "configured", "config", "site", "checks", "localReadiness", "externalReadiness"],
+    optional: ["migration"]
+  },
+  get_editorial_workspace: {
+    required: ["sync", "today", "candidates", "drafts", "weeklySlots", "scheduled", "history", "failures", "codexRoles", "preferences", "systemHealth"]
+  },
+  get_operations: { required: ["events", "schedule", "worker", "publisher"] },
+  get_engine_diagnostics: { required: ["path", "lines", "bridgeError"] },
+  list_sources: { required: ["sources"] },
+  local_dev_status: { required: ["running", "supported"] },
+  github_device_flow_status: {
+    required: ["status", "writes", "network", "detail"],
+    optional: ["userCode", "verificationUri", "scopes", "retryAfterSeconds", "lastError"]
+  },
+  autostart_status: { required: ["enabled"] }
+};
 function fail(message) {
   throw new Error(`Native WebView smoke failed: ${message}`);
 }
@@ -356,9 +365,25 @@ async function waitForSetupGuideStep(sessionId, expectedTitle, expectedProgress)
 async function verifyNativeReadCommands(sessionId) {
   const results = await execute(
     sessionId,
-    `return Promise.all(${JSON.stringify(requiredNativeReadCommands)}.map(async (command) => {
+    `return Promise.all(Object.entries(${JSON.stringify(requiredNativeReadContracts)}).map(async ([command, contract]) => {
       try {
-        await window.__TAURI_INTERNALS__.invoke(command);
+        const result = await window.__TAURI_INTERNALS__.invoke(command);
+        if (!result || typeof result !== 'object' || Array.isArray(result)) {
+          return { command, ok: false, error: 'response is not an object' };
+        }
+        const actualKeys = Object.keys(result);
+        const allowedKeys = [...contract.required, ...(contract.optional ?? [])];
+        const missingKeys = contract.required.filter((key) => !actualKeys.includes(key));
+        const unexpectedKeys = actualKeys.filter((key) => !allowedKeys.includes(key));
+        if (missingKeys.length > 0 || unexpectedKeys.length > 0) {
+          return {
+            command,
+            ok: false,
+            error: 'response key contract mismatch',
+            missingKeys,
+            unexpectedKeys
+          };
+        }
         return { command, ok: true };
       } catch (error) {
         return { command, ok: false, error: String(error).slice(0, 240) };

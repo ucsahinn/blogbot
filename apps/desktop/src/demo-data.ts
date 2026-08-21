@@ -16,6 +16,10 @@ import type {
 const demoBobyGuidance = new Map<string, unknown>();
 let demoBobyGuidanceSequence = 0;
 
+export const DEMO_REVIEW_MEDIA_CONTENT_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl3sAAAAASUVORK5CYII=";
+export const DEMO_REVIEW_MEDIA_SHA256 = "18537dc5086d6545f6df54ef124fef79350bf70545a00fd08c48e5490655131a";
+export const DEMO_REVIEW_MEDIA_BYTES = 68;
+
 function createDemoBobyGuidance(question: string): {
   reply: string;
   suggestedActions: Array<{ id: string; label: string }>;
@@ -340,6 +344,14 @@ const bootstrap: BootstrapSnapshot = {
 const review: ReviewRevision = {
   id: "rev-identity",
   revisionHash: "9f52c21326a63bd5e379863544485efd248156093d5522745360e470e197a504",
+  packageVersion: 3,
+  approvalRequirements: ["EDITORIAL_REVIEW"],
+  publicationSources: [
+    { id: "snap-fido", title: "Birincil kaynak · Uygulama rehberi", url: "https://example.org/guides/primary", role: "primary" },
+    { id: "snap-standard", title: "Birincil kaynak · Uygulama standardı", url: "https://example.org/standards/primary", role: "primary" },
+    { id: "snap-google", title: "İkincil kaynak · Alan güncellemesi", url: "https://example.org/updates/secondary", role: "supporting" },
+    { id: "snap-independent", title: "İkincil kaynak · Bağımsız değerlendirme", url: "https://example.org/analysis/secondary", role: "independent" }
+  ],
   articleId: "article-identity",
   state: "REVIEW_REQUIRED",
   section: "analiz",
@@ -347,7 +359,7 @@ const review: ReviewRevision = {
   author: "OPE Editorya",
   tags: ["örnek", "geçiş", "uygulama"],
   scheduledAt: "2026-07-29T13:30:00.000Z",
-  adapterVersion: "site-adapter@1.0.0",
+  adapterVersion: "local-folder-v1@1",
   tr: {
     title: "Yeni teknoloji geçişinde gözden kaçan üç risk",
     description:
@@ -499,20 +511,22 @@ const review: ReviewRevision = {
     {
       id: "media-hero",
       role: "hero",
-      filename: "technology-transition-hero.webp",
-      width: 1600,
-      height: 900,
-      sha256: "sha256:bd95media",
+      filename: "technology-transition-hero.png",
+      width: 1,
+      height: 1,
+      sha256: DEMO_REVIEW_MEDIA_SHA256,
+      byteSize: DEMO_REVIEW_MEDIA_BYTES,
       altTr: "Dijital anahtar ve kimlik doğrulama katmanları",
       altEn: "Digital key and layered identity verification"
     },
     {
       id: "media-inline",
       role: "inline",
-      filename: "transition-flow.webp",
-      width: 1200,
-      height: 675,
-      sha256: "sha256:a517media",
+      filename: "transition-flow.png",
+      width: 1,
+      height: 1,
+      sha256: DEMO_REVIEW_MEDIA_SHA256,
+      byteSize: DEMO_REVIEW_MEDIA_BYTES,
       altTr: "Yeni teknoloji geçişinde geri dönüş akışı",
       altEn: "Rollback flow during a technology migration"
     }
@@ -618,6 +632,43 @@ export function createDemoTransport(): InvokeTransport {
   const demoReview = structuredClone(review);
   const demoOperations = structuredClone(operations);
   const editorialWorkspace = createEditorialWorkspaceDemo();
+  const demoCandidateScores: Record<string, {
+    sourceSufficiencyScore: number;
+    freshnessScore: number;
+    originalityScore: number;
+    topicFitScore: number;
+    rankingScore: number;
+    scoreReasons: string[];
+  }> = {
+    "candidate-cisa-001": {
+      sourceSufficiencyScore: 100,
+      freshnessScore: 85,
+      originalityScore: 82,
+      topicFitScore: 100,
+      rankingScore: 92,
+      scoreReasons: ["Üç onaylı kaynak", "Son üç günde yayımlandı", "Ayrı olay kümelerine düşük benzerlik", "Kaynak yönlendirmeleri uzlaşıyor"]
+    },
+    "candidate-supply-chain": {
+      sourceSufficiencyScore: 45,
+      freshnessScore: 85,
+      originalityScore: 69,
+      topicFitScore: 65,
+      rankingScore: 66,
+      scoreReasons: ["Tek onaylı kaynak", "Son üç günde yayımlandı", "Orta düzey küme benzerliği", "Tek kaynakta açık yönlendirme"]
+    },
+    "candidate-cloud-routing": {
+      sourceSufficiencyScore: 100,
+      freshnessScore: 70,
+      originalityScore: 88,
+      topicFitScore: 35,
+      rankingScore: 73,
+      scoreReasons: ["Dört onaylı kaynak", "Son yedi günde yayımlandı", "Ayrı olay kümelerine düşük benzerlik", "Kaynak yönlendirmesi eksik"]
+    }
+  };
+  for (const candidate of editorialWorkspace.candidates) {
+    const scores = demoCandidateScores[candidate.id];
+    if (scores) Object.assign(candidate, scores);
+  }
   const demoScanStatuses = new Map<string, {
     operationId: string;
     complete: boolean;
@@ -644,6 +695,12 @@ export function createDemoTransport(): InvokeTransport {
         articleType: "news",
         confidence: 85,
         duplicateScore: 0,
+        sourceSufficiencyScore: 45,
+        freshnessScore: 100,
+        originalityScore: 95,
+        topicFitScore: 65,
+        rankingScore: 76,
+        scoreReasons: ["Tek onaylı kaynak", "Son 24 saatte yayımlandı", "Ayrı olay kümelerine düşük benzerlik", "Tek kaynakta açık yönlendirme"],
         discoveredAt: new Date().toISOString(),
         state: "NEW"
       });
@@ -669,6 +726,10 @@ export function createDemoTransport(): InvokeTransport {
     switch (command) {
       case "open_project_page":
         return { opened: true };
+      case "check_unsigned_update":
+        return { kind: "upToDate", latestVersion: "0.1.38" };
+      case "install_unsigned_update":
+        return undefined;
       case "get_bootstrap_snapshot":
         return structuredClone(demoBootstrap);
       case "get_connector_state":
@@ -682,6 +743,8 @@ export function createDemoTransport(): InvokeTransport {
           component: "local-engine",
           detail: "Yerel engine, PGlite ve iş kuyruğu çalışıyor."
         };
+      case "verify_local_integrity":
+        return { verified: true, completedAt: new Date().toISOString() };
       case "recover_local_workspace":
         return { ready: true, detail: "Yeni yerel çalışma alanı hazır." };
       case "pick_local_folder":
@@ -730,6 +793,36 @@ export function createDemoTransport(): InvokeTransport {
       }
       case "github_device_flow_start":
         return { started: true, writes: false, network: false, userCode: "DEMO-CODE", verificationUri: "https://github.com/login/device", detail: "Demo GitHub cihaz akışı hazır." };
+      case "github_device_flow_poll":
+        return { status: "authorized", writes: false, network: false, scopes: ["repo"], detail: "Demo GitHub bağlantısı hazır." };
+      case "github_device_flow_clear":
+        return { status: "logged-out", writes: false, network: false, detail: "Demo GitHub bağlantısı kaldırıldı." };
+      case "github_validate_repository":
+        return {
+          valid: true,
+          repository: `${String(args?.owner ?? "owner")}/${String(args?.repository ?? "site")}`,
+          workflow: String(args?.workflow ?? "deploy.yml"),
+          writes: false
+        };
+      case "github_capture_base_sha":
+        // The demo workspace has no remote, so it reports a captured SHA only to
+        // keep the setup flow legible. A real capture needs GitHub authorization.
+        return {
+          captured: true,
+          repository: `${String(args?.owner ?? "owner")}/${String(args?.repository ?? "site")}`,
+          branch: String(args?.branch ?? "main"),
+          baseSha: "d".repeat(40),
+          writes: false,
+          network: false
+        };
+      case "github_preview_pull_request":
+        return {
+          mode: "dry-run",
+          writes: false,
+          repository: String(args?.repository ?? "owner/site"),
+          workflow: String(args?.workflow ?? "deploy.yml"),
+          steps: ["Immutable paketi doğrula", "Korumalı PR aç", "Zorunlu kontrolleri bekle"]
+        };
       case "github_device_flow_status":
         return { status: "authorized", writes: false, network: false, scopes: ["repo"], detail: "Demo GitHub bağlantısı hazır." };
       case "backup_create":
@@ -740,6 +833,13 @@ export function createDemoTransport(): InvokeTransport {
         return { archivePath: String(args?.archivePath ?? ""), targetDirectory: String(args?.targetDirectory ?? ""), entries: [] };
       case "backup_restore_apply":
         return { restored: true, targetDirectory: String(args?.targetDirectory ?? ""), entries: 0 };
+      case "automatic_backup_list":
+        return { snapshots: [{ name: "automatic-2026-08-20T09-30-00-000Z.backup", bytes: 2048, createdAt: "2026-08-20T09:30:00.000Z" }] };
+      case "automatic_backup_verify":
+      case "automatic_backup_restore_preview":
+        return { archivePath: "C:\\OPE-Demo\\backups\\automatic-2026-08-20T09-30-00-000Z.backup", createdAt: "2026-08-20T09:30:00.000Z", verified: true, tables: [{ name: "local_state", rowCount: 1 }, { name: "jobs", rowCount: 2 }], rows: 3 };
+      case "automatic_backup_restore_apply":
+        return { archivePath: "C:\\OPE-Demo\\backups\\automatic-2026-08-20T09-30-00-000Z.backup", createdAt: "2026-08-20T09:30:00.000Z", tables: [{ name: "local_state", rowCount: 1 }, { name: "jobs", rowCount: 2 }], rows: 3, restoredRows: 3 };
       case "autostart_status":
         return { enabled: false };
       case "set_autostart":
@@ -867,6 +967,21 @@ export function createDemoTransport(): InvokeTransport {
       }
       case "get_review_revision":
         return structuredClone(demoReview);
+      case "read_revision_media": {
+        const asset = String(args?.revisionId ?? "") === demoReview.id
+          ? demoReview.media.find((item) =>
+              item.sha256 === String(args?.sha256 ?? "") &&
+              /^[a-z0-9][a-z0-9._-]*\.png$/u.test(item.filename)
+            )
+          : undefined;
+        if (!asset) throw new BridgeError("COMMAND_FAILED", "Revizyon medyası bulunamadı.");
+        return {
+          contentBase64: DEMO_REVIEW_MEDIA_CONTENT_BASE64,
+          mimeType: "image/png"
+        };
+      }
+      case "repair_revision_media":
+        return { revision: { id: demoReview.id, revisionHash: demoReview.revisionHash } };
       case "approve_revision": {
         const expectedHash = String(args?.expectedHash ?? "");
         if (expectedHash !== demoReview.revisionHash) {
@@ -875,11 +990,55 @@ export function createDemoTransport(): InvokeTransport {
             "Revizyon değişti; onaylamadan önce güncel sürümü açın."
           );
         }
+        const attestation = args?.attestation as {
+          editorialReview?: { reviewer?: unknown; sourceRoles?: Array<{ sourceId?: unknown; role?: unknown }> };
+          expertReview?: unknown;
+          ethicsReview?: unknown;
+        } | undefined;
+        const expectedRoles = demoReview.publicationSources ?? [];
+        const suppliedRoles = attestation?.editorialReview?.sourceRoles;
+        if (
+          args?.packageVersion !== 3 ||
+          typeof args?.warningSetHash !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(args.warningSetHash) ||
+          typeof attestation?.editorialReview?.reviewer !== "string" ||
+          !attestation.editorialReview.reviewer.trim() ||
+          !Array.isArray(suppliedRoles) ||
+          suppliedRoles.length !== expectedRoles.length ||
+          expectedRoles.some((source) => !suppliedRoles.some((item) => item.sourceId === source.id && item.role === source.role)) ||
+          attestation.expertReview !== null ||
+          attestation.ethicsReview !== null
+        ) {
+          throw new BridgeError("COMMAND_FAILED", "V3 insan inceleme beyanı eksik veya revizyonun kaynak rolleriyle eşleşmiyor.");
+        }
         demoReview.state = "APPROVED";
         return {
           approvedAt: new Date().toISOString(),
           revisionHash: demoReview.revisionHash,
           state: demoReview.state
+        };
+      }
+      case "revoke_revision_approval": {
+        const revisionId = String(args?.revisionId ?? "");
+        const expectedHash = String(args?.expectedHash ?? "");
+        const reason = String(args?.reason ?? "").trim();
+        if (
+          demoReview.state !== "APPROVED" ||
+          revisionId !== demoReview.id ||
+          expectedHash !== demoReview.revisionHash ||
+          reason.length < 10 ||
+          reason.length > 512
+        ) {
+          throw new BridgeError("COMMAND_FAILED", "Onay geri çekme isteği güncel onaylı revizyon ve açıklayıcı bir gerekçe gerektirir.");
+        }
+        demoReview.state = "REVIEW_REQUIRED";
+        demoReview.editorialApproved = false;
+        demoReview.highRiskApproved = false;
+        return {
+          revokedAt: new Date().toISOString(),
+          revisionHash: demoReview.revisionHash,
+          state: demoReview.state,
+          recalledEffectIds: []
         };
       }
       case "approve_high_risk_revision": {

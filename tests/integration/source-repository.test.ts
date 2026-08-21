@@ -6,10 +6,31 @@ import test from "node:test";
 
 import { PGlite } from "@electric-sql/pglite";
 
+import { JsonProtector } from "../../packages/database/src/encrypted-json.ts";
 import {
   PGliteSourceRepository,
   SourceRepositoryError
 } from "../../packages/database/src/source-repository.ts";
+
+function activeSource(id: string, url: string) {
+  return {
+    id,
+    url,
+    kind: "RSS" as const,
+    status: "ACTIVE" as const,
+    trustStatus: "APPROVED" as const,
+    rightsStatus: "APPROVED" as const,
+    language: "en" as const,
+    discoveredFeeds: [],
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:00:00.000Z",
+    version: 1
+  };
+}
+
+function rawDatabase(repository: PGliteSourceRepository): PGlite {
+  return (repository as unknown as { database: PGlite }).database;
+}
 
 function countTransactionalQueries(repository: PGliteSourceRepository) {
   const holder = repository as unknown as { database: PGlite };
@@ -486,4 +507,150 @@ test("concurrent source scan workers atomically claim one queued scan", async (t
   assert.equal(results.filter((result) => !result.claimed).length, 1);
   assert.equal(results.find((result) => result.claimed)?.scan.attempts, 1);
   assert.equal((await repository.listScanRuns("engine:claim-scan"))[0]?.attempts, 1);
+});
+
+test("retention keeps protected evidence reachable after a newer version expires", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-purge-latest-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const repository = await PGliteSourceRepository.open(dataDir);
+  t.after(() => repository.close());
+  await repository.saveSource(activeSource("s1", "https://ex.test/feed.xml"));
+
+  await repository.saveEntries("s1", [{
+    externalId: "e1",
+    title: "Old title",
+    url: "https://ex.test/a",
+    publishedAt: "2026-01-01T00:00:00.000Z"
+  }]);
+  const [versionA] = await repository.listEntryVersions("s1", "e1");
+  assert.ok(versionA?.versionId);
+  await repository.saveEntries("s1", [{
+    externalId: "e1",
+    title: "New title",
+    url: "https://ex.test/a",
+    publishedAt: "2026-01-01T00:00:00.000Z"
+  }]);
+
+  // Only the newer capture expires; an approved revision cites version A.
+  const purged = await repository.purgeExpiredEntries("2030-01-01T00:00:00.000Z", [versionA.versionId!]);
+
+  assert.equal(purged, 1);
+  assert.deepEqual((await repository.listEntryVersions("s1", "e1")).map((entry) => entry.title), ["Old title"]);
+  assert.deepEqual((await repository.listEntries("s1")).map((entry) => entry.title), ["Old title"]);
+  assert.equal((await repository.findEntryByUrl("s1", "https://ex.test/a"))?.title, "Old title");
+  assert.deepEqual((await repository.listRecentEntriesBounded(10)).map((entry) => entry.title), ["Old title"]);
+});
+
+test("retention finds expired versions without decrypting the ledger", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-purge-nodecrypt-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const repository = await PGliteSourceRepository.open(dataDir);
+  t.after(() => repository.close());
+  await repository.saveSource(activeSource("s1", "https://ex.test/feed.xml"));
+
+  await repository.saveEntries("s1", Array.from({ length: 5 }, (_, index) => ({
+    externalId: `old-${index}`,
+    title: `Old ${index}`,
+    url: `https://ex.test/old-${index}`
+  })));
+  await repository.saveEntries("s1", Array.from({ length: 40 }, (_, index) => ({
+    externalId: `fresh-${index}`,
+    title: `Fresh ${index}`,
+    url: `https://ex.test/fresh-${index}`
+  })));
+  // Only the first capture batch predates the cutoff.
+  await rawDatabase(repository).query(
+    "UPDATE blogbot_source_entry_versions SET captured_at = '2020-01-01T00:00:00.000Z' WHERE external_id LIKE 'old-%'"
+  );
+
+  const originalOpen = JsonProtector.prototype.open;
+  let opened = 0;
+  JsonProtector.prototype.open = function patched(this: JsonProtector, ...args: Parameters<typeof originalOpen>) {
+    opened += 1;
+    return originalOpen.apply(this, args);
+  } as typeof originalOpen;
+  try {
+    assert.equal(await repository.purgeExpiredEntries("2026-01-01T00:00:00.000Z"), 5);
+  } finally {
+    JsonProtector.prototype.open = originalOpen;
+  }
+
+  assert.equal(opened, 0);
+  assert.equal((await repository.listEntries("s1")).length, 40);
+});
+
+test("a non-retryable scan failure persists the completion it reports", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-fail-scan-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const repository = await PGliteSourceRepository.open(dataDir);
+  t.after(() => repository.close());
+  await repository.saveSource(activeSource("s1", "https://ex.test/feed.xml"));
+  const [queued] = await repository.prepareScanBatch(
+    "engine:scan-fail",
+    "scan request",
+    [{ sourceId: "s1", expectedVersion: 1 }],
+    "2026-08-19T09:00:00.000Z"
+  );
+  assert.ok(queued);
+  await repository.markScanRunning(queued.id, "2026-08-19T09:30:00.000Z");
+
+  const failed = await repository.failSourceScan(
+    queued.id,
+    { code: "RIGHTS_REJECTED", message: "rights review rejected the source", retryable: false },
+    "2026-08-19T10:00:00.000Z"
+  );
+
+  assert.equal(failed.state, "FAILED");
+  assert.equal(failed.completedAt, "2026-08-19T10:00:00.000Z");
+  const [persisted] = await repository.listScanRuns("engine:scan-fail");
+  assert.equal(persisted?.state, "FAILED");
+  assert.equal(persisted?.completedAt, failed.completedAt);
+});
+
+test("a retryable scan failure never persists a stale completion", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "blogbot-source-retry-scan-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const repository = await PGliteSourceRepository.open(dataDir);
+  t.after(() => repository.close());
+  await repository.saveSource(activeSource("s1", "https://ex.test/feed.xml"));
+  const [queued] = await repository.prepareScanBatch(
+    "engine:scan-retry",
+    "scan request",
+    [{ sourceId: "s1", expectedVersion: 1 }],
+    "2026-08-19T09:00:00.000Z"
+  );
+  assert.ok(queued);
+  // A running scan that still carries a completion from an earlier attempt is
+  // exactly the case where a re-queue must clear it.
+  const stale = {
+    ...queued,
+    state: "RUNNING" as const,
+    attempts: 1,
+    startedAt: "2026-08-19T09:10:00.000Z",
+    completedAt: "2026-08-19T09:20:00.000Z"
+  };
+  await rawDatabase(repository).query(
+    "UPDATE blogbot_source_scans SET state = $2, value = $3::jsonb WHERE id = $1",
+    [
+      queued.id,
+      stale.state,
+      JSON.stringify(JsonProtector.fromEnvironment().seal(stale, {
+        table: "blogbot_source_scans",
+        key: queued.id,
+        field: "value"
+      }))
+    ]
+  );
+
+  const retried = await repository.failSourceScan(
+    queued.id,
+    { code: "FETCH_FAILED", message: "network unavailable", retryable: true },
+    "2026-08-19T09:30:00.000Z"
+  );
+
+  assert.equal(retried.state, "QUEUED");
+  assert.equal(retried.completedAt, undefined);
+  const [persisted] = await repository.listScanRuns("engine:scan-retry");
+  assert.equal(persisted?.state, "QUEUED");
+  assert.equal(persisted?.completedAt, undefined);
 });

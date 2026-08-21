@@ -192,8 +192,7 @@ test("Boby guidance queues only a bounded local guidance request", async () => {
       activePage: "content",
       runtimeState: "ONLINE",
       sessionId: "boby-luna-thread-1",
-      safeWorkspaceSummary: { draftCount: 2, reviewCount: 1, sourceCount: 3 },
-      ignoredSecret: "must-not-reach-codex"
+      safeWorkspaceSummary: { draftCount: 2, reviewCount: 1, sourceCount: 3 }
     }
   }));
 
@@ -557,6 +556,37 @@ test("draft.create with NEXT_SLOT considers every enabled slot of the same weekd
   assert.ok(Date.parse(String(job.metadata?.scheduledAt)) > Date.now());
 });
 
+test("paid fallback disabled remains a manual stop after restart", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-paid-fallback-disabled",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 1,
+    lastError: "PAID_FALLBACK_DISABLED",
+    metadata: {
+      codexWaitReason: "PAID_FALLBACK_DISABLED",
+      instruction: "Ücretli fallback olmadan yerel Codex beklesin",
+      sourceIds: ["source-1"],
+      urls: []
+    }
+  });
+  const recoveredIds: string[] = [];
+  const coordinator = {
+    async submit() { throw new Error("not used"); },
+    async recoverInterrupted(jobId: string) {
+      recoveredIds.push(jobId);
+      return { recovered: true, snapshot: null };
+    },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); }
+  } as unknown as CodexWorkerCoordinator;
+
+  assert.equal(await recoverWaitingDraftJobs(repository, coordinator), 0);
+  assert.deepEqual(recoveredIds, []);
+  assert.equal((await repository.getJob("draft-paid-fallback-disabled")).state, "WAITING_CODEX");
+});
+
 test("NEXT_SLOT reserves an already assigned time and chooses the next available slot", async () => {
   const repository = new InMemoryBackendStore();
   await repository.setLocalState("desktop.editorial", {
@@ -685,7 +715,7 @@ test("draft.create dispatches to the isolated Codex coordinator when configured"
 
 test("job.retry moves a failed job back to QUEUED and increments attempts", async () => {
   const repository = new InMemoryBackendStore();
-  await repository.createJob({ id: "job-1", kind: "DRAFT", state: "FAILED", attempts: 1, lastError: "boom" });
+  await repository.createJob({ id: "job-1", kind: "INGEST", state: "FAILED", attempts: 1, lastError: "boom" });
   const handle = createEngineProtocol(repository);
   const response = await handle(envelope({
     version: 1,
@@ -698,6 +728,74 @@ test("job.retry moves a failed job back to QUEUED and increments attempts", asyn
   assert.equal(response.ok, true);
   assert.equal((await repository.getJob("job-1")).state, "QUEUED");
   assert.equal((await repository.getJob("job-1")).attempts, 2);
+});
+
+test("malformed local workflow commands fail before any durable mutation", async () => {
+  const commands = [
+    { kind: "DRAFT.CREATE", payload: { draftId: "draft-invalid", sourceIds: ["source-1"], unexpected: true } },
+    {
+      kind: "BOBY.GUIDE",
+      payload: {
+        guidanceId: "boby-invalid",
+        question: "Ne yapmalıyım?",
+        activePage: "content",
+        runtimeState: "ONLINE",
+        safeWorkspaceSummary: { draftCount: 0, reviewCount: 0, sourceCount: 0 },
+        unexpected: true
+      }
+    },
+    { kind: "JOB.RETRY", payload: { jobId: "missing-job", unexpected: true } },
+    { kind: "LOCAL_STATE.SET", payload: { key: "desktop.invalid", value: true, unexpected: true } }
+  ];
+  for (const [index, local] of commands.entries()) {
+    const repository = new InMemoryBackendStore();
+    const handle = createEngineProtocol(repository);
+    const response = await handle(envelope({
+      version: 1,
+      requestId: `invalid-local-${index}`,
+      idempotencyKey: `invalid-local-${index}`,
+      expectedVersion: 0,
+      ...local
+    }));
+    assert.equal(response.ok, false, local.kind);
+    assert.equal((response.result as { error: { code: string } }).error.code, "INVALID_COMMAND", local.kind);
+    assert.equal(await repository.getVersion(), 0, local.kind);
+    assert.deepEqual(await repository.listJobs(), [], local.kind);
+    assert.equal(await repository.getLocalState("desktop.invalid"), undefined, local.kind);
+  }
+});
+
+test("job.retry preserves Codex-required terminal jobs when no coordinator is available", async () => {
+  for (const kind of ["DRAFT", "CODEX"] as const) {
+    for (const state of ["WAITING_CODEX", "FAILED", "DEAD_LETTER", "RETRY_SCHEDULED"] as const) {
+      const repository = new InMemoryBackendStore();
+      const id = `${kind.toLowerCase()}-${state.toLowerCase()}`;
+      const before = {
+        id,
+        kind,
+        state,
+        attempts: 3,
+        lastError: "original-stop",
+        metadata: { progressStage: "original-stage" }
+      } as const;
+      await repository.createJob(before);
+      const version = await repository.getVersion();
+      const handle = createEngineProtocol(repository);
+      const response = await handle(envelope({
+        version: 1,
+        requestId: `retry-${id}`,
+        idempotencyKey: `retry-${id}`,
+        expectedVersion: version,
+        kind: "JOB.RETRY",
+        payload: { jobId: id }
+      }));
+
+      assert.equal(response.ok, false, `${kind}/${state}`);
+      assert.equal((response.result as { error: { code: string } }).error.code, "CODEX_RUNNER_UNAVAILABLE");
+      assert.deepEqual(await repository.getJob(id), before, `${kind}/${state}`);
+      assert.equal(await repository.getVersion(), version, `${kind}/${state}`);
+    }
+  }
 });
 
 test("job.retry recovers a waiting Codex draft through its durable coordinator", async () => {

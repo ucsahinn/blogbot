@@ -321,7 +321,13 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
     "native smoke must explain that WebDriver cannot attach to an editor-owned Tauri window"
   );
   assert.match(smokeScript, /waitForVisibleHeading/u);
-  assert.match(smokeScript, /requiredNativeReadCommands/u);
+  assert.match(
+    smokeScript,
+    /requiredNativeReadContracts/u,
+    "native smoke must bind each real IPC read to an explicit response key contract"
+  );
+  assert.match(smokeScript, /missingKeys/u);
+  assert.match(smokeScript, /unexpectedKeys/u);
   assert.match(
     smokeScript,
     /verifyCandidateJourney/u,
@@ -458,6 +464,78 @@ test("sidecar doctor smoke contract checks durable local readiness", async () =>
   );
 });
 
+test("fetcher SEA bundle starts its stdin protocol and has a packaged smoke gate", async () => {
+  const [buildScript, entrypoint, smokeScript, packageJson, verifyWorkflow, releaseWorkflow] = await Promise.all([
+    readFile(join(repositoryRoot, "scripts", "build-engine-sidecar.mjs"), "utf8"),
+    readFile(join(repositoryRoot, "apps", "fetcher", "src", "sea-entrypoint.ts"), "utf8"),
+    readFile(join(repositoryRoot, "scripts", "smoke-fetcher-sidecar.mjs"), "utf8"),
+    readFile(join(repositoryRoot, "package.json"), "utf8"),
+    readFile(join(repositoryRoot, ".github", "workflows", "verify.yml"), "utf8"),
+    readFile(join(repositoryRoot, ".github", "workflows", "release-desktop.yml"), "utf8")
+  ]);
+
+  assert.match(buildScript, /__BLOGBOT_FETCHER_SEA__.*true/u);
+  assert.match(entrypoint, /typeof __BLOGBOT_FETCHER_SEA__/u);
+  assert.match(smokeScript, /blogbot-fetcher-x86_64-pc-windows-msvc\.exe/u);
+  assert.match(smokeScript, /FETCHER_REQUEST_FAILED/u);
+  const scripts = (JSON.parse(packageJson) as { scripts: Record<string, string> }).scripts;
+  assert.equal(scripts["smoke:fetcher"], "node scripts/smoke-fetcher-sidecar.mjs");
+  const checkAll = scripts["check:all"];
+  assert.ok(checkAll);
+  assert.match(checkAll, /smoke:fetcher/u);
+  assert.match(verifyWorkflow, /npm\.cmd run smoke:engine[\s\S]*npm\.cmd run smoke:fetcher/u);
+  assert.match(releaseWorkflow, /npm\.cmd run smoke:engine[\s\S]*npm\.cmd run smoke:fetcher/u);
+  assert.match(releaseWorkflow, /npm\.cmd run test:browser/u);
+});
+
+test("desktop release gates publication on a same-run pinned Gitleaks scan", async () => {
+  const releaseWorkflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+
+  assert.match(
+    releaseWorkflow,
+    /secret-scan:[\s\S]*?permissions:\r?\n\s+contents:\s*read[\s\S]*?actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683[\s\S]*?fetch-depth:\s*0[\s\S]*?gitleaks\/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc/u
+  );
+  assert.match(releaseWorkflow, /release:\s*\r?\n\s+needs:\s*secret-scan/u);
+});
+
+test("desktop release pins the generated tag to the dispatched commit", async () => {
+  const releaseWorkflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+
+  assert.match(
+    releaseWorkflow,
+    /gh release create "v\$env:RELEASE_VERSION"[\s\S]*?--target "\$\{\{ github\.sha \}\}"/u
+  );
+});
+
+test("verify and release reject RustSec vulnerabilities in the Windows desktop lock", async () => {
+  const [packageJsonRaw, verifyWorkflow, releaseWorkflow] = await Promise.all([
+    readFile(join(repositoryRoot, "package.json"), "utf8"),
+    readFile(join(repositoryRoot, ".github", "workflows", "verify.yml"), "utf8"),
+    readFile(join(repositoryRoot, ".github", "workflows", "release-desktop.yml"), "utf8")
+  ]);
+
+  const scripts = (JSON.parse(packageJsonRaw) as { scripts: Record<string, string> }).scripts;
+  assert.equal(
+    scripts["security:rust"],
+    "cargo audit --file apps/desktop/src-tauri/Cargo.lock --target-os windows --target-arch x86_64"
+  );
+  const securityVerify = scripts["security:verify"];
+  assert.ok(securityVerify);
+  assert.match(securityVerify, /npm run security:rust/u);
+  for (const workflow of [verifyWorkflow, releaseWorkflow]) {
+    assert.match(
+      workflow,
+      /cargo install cargo-audit --version 0\.22\.2 --locked[\s\S]*npm\.cmd run security:rust/u
+    );
+  }
+});
+
 test("native smoke fails a slow route instead of tolerating a minute-long frozen menu", async () => {
   const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
 
@@ -479,4 +557,32 @@ test("desktop preflight verifies clean-machine installer inputs without building
   assert.ok(result.checks.some((check) => check.id === "clean-machine-runtime"));
   assert.ok(result.checks.some((check) => check.id === "gui-smoke-contract"));
   assert.ok(result.checks.some((check) => check.id === "bundled-engine-sidecar"));
+});
+
+test("release version stays identical across every packaged desktop manifest", async () => {
+  const [desktopManifestRaw, cargoManifestRaw, tauriConfigRaw] = await Promise.all([
+    readFile(join(repositoryRoot, "apps", "desktop", "package.json"), "utf8"),
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "Cargo.toml"), "utf8"),
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8")
+  ]);
+
+  const desktopVersion = (JSON.parse(desktopManifestRaw) as { version?: unknown }).version;
+  const tauriVersion = (JSON.parse(tauriConfigRaw) as { version?: unknown }).version;
+  const cargoVersion = /^\s*\[package\][\s\S]*?^\s*version\s*=\s*"([^"]+)"/mu.exec(cargoManifestRaw)?.[1];
+
+  // A vacuous pass would hide a real drift, so prove each manifest was parsed.
+  assert.match(String(desktopVersion), /^\d+\.\d+\.\d+$/u, "apps/desktop/package.json needs a SemVer version");
+  assert.match(String(tauriVersion), /^\d+\.\d+\.\d+$/u, "tauri.conf.json needs a SemVer version");
+  assert.match(String(cargoVersion), /^\d+\.\d+\.\d+$/u, "src-tauri/Cargo.toml [package] needs a SemVer version");
+
+  assert.equal(
+    tauriVersion,
+    desktopVersion,
+    "tauri.conf.json version must match apps/desktop/package.json or the NSIS bundle name drifts from the release tag"
+  );
+  assert.equal(
+    cargoVersion,
+    desktopVersion,
+    "src-tauri/Cargo.toml version must match apps/desktop/package.json or the installed app reports the wrong version"
+  );
 });

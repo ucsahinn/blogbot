@@ -8,6 +8,18 @@ export {
   type PortableRestorePlan
 } from "./portable-backup.ts";
 export {
+  createLogicalBackup,
+  logicalRestoreTables,
+  planLogicalRestore,
+  LOGICAL_BACKUP_LIMITS,
+  type CreateLogicalBackupInput,
+  type LogicalBackupManifest,
+  type LogicalBackupTableManifest,
+  type LogicalRestorePlan,
+  type LogicalTableDump,
+  type PlanLogicalRestoreInput
+} from "./logical-backup.ts";
+export {
   planBackupRetention,
   type BackupRetentionPlan,
   type BackupRetentionPolicy,

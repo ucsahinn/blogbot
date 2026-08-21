@@ -21,6 +21,11 @@ use crate::secure_store;
 // as base64. Keep request traffic narrow while allowing that one bounded,
 // credential-free response plus JSON metadata.
 const MAX_RESPONSE_BYTES: usize = 72 * 1024 * 1024;
+// This must stay equal to the engine's own NDJSON line cap
+// (`MAX_LINE_BYTES` in apps/engine/src/stdio-entrypoint.ts). A request the
+// bridge accepts but the engine rejects would be answered with
+// REQUEST_TOO_LARGE against an id the engine could not read, so the two caps
+// are only ever changed together.
 const MAX_REQUEST_BYTES: usize = 1_000_000;
 // A ready engine may legitimately spend longer than a UI round-trip on a
 // guarded source fetch (the fetcher itself allows an 8s wall-clock hop), a
@@ -41,6 +46,10 @@ const MAINTENANCE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(1);
 const MAX_DIAGNOSTIC_LOG_BYTES: u64 = 256 * 1024;
 const MAX_DIAGNOSTIC_LOG_ROTATIONS: usize = 4;
+// The Codex CLI can be installed while OPE is already running. Re-probing is
+// bounded to this interval so a doctor call issued on every UI poll cannot
+// spawn discovery helpers per request.
+const CODEX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
 // `CREATE_NO_WINDOW` applies to every helper process started by the desktop
 // host. In particular, probing a `.cmd` launcher at app start must never flash
 // a Command Prompt behind the Blogbot window.
@@ -156,6 +165,27 @@ fn rotate_diagnostic_log(path: &Path) {
     }
 }
 
+/// Append one already-redacted diagnostic line, enforcing the size cap first.
+/// Every writer must go through here: the bridge records an event per request,
+/// so a healthy session whose sidecar never writes stderr would otherwise grow
+/// this file without bound because only the stderr reader checked the cap.
+fn append_diagnostic_line(path: &Path, write_lock: &Mutex<()>, line: &str) {
+    // A poisoned lock must not silently discard diagnostics; the guarded
+    // section only touches the log file.
+    let _serialized = write_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(parent) = path.parent() {
+        let _ = create_dir_all(parent);
+    }
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_DIAGNOSTIC_LOG_BYTES) {
+        rotate_diagnostic_log(path);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 fn serialize_bounded_request(request: &Value) -> Result<String, String> {
     let serialized = serde_json::to_string(request)
         .map_err(|error| format!("ENGINE_REQUEST_INVALID: {error}"))?;
@@ -213,14 +243,36 @@ fn response_timeout_for_request(request: &Value, ready: bool) -> Duration {
     }
     match request.get("kind").and_then(Value::as_str) {
         Some("source.list") | Some("candidate.list") => CATALOG_RESPONSE_TIMEOUT,
-        Some("backup.create")
-        | Some("backup.auto")
-        | Some("backup.verify")
-        | Some("backup.restore.preview")
-        | Some("backup.restore")
-        | Some("maintenance.integrity.verify") => MAINTENANCE_RESPONSE_TIMEOUT,
+        // Match the whole backup family by prefix. The automatic-snapshot
+        // kinds (`backup.auto.*`) read, decrypt and hash the same bounded
+        // archives as the manual ones, so a new kind must not silently fall
+        // back to the interactive timeout and kill a sidecar mid-restore.
+        Some(kind) if kind.starts_with("backup.") => MAINTENANCE_RESPONSE_TIMEOUT,
+        // A native publication claim may legitimately carry up to 70 MiB of
+        // approved media, and media.read streams one approved asset. Timing
+        // either out tears down the sidecar, which resets the already
+        // committed IN_PROGRESS effect and lets the drainer reclaim it in a
+        // loop instead of finishing the publication.
+        Some("maintenance.integrity.verify")
+        | Some("publication.broker.claim")
+        | Some("media.read") => MAINTENANCE_RESPONSE_TIMEOUT,
         _ => RESPONSE_TIMEOUT,
     }
+}
+
+/// The runner path is resolved for the sidecar's scrubbed environment, which
+/// cannot rely on PATH. Re-probe only while no runner is known, and at most
+/// once per interval, so a resolved path stays stable for the session and an
+/// absent one does not spawn discovery helpers on every request.
+fn should_reprobe_codex_command(
+    command: Option<&str>,
+    probed_at: Option<Instant>,
+    now: Instant,
+) -> bool {
+    command.is_none()
+        && probed_at.is_none_or(|probed_at| {
+            now.saturating_duration_since(probed_at) >= CODEX_REDISCOVERY_INTERVAL
+        })
 }
 
 fn transport_error_for_request(error: &str, request_id: &str) -> String {
@@ -323,19 +375,33 @@ pub(crate) fn terminate_owned_process_tree(child: &mut Child) {
     let _ = child.kill();
 }
 
+type CodexCommandProbe = Box<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// The resolved runner path plus the moment discovery last ran, so a runner
+/// installed after launch can still be picked up without re-probing on every
+/// request.
+struct CodexRunner {
+    command: Option<String>,
+    probed_at: Option<Instant>,
+}
+
 pub struct EngineBridge {
     executable: Option<PathBuf>,
     fetcher_executable: Option<PathBuf>,
     secure_restore_executable: Option<PathBuf>,
     assets: Option<PathBuf>,
     node_modules: Option<PathBuf>,
-    codex_command: Option<String>,
+    codex_runner: Mutex<CodexRunner>,
+    codex_command_probe: CodexCommandProbe,
     codex_home: Option<PathBuf>,
     data_key_hex: Mutex<Vec<String>>,
     data_key_fallback_attempts: Mutex<usize>,
     data_key_recovery_exhausted: AtomicBool,
     stable_data_key_path: Option<PathBuf>,
     diagnostic_log: Option<PathBuf>,
+    // Shared with the stderr reader thread so the size-check-and-rotate step is
+    // serialised across every diagnostic writer.
+    diagnostic_write_lock: Arc<Mutex<()>>,
     process: Mutex<Option<EngineProcess>>,
     request_sequence: AtomicU64,
     last_error: Mutex<Option<String>>,
@@ -379,6 +445,13 @@ impl PendingResponses {
     fn resolve_line(&self, line: &str) -> Result<bool, String> {
         let response = serde_json::from_str::<Value>(line)
             .map_err(|error| format!("ENGINE_RESPONSE_INVALID: {error}"))?;
+        // The engine gates inbound request versions; without the reverse gate a
+        // newer sidecar's response shape would be handed to v1 callers, whose
+        // pointer lookups then fail as a misleading payload-shape error instead
+        // of naming the protocol skew.
+        if response.get("version").and_then(Value::as_u64) != Some(1) {
+            return Err("ENGINE_PROTOCOL_VERSION_UNSUPPORTED".to_string());
+        }
         let request_id = response
             .get("id")
             .and_then(Value::as_str)
@@ -452,7 +525,11 @@ impl EngineBridge {
             secure_restore_executable,
             assets,
             node_modules,
-            codex_command,
+            codex_runner: Mutex::new(CodexRunner {
+                command: codex_command,
+                probed_at: Some(Instant::now()),
+            }),
+            codex_command_probe: Box::new(discover_codex_command),
             codex_home,
             data_key_hex: Mutex::new(data_key.as_ref().ok().cloned().unwrap_or_default()),
             data_key_fallback_attempts: Mutex::new(0),
@@ -463,6 +540,7 @@ impl EngineBridge {
                 .app_data_dir()
                 .ok()
                 .map(|directory| directory.join("logs").join("engine.stderr.log")),
+            diagnostic_write_lock: Arc::new(Mutex::new(())),
             process: Mutex::new(None),
             request_sequence: AtomicU64::new(1),
             last_error: Mutex::new(data_key.err()),
@@ -474,6 +552,12 @@ impl EngineBridge {
     }
 
     pub fn doctor(&self) -> Result<Value, String> {
+        // The sidecar reads BLOGBOT_CODEX_COMMAND once, at construction, and
+        // only then exposes CODEX.RUNNER. Setup Center's runner check goes
+        // through Doctor, so re-probe here: otherwise a Codex CLI installed
+        // after launch could never become available and the retry the UI
+        // suggests would be one that can never succeed.
+        self.refresh_codex_command();
         self.request(json!({
             "version": 1,
             "id": "desktop-doctor",
@@ -583,6 +667,32 @@ impl EngineBridge {
         if let Ok(mut process) = self.process.lock() {
             *process = None;
         }
+    }
+
+    fn refresh_codex_command(&self) -> bool {
+        self.refresh_codex_command_at(Instant::now())
+    }
+
+    /// Re-run runner discovery and report whether the live sidecar had to be
+    /// dropped. A sidecar spawned without the runner path cannot learn it
+    /// later, so the next request must start a replacement process.
+    fn refresh_codex_command_at(&self, now: Instant) -> bool {
+        let Ok(mut runner) = self.codex_runner.lock() else {
+            return false;
+        };
+        if !should_reprobe_codex_command(runner.command.as_deref(), runner.probed_at, now) {
+            return false;
+        }
+        runner.probed_at = Some(now);
+        let discovered = (self.codex_command_probe)();
+        if discovered.is_none() || discovered == runner.command {
+            return false;
+        }
+        runner.command = discovered;
+        drop(runner);
+        self.record_diagnostic_event("CODEX_RUNNER_REDISCOVERED");
+        self.stop();
+        true
     }
 
     fn advance_data_key_candidate(&self) -> bool {
@@ -824,42 +934,26 @@ impl EngineBridge {
             .take()
             .ok_or_else(|| "ENGINE_STDERR_UNAVAILABLE".to_string())?;
         let stderr_path = self.diagnostic_log.clone();
+        let stderr_write_lock = Arc::clone(&self.diagnostic_write_lock);
         let startup_decrypt_failed = Arc::new(AtomicBool::new(false));
         let stderr_decrypt_failed = Arc::clone(&startup_decrypt_failed);
         let stderr_reader = thread::Builder::new()
             .name("blogbot-engine-stderr".to_string())
             .spawn(move || {
                 if let Some(path) = stderr_path {
-                    if let Some(parent) = path.parent() {
-                        let _ = create_dir_all(parent);
-                    }
-                    let mut log = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&path)
-                        .ok();
                     let reader = BufReader::new(stderr);
                     for line in reader.lines().map_while(Result::ok) {
                         if line.contains("LOCAL_DATA_DECRYPT_FAILED") {
                             stderr_decrypt_failed.store(true, Ordering::Release);
                         }
-                        let redacted = redact_diagnostic_for_persistence(&line);
-                        if let Some(file) = log.as_mut() {
-                            if file.metadata().map(|meta| meta.len()).unwrap_or(0)
-                                > MAX_DIAGNOSTIC_LOG_BYTES
-                            {
-                                drop(log.take());
-                                rotate_diagnostic_log(&path);
-                                log = OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(&path)
-                                    .ok();
-                            }
-                        }
-                        if let Some(file) = log.as_mut() {
-                            let _ = writeln!(file, "{redacted}");
-                        }
+                        // Rotation is shared with the bridge's own writers, so
+                        // this thread must not keep a handle to a file another
+                        // writer may have rotated away underneath it.
+                        append_diagnostic_line(
+                            &path,
+                            &stderr_write_lock,
+                            &redact_diagnostic_for_persistence(&line),
+                        );
                     }
                 }
             })
@@ -941,15 +1035,14 @@ impl EngineBridge {
             *last_error = Some(error);
         }
         if let Some(path) = &self.diagnostic_log {
-            if let Some(parent) = path.parent() {
-                let _ = create_dir_all(parent);
-            }
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                let detail = redact_diagnostic_for_persistence(
-                    &self.last_error().unwrap_or_else(|| "unknown".to_string()),
-                );
-                let _ = writeln!(file, "BRIDGE_ERROR {detail}");
-            }
+            let detail = redact_diagnostic_for_persistence(
+                &self.last_error().unwrap_or_else(|| "unknown".to_string()),
+            );
+            append_diagnostic_line(
+                path,
+                &self.diagnostic_write_lock,
+                &format!("BRIDGE_ERROR {detail}"),
+            );
         }
     }
 
@@ -957,24 +1050,58 @@ impl EngineBridge {
         let Some(path) = &self.diagnostic_log else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = create_dir_all(parent);
-        }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let detail = redact_diagnostic_for_persistence(event);
-            let _ = writeln!(file, "{detail}");
-        }
+        append_diagnostic_line(
+            path,
+            &self.diagnostic_write_lock,
+            &redact_diagnostic_for_persistence(event),
+        );
     }
 
     fn codex_environment(&self) -> Vec<(&'static str, PathBuf)> {
         let mut vars = Vec::new();
-        if let Some(command) = &self.codex_command {
+        if let Some(command) = self
+            .codex_runner
+            .lock()
+            .ok()
+            .and_then(|runner| runner.command.clone())
+        {
             vars.push(("BLOGBOT_CODEX_COMMAND", PathBuf::from(command)));
         }
         if let Some(home) = &self.codex_home {
             vars.push(("BLOGBOT_CODEX_HOME", home.clone()));
         }
         vars
+    }
+
+    /// A bridge with no discovered sidecar, used to exercise runner discovery
+    /// and diagnostic-log bounds without an AppHandle or a live engine.
+    #[cfg(test)]
+    fn for_local_test(
+        codex_command_probe: CodexCommandProbe,
+        diagnostic_log: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            executable: None,
+            fetcher_executable: None,
+            secure_restore_executable: None,
+            assets: None,
+            node_modules: None,
+            codex_runner: Mutex::new(CodexRunner {
+                command: None,
+                probed_at: None,
+            }),
+            codex_command_probe,
+            codex_home: None,
+            data_key_hex: Mutex::new(Vec::new()),
+            data_key_fallback_attempts: Mutex::new(0),
+            data_key_recovery_exhausted: AtomicBool::new(false),
+            stable_data_key_path: None,
+            diagnostic_log,
+            diagnostic_write_lock: Arc::new(Mutex::new(())),
+            process: Mutex::new(None),
+            request_sequence: AtomicU64::new(1),
+            last_error: Mutex::new(None),
+        }
     }
 }
 
@@ -1179,13 +1306,27 @@ mod tests {
         can_advance_data_key_candidate, should_attempt_data_key_fallback,
         should_promote_data_key_after_fallback,
         should_retry_after_transport_fault,
-        sidecar_environment_with, transport_error_for_request, PendingResponses,
-        MAINTENANCE_RESPONSE_TIMEOUT, RESPONSE_TIMEOUT, SHUTDOWN_DEADLINE,
-        STARTUP_RESPONSE_TIMEOUT, WINDOWS_CREATE_NO_WINDOW,
+        sidecar_environment_with, transport_error_for_request, EngineBridge, PendingResponses,
+        MAINTENANCE_RESPONSE_TIMEOUT, MAX_DIAGNOSTIC_LOG_BYTES, RESPONSE_TIMEOUT,
+        SHUTDOWN_DEADLINE, STARTUP_RESPONSE_TIMEOUT, WINDOWS_CREATE_NO_WINDOW,
     };
     use serde_json::json;
-    use std::path::Path;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-{label}-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        directory
+    }
 
     #[test]
     fn diagnostic_rotation_preserves_recent_log_segments() {
@@ -1375,30 +1516,134 @@ mod tests {
             .expect("second pending response");
 
         assert!(pending
-            .resolve_line(r#"{"id":"desktop-read-2","ok":true}"#)
+            .resolve_line(r#"{"version":1,"id":"desktop-read-2","ok":true}"#)
             .unwrap());
         assert_eq!(
             second
                 .recv_timeout(Duration::from_millis(50))
                 .unwrap()
                 .unwrap(),
-            r#"{"id":"desktop-read-2","ok":true}"#
+            r#"{"version":1,"id":"desktop-read-2","ok":true}"#
         );
         assert!(first.try_recv().is_err());
 
         assert!(pending
-            .resolve_line(r#"{"id":"desktop-read-1","ok":true}"#)
+            .resolve_line(r#"{"version":1,"id":"desktop-read-1","ok":true}"#)
             .unwrap());
         assert_eq!(
             first
                 .recv_timeout(Duration::from_millis(50))
                 .unwrap()
                 .unwrap(),
-            r#"{"id":"desktop-read-1","ok":true}"#
+            r#"{"version":1,"id":"desktop-read-1","ok":true}"#
         );
         assert!(!pending
-            .resolve_line(r#"{"id":"late-response","ok":true}"#)
+            .resolve_line(r#"{"version":1,"id":"late-response","ok":true}"#)
             .unwrap());
+    }
+
+    #[test]
+    fn responses_from_an_unsupported_protocol_version_never_reach_the_caller() {
+        let pending = PendingResponses::default();
+        let waiting = pending
+            .register("desktop-read-1")
+            .expect("pending response");
+
+        assert_eq!(
+            pending
+                .resolve_line(r#"{"version":2,"id":"desktop-read-1","ok":true}"#)
+                .expect_err("a newer protocol response must be refused"),
+            "ENGINE_PROTOCOL_VERSION_UNSUPPORTED"
+        );
+        assert_eq!(
+            pending
+                .resolve_line(r#"{"id":"desktop-read-1","ok":true}"#)
+                .expect_err("a response without a version must be refused"),
+            "ENGINE_PROTOCOL_VERSION_UNSUPPORTED"
+        );
+        // The reader thread converts this into fail_all, so the waiting caller
+        // must never be handed the unsupported payload as a success.
+        assert!(waiting.try_recv().is_err());
+    }
+
+    #[test]
+    fn automatic_backup_access_shares_the_bounded_maintenance_timeout() {
+        for kind in [
+            "backup.auto.list",
+            "backup.auto.verify",
+            "backup.auto.restore.preview",
+            "backup.auto.restore",
+        ] {
+            assert_eq!(
+                response_timeout_for_request(&json!({ "kind": kind }), true),
+                MAINTENANCE_RESPONSE_TIMEOUT,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn large_media_responses_do_not_expire_on_the_interactive_timeout() {
+        for kind in ["publication.broker.claim", "media.read"] {
+            assert_eq!(
+                response_timeout_for_request(&json!({ "kind": kind }), true),
+                MAINTENANCE_RESPONSE_TIMEOUT,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_runner_installed_after_launch_is_rediscovered_and_forces_a_fresh_spawn() {
+        let installed = Arc::new(Mutex::new(None::<String>));
+        let probed = Arc::clone(&installed);
+        let bridge = EngineBridge::for_local_test(
+            Box::new(move || probed.lock().expect("probe state").clone()),
+            None,
+        );
+
+        assert!(!bridge.refresh_codex_command_at(Instant::now()));
+        assert!(!bridge
+            .codex_environment()
+            .iter()
+            .any(|(key, _)| *key == "BLOGBOT_CODEX_COMMAND"));
+
+        *installed.lock().expect("probe state") = Some("C:\\tools\\codex.exe".to_string());
+        let after_interval = Instant::now() + Duration::from_secs(60);
+        assert!(
+            bridge.refresh_codex_command_at(after_interval),
+            "a newly resolved runner must request a fresh sidecar spawn"
+        );
+        assert_eq!(
+            bridge
+                .codex_environment()
+                .into_iter()
+                .find(|(key, _)| *key == "BLOGBOT_CODEX_COMMAND")
+                .map(|(_, value)| value),
+            Some(PathBuf::from("C:\\tools\\codex.exe"))
+        );
+    }
+
+    #[test]
+    fn bridge_diagnostic_events_stay_bounded_without_any_stderr_activity() {
+        let directory = temporary_directory("diagnostic-events");
+        let path = directory.join("engine.stderr.log");
+        let bridge = EngineBridge::for_local_test(Box::new(|| None), Some(path.clone()));
+
+        // A healthy session records one line per bridge request and the
+        // sidecar may never write stderr at all.
+        let event = "BRIDGE_REQUEST kind=state duration_ms=1 outcome=OK ".repeat(20);
+        for _ in 0..400 {
+            bridge.record_diagnostic_event(&event);
+        }
+
+        let live = std::fs::metadata(&path).expect("live diagnostic log").len();
+        assert!(
+            live <= MAX_DIAGNOSTIC_LOG_BYTES,
+            "live diagnostic log grew to {live} bytes"
+        );
+        assert!(diagnostic_log_variants(&path)[1].is_file());
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

@@ -55,6 +55,21 @@ async function advanceSetupToTarget(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Çıktı klasörünü seç", exact: true })).toBeVisible();
 }
 
+async function completeEditorialApprovalAttestation(page: Page): Promise<void> {
+  await page.getByRole("textbox", { name: "Sorumlu editörün adı" }).fill("Browser QA Editörü");
+  const sourceRoles = page.locator('[aria-label="Kaynak rol onayları"] input[type="checkbox"]');
+  const count = await sourceRoles.count();
+  expect(count).toBeGreaterThan(0);
+  for (let index = 0; index < count; index += 1) await sourceRoles.nth(index).check();
+}
+
+async function approveCurrentRevision(page: Page): Promise<void> {
+  await completeEditorialApprovalAttestation(page);
+  const approval = page.getByRole("button", { name: "Bu revizyonu onayla" });
+  await expect(approval).toBeEnabled();
+  await approval.click();
+}
+
 test.beforeEach(async ({ page }) => {
   collectRuntimeErrors(page);
 });
@@ -607,6 +622,16 @@ test("instant create shows source evidence readiness before selection", async ({
   await expect(page.getByRole("note")).toContainText("Seçtiğiniz 1 kaynak yayın kanıtı olmadan önce değerlendirilmelidir");
 });
 
+test("instant create explains the local visual fallback when ImageGen is unavailable", async ({ page }) => {
+  await page.goto("#instant");
+  await page.locator("details.optional-controls > summary").click();
+
+  await expect(page.getByRole("combobox", { name: "Görsel yaklaşımı" })).toHaveValue("GENERATE");
+  await expect(page.locator("#instant-visual-policy-hint")).toHaveText(
+    "Önce ImageGen denenir; kullanılamazsa veya üretim başarısız olursa yerel oluşturucu metinsiz kapak ve üç yayın oranı üretir."
+  );
+});
+
 test("dashboard refreshes the complete local workspace snapshot on demand", async ({ page }) => {
   await page.goto("#dashboard");
 
@@ -976,6 +1001,25 @@ test("backup setup guides the user through picker-backed create, verify, preview
   await expect(page.getByText("Geri yükleme tamamlandı: 0 dosya yeni klasöre çıkarıldı. Aktif çalışma alanı değiştirilmedi.", { exact: true })).toBeVisible();
 });
 
+test("automatic snapshot restore previews and explicitly replaces the live local database", async ({ page }) => {
+  await page.goto("#setup");
+  await page.getByRole("button", { name: /Yedekleme ve kurtarma/u }).click();
+
+  await page.getByRole("button", { name: "Snapshot'ları yenile" }).click();
+  await expect(page.getByText("1 yerel kurtarma snapshot'ı hazır.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Snapshot'ı doğrula" }).click();
+  await expect(page.getByText("Yerel kurtarma snapshot'ı doğrulandı: 2 tablo ve 3 satır.", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Yerel snapshot geri yüklemesini önizle" }).click();
+  await expect(page.getByText("Geri yükleme önizlemesi hazır: 2 tablo ve 3 satır mevcut yerel verinin yerini alacak; henüz hiçbir veri değiştirilmedi.", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Yerel veriyi geri yükle" }).click();
+  const confirmation = page.getByRole("alertdialog", { name: "Yerel verinin değiştirilmesini onayla" });
+  await expect(confirmation).toContainText("mevcut OPE yerel verisinin tamamının yerini alacak");
+  await confirmation.getByRole("button", { name: "Yerel veriyi geri yükle" }).click();
+  await expect(page.getByText("Yerel çalışma alanı geri yüklendi: 3 satır snapshot verisiyle değiştirildi.", { exact: true })).toBeVisible();
+});
+
 test("scanning sources makes queued research visible on the editorial desk before review is available", async ({ page }) => {
   await page.goto("#content");
   await page.getByRole("button", { name: "Tümünü tara" }).click();
@@ -1025,7 +1069,10 @@ test("a failed candidate research job explains why the editorial desk is empty a
 
 test("failed candidate guidance does not overlap its primary-source detail", async ({ page }) => {
   await page.goto("?state=candidate-draft-failed#content-candidates");
-  const source = page.getByText(/^Birincil kaynak:/u).first();
+  const failedCandidate = page.locator(".candidate-card").filter({
+    has: page.getByText(/Ara.t.rma ba.ar.s.z/u)
+  });
+  const source = failedCandidate.getByText(/Birincil kaynak:/u);
   const guidance = page.getByText(/Nedeni ve güvenli tekrar seçeneğini Operasyonlar’dan açın/u);
 
   const [sourceBox, guidanceBox] = await Promise.all([source.boundingBox(), guidance.boundingBox()]);
@@ -1042,6 +1089,22 @@ test("candidate triage explains that drafting is local and publication follows r
 
   await expect(page.getByText("Araştırmaya almak yerel kuyruğu başlatır; hemen yayın yapmaz.")).toBeVisible();
   await expect(page.getByText("Yayın yalnızca hazır taslağı inceledikten sonra başlar; insan onayı olmadan hiçbir içerik gönderilmez.")).toBeVisible();
+});
+
+test("candidate triage visibly compares all four measured ranking dimensions", async ({ page }) => {
+  await page.goto("#content-candidates");
+  const candidate = page.locator(".candidate-card").filter({
+    has: page.getByRole("heading", { name: "Resmî kurum yeni bir duyuru yayımladı" })
+  });
+
+  await expect(candidate.getByText("Kaynak yeterliliği", { exact: true })).toBeVisible();
+  await expect(candidate.getByText("Güncellik", { exact: true })).toBeVisible();
+  await expect(candidate.getByText("Özgünlük", { exact: true })).toBeVisible();
+  await expect(candidate.getByText("Konu uyumu", { exact: true })).toBeVisible();
+  await expect(candidate.getByText("100%", { exact: true })).toHaveCount(2);
+  await expect(candidate.getByText("85%", { exact: true })).toBeVisible();
+  await expect(candidate.getByText("82%", { exact: true })).toBeVisible();
+  await expect(candidate.getByText("Genel sıralama: 92%", { exact: true })).toBeVisible();
 });
 
 test("section and article-type labels avoid mechanical duplication", async ({ page }) => {
@@ -1321,7 +1384,7 @@ test("requesting a revision edit refreshes the durable draft inventory and retur
 
 test("an approved revision can request a new immutable revision instead of becoming permanently locked", async ({ page }) => {
   await page.goto("?state=publish-ready#editorial-review");
-  await page.getByRole("button", { name: "Bu revizyonu onayla" }).click();
+  await approveCurrentRevision(page);
 
   const edit = page.getByRole("button", { name: "Düzenleme iste" });
   await expect(edit).toBeEnabled();
@@ -1362,7 +1425,7 @@ test("review metadata is derived from the selected immutable revision", async ({
 });
 
 test("review content makes missing hero media actionable instead of showing a synthetic preview", async ({ page }) => {
-  await page.goto("#editorial-review");
+  await page.goto("?state=missing-media#editorial-review");
 
   await expect(page.getByText("Bu taslakta hero medya yok.")).toHaveCount(2);
   await expect(page.getByRole("button", { name: "Görseli hazırla" })).toHaveCount(2);
@@ -1379,10 +1442,24 @@ test("a short legacy review draft offers one-step comprehensive regeneration", a
   await expect(page.getByRole("button", { name: /Kapsamlı yeniden oluşturma işleniyor/u })).toBeVisible();
 });
 
+test("narrow embedded V3 review reaches comprehensive regeneration without forced interaction", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("#editorial-review");
+
+  const embeddedWorkspace = page.locator(".review-page-embedded");
+  await expect(embeddedWorkspace).toBeVisible();
+  const regenerate = embeddedWorkspace.getByRole("button", { name: "Kapsamlı yeniden oluştur" });
+  await regenerate.click();
+
+  await expect(page.getByRole("tab", { name: /Taslaklar/u })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: /Kapsamlı yeniden oluşturma işleniyor/u })).toBeVisible();
+});
+
 test("review approval remains hash-bound and requires a selected local target before materialization", async ({ page }) => {
   await page.goto("#editorial-review");
 
   const approval = page.getByRole("button", { name: "Bu revizyonu onayla" });
+  await completeEditorialApprovalAttestation(page);
   await expect(approval).toBeEnabled();
   await approval.click();
   await expect(page.getByRole("status")).toContainText("Revizyon onaylandı");
@@ -1394,7 +1471,7 @@ test("review approval remains hash-bound and requires a selected local target be
 test("revision approval refreshes the review queue instead of leaving a stale pending count", async ({ page }) => {
   await page.goto("?state=approval-refresh#editorial-review");
   await expect(page.getByText("2 açık revizyon")).toBeVisible();
-  await page.getByRole("button", { name: "Bu revizyonu onayla" }).click();
+  await approveCurrentRevision(page);
 
   await expect(page.getByRole("status")).toContainText("Revizyon onaylandı");
   await expect(page.getByText("1 açık revizyon")).toBeVisible();
@@ -1415,7 +1492,7 @@ test("high-risk approval requires reauthentication acknowledgement and refreshes
 
 test("an approved revision keeps remote publication unavailable until the GitHub broker is configured", async ({ page }) => {
   await page.goto("?state=publish-ready#editorial-review");
-  await page.getByRole("button", { name: "Bu revizyonu onayla" }).click();
+  await approveCurrentRevision(page);
   await expect(page.getByRole("button", { name: "Yayın kuyruğuna al" })).toHaveCount(0);
   await expect(page.getByText("GitHub yayın bağlantısı henüz hazır değil. Bu revizyonu şimdi onaylayabilir; bağlantı doğrulanınca aynı onaylı paketi hedefe gönderebilirsiniz.")).toBeVisible();
 });
@@ -1428,7 +1505,7 @@ test("publication setup does not offer a misleading remote queue before the GitH
 });
 
 test("saved local output target unlocks approved revision materialization", async ({ page }) => {
-  await page.goto("#setup");
+  await page.goto("?state=materialization-ready#setup");
   await page.getByRole("button", { name: /Yayın bağlantısı: Yerel klasör, proje veya GitHub hedefini/u }).click();
   const localOutput = page.getByRole("group", { name: "Çıktı klasörü" });
   await localOutput.getByRole("button", { name: "Bilgisayardan klasör seç" }).click();
@@ -1436,7 +1513,7 @@ test("saved local output target unlocks approved revision materialization", asyn
   await expect(localOutput.getByRole("status")).toContainText("Kurulum alanları demo çalışma alanında doğrulandı.");
 
   await page.goto("#editorial-review");
-  await page.getByRole("button", { name: "Bu revizyonu onayla" }).click();
+  await approveCurrentRevision(page);
   const materialize = page.getByRole("button", { name: /Onaylı paketi seçili klasöre yaz/u });
   await expect(materialize).toBeEnabled();
   await materialize.click();
@@ -1444,6 +1521,7 @@ test("saved local output target unlocks approved revision materialization", asyn
   await expect(materializeConfirmation).toContainText("Mevcut OPE çıktıları güvenli bir yedeğe alınır;");
   await materializeConfirmation.getByRole("button", { name: "Dosyaları yerel hedefe yaz" }).click();
   await expect(page.getByRole("status")).toContainText("dosya yerel proje klasörüne yazıldı");
+  await expect(page.getByRole("status")).toContainText(/^5 /u);
 });
 
 test("local write confirmation traps focus on the safe action and returns it when cancelled", async ({ page }) => {
@@ -1454,7 +1532,7 @@ test("local write confirmation traps focus on the safe action and returns it whe
   await localOutput.getByRole("button", { name: "Bu ayarı kaydet" }).click();
 
   await page.goto("#editorial-review");
-  await page.getByRole("button", { name: "Bu revizyonu onayla" }).click();
+  await approveCurrentRevision(page);
   const materialize = page.getByRole("button", { name: /Onaylı paketi seçili klasöre yaz/u });
   await materialize.click();
   const confirmation = page.getByRole("alertdialog", { name: "Yerel dosya yazımını onayla" });
@@ -1774,6 +1852,21 @@ test("every desktop workspace exposes bounded, named controls without actionable
     expect(report.unnamed, `${route}: visible controls need an accessible name`).toEqual([]);
     expect(report.collisions, `${route}: actionable controls overlap`).toEqual([]);
   }
+});
+
+test("an approved revision can revoke its exact approval before publication", async ({ page }) => {
+  await page.goto("#editorial-review");
+  await approveCurrentRevision(page);
+  await expect(page.getByRole("status")).toContainText("Revizyon onaylandı");
+
+  await page.getByRole("button", { name: "Onayı geri çek" }).click();
+  await page.getByRole("textbox", { name: "Onayı geri çekme gerekçesi" }).fill("Kaynak doğrulaması yeniden yapılacak.");
+  await page.getByRole("button", { name: "Geri çekmeyi onayla" }).click();
+  const confirmation = page.getByRole("alertdialog", { name: "Revizyon onayını geri çek" });
+  await confirmation.getByRole("button", { name: "Onayı geri çek" }).click();
+
+  await expect(page.getByRole("status")).toContainText("Revizyon onayı geri çekildi");
+  await expect(page.getByRole("button", { name: "Bu revizyonu onayla" })).toBeVisible();
 });
 
 test("mobile About opens above the fixed utility navigation without overflow", async ({ page }) => {

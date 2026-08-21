@@ -56,6 +56,9 @@ export interface FetchedSource {
   body: Uint8Array;
 }
 
+export const MAX_FETCH_TIMEOUT_MS = 30_000;
+export const MAX_FETCH_RESPONSE_BYTES = 2_000_000;
+
 const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 const defaultAllowedContentTypes = [
   "text/html",
@@ -110,6 +113,15 @@ export async function fetchSource(
   const timeoutMs = options.timeoutMs ?? 8_000;
   const maxBytes = options.maxBytes ?? 2_000_000;
   const maxRedirects = options.maxRedirects ?? 5;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_FETCH_TIMEOUT_MS) {
+    throw new RangeError(`source timeout must be within 1..${MAX_FETCH_TIMEOUT_MS} ms`);
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_FETCH_RESPONSE_BYTES) {
+    throw new RangeError(`source max bytes must be within 1..${MAX_FETCH_RESPONSE_BYTES}`);
+  }
+  if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 10) {
+    throw new RangeError("source redirect bound must be within 0..10");
+  }
   const allowedContentTypes = new Set(
     options.allowedContentTypes ?? defaultAllowedContentTypes
   );
