@@ -40,7 +40,7 @@ test("art direction blocks remote assets and unsupported brand or person depicti
   );
 });
 
-test("SVG intermediate escapes injected markup and contains no remote references", () => {
+test("SVG intermediate excludes injected markup and contains no remote references", () => {
   const svg = buildSafeCoverSvg({
     title: '<script src="https://evil.example/x.js">x</script>',
     palette: ["#08131f", "#32d3a6"],
@@ -51,7 +51,7 @@ test("SVG intermediate escapes injected markup and contains no remote references
   }, { width: 1600, height: 900 });
 
   assert.doesNotMatch(svg, /<script|(?:href|src)=["']https?:\/\//i);
-  assert.match(svg, /&lt;script/);
+  assert.doesNotMatch(svg, /script|evil\.example/i);
 });
 
 test("local fallback cover is a text-free visual and never stamps article data into pixels", () => {
