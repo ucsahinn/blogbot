@@ -3184,7 +3184,8 @@ async function handleLocalWorkflowCommand(
           progressStage: researchSnapshot.status === "READY" ? "RESEARCH_COMPLETE" : "RESEARCH_NEEDS_SOURCE",
           researchSnapshot
         }
-      }));      codex = await options.codexCoordinator.submit({
+      }));
+      codex = await options.codexCoordinator.submit({
         jobId: draftId,
         idempotencyKey: `draft:${idempotencyKey}`,
         definitionId: "DRAFT.CREATE",
