@@ -62,6 +62,7 @@ jobs:
       # `check:all` is not reused here because Gitleaks runs in the required
       # same-workflow Linux `secret-scan` job above, while this job owns the
       # remaining release checks and Windows-only packaging.
+      - run: npm.cmd run build:engine
       - run: npm.cmd run test:all
       - run: npm.cmd run lint
       - run: npm.cmd run typecheck
@@ -71,13 +72,12 @@ jobs:
       - run: npm.cmd audit --audit-level=high --offline
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: npm.cmd run security:rust
-      - run: npm.cmd run build:engine
       - run: npm.cmd run smoke:engine
       - run: npm.cmd run smoke:fetcher
       - run: npm.cmd run native:test
       - run: npm.cmd run native:lint
       - name: Build unsigned desktop installer
-        run: npm.cmd run build:desktop
+        run: npm.cmd run build:desktop -- --prepared-sidecars
       - name: Verify packaged installer inputs
         run: npm.cmd run desktop:preflight -- --artifacts-dir apps/desktop/src-tauri/target/release/bundle
       - name: Create unsigned updater manifest

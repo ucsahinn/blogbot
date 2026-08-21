@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { createInvokeBridge } from "../../apps/desktop/src/bridge.ts";
 import { createDemoTransport } from "../../apps/desktop/src/demo-data.ts";
 import { runDesktopPreflight } from "../../scripts/desktop-preflight.mjs";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
+const execFile = promisify(execFileCallback);
 
 test("prerequisite wizard snapshot is unique, actionable, and scope-aware", async () => {
   const bridge = createInvokeBridge(createDemoTransport());
@@ -203,6 +207,47 @@ test("desktop production build invokes Tauri after preparing the local engine", 
   );
   assert.doesNotMatch(desktopBuildScript, /--no-bundle/u, "release packaging must generate the configured MSI and NSIS installers");
   assert.match(desktopBuildScript, /WIX_TEMP/u, "Windows MSI packaging must use an app-owned writable WiX temporary directory");
+});
+
+test("desktop build validates prepared sidecars without rebuilding them", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "blogbot-desktop-build-plan-"));
+  const fakeNpmCli = join(temporaryRoot, "fake-npm.mjs");
+  const commandLog = join(temporaryRoot, "commands.jsonl");
+  await writeFile(
+    fakeNpmCli,
+    [
+      'import { appendFile } from "node:fs/promises";',
+      'await appendFile(process.env.BLOGBOT_DESKTOP_BUILD_COMMAND_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");'
+    ].join("\n"),
+    "utf8"
+  );
+
+  try {
+    await execFile(
+      process.execPath,
+      [join(repositoryRoot, "scripts", "build-desktop.mjs"), "--prepared-sidecars"],
+      {
+        cwd: repositoryRoot,
+        env: {
+          ...process.env,
+          npm_execpath: fakeNpmCli,
+          BLOGBOT_DESKTOP_BUILD_COMMAND_LOG: commandLog
+        },
+        windowsHide: true
+      }
+    );
+    const commands = (await readFile(commandLog, "utf8"))
+      .trim()
+      .split(/\r?\n/u)
+      .map((line) => JSON.parse(line) as string[]);
+
+    assert.deepEqual(commands, [
+      ["run", "desktop:preflight:json"],
+      ["run", "tauri", "--workspace", "@blogbot/desktop", "--", "build", "--", "--bin", "blogbot"]
+    ]);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("root Tauri development command delegates to the desktop workspace", async () => {
@@ -499,6 +544,34 @@ test("desktop release gates publication on a same-run pinned Gitleaks scan", asy
     /secret-scan:[\s\S]*?permissions:\r?\n\s+contents:\s*read[\s\S]*?actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683[\s\S]*?fetch-depth:\s*0[\s\S]*?gitleaks\/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc/u
   );
   assert.match(releaseWorkflow, /release:\s*\r?\n\s+needs:\s*secret-scan/u);
+});
+
+test("desktop release prepares Windows sidecars before tests assert clean-machine inputs", async () => {
+  const releaseWorkflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+  const buildEngineIndex = releaseWorkflow.indexOf("npm.cmd run build:engine");
+  const testAllIndex = releaseWorkflow.indexOf("npm.cmd run test:all");
+
+  assert.notEqual(buildEngineIndex, -1, "release workflow must build the Windows sidecars");
+  assert.notEqual(testAllIndex, -1, "release workflow must run the complete Node test suite");
+  assert.ok(
+    buildEngineIndex < testAllIndex,
+    "release workflow must prepare sidecars before Windows packaging-readiness tests"
+  );
+});
+
+test("desktop release packages prepared sidecars without rebuilding them", async () => {
+  const releaseWorkflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+
+  assert.match(
+    releaseWorkflow,
+    /run: npm\.cmd run build:desktop -- --prepared-sidecars/u
+  );
 });
 
 test("desktop release pins the generated tag to the dispatched commit", async () => {

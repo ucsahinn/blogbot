@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const wixTemp = resolve(tmpdir(), "blogbot-wix-temp");
 const npmCli = process.env.npm_execpath;
+const preparedSidecars = process.argv.slice(2).includes("--prepared-sidecars");
 
 if (!npmCli) {
   throw new Error("npm_execpath is required to run the repository package scripts safely.");
@@ -27,7 +28,12 @@ function run(command, args, environment = process.env) {
   });
 }
 
-await run(process.execPath, [npmCli, "run", "build:engine"]);
+await run(
+  process.execPath,
+  preparedSidecars
+    ? [npmCli, "run", "desktop:preflight:json"]
+    : [npmCli, "run", "build:engine"]
+);
 
 const environment = process.platform === "win32"
   ? { ...process.env, WIX_TEMP: process.env.WIX_TEMP?.trim() || wixTemp }
