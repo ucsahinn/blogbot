@@ -75,7 +75,8 @@ export function bobyGuidancePollDelay(
  * Local guidance is a deliberately separate offline fallback in the panel.
  */
 export function shouldUseLocalBobyShortcut(question: string): boolean {
-  return question.trim().length > 0;
+  void question;
+  return false;
 }
 
 /**

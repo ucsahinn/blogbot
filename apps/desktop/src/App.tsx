@@ -91,7 +91,12 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         // Doctor owns the initial runtime boundary. Reading the workspace
         // before it completes sees DesktopState's conservative offline default
         // and briefly paints a false red Operations health card.
-        const coalescingBridge = createCoalescingBridge(runtimeBridge);
+        // Candidate projections can require a bounded database scan. Reusing
+        // the just-read local snapshot during the 750 ms recovery pass avoids
+        // a second 3–5 second scan and the visible busy cursor it caused.
+        // Keep this shorter than the queue poll cadence so an accepted draft
+        // can never be hidden behind a stale projection.
+        const coalescingBridge = createCoalescingBridge(runtimeBridge, { completedSnapshotFreshnessMs: { bootstrap: 1_500, workspace: 1_000 } });
         const initialSnapshot = await withBootstrapTimeout(coalescingBridge.getBootstrapSnapshot());
         const initialWorkspace = await withBootstrapTimeout(coalescingBridge.getEditorialWorkspace());
         if (alive) {

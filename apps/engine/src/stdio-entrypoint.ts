@@ -3958,9 +3958,11 @@ export async function resolveCandidateSourceUrl(
  * retry budget are both such conditions, and so is an isolation rejection —
  * `CODEX_PROTOCOL_REJECTED` means the runner refused an event the task tried to
  * perform. Untrusted source text can be exactly what produced that attempt, so
- * replaying it would silently re-execute the same prompt on every start. The
- * genuinely resumable waits (authentication, rate and usage limits) stay
- * replayable.
+ * replaying it would silently re-execute the same prompt on every start. A
+ * local CLI incompatibility is different: it is normally resolved by updating
+ * the desktop app or Codex itself, so a restart should recover the durable work
+ * without asking the editor to recreate it. The genuinely resumable waits
+ * (authentication, rate and usage limits) stay replayable as well.
  */
 export function isFinalCodexStopCondition(job: BackendJob): boolean {
   if (job.state !== "WAITING_CODEX") return false;
@@ -3968,8 +3970,7 @@ export function isFinalCodexStopCondition(job: BackendJob): boolean {
   return metadata.codexWaitReason === "RUNNER_TIMEOUT"
     || metadata.codexWaitReason === "RETRY_LIMIT_REACHED"
     || metadata.codexWaitReason === "PAID_FALLBACK_DISABLED"
-    || metadata.codexDiagnosticCode === "CODEX_PROTOCOL_REJECTED"
-    || metadata.codexDiagnosticCode === "CODEX_CLI_UNSUPPORTED";
+    || metadata.codexDiagnosticCode === "CODEX_PROTOCOL_REJECTED";
 }
 
 async function updateJobWithCas(

@@ -106,13 +106,15 @@ export function EditorialDesk({
         // false failure. Manual refresh and Operations remain available.
       }
     };
-    // Workspace reads include the local candidate projection. Polling every
-    // five seconds made a busy draft turn navigation into a stream of full
-    // database reads. The engine now bounds and briefly caches that projection;
-    // this calmer cadence keeps progress visible without competing with it.
+    // Native engines announce durable changes immediately. A single follow-up
+    // check also covers a bridge that cannot emit that event (for example an
+    // interrupted desktop session) without returning to a costly five-second
+    // full-workspace poll while a draft is running.
+    const initialCheck = window.setTimeout(() => void refreshActiveDrafts(), 1_200);
     const timer = window.setInterval(() => void refreshActiveDrafts(), EDITORIAL_DRAFT_POLL_MS);
     return () => {
       cancelled = true;
+      window.clearTimeout(initialCheck);
       window.clearInterval(timer);
     };
   }, [activeDraftSignature, bridge, onWorkspaceChange, tab]);

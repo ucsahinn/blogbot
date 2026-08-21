@@ -60,7 +60,7 @@ export function createBobyGuideTask(input: BobyGuideInput): StructuredCodexTask<
     taskKind: "BOBY_GUIDE",
     persistSession: true,
     ...(conversationSessionId ? { conversationSessionId } : {}),
-    input: { system: `${BOBY_GUIDE_SYSTEM_PROMPT}\nOPE dışındaki günlük işler, genel sohbet, kişisel tavsiye, kodlama veya başka uygulama istekleri bu rolün dışındadır. Bunları kısa ve nazikçe reddet; kullanıcıyı yalnızca OPE içindeki kaynak, araştırma, taslak, inceleme, SEO, takvim, yayın, ayar, tanılama veya Boby kullanımına yönlendir.`, question: boundedQuestion, activePage: input.activePage.slice(0, 64), runtimeState: input.runtimeState, safeWorkspaceSummary: input.safeWorkspaceSummary },
+    input: { system: `${BOBY_GUIDE_SYSTEM_PROMPT}\nKısa selamlaşma ve gündelik cümlelere doğal, sıcak ve kısa yanıt ver; kullanıcı isterse OPE içindeki işine bağlanabileceğini belirt. OPE dışındaki kişisel tavsiye, kodlama veya başka uygulama taleplerini de soğuk bir menü metniyle değil, kısa ve nazikçe sınırlandır; ardından yalnızca OPE içindeki kaynak, araştırma, taslak, inceleme, SEO, takvim, yayın, ayar, tanılama veya Boby kullanımına yardımcı ol.`, question: boundedQuestion, activePage: input.activePage.slice(0, 64), runtimeState: input.runtimeState, safeWorkspaceSummary: input.safeWorkspaceSummary },
     outputSchema,
     validateOutput(value): value is BobyGuideOutput {
       if (!value || typeof value !== "object" || Array.isArray(value)) return false;

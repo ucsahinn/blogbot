@@ -92,9 +92,9 @@ test("Editor Boby answers immediately in-panel without starting a queued task", 
   await page.goto("#dashboard");
   await page.getByRole("button", { name: "Editör Boby'yi aç" }).click();
   const boby = page.getByRole("dialog", { name: "Editör Boby" });
-  await expect(boby).toContainText("Konuşma bu panelde kalır");
+  await expect(boby).toContainText("Boby doğrudan yanıtlar ve gerekirse seni doğru yere götürür");
   await boby.getByRole("button", { name: "Kaynak ekle" }).click();
-  await expect(boby).toContainText("Kaynak eklemek için İçerik Akışı'nı aç");
+  await expect(boby).toContainText("Kaynağı İçerik Akışı'nda ekle");
   await expect(boby.getByRole("textbox", { name: "Boby'ye sor" })).toBeEnabled();
   await expect(boby).not.toContainText("Boby düşünüyor");
   await expect(boby).not.toContainText("sırada");
@@ -108,12 +108,12 @@ test("Editor Boby gives distinct in-panel guidance for two different questions",
 
   await question.fill("Kaynak nasıl eklenir?");
   await boby.getByRole("button", { name: "Sor" }).click();
-  await expect(boby).toContainText("Kaynak eklemek için İçerik Akışı'nı aç");
+  await expect(boby).toContainText("Kaynağı İçerik Akışı'nda ekle");
   await expect(question).toBeEnabled();
 
   await question.fill("Bu konu için post hazırla");
   await boby.getByRole("button", { name: "Sor" }).click();
-  await expect(boby).toContainText("Taslak için adaydan Taslak oluştur'u seç");
+  await expect(boby).toContainText("Bu konu için Yeni Taslak'ta kısa editoryal talimatı ve kaynakları seç");
 });
 
 test("Boby preserves its conversation when closed and reopened after navigation", async ({ page }) => {
@@ -489,10 +489,9 @@ test("weekly calendar lets every day use a preset or an explicit custom publishi
   await expect(page.getByText("Pazartesi için haftalık yayın slotu güncellendi.")).toBeVisible();
 });
 
-test("weekly calendar suggests a modest SEO cadence without assigning approved posts", async ({ page }) => {
+test("weekly calendar keeps legacy assignments visible without a separate SEO recommendation action", async ({ page }) => {
   await page.goto("#publishing");
-  await page.getByRole("button", { name: "Dengeli SEO saatlerini öner" }).click();
-  await expect(page.getByText("3 dengeli SEO slotu yerel takvime uygulandı.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Dengeli SEO saatlerini öner" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Perşembe · 1. slot: Takvimde bu slotu düzenle" }).click();
   const thursday = page.getByRole("article", { name: "Perşembe · 1. slot yayın slotu" });
@@ -1102,6 +1101,22 @@ test("candidate triage presents a simple priority, source date, and accessible b
   await expect(page.getByRole("button", { name: "Seçimi temizle" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Seçilmiş adayları araştır" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Seçilenleri kapat" })).toBeVisible();
+});
+
+test("bulk research accepts every eligible selected candidate into the local queue", async ({ page }) => {
+  await page.goto("#content-candidates");
+
+  const selectable = page.getByRole("checkbox", { name: /adayını seç/u });
+  const eligibleCount = await selectable.count();
+  expect(eligibleCount).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "Görünenleri seç" }).click();
+  await expect(page.getByText(`${eligibleCount} aday seçildi`, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Seçilmiş adayları araştır" }).click();
+
+  await expect(page.getByText(`${eligibleCount} aday araştırma kuyruğuna alındı.`, { exact: true })).toBeVisible();
+  await expect(page.getByText("0 aday seçildi", { exact: true })).toBeVisible();
+  await expect(page.getByText("Araştırma kuyruğunda", { exact: true })).toHaveCount(eligibleCount);
 });
 
 test("section and article-type labels avoid mechanical duplication", async ({ page }) => {

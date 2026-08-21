@@ -18,19 +18,22 @@ test("Boby is ready as an immediate local guide in every runtime state", () => {
   }
 });
 
-test("Boby answers every non-empty editor question locally without waiting for a runner", () => {
-  assert.equal(shouldUseLocalBobyShortcut("naber"), true);
-  assert.equal(shouldUseLocalBobyShortcut("bu konu hakkında ne düşünüyorsun?"), true);
-  assert.equal(shouldUseLocalBobyShortcut("kaynak nasıl eklenir?"), true);
+test("Boby reserves local shortcuts for an unavailable Luna session", () => {
+  assert.equal(shouldUseLocalBobyShortcut("naber"), false);
+  assert.equal(shouldUseLocalBobyShortcut("bu konu hakkında ne düşünüyorsun?"), false);
+  assert.equal(shouldUseLocalBobyShortcut("kaynak nasıl eklenir?"), false);
   assert.equal(shouldUseLocalBobyShortcut("   "), false);
   assert.match(localBobyReply("Kaynak nasıl eklenir?", "content"), /Kaynak/iu);
   assert.doesNotMatch(localBobyReply("bu konu hakkında ne düşünüyorsun?", "content"), /canlı bağlantı/iu);
 });
 
-test("Boby panel has no login, queue, or durable-polling path", async () => {
+test("Boby panel uses the existing Luna conversation bridge when it is ready", async () => {
   const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");
 
-  assert.match(assistant, /text: localBobyReply\(question, activePage\)/u);
+  assert.match(assistant, /requestBobyGuidance/u);
+  assert.match(assistant, /getBobyGuidance/u);
+  assert.match(assistant, /suggestedActions/u);
   assert.match(assistant, /Merhaba, ben Boby/u);
-  assert.doesNotMatch(assistant, /requestBobyGuidance|getBobyGuidance|testCodexRuntime|startCodexLogin|pendingGuidanceId|Yerel sırada/u);
+  assert.match(assistant, /localBobyReply/u);
+  assert.doesNotMatch(assistant, /Yerel sırada/u);
 });

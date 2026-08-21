@@ -45,7 +45,7 @@ test("Boby never forwards a session name or path-like value as an app-owned Code
   }
 });
 
-test("Boby's scope guardrail reaches Codex as readable Turkish", () => {
+test("Boby accepts light chat and keeps non-editorial requests inside a friendly boundary", () => {
   const task = createBobyGuideTask({
     question: "Kaynak nasıl eklenir?",
     activePage: "dashboard",
@@ -56,8 +56,8 @@ test("Boby's scope guardrail reaches Codex as readable Turkish", () => {
 
   // This instruction was stored as UTF-8 bytes decoded as Latin-1, so the
   // guardrail Codex actually received was mojibake ("dÄ±ÅŸÄ±ndaki").
-  assert.match(system, /OPE dışındaki günlük işler/u);
-  assert.match(system, /kısa ve nazikçe reddet/u);
+  assert.match(system, /Kısa selamlaşma ve gündelik cümlelere doğal, sıcak ve kısa yanıt ver/u);
+  assert.match(system, /kısa ve nazikçe sınırlandır/u);
   assert.doesNotMatch(
     system,
     /Ä±|ÅŸ|Ã¼|Ã§|Ã¶|ÄŸ/u,

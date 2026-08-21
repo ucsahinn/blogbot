@@ -5763,7 +5763,7 @@ strong {
 
 .slot-card-active {
   grid-column: 1 / -1;
-  order: 2;
+  order: -1;
 }
 
 .slot-time-field {

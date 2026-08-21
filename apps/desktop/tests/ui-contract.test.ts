@@ -31,8 +31,9 @@ test("Boby is a persistent local editor guide with a keyboard-accessible convers
   assert.match(shell, /onOpenBoby/u);
   assert.match(assistant, /describeBobyAvailability/u);
   assert.match(assistant, /boby-availability/u);
+  assert.match(assistant, /requestBobyGuidance|getBobyGuidance/u);
   assert.match(assistant, /text: localBobyReply\(question, activePage\)/u);
-  assert.doesNotMatch(assistant, /requestBobyGuidance|getBobyGuidance|testCodexRuntime|startCodexLogin/u);
+  assert.doesNotMatch(assistant, /testCodexRuntime|startCodexLogin/u);
 });
 
 test("notifications use local feedback sounds without speech synthesis", async () => {
@@ -222,6 +223,8 @@ test("compact desktop turns the editable weekly calendar into an operable grid i
     /@media \(max-width: 1100px\)[\s\S]*?\.week-grid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)[\s\S]*?overflow-x:\s*visible/u
   );
   assert.match(publishing, /activeSlotId/u);
+  assert.doesNotMatch(publishing, /recommendBalancedSeoSlots/u);
+  assert.match(styles, /\.slot-card-active\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1[\s\S]*?order:\s*-1/u);
   assert.match(publishing, /Takvimde bu slotu düzenle/u);
 });
 

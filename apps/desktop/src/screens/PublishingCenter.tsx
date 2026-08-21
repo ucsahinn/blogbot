@@ -5,7 +5,6 @@ import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
 import { sectionLabel, slotStateLabel } from "../app-model.ts";
 import {
   PREFERRED_PUBLISHING_TIMES,
-  recommendBalancedSeoSlots,
   resolveScheduleTime,
   scheduleTimeChoice,
   type ScheduleTimeChoice
@@ -65,7 +64,6 @@ export function PublishingCenter({
   const [busyId, setBusyId] = useState("");
   const [message, setMessage] = useState("");
   const [refreshing, setRefreshing] = useState(false);
-  const [suggestingSeoSlots, setSuggestingSeoSlots] = useState(false);
   const [slotDrafts, setSlotDrafts] = useState<Record<string, SlotDraft>>({});
   const [activeSlotId, setActiveSlotId] = useState("");
   const refreshRequestId = useRef(0);
@@ -147,28 +145,6 @@ export function PublishingCenter({
     }
   };
 
-  const suggestSeoSlots = async () => {
-    const recommendations = recommendBalancedSeoSlots(workspace.weeklySlots);
-    if (recommendations.length === 0) {
-      setMessage("Atanmamış uygun slot bulunamadı; mevcut editoryal plan korunuyor.");
-      return;
-    }
-    setSuggestingSeoSlots(true);
-    setMessage("");
-    try {
-      await Promise.all(recommendations.map((recommendation) => bridge.updateScheduleSlot({
-        ...recommendation,
-        articleId: null,
-        articleTitle: null
-      })));
-      onWorkspaceChange(await bridge.getEditorialWorkspace());
-      setMessage(`${recommendations.length} dengeli SEO slotu yerel takvime uygulandı.`);
-    } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "SEO saat önerisi kaydedilemedi."));
-    } finally {
-      setSuggestingSeoSlots(false);
-    }
-  };
 
   return (
     <div className="page hub-page">
@@ -184,10 +160,7 @@ export function PublishingCenter({
           ) : null}
         </div>
         <div className="page-header-actions">
-          <button className="button button-secondary" type="button" disabled={readOnly || suggestingSeoSlots} onClick={() => void suggestSeoSlots()}>
-            {suggestingSeoSlots ? "SEO saatleri uygulanıyor…" : "Dengeli SEO saatlerini öner"}
-          </button>
-        <button className="button button-secondary" type="button" disabled={refreshing} onClick={() => void refresh()}>
+          <button className="button button-secondary" type="button" disabled={refreshing} onClick={() => void refresh()}>
           {refreshing ? "Yenileniyor…" : "Takvim durumunu yenile"}
         </button>
         </div>

@@ -28,7 +28,11 @@ test("application startup keeps the setup path available when connector state ca
 test("application bootstrap renders the local workspace before a slow connector read completes", async () => {
   const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
 
-  assert.match(appSource, /const coalescingBridge = createCoalescingBridge\(runtimeBridge\);/u);
+  assert.match(
+    appSource,
+    /const coalescingBridge = createCoalescingBridge\(runtimeBridge, \{ completedSnapshotFreshnessMs: \{ bootstrap: 1_500, workspace: 1_000 \} \}\);/u,
+    "slow local candidate projections must be briefly reused during startup reconciliation"
+  );
   assert.match(appSource, /const initialSnapshot = await withBootstrapTimeout\(coalescingBridge\.getBootstrapSnapshot\(\)\);[\s\S]*?const initialWorkspace = await withBootstrapTimeout\(coalescingBridge\.getEditorialWorkspace\(\)\);/u);
   assert.match(appSource, /setConnectorState\(fallbackConnectorState\);/u);
   assert.match(
