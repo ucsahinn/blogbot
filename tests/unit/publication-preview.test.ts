@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { buildPublicationPreview } from "../../apps/engine/src/publication-preview.ts";
+import { buildPublicationPreview, comparePublicationPaths } from "../../apps/engine/src/publication-preview.ts";
 
 test("publication preview hashes an immutable engine media reference without inlining bytes", () => {
   const tr = "Türkçe içerik";
@@ -59,4 +59,20 @@ test("publication preview hashes an immutable engine media reference without inl
   });
 
   assert.match(preview.previewHash, /^[a-f0-9]{64}$/u);
+});
+
+test("publication preview path ordering is UTF-8 byte stable and never locale-driven", () => {
+  const paths = ["public/images/ı.webp", "public/images/I.webp", "public/images/é.webp", "public/images/z.webp"];
+  const expected = [...paths].sort((left, right) =>
+    Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))
+  );
+  const original = String.prototype.localeCompare;
+  String.prototype.localeCompare = () => {
+    throw new Error("host locale must not participate in an immutable digest");
+  };
+  try {
+    assert.deepEqual([...paths].sort(comparePublicationPaths), expected);
+  } finally {
+    String.prototype.localeCompare = original;
+  }
 });

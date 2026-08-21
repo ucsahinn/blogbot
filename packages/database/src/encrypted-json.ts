@@ -2,6 +2,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   randomBytes
 } from "node:crypto";
 
@@ -16,6 +17,13 @@ export interface EncryptedJsonEnvelopeV1 {
 export interface EncryptedJsonEnvelopeV2 {
   v: 2;
   alg: "A256GCM";
+  /**
+   * Truncated key identifier. Without it a failed open cannot say whether the
+   * row was written under a different data key or was tampered with, which is
+   * the difference between "restore the key" and "this database is corrupt".
+   * Optional because rows sealed before it existed stay readable.
+   */
+  kid?: string;
   iv: string;
   tag: string;
   ciphertext: string;
@@ -28,10 +36,16 @@ export interface EncryptionContext {
 }
 
 export class JsonProtector {
+  private readonly keyId: string;
+
   constructor(private readonly key: Buffer) {
     if (key.length !== 32) {
       throw new Error("LOCAL_DATA_KEY_INVALID: AES-256-GCM requires 32 bytes");
     }
+    this.keyId = createHmac("sha256", key)
+      .update("blogbot-encrypted-json-key-id")
+      .digest("hex")
+      .slice(0, 16);
   }
 
   static fromEnvironment(): JsonProtector {
@@ -60,6 +74,7 @@ export class JsonProtector {
     return {
       v: 2,
       alg: "A256GCM",
+      kid: this.keyId,
       iv: iv.toString("base64"),
       tag: cipher.getAuthTag().toString("base64"),
       ciphertext: ciphertext.toString("base64")
@@ -70,13 +85,33 @@ export class JsonProtector {
     if (!isEncryptedEnvelopeV2(value)) {
       throw new Error("LOCAL_DATA_ENVELOPE_INVALID");
     }
+    if (value.kid !== undefined && value.kid !== this.keyId) {
+      throw new Error("LOCAL_DATA_KEY_MISMATCH");
+    }
     return this.openEnvelopeV2<T>(value, context);
   }
 
-  openLegacy<T>(value: unknown): T {
-    return isEncryptedEnvelopeV1(value)
+  /**
+   * Reads a row written before the identity-bound v2 envelope existed. A legacy
+   * plaintext row carries no proof of origin at all, so resealing whatever the
+   * column happens to hold would turn arbitrary injected JSON into data that
+   * passes every later authenticity check. The caller must therefore say what
+   * shape it expects, and a v2 envelope is never unwrapped here: a v2 row
+   * belongs to `open`, which verifies its identity binding.
+   */
+  openLegacy<T>(value: unknown, isExpectedRecord: (candidate: unknown) => boolean): T {
+    if (isEncryptedEnvelopeV2(value)) {
+      throw new Error(
+        "LOCAL_DATA_LEGACY_UNVERIFIABLE: a v2 envelope cannot be resealed through the legacy path"
+      );
+    }
+    const plaintext = isEncryptedEnvelopeV1(value)
       ? this.openEnvelopeV1<T>(value)
       : (structuredClone(value) as T);
+    if (!isExpectedRecord(plaintext)) {
+      throw new Error("LOCAL_DATA_LEGACY_UNVERIFIABLE");
+    }
+    return plaintext;
   }
 
   private openEnvelopeV1<T>(value: EncryptedJsonEnvelopeV1): T {
@@ -125,6 +160,7 @@ export function isEncryptedEnvelope(
   return (
     (candidate.v === 1 || candidate.v === 2) &&
     candidate.alg === "A256GCM" &&
+    (candidate.kid === undefined || typeof candidate.kid === "string") &&
     typeof candidate.iv === "string" &&
     typeof candidate.tag === "string" &&
     typeof candidate.ciphertext === "string"

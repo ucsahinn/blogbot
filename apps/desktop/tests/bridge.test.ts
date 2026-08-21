@@ -316,7 +316,13 @@ test("offline read-only bridge serves reads and redacted diagnostics but blocks 
     bridge.approveRevision({
       revisionId: "rev-1",
       expectedHash: "abc",
-      warningSetHash: "def"
+      warningSetHash: "def",
+      packageVersion: 3,
+      attestation: {
+        editorialReview: { reviewer: "Test Editor", sourceRoles: [{ sourceId: "source-1", role: "primary" }] },
+        expertReview: null,
+        ethicsReview: null
+      }
     }),
     (error: unknown) =>
       error instanceof BridgeError && error.code === "OFFLINE_READ_ONLY"
@@ -592,12 +598,11 @@ test("backup bridge exposes preview-first commands without persisting recovery k
   await bridge.listAutomaticBackups();
   await bridge.verifyAutomaticBackup({ backupName: "automatic-2026-08-11T00-00-00-000Z.backup" });
   await bridge.previewAutomaticBackupRestore({
-    backupName: "automatic-2026-08-11T00-00-00-000Z.backup",
-    targetDirectory: "C:/restore-auto"
+    backupName: "automatic-2026-08-11T00-00-00-000Z.backup"
   });
   await bridge.restoreAutomaticBackup({
     backupName: "automatic-2026-08-11T00-00-00-000Z.backup",
-    targetDirectory: "C:/restore-auto"
+    confirmReplaceLocalData: true
   });
 
   assert.deepEqual(calls, [
@@ -618,11 +623,11 @@ test("backup bridge exposes preview-first commands without persisting recovery k
     { command: "automatic_backup_verify", args: { backupName: "automatic-2026-08-11T00-00-00-000Z.backup" } },
     {
       command: "automatic_backup_restore_preview",
-      args: { backupName: "automatic-2026-08-11T00-00-00-000Z.backup", targetDirectory: "C:/restore-auto" }
+      args: { backupName: "automatic-2026-08-11T00-00-00-000Z.backup" }
     },
     {
       command: "automatic_backup_restore_apply",
-      args: { backupName: "automatic-2026-08-11T00-00-00-000Z.backup", targetDirectory: "C:/restore-auto" }
+      args: { backupName: "automatic-2026-08-11T00-00-00-000Z.backup", confirmReplaceLocalData: true }
     }
   ]);
 });
@@ -641,8 +646,9 @@ test("diagnostic bridge exports a redacted local support package", async () => {
 });
 
 test("every WebView bridge command is registered by the native Tauri handler", async () => {
-  const [bridgeSource, nativeEntryPoint, nativeBuildManifest, defaultPermission] = await Promise.all([
+  const [bridgeSource, demoSource, nativeEntryPoint, nativeBuildManifest, defaultPermission] = await Promise.all([
     readFile(new URL("../src/bridge.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/demo-data.ts", import.meta.url), "utf8"),
     readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8"),
     readFile(new URL("../src-tauri/build.rs", import.meta.url), "utf8"),
     readFile(new URL("../src-tauri/permissions/default.toml", import.meta.url), "utf8")
@@ -655,6 +661,11 @@ test("every WebView bridge command is registered by the native Tauri handler", a
 
   assert.ok(commands.size > 40, "the bridge command inventory unexpectedly became incomplete");
   for (const command of commands) {
+    assert.match(
+      demoSource,
+      new RegExp(`case ["']${command}["']`, "u"),
+      `${command} is callable by the WebView but is missing from the browser QA demo transport`
+    );
     assert.match(
       nativeEntryPoint,
       new RegExp(`commands::${command}\\b`, "u"),

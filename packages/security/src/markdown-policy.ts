@@ -3,11 +3,59 @@ export interface MarkdownPolicyResult {
   blockers: string[];
 }
 
+const FENCE_OPENER = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/**
+ * Removes code spans and fenced code blocks so their contents are not treated as
+ * publishable markup.
+ *
+ * Fences are line-anchored on purpose. A regex that matched any ``` or ~~~ run
+ * also matched inline occurrences, so untrusted source text could wrap raw HTML
+ * or a `javascript:` link in an inline `~~~ ... ~~~` pair, disappear from every
+ * check below, and still be published verbatim.
+ *
+ * An unterminated fence is deliberately NOT stripped: for a security scanner the
+ * safe direction is to inspect too much, never too little.
+ */
 function stripCode(markdown: string): string {
-  return markdown
-    .replace(/```[\s\S]*?```/g, "")
-    .replace(/~~~[\s\S]*?~~~/g, "")
-    .replace(/`[^`\n]*`/g, "");
+  const lines = markdown.split("\n");
+  const stripped = [...lines];
+  let fence: string | undefined;
+  let openedAt = -1;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const opener = FENCE_OPENER.exec(line);
+    if (fence === undefined) {
+      // A backtick fence's info string may not contain a backtick, so a line
+      // like ``` a ` b ``` is a code span, not a fence.
+      if (opener && !(opener[1]!.startsWith("`") && opener[2]!.includes("`"))) {
+        fence = opener[1]!;
+        openedAt = index;
+        stripped[index] = "";
+      }
+      continue;
+    }
+    stripped[index] = "";
+    const closes =
+      opener !== null &&
+      opener[1]![0] === fence[0] &&
+      opener[1]!.length >= fence.length &&
+      opener[2]!.trim() === "";
+    if (closes) {
+      fence = undefined;
+      openedAt = -1;
+    }
+  }
+
+  if (fence !== undefined && openedAt >= 0) {
+    // Never closed: restore those lines so they are still inspected.
+    for (let index = openedAt; index < lines.length; index += 1) {
+      stripped[index] = lines[index]!;
+    }
+  }
+
+  return stripped.join("\n").replace(/`[^`\n]*`/g, "");
 }
 
 function decodeBasicEntities(value: string): string {
@@ -33,7 +81,19 @@ function decodeBasicEntities(value: string): string {
 }
 
 function normalizedTarget(value: string): string {
-  return decodeBasicEntities(value)
+  let decoded = decodeBasicEntities(value);
+  try {
+    for (;;) {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    }
+  } catch {
+    // A malformed escape cannot be canonicalized safely. The percent sentinel
+    // is rejected by both link and image validation below.
+    return "%invalid-percent-encoding%";
+  }
+  return decoded
     .split("")
     .filter((character) => {
       const code = character.charCodeAt(0);
@@ -68,6 +128,10 @@ function validateImageTarget(target: string, blockers: Set<string>): void {
     return;
   }
   const withoutQuery = normalized.split(/[?#]/, 1)[0] ?? normalized;
+  if (withoutQuery.includes("%") || withoutQuery.includes("\\")) {
+    blockers.add("IMAGE_PATH_OUTSIDE_ALLOWLIST");
+    return;
+  }
   // The renderer only owns the image directory. Do not let a relative path
   // navigate out of it after a filesystem or URL implementation normalizes it.
   if (withoutQuery.split("/").some((part, index) => part === ".." || (part === "." && index > 0))) {
@@ -79,8 +143,7 @@ function validateImageTarget(target: string, blockers: Set<string>): void {
   }
   if (
     !withoutQuery.startsWith("/images/") &&
-    !withoutQuery.startsWith("./images/") &&
-    !withoutQuery.startsWith("../images/")
+    !withoutQuery.startsWith("./images/")
   ) {
     blockers.add("IMAGE_PATH_OUTSIDE_ALLOWLIST");
   }
@@ -136,6 +199,27 @@ export function validatePublishableMarkdown(markdown: string): MarkdownPolicyRes
       : undefined;
     if (!target) {
       blockers.add(isImage ? "UNSAFE_IMAGE_FORMAT" : "UNSAFE_LINK_TARGET");
+      continue;
+    }
+    if (isImage) {
+      validateImageTarget(target, blockers);
+    } else if (!isSafeLinkTarget(target)) {
+      blockers.add("UNSAFE_LINK_TARGET");
+    }
+  }
+
+  // CommonMark shortcut references: `[label]` resolved by a matching
+  // `[label]: target` definition, with no `(...)` or `[...]` suffix. These
+  // render exactly like inline links, so their targets need the same checks.
+  // The link-definition lines themselves are skipped; they are the definitions,
+  // not uses.
+  for (const match of content.matchAll(/(!?)\[([^\]\n]+)](?![([:])/g)) {
+    const isImage = match[1] === "!";
+    const label = match[2]!;
+    const target = referenceTargets.get(normalizedReferenceLabel(label));
+    if (target === undefined) {
+      // An unresolved `[text]` is ordinary literal text in CommonMark, not a
+      // link, so it is not a policy violation.
       continue;
     }
     if (isImage) {

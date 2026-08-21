@@ -434,7 +434,7 @@ export function InstantCreate({
                   </select>
                   <small id="instant-visual-policy-hint">
                     {visualPolicy === "GENERATE"
-                      ? "ImageGen kullanılır; kullanılamazsa veya üretim başarısız olursa görsel eklenmez ve taslak yayın onayına uygun olmaz."
+                      ? "Önce ImageGen denenir; kullanılamazsa veya üretim başarısız olursa yerel oluşturucu metinsiz kapak ve üç yayın oranı üretir."
                       : "Yerel oluşturucu dış görsel üretimi çağırmaz; metinsiz kapak ve üç yayın oranı üretir."}
                   </small>
                 </label>

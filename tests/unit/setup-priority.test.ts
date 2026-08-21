@@ -26,6 +26,20 @@ test("local-only setup never makes optional publishing the next required action"
   assert.equal(result, undefined);
 });
 
+test("local development setup also keeps publishing prerequisites optional", () => {
+  const result = nextSetupPrerequisite([
+    check("local-engine", "READY", "WRITE"),
+    check("local-database", "READY", "WRITE"),
+    check("local-queue", "READY", "WRITE"),
+    check("codex", "READY", "WRITE"),
+    check("github", "BLOCKED", "PUBLISH"),
+    check("site-adapter", "BLOCKED", "PUBLISH"),
+    check("deploy", "BLOCKED", "PUBLISH")
+  ], "LOCAL_DEV");
+
+  assert.equal(result, undefined);
+});
+
 test("publish setup asks for its publishing prerequisites after local drafting is ready", () => {
   const github = check("github", "BLOCKED", "PUBLISH");
   const result = nextSetupPrerequisite([
@@ -38,4 +52,20 @@ test("publish setup asks for its publishing prerequisites after local drafting i
   ], "PUBLISH");
 
   assert.equal(result, github);
+});
+
+test("publish setup fails closed when a required prerequisite row is absent", () => {
+  const result = nextSetupPrerequisite([
+    check("local-engine", "READY", "WRITE"),
+    check("local-database", "READY", "WRITE"),
+    check("local-queue", "READY", "WRITE"),
+    check("codex", "READY", "WRITE"),
+    check("github", "READY", "PUBLISH"),
+    check("site-adapter", "READY", "PUBLISH")
+  ], "PUBLISH");
+
+  assert.equal(result?.id, "deploy");
+  assert.equal(result?.state, "MISSING");
+  assert.equal(result?.scope, "PUBLISH");
+  assert.ok(result?.userAction);
 });

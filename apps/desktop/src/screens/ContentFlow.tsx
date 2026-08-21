@@ -34,6 +34,11 @@ const candidateStateLabels: Record<CandidateView["state"], string> = {
   RESEARCH_FAILED: "Araştırma başarısız"
 };
 
+function candidateScoreLabel(score: number | undefined): string {
+  if (typeof score !== "number" || !Number.isFinite(score)) return "Ölçülmedi";
+  return `${Math.max(0, Math.min(100, Math.round(score)))}%`;
+}
+
 export function ContentFlow({
   bridge,
   readOnly,
@@ -251,12 +256,16 @@ export function ContentFlow({
                   </div>
                   <h2>{candidate.title}</h2>
                   <p>{candidate.summary}</p>
-                  <dl className="signal-grid">
-                    <div><dt>Güven</dt><dd>{candidate.confidence}%</dd></div>
-                    <div><dt>Benzerlik</dt><dd>{candidate.duplicateScore}%</dd></div>
-                    <div><dt>Kanıt</dt><dd>{candidate.sourceCount} kaynak</dd></div>
+                  <dl className="signal-grid" aria-label={`${candidate.title} sıralama puanları`} style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+                    <div><dt>Kaynak yeterliliği</dt><dd>{candidateScoreLabel(candidate.sourceSufficiencyScore)}</dd></div>
+                    <div><dt>Güncellik</dt><dd>{candidateScoreLabel(candidate.freshnessScore)}</dd></div>
+                    <div><dt>Özgünlük</dt><dd>{candidateScoreLabel(candidate.originalityScore)}</dd></div>
+                    <div><dt>Konu uyumu</dt><dd>{candidateScoreLabel(candidate.topicFitScore)}</dd></div>
                   </dl>
-                  <div className="candidate-source"><small>Birincil kaynak: {candidate.primarySource}</small></div>
+                  <div className="candidate-source">
+                    <small>Genel sıralama: {candidateScoreLabel(candidate.rankingScore)}</small>{" · "}
+                    <small>{candidate.sourceCount} kaynak · Birincil kaynak: {candidate.primarySource}</small>
+                  </div>
                   {dismissReason || researchReason ? (
                     <div className="candidate-action-reasons">
                       {dismissReason ? <small id={`candidate-dismiss-unavailable-${candidate.id}`} className="action-unavailable-reason">{dismissReason}</small> : null}

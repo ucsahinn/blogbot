@@ -1,6 +1,7 @@
 import type { AutomationSettings } from "../../editorial/src/automation.ts";
 import type {
   Approval,
+  ApprovalV3,
   ArticleRevision,
   HighRiskApproval
 } from "../../editorial/src/revision.ts";
@@ -9,6 +10,7 @@ export type BackendChangeKind =
   | "AUTOMATION_UPDATED"
   | "REVISION_SUBMITTED"
   | "REVISION_APPROVED"
+  | "APPROVAL_REVOKED"
   | "JOB_UPDATED"
   | "EFFECT_UPDATED"
   | "LOCAL_STATE_UPDATED";
@@ -17,6 +19,37 @@ export interface BackendChange {
   cursor: number;
   kind: BackendChangeKind;
   entityId: string;
+}
+
+/** Immutable audit record proving which exact editorial approval was revoked. */
+export interface ApprovalRevocation {
+  revisionId: string;
+  revisionHash: string;
+  deviceId: string;
+  reason: string;
+  revokedAt: string;
+}
+
+export function assertValidApprovalRevocation(
+  value: ApprovalRevocation
+): asserts value is ApprovalRevocation {
+  const exactIsoDate =
+    Number.isFinite(Date.parse(value.revokedAt)) &&
+    new Date(Date.parse(value.revokedAt)).toISOString() === value.revokedAt;
+  if (
+    !/^[A-Za-z0-9._:-]{1,128}$/u.test(value.revisionId) ||
+    !/^[a-f0-9]{64}$/u.test(value.revisionHash) ||
+    !/^[A-Za-z0-9._:-]{1,128}$/u.test(value.deviceId) ||
+    value.reason.length === 0 ||
+    value.reason.length > 512 ||
+    value.reason !== value.reason.trim() ||
+    !exactIsoDate
+  ) {
+    throw new BackendStoreError(
+      "INVALID_APPROVAL_REVOCATION",
+      "Approval revocation audit data is invalid"
+    );
+  }
 }
 
 export type OutboxEffectState =
@@ -45,6 +78,10 @@ export interface OutboxEffect {
   attempts: number;
   /** Monotonic fencing token for a specific native publication claim. */
   claimAttempt?: number;
+  /** Durable identity of the engine runtime that owns the current native claim. */
+  nativeClaimOwnerId?: string;
+  /** Lease deadline after which another runtime may fence and reclaim the effect. */
+  nativeClaimLeaseUntil?: string;
   /** Durable retry deadline for a recoverable external publication effect. */
   nextAttemptAt?: string;
   resultRef?: string;
@@ -76,7 +113,7 @@ export interface BackendJob {
 export interface BackendSnapshot {
   automation: AutomationSettings;
   revisions: ArticleRevision[];
-  approvals: Approval[];
+  approvals: Array<Approval | ApprovalV3>;
   highRiskApprovals: HighRiskApproval[];
   outbox: OutboxEffect[];
   jobs: BackendJob[];
@@ -111,7 +148,7 @@ export interface DashboardReadOptions {
 /** Bounded editorial-list read; excludes jobs, outbox, and audit history. */
 export interface RevisionListSnapshot {
   revisions: ArticleRevision[];
-  approvals: Approval[];
+  approvals: Array<Approval | ApprovalV3>;
   highRiskApprovals: HighRiskApproval[];
 }
 
@@ -136,7 +173,12 @@ export class BackendStoreError extends Error {
       | "REVISION_NOT_FOUND"
       | "IDEMPOTENCY_KEY_REUSED"
       | "REVISION_ALREADY_APPROVED"
-      | "INVALID_MAINTENANCE_KEY",
+      | "APPROVAL_NOT_FOUND"
+      | "APPROVAL_HASH_MISMATCH"
+      | "APPROVAL_ALREADY_REVOKED"
+      | "INVALID_APPROVAL_REVOCATION"
+      | "INVALID_MAINTENANCE_KEY"
+      | "WRITE_VERSION_CONFLICT",
     message: string
   ) {
     super(message);
@@ -150,9 +192,11 @@ export interface BackendRepositoryTransaction {
   getAutomation(): Promise<AutomationSettings>;
   insertRevision(revision: ArticleRevision): Promise<ArticleRevision>;
   getRevision(revisionId: string): Promise<ArticleRevision>;
-  getApproval(revisionId: string): Promise<Approval | null>;
+  getApproval(revisionId: string): Promise<Approval | ApprovalV3 | null>;
+  getApprovalRevocation(revisionId: string): Promise<ApprovalRevocation | null>;
   getHighRiskApproval?(revisionId: string): Promise<HighRiskApproval | null>;
-  saveApproval(approval: Approval): Promise<Approval>;
+  saveApproval<T extends Approval | ApprovalV3>(approval: T): Promise<T>;
+  revokeApproval(revocation: ApprovalRevocation): Promise<ApprovalRevocation>;
   saveHighRiskApproval(approval: HighRiskApproval): Promise<HighRiskApproval>;
   enqueuePublication(
     revisionId: string,
@@ -160,11 +204,28 @@ export interface BackendRepositoryTransaction {
     binding: PublicationIntentBinding
   ): Promise<OutboxEffect>;
   listOutbox(): Promise<OutboxEffect[]>;
-  updateOutbox(effect: OutboxEffect): Promise<OutboxEffect>;
+  /** Atomically reads an outbox value and its compare-and-set token. */
+  getOutboxEffect(effectId: string): Promise<{ effect: OutboxEffect; version: number }>;
+  /**
+   * A durable job or outbox row is a whole-record overwrite, so two lanes that
+   * each read the same row and write it back silently lose one of the two
+   * writes. `expectedVersion` turns the write into a compare-and-set against
+   * the token the reader observed; a mismatch raises
+   * `WRITE_VERSION_CONFLICT` instead of overwriting the other lane.
+   */
+  updateOutbox(effect: OutboxEffect, expectedVersion: number): Promise<OutboxEffect>;
   createJob(job: BackendJob): Promise<BackendJob>;
   getJob(jobId: string): Promise<BackendJob>;
-  saveJob(job: BackendJob): Promise<BackendJob>;
+  /** Atomically reads a durable job and the CAS token for that exact value. */
+  getJobRecord(jobId: string): Promise<{ job: BackendJob; version: number }>;
+  saveJob(job: BackendJob, expectedVersion: number): Promise<BackendJob>;
   listJobs(): Promise<BackendJob[]>;
+  /**
+   * Reads the compare-and-set token of a durable row without decrypting it.
+   * Optional while compatibility stores adopt the mechanism.
+   */
+  getJobVersion?(jobId: string): Promise<number>;
+  getOutboxVersion?(effectId: string): Promise<number>;
   getLocalState(key: string): Promise<unknown | undefined>;
   setLocalState(key: string, value: unknown): Promise<void>;
   /**

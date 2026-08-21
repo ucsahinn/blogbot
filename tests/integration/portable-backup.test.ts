@@ -225,13 +225,56 @@ test("restore rejects an archive with more files than its bounded native writer 
   const source = join(root, "source");
   const target = join(root, "restored");
   mkdirSync(source);
-  const relativePaths = Array.from({ length: 257 }, (_, index) => `state-${String(index)}.txt`);
-  for (const relativePath of relativePaths) writeFileSync(join(source, relativePath), "x");
+  writeFileSync(join(source, "state-0.txt"), "x");
 
   try {
-    const archive = await createPortableBackup({ sourceDirectory: source, relativePaths, recoveryKey });
+    // `createPortableBackup` now refuses to build an over-limit archive, so this
+    // one is crafted by re-encrypting a valid archive. The restore bound must
+    // stay independent: an archive can come from another build or a tampered
+    // file, and restore is the last line of defence.
+    const archive = await createPortableBackup({
+      sourceDirectory: source,
+      relativePaths: ["state-0.txt"],
+      recoveryKey
+    });
+    const envelope = JSON.parse(archive.toString("utf8")) as TestEnvelope;
+    const key = await deriveTestKey(recoveryKey, Buffer.from(envelope.kdf.salt, "base64"), {
+      N: envelope.kdf.N,
+      r: envelope.kdf.r,
+      p: envelope.kdf.p,
+      maxmem: envelope.kdf.maxmem
+    });
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.cipher.iv, "base64"));
+    decipher.setAuthTag(Buffer.from(envelope.cipher.tag, "base64"));
+    const payload = JSON.parse(
+      Buffer.concat([
+        decipher.update(Buffer.from(envelope.ciphertext, "base64")),
+        decipher.final()
+      ]).toString("utf8")
+    ) as TestPayload & { manifest: { files: Array<{ path: string; size: number; sha256: string }> } };
+
+    const templateFile = payload.files[0]!;
+    const templateManifest = payload.manifest.files[0]!;
+    for (let index = 1; index < 257; index += 1) {
+      const path = `state-${String(index)}.txt`;
+      payload.files.push({ path, data: templateFile.data });
+      payload.manifest.files.push({ ...templateManifest, path });
+    }
+
+    const cipher = createCipheriv("aes-256-gcm", key, Buffer.from(envelope.cipher.iv, "base64"));
+    const ciphertext = Buffer.concat([
+      cipher.update(Buffer.from(JSON.stringify(payload))),
+      cipher.final()
+    ]);
+    envelope.cipher.tag = cipher.getAuthTag().toString("base64");
+    envelope.ciphertext = ciphertext.toString("base64");
+
     await assert.rejects(
-      planPortableRestore({ archive, recoveryKey, targetDirectory: target }),
+      planPortableRestore({
+        archive: Buffer.from(JSON.stringify(envelope)),
+        recoveryKey,
+        targetDirectory: target
+      }),
       (error: unknown) => error instanceof BackupError && error.code === "BACKUP_LIMIT_EXCEEDED"
     );
     assert.equal(existsSync(target), false);
@@ -308,3 +351,58 @@ function deriveTestKey(
     });
   });
 }
+
+test("a backup this build could never restore is refused instead of reported as created", async () => {
+  const root = mkdtempSync(join(tmpdir(), "blogbot-backup-oversized-"));
+  try {
+    // One byte over the restore-side per-file limit. Creating this archive used
+    // to succeed and report a sha256, but every verify/restore of it fails with
+    // BACKUP_LIMIT_EXCEEDED — a successful backup that cannot be restored is a
+    // false success in the one path the user relies on for recovery.
+    writeFileSync(join(root, "large.bin"), Buffer.alloc(16 * 1024 * 1024 + 1));
+
+    await assert.rejects(
+      () => createPortableBackup({
+        sourceDirectory: root,
+        relativePaths: ["large.bin"],
+        recoveryKey,
+        createdAt: "2026-08-19T10:00:00.000Z"
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof BackupError, `expected BackupError, got ${String(error)}`);
+        assert.equal(error.code, "BACKUP_LIMIT_EXCEEDED");
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a backup with more files than restore accepts is refused at creation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "blogbot-backup-too-many-"));
+  try {
+    const paths: string[] = [];
+    for (let index = 0; index < 257; index += 1) {
+      const name = `file-${index}.txt`;
+      writeFileSync(join(root, name), "x");
+      paths.push(name);
+    }
+
+    await assert.rejects(
+      () => createPortableBackup({
+        sourceDirectory: root,
+        relativePaths: paths,
+        recoveryKey,
+        createdAt: "2026-08-19T10:00:00.000Z"
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof BackupError, `expected BackupError, got ${String(error)}`);
+        assert.equal(error.code, "BACKUP_LIMIT_EXCEEDED");
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

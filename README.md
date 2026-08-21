@@ -132,7 +132,7 @@ Repo şu yerel runtime temelini içerir:
 - Tauri'nin `externalBin` olarak paketlediği Node SEA engine sidecar'ı;
 - dosya sisteminde kalıcı PGlite repository ve PGlite üzerinde pg-boss kuyruğu;
 - sürümlü stdio doctor/state/command protokolü;
-- Rust tarafında sidecar keşfi, başlatma, yeniden başlatma ve 1 MiB mesaj sınırı;
+- Rust tarafında sidecar keşfi, başlatma, yeniden başlatma ve 1.000.000 bayt mesaj sınırı;
 - DPAPI ile sarılmış yerel veri anahtarı, AES-256-GCM şifreli PGlite JSON
   kayıtları, tek-instance, isteğe bağlı Windows autostart, tepsi ve bildirimler;
 - gerçek `SOURCE.LIST`, SSRF-korumalı `SOURCE.TEST`, sürümlü/idempotent
@@ -142,22 +142,32 @@ Repo şu yerel runtime temelini içerir:
   restore planı ve günlük/haftalık saklama domain'i;
 - şifreli PGlite Codex iş kayıtları, sürüm/CAS geçişleri, kuyruk generation
   deduplication'ı ve `WAITING_CODEX` yeniden deneme çekirdeği;
-- sıkı doğrulanan V2 revizyon paketleri için gerçek `REVISION.SAVE`,
+- sıkı doğrulanan V3 revizyon paketleri için gerçek `REVISION.SAVE`,
   `REVISION.LIST`, `REVISION.GET` ve exact-hash bağlı normal
-  `APPROVAL.GRANT` engine operasyonları; Windows inceleme kuyruğu ve salt
+  `APPROVAL.GRANT`/`APPROVAL.REVOKE` engine operasyonları; insan editoryal
+  beyanı ve kaynak rolleri onay hash'ine bağlanır, geri çekme bekleyen yayın
+  etkilerini geri çağırır; Windows inceleme kuyruğu ve salt
   okunur revizyon çalışma alanı bu kalıcı kayıtlardan beslenir;
 - Markdown/claim/revision/publisher güvenlik sınırları ve bunların yerel testleri;
 - genel Astro/site adaptörü ve isteğe bağlı, environment-gated yayın workflow
   sınırı. Hiçbir marka veya site ürünün zorunlu parçası değildir.
 
+Bu listedeki her madde "kaynak mevcut" demektir; "gerçek kullanıcı yolunda
+çalışıyor" demek değildir. Aradaki farkın güncel ve kanıtlı dökümü
+[2026-08-20 master completion index'tedir](docs/audits/OPE-MASTER-COMPLETION-INDEX-20260820.md).
+Yedekleme/doğrulama/önizleme/geri yükleme ile immutable preview/outbox tabanlı
+`PUBLISH` yolu yerel olarak bağlıdır ve önkoşulları eksik olduğunda fail-closed
+davranır. Bu yerel kanıt, herhangi bir uzak depo, CI veya hosting ortamının
+yapılandırıldığı ya da canlı yayının başarıyla çalıştırıldığı anlamına gelmez.
+
 Bu liste ürünün canlı yayına alındığı anlamına gelmez. Normal editoryal onay
-engine'e exact hash ve kalıcı onay kaydıyla bağlanmıştır. Yüksek risk ikinci
-onayının ayrı Windows yeniden doğrulamasıyla bağlanması, Codex ve GitHub
-bağlayıcılarının son kullanıcı akışına tam bağlanması, seçilen sitenin gerçek
-dönüşümü, production GitHub App/environment yapılandırması, hosting ilk
-kurulumu, staging tatbikatı ve temiz Windows VM kabulü tamamlanmış veya canlı
-doğrulanmış değildir. Uzak durum, credential ve secret'lar bu repository
-belgelerinden çıkarılamaz.
+engine'e exact hash ve kalıcı onay kaydıyla bağlanmıştır. V3 insan inceleme
+beyanı, yüksek risk ikinci onayı, Codex runner sınırı ve native GitHub cihaz
+yetkilendirme/yayın aracısı kaynakta son kullanıcı akışına bağlıdır. Seçilen
+sitenin gerçek dönüşümü, production GitHub environment yapılandırması, hosting
+ilk kurulumu, staging tatbikatı ve temiz Windows VM kabulü bu yerel geliştirme
+turunda canlı doğrulanmış değildir. Uzak durum, credential ve secret'lar bu
+repository belgelerinden çıkarılamaz.
 
 ## Güvenlik ve onay sınırları
 
@@ -186,3 +196,7 @@ kendiliğinden ücretli aşımı etkinleştirmez.
 
 Belge haritası [docs/README.md](docs/README.md) içindedir. Mimari kararların
 tarihsel kaydı [docs/adr](docs/adr) altında tutulur.
+Güncel yerel bulgu defteri
+[2026-08-20 master indeksinde](docs/audits/OPE-MASTER-COMPLETION-INDEX-20260820.md),
+komut kanıtı ve dış kabul sınırları ise
+[2026-08-20 doğrulama kaydındadır](docs/audits/end-to-end-verification-20260820.md).

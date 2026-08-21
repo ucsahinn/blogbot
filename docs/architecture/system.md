@@ -33,16 +33,19 @@ The repository currently verifies the sidecar, encrypted PGlite JSON records,
 pg-boss, doctor/state/automation and source list/test/save/scan command paths.
 Fetcher probes and restart-safe queued source scans are wired end to end.
 Codex jobs have encrypted, restart-safe, versioned PGlite persistence plus a
-deduplicated pg-boss adapter, but the real Codex login/runtime connector is not
-advertised as ready. Strict V2 revision save/list/get operations are wired from
-PGlite through stdio into the Windows review queue and read-only review
-workspace. Normal editorial approval is wired end to end and remains bound to
-the engine-computed immutable revision hash. High-risk content now has a
-separate engine approval command bound to a checklist hash, exact revision hash,
-Windows secure-store readiness and an explicit second confirmation. The local
-desktop also exposes encrypted backup verification/preview/restore and the
-publication outbox. Remote publisher effects remain blocked or degraded until
-the real GitHub and deployment connector checks succeed.
+deduplicated pg-boss adapter. The desktop checks the separately installed Codex
+runtime and login state; the isolated runner verifies its CLI/tool/MCP contract
+before accepting work. Strict V3 revision save/list/get operations are wired
+from PGlite through stdio into the Windows review queue. Editorial approval
+binds human attestation, source roles and the engine-computed immutable revision
+hash; revocation is immutable, recalls unclaimed effects and blocks later
+preview/claim attempts. High-risk content has a separate engine approval command
+bound to a checklist hash, exact revision hash, Windows secure-store readiness
+and explicit second confirmation. The desktop also exposes encrypted automatic
+and portable backup verification/preview/restore plus the durable publication
+outbox. Remote publisher effects remain blocked or degraded until the real
+GitHub and deployment connector checks succeed; no live remote readiness is
+inferred from these local paths.
 
 ## Trust boundaries
 
@@ -60,10 +63,11 @@ the real GitHub and deployment connector checks succeed.
 ## Local engine-owned state
 
 The list below is the V1 ownership contract. At the currently wired boundary,
-source records, source tests, automation state, durable jobs, immutable
-revisions and normal editorial approvals are implemented. Candidate generation,
-high-risk reauthentication, portable restore and publication still stop at
-domain or connector boundaries.
+source records/tests/scans, candidate ranking, automation state, durable jobs,
+immutable V3 revisions, normal and high-risk approvals, approval revocation,
+portable/automatic restore and publication intents are implemented. Networked
+Codex, source and GitHub/deploy effects still stop at their connector boundary
+when authentication, network or required workflow evidence is unavailable.
 
 - automation settings and independent ingest/publish pauses;
 - sources, trust/rights reviews, mappings, scans and evidence snapshots;

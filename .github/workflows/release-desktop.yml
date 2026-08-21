@@ -20,7 +20,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   release:
+    needs: secret-scan
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -41,8 +54,32 @@ jobs:
           if ($desktopManifest.version -ne $env:RELEASE_VERSION) {
             throw "RELEASE_VERSION_MISMATCH: apps/desktop/package.json must equal the requested release version"
           }
+      # A dispatched release must never publish an installer built from a commit
+      # that cannot pass the same gate `verify.yml` enforces on every push.
+      # Each check is its own step: in a multi-line `run` block the hosted
+      # Windows shell only reports the last command's exit code, so an earlier
+      # failure would be published as a green release.
+      # `check:all` is not reused here because Gitleaks runs in the required
+      # same-workflow Linux `secret-scan` job above, while this job owns the
+      # remaining release checks and Windows-only packaging.
+      - run: npm.cmd run test:all
+      - run: npm.cmd run lint
+      - run: npm.cmd run typecheck
+      - run: npm.cmd run build
+      - run: npm.cmd run test:browser
+      - run: npm.cmd run security:scan
+      - run: npm.cmd audit --audit-level=high --offline
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: npm.cmd run security:rust
+      - run: npm.cmd run build:engine
+      - run: npm.cmd run smoke:engine
+      - run: npm.cmd run smoke:fetcher
+      - run: npm.cmd run native:test
+      - run: npm.cmd run native:lint
       - name: Build unsigned desktop installer
         run: npm.cmd run build:desktop
+      - name: Verify packaged installer inputs
+        run: npm.cmd run desktop:preflight -- --artifacts-dir apps/desktop/src-tauri/target/release/bundle
       - name: Create unsigned updater manifest
         id: manifest
         shell: pwsh
@@ -77,4 +114,4 @@ jobs:
           UPDATER_ARCHIVE: ${{ steps.manifest.outputs.archive }}
         run: |
           Set-Content -LiteralPath release-notes.txt -Value $env:RELEASE_NOTES -Encoding utf8NoBOM
-          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE latest.json --title "OPE $env:RELEASE_VERSION" --notes-file release-notes.txt
+          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE latest.json --target "${{ github.sha }}" --title "OPE $env:RELEASE_VERSION" --notes-file release-notes.txt

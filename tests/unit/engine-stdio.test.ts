@@ -2,27 +2,95 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   createEngineProtocol,
+  approvalBoundFilesDigest,
   assertRevisionGeneratedFilesMatch,
   automaticBackupInitialDelayMs,
+  collectDraftSourceEvidence,
+  writeBackupArchiveNoReplace,
   createConsistentAutomaticBackup,
+  handleAutomaticBackupAccess,
   isPublicationPreviewCurrent,
   handleBackupRequest,
   protectedCatalogEvidenceReferences,
   protectedCatalogSourceIds,
+  recoverWaitingDraftJobs,
   reportBackgroundTaskFault,
   reportCodexLifecycle,
   readBoundedLines,
-  isParallelReadRequest
+  htmlToEvidenceText,
+  automaticBackupIsOverdue,
+  isParallelReadRequest,
+  scheduleOverdueAutomaticBackup,
+  scrubbedRestoreEnvironment,
+  DRAFT_EVIDENCE_FETCH_BUDGET_MS
 } from "../../apps/engine/src/stdio-entrypoint.ts";
 import { buildPublicationPreview } from "../../apps/engine/src/publication-preview.ts";
+import type { CodexWorkerCoordinator } from "../../apps/engine/src/codex-worker.ts";
 import { createPortableBackup } from "../../packages/backup/src/portable-backup.ts";
 import { InMemoryBackendStore } from "../../packages/database/src/in-memory-backend-store.ts";
+import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
+import { PGliteSourceRepository } from "../../packages/database/src/source-repository.ts";
+
+/**
+ * Minimal stand-in for the snapshot read port. An automatic snapshot archives
+ * the rows Blogbot owns, so a fake only has to answer the catalogue query and
+ * one table read.
+ */
+function logicalBackupGate(rows = 1) {
+  const applied: unknown[][] = [];
+  const read = async <Row>(sql: string) => ({
+    rows: (sql.includes("information_schema.tables")
+      ? [{ table_name: "blogbot_automation" }]
+      : sql.includes("information_schema.columns")
+        ? [{ column_name: "singleton_id" }, { column_name: "value" }]
+        : Array.from({ length: rows }, (_, index) => ({
+          singleton_id: index + 1,
+          value: { mode: "INGEST_ONLY" }
+        }))) as Row[]
+  });
+  return {
+    applied,
+    gate: {
+      query: read,
+      transaction: async <T>(work: (transaction: {
+        query<Row>(sql: string, parameters?: readonly unknown[]): Promise<{ rows: Row[] }>;
+      }) => Promise<T>) => work({
+        query: async <Row>(sql: string, parameters?: readonly unknown[]) => {
+          if (parameters) applied.push([...parameters]);
+          return read<Row>(sql);
+        }
+      })
+    }
+  };
+}
+
+test("portable restore child environment excludes engine credentials and user context", () => {
+  const environment = scrubbedRestoreEnvironment({
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Windows\\System32",
+    TEMP: "C:\\Temp",
+    BLOGBOT_DATA_KEY_HEX: "sensitive-data-key",
+    BLOGBOT_IMAGEGEN_API_KEY: "sensitive-provider-key",
+    BLOGBOT_CODEX_RUNNER: "C:\\private\\runner.exe",
+    GITHUB_TOKEN: "sensitive-github-token",
+    USERPROFILE: "C:\\Users\\private"
+  });
+
+  assert.deepEqual(environment, {
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Windows\\System32",
+    TEMP: "C:\\Temp"
+  });
+  for (const key of ["BLOGBOT_DATA_KEY_HEX", "BLOGBOT_IMAGEGEN_API_KEY", "BLOGBOT_CODEX_RUNNER", "GITHUB_TOKEN", "USERPROFILE"]) {
+    assert.equal(key in environment, false);
+  }
+});
 
 test("source retention protects catalog feeds referenced by immutable revision evidence", () => {
   const revisions = [{
@@ -296,6 +364,10 @@ test("desktop state projection uses the lightweight repository read instead of t
       throw new Error("FULL_SYNC_MUST_NOT_RUN_FOR_DESKTOP_STATE");
     }
 
+    override async getVersion(): Promise<number> {
+      return 77;
+    }
+
     async syncDashboard(afterCursor: number) {
       this.dashboardReads += 1;
       assert.equal(afterCursor, 42);
@@ -328,7 +400,10 @@ test("desktop state projection uses the lightweight repository read instead of t
 
   assert.equal(result.ok, true);
   assert.equal(repository.dashboardReads, 1);
-  assert.equal((result.snapshot as { serverCursor?: number }).serverCursor, 42);
+  // The optimistic version comes from the authoritative version read, while the
+  // dashboard read only supplies the change-paging watermark.
+  assert.equal((result.snapshot as { serverCursor?: number }).serverCursor, 77);
+  assert.equal((result.snapshot as { changeCursor?: number }).changeCursor, 42);
 });
 
 test("state projection bounds stale history for desktop polling", async () => {
@@ -356,7 +431,16 @@ test("state projection bounds stale history for desktop polling", async () => {
   assert.equal(result.ok, true);
   const changes = (result.snapshot as { changes?: Array<{ cursor?: number }> }).changes ?? [];
   assert.deepEqual(changes.map((change) => change.cursor), [1, 2]);
-  assert.equal((result.snapshot as { serverCursor?: number }).serverCursor, 2);
+  // The change page is bounded, but `serverCursor` is the optimistic version the
+  // desktop sends back as `expectedVersion`. It must report the engine's real
+  // version, not the last delivered change, or every mutation would fail with
+  // VERSION_CONFLICT once a workspace outgrew one page of history.
+  assert.equal((result.snapshot as { serverCursor?: number }).serverCursor, 5);
+  assert.equal(
+    (result.snapshot as { changeCursor?: number }).changeCursor,
+    2,
+    "the paging watermark stays available under its own name"
+  );
 
   const next = await handle({
     version: 1,
@@ -573,7 +657,7 @@ test("automatic snapshots can be listed, verified, and previewed without exposin
   process.env.BLOGBOT_DATA_KEY_HEX = "42".repeat(32);
   try {
     await writeFile(join(root, "state.json"), "{}\n", "utf8");
-    const created = await handleBackupRequest({ version: 1, id: "auto-create", kind: "backup.auto", payload: {} }, root);
+    const created = await createConsistentAutomaticBackup(logicalBackupGate().gate, root);
     assert.equal(created.ok, true);
 
     const listed = await handleBackupRequest({ version: 1, id: "auto-list", kind: "backup.auto.list", payload: {} }, root);
@@ -584,21 +668,21 @@ test("automatic snapshots can be listed, verified, and previewed without exposin
     assert.ok(snapshot);
     assert.match(snapshot.name, /^automatic-.+\.backup$/u);
 
-    const verified = await handleBackupRequest({
+    const verified = await handleAutomaticBackupAccess({
       version: 1,
       id: "auto-verify",
       kind: "backup.auto.verify",
       payload: { backupName: snapshot.name }
-    }, root);
+    }, root, logicalBackupGate().gate);
     assert.equal(verified.ok, true);
     assert.equal(verified.verified, true);
 
-    const preview = await handleBackupRequest({
+    const preview = await handleAutomaticBackupAccess({
       version: 1,
       id: "auto-preview",
       kind: "backup.auto.restore.preview",
-      payload: { backupName: snapshot.name, targetDirectory: join(root, "restored") }
-    }, root);
+      payload: { backupName: snapshot.name }
+    }, root, logicalBackupGate().gate);
     assert.equal(preview.ok, true);
     assert.equal(preview.verified, true);
   } finally {
@@ -612,28 +696,715 @@ test("automatic backups never run in the first interactive session window", () =
   assert.equal(automaticBackupInitialDelayMs(), 24 * 60 * 60 * 1_000);
 });
 
-test("automatic snapshot checkpoints and excludes concurrent PGlite queries before reading live data", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-auto-backup-checkpoint-"));
+test("automatic snapshot reads every table inside one transaction so the archive is consistent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-auto-backup-consistency-"));
   const previousKey = process.env.BLOGBOT_DATA_KEY_HEX;
   process.env.BLOGBOT_DATA_KEY_HEX = "43".repeat(32);
   const events: string[] = [];
   try {
-    await writeFile(join(root, "state.json"), "{}\n", "utf8");
+    let insideTransaction = false;
+    const read = async <Row>(sql: string) => {
+      events.push(`${insideTransaction ? "tx" : "loose"}:${sql.includes("information_schema.tables")
+        ? "list-tables"
+        : sql.includes("information_schema.columns") ? "list-columns" : "select-rows"}`);
+      return { rows: (sql.includes("information_schema.tables")
+        ? [{ table_name: "blogbot_automation" }]
+        : sql.includes("information_schema.columns")
+          ? [{ column_name: "singleton_id" }, { column_name: "value" }]
+          : [{ singleton_id: 1, value: { mode: "INGEST_ONLY" } }]) as Row[] };
+    };
     const result = await createConsistentAutomaticBackup({
-      runExclusive: async <T>(work: () => Promise<T>) => {
-        events.push("exclusive:start");
-        const result = await work();
-        events.push("exclusive:end");
-        return result;
-      },
-      exec: async (query: string) => { events.push(query); return []; }
+      query: read,
+      transaction: async <T>(work: (transaction: {
+        query<Row>(sql: string, parameters?: readonly unknown[]): Promise<{ rows: Row[] }>;
+      }) => Promise<T>) => {
+        insideTransaction = true;
+        try {
+          return await work({ query: read });
+        } finally {
+          insideTransaction = false;
+        }
+      }
     }, root);
 
-    assert.equal(result.ok, true);
-    assert.deepEqual(events, ["exclusive:start", "CHECKPOINT", "exclusive:end"]);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    // One transaction is already a consistent MVCC view, so the archive cannot
+    // mix rows from before and after a concurrent write. Reading outside it, or
+    // through PGlite's non-reentrant exclusive gate, would either tear the
+    // snapshot or deadlock.
+    assert.ok(events.length > 0);
+    assert.ok(events.every((event) => event.startsWith("tx:")), events.join(","));
+    assert.ok(events.includes("tx:list-tables"));
+    assert.ok(events.includes("tx:select-rows"));
+    assert.equal(result.rows, 1);
   } finally {
     if (previousKey === undefined) delete process.env.BLOGBOT_DATA_KEY_HEX;
     else process.env.BLOGBOT_DATA_KEY_HEX = previousKey;
-    await (await import("node:fs/promises")).rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a completed Boby answer survives the dashboard job projection", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "boby-guidance-1",
+    kind: "CODEX",
+    state: "SUCCEEDED",
+    attempts: 1,
+    metadata: {
+      purpose: "BOBY_GUIDANCE",
+      bobySessionId: "session-1",
+      bobyReply: "Kaynak eklemek için İçerik Akışı ekranını açın.",
+      bobyActions: [{ id: "OPEN_SOURCES", label: "Kaynakları aç" }]
+    }
+  });
+  const handle = createEngineProtocol(repository, "memory");
+
+  const result = await handle({
+    version: 1,
+    id: "boby-state",
+    kind: "state",
+    afterCursor: 0
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const jobs = (result.snapshot as { jobs: Array<Record<string, unknown>> }).jobs;
+  const job = jobs.find((entry) => entry.id === "boby-guidance-1");
+  assert.ok(job, "the Boby job must be visible in the desktop projection");
+  const metadata = job.metadata as Record<string, unknown> | undefined;
+  // The desktop resolves a Boby answer from this projection: without `purpose`
+  // the lookup rejects the job as "not found", and without the reply there is
+  // nothing to show even after Codex answered.
+  assert.equal(metadata?.purpose, "BOBY_GUIDANCE");
+  assert.equal(metadata?.bobyReply, "Kaynak eklemek için İçerik Akışı ekranını açın.");
+  assert.deepEqual(metadata?.bobyActions, [{ id: "OPEN_SOURCES", label: "Kaynakları aç" }]);
+  assert.equal(metadata?.bobySessionId, "session-1");
+});
+
+test("HTML evidence extraction matches the documented output and stays linear on hostile input", () => {
+  assert.equal(
+    htmlToEvidenceText("<h1>Başlık</h1><p>Doğrulanmış <b>gelişme</b>.</p>"),
+    "Başlık Doğrulanmış gelişme ."
+  );
+  // Script, style and noscript bodies are evidence-free markup, not article text.
+  assert.equal(
+    htmlToEvidenceText("<p>Önce</p><script>var a = 1 < 2;</script><style>p{color:red}</style><p>Sonra</p>"),
+    "Önce Sonra"
+  );
+  // A tag name that merely starts with a skipped name is a normal element.
+  assert.equal(htmlToEvidenceText("<scripted>Metin</scripted>"), "Metin");
+
+  // Untrusted source pages are frequently malformed. Each of these took tens of
+  // seconds to minutes with the previous quadratic regex pipeline and blocked
+  // every other engine request on the single thread.
+  const budgetMs = 2_000;
+  for (const hostile of [
+    "<script>".repeat(128 * 1024),
+    "<".repeat(512 * 1024),
+    `${"<p>metin</p>".repeat(64 * 1024)}<script>`
+  ]) {
+    const startedAt = Date.now();
+    htmlToEvidenceText(hostile);
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed < budgetMs, `malformed markup must stay linear, took ${elapsed} ms`);
+  }
+});
+
+test("the automatic backup due-check treats a missing, stale or future timestamp as overdue", () => {
+  const now = Date.parse("2026-08-19T12:00:00.000Z");
+  const day = 24 * 60 * 60 * 1_000;
+
+  // Never taken, or no readable outcome yet.
+  assert.equal(automaticBackupIsOverdue(undefined, now), true);
+  assert.equal(automaticBackupIsOverdue({}, now), true);
+  assert.equal(automaticBackupIsOverdue({ state: "FAILED" }, now), true);
+  assert.equal(automaticBackupIsOverdue({ succeededAt: "not-a-date" }, now), true);
+
+  // Taken within the interval.
+  assert.equal(
+    automaticBackupIsOverdue({ succeededAt: new Date(now - day / 2).toISOString() }, now),
+    false
+  );
+  // Exactly one interval old counts as due.
+  assert.equal(
+    automaticBackupIsOverdue({ succeededAt: new Date(now - day).toISOString() }, now),
+    true
+  );
+  // A clock moved backwards must not postpone recovery coverage indefinitely.
+  assert.equal(
+    automaticBackupIsOverdue({ succeededAt: new Date(now + day).toISOString() }, now),
+    true
+  );
+});
+
+test("a replayed Codex materialization returns the first revision instead of poisoning its key", async () => {
+  const repository = new InMemoryBackendStore();
+  const key = "codex-materialize:draft-job-1";
+  const first = {
+    id: "draft-job-1",
+    translationKey: "story-1",
+    state: "REVIEW_REQUIRED" as const,
+    tr: { title: "İlk", slug: "ilk", description: "A", bodyMarkdown: "B", heroImageAlt: "C" },
+    en: { title: "First", slug: "first", description: "A", bodyMarkdown: "B", heroImageAlt: "C" },
+    section: "haberler" as const,
+    articleType: "news" as const,
+    author: "Ada",
+    tags: [],
+    claims: [],
+    sources: [],
+    media: [],
+    scheduledAt: "2026-08-19T10:00:00.000Z",
+    adapterVersion: "1"
+  };
+  // The durable effects run before the Codex job is CAS'd to COMPLETED. After a
+  // crash in between, restart recovery re-runs the job and Codex returns
+  // different prose for the same draft.
+  const second = { ...first, tr: { ...first.tr, bodyMarkdown: "Yeniden üretilmiş gövde" } };
+
+  const stored = await repository.runIdempotent(key, key, (tx) => tx.insertRevision(first));
+  const replayed = await repository.runIdempotent(key, key, (tx) => tx.insertRevision(second));
+
+  assert.equal(stored.id, "draft-job-1");
+  assert.equal(
+    replayed.tr.bodyMarkdown,
+    "B",
+    "the replay must return the first materialized revision, not a second one"
+  );
+  assert.equal((await repository.sync(0)).snapshot.revisions.length, 1);
+});
+
+test("an overdue daily snapshot is caught up once at startup instead of waiting a whole interval", async () => {
+  const now = Date.parse("2026-08-19T12:00:00.000Z");
+  const hour = 60 * 60 * 1_000;
+  const overdueRuns: string[] = [];
+
+  // `setInterval` alone first fires 24 h from now and is recreated on every
+  // sidecar spawn, so an ordinary desktop session never reached it.
+  const overdue = scheduleOverdueAutomaticBackup(
+    { state: "SUCCEEDED", succeededAt: new Date(now - 30 * hour).toISOString() },
+    () => overdueRuns.push("overdue"),
+    now,
+    0
+  );
+  assert.notEqual(overdue, undefined);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(overdueRuns, ["overdue"]);
+
+  const fresh = scheduleOverdueAutomaticBackup(
+    { state: "SUCCEEDED", succeededAt: new Date(now - hour).toISOString() },
+    () => overdueRuns.push("fresh"),
+    now,
+    0
+  );
+  assert.equal(fresh, undefined);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(overdueRuns, ["overdue"]);
+});
+
+test("the approval-bound files digest orders paths by bytes so the native verifier agrees", () => {
+  // The native claim verifier sorts the same bundle with byte order. Under this
+  // machine's locale an ICU collation orders `_`, `-` and case differently, and
+  // the resulting digest mismatch rejects an approved, immutable revision for
+  // good.
+  const files = [
+    { path: "public/images/a_b.webp", content: "1" },
+    { path: "public/images/a-b.webp", content: "2" },
+    { path: "public/images/aB.webp", content: "3" },
+    { path: "public/images/ab.webp", content: "4" }
+  ];
+  const expected = createHash("sha256");
+  for (const file of [...files].sort((left, right) =>
+    Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8"))
+  )) {
+    const content = Buffer.from(file.content, "utf8");
+    const size = Buffer.alloc(8);
+    size.writeBigUInt64BE(BigInt(content.byteLength));
+    expected.update(file.path, "utf8").update(Buffer.from([0])).update(size).update(content);
+  }
+
+  assert.equal(approvalBoundFilesDigest(files), expected.digest("hex"));
+});
+
+test("automatic snapshot retention never deletes a backup the engine does not own", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-auto-backup-retention-"));
+  const previousKey = process.env.BLOGBOT_DATA_KEY_HEX;
+  process.env.BLOGBOT_DATA_KEY_HEX = "44".repeat(32);
+  const day = 24 * 60 * 60 * 1_000;
+  try {
+    await writeFile(join(root, "state.json"), "{}\n", "utf8");
+    const backups = join(root, "backups");
+    await mkdir(backups, { recursive: true });
+    // Enough engine snapshots, spread over more than the retained daily and
+    // weekly windows, that retention really plans deletions.
+    for (const days of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 30, 40, 50, 60, 70, 80, 90]) {
+      const name = join(backups, `automatic-old-${days}.backup`);
+      await writeFile(name, "snapshot", "utf8");
+      const stamp = new Date(Date.now() - days * day);
+      await utimes(name, stamp, stamp);
+    }
+    // A user may reasonably keep their own manual archive next to the engine's
+    // snapshots. No read path ever lists it, so deleting it is silent data loss.
+    const manual = join(backups, "before-upgrade.backup");
+    await writeFile(manual, "manual", "utf8");
+    const manualStamp = new Date(Date.now() - 300 * day);
+    await utimes(manual, manualStamp, manualStamp);
+
+    const created = await createConsistentAutomaticBackup(logicalBackupGate().gate, root);
+    assert.equal(created.ok, true, JSON.stringify(created));
+    await access(manual);
+    const remaining = await readdir(backups);
+    assert.ok(remaining.some((name) => /^automatic-\d{4}-/u.test(name)), "the new snapshot must be on disk");
+    assert.ok(remaining.length < 28, "retention must still remove superseded engine snapshots");
+  } finally {
+    if (previousKey === undefined) delete process.env.BLOGBOT_DATA_KEY_HEX;
+    else process.env.BLOGBOT_DATA_KEY_HEX = previousKey;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a successful backup leaves no temporary archive behind and refuses to overwrite", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-backup-temporary-"));
+  try {
+    await writeFile(join(root, "state.json"), "{}\n", "utf8");
+    const output = join(root, "out", "manual.backup");
+    const request = {
+      version: 1,
+      id: "backup-temporary",
+      kind: "backup.create",
+      payload: { outputPath: output, sourceDirectory: root, relativePaths: ["state.json"], recoveryKey: "correct-recovery-key-123" }
+    };
+    const created = await handleBackupRequest(request, root);
+    assert.equal(created.ok, true, JSON.stringify(created));
+    // A `.tmp-*` leftover is a valid encrypted archive under a name nothing
+    // lists, verifies, or deletes.
+    assert.deepEqual((await readdir(join(root, "out"))).filter((name) => name.includes(".tmp-")), []);
+
+    const clobbered = await handleBackupRequest({ ...request, id: "backup-temporary-again" }, root);
+    assert.equal(clobbered.ok, false);
+    assert.equal(clobbered.code, "BACKUP_OUTPUT_EXISTS");
+    assert.deepEqual((await readdir(join(root, "out"))).filter((name) => name.includes(".tmp-")), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("backup finalization cannot replace a destination created after the temporary archive", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-backup-race-"));
+  try {
+    const temporary = join(root, "manual.backup.tmp");
+    const output = join(root, "manual.backup");
+    assert.equal(await writeBackupArchiveNoReplace(
+      temporary,
+      output,
+      Buffer.from("encrypted-archive", "utf8"),
+      async (target, archive) => {
+        await writeFile(target, archive, { flag: "wx" });
+        // This simulates another process winning the race after Blogbot has
+        // fully written its temp archive but before the filesystem commit.
+        await writeFile(output, "racing-writer", { encoding: "utf8", flag: "wx" });
+      }
+    ), false);
+    assert.equal(await (await import("node:fs/promises")).readFile(output, "utf8"), "racing-writer");
+    await assert.rejects(access(temporary), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("backup finalization removes a partial temporary archive after a write failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-backup-write-failure-"));
+  try {
+    const temporary = join(root, "manual.backup.tmp");
+    const output = join(root, "manual.backup");
+    await assert.rejects(
+      writeBackupArchiveNoReplace(
+        temporary,
+        output,
+        Buffer.from("complete-encrypted-archive", "utf8"),
+        async (target) => {
+          await writeFile(target, "partial", { encoding: "utf8", flag: "wx" });
+          throw Object.assign(new Error("simulated disk full"), { code: "ENOSPC" });
+        }
+      ),
+      { code: "ENOSPC", message: "simulated disk full" }
+    );
+    await assert.rejects(access(temporary), { code: "ENOENT" });
+    await assert.rejects(access(output), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("backup finalization never deletes a temporary archive owned by another writer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-backup-temp-owner-"));
+  try {
+    const temporary = join(root, "manual.backup.tmp");
+    const output = join(root, "manual.backup");
+    await writeFile(temporary, "other-writer", { encoding: "utf8", flag: "wx" });
+
+    await assert.rejects(
+      writeBackupArchiveNoReplace(temporary, output, Buffer.from("our-archive", "utf8")),
+      { code: "EEXIST" }
+    );
+    assert.equal(await (await import("node:fs/promises")).readFile(temporary, "utf8"), "other-writer");
+    await assert.rejects(access(output), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a restore writer that stops reading fails the request instead of killing the engine", async (t) => {
+  const stub = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "whoami.exe");
+  try {
+    await access(stub);
+  } catch {
+    t.skip("no stub writer available on this host");
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-restore-epipe-"));
+  const source = join(root, "source");
+  const archive = join(root, "backup.blogbot");
+  const previousRestoreWriter = process.env.BLOGBOT_SECURE_RESTORE_BIN;
+  process.env.BLOGBOT_SECURE_RESTORE_BIN = stub;
+  try {
+    await mkdir(source);
+    // Comfortably larger than the OS pipe buffer, so the payload write is still
+    // in flight when the writer exits. Without a listener on the child's stdin
+    // that EPIPE was an unhandled 'error' event and took the whole engine down.
+    await writeFile(join(source, "state.json"), "x".repeat(2_000_000), "utf8");
+    await writeFile(archive, await createPortableBackup({
+      sourceDirectory: source,
+      relativePaths: ["state.json"],
+      recoveryKey: "correct-recovery-key-123",
+      createdAt: "2026-08-19T09:00:00.000Z"
+    }));
+
+    const result = await handleBackupRequest({
+      version: 1,
+      id: "restore-epipe",
+      kind: "backup.restore",
+      payload: { archivePath: archive, recoveryKey: "correct-recovery-key-123", targetDirectory: join(root, "restore-target") }
+    }, root);
+
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.code, "BACKUP_INVALID");
+    assert.equal(result.message, "SECURE_RESTORE_WRITE_FAILED");
+  } finally {
+    if (previousRestoreWriter === undefined) delete process.env.BLOGBOT_SECURE_RESTORE_BIN;
+    else process.env.BLOGBOT_SECURE_RESTORE_BIN = previousRestoreWriter;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("job.retry refuses a Codex-waiting job when no runner exists instead of hiding the reason", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-no-runner-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 0,
+    lastError: "CODEX_RUNNER_UNAVAILABLE"
+  });
+  const handle = createEngineProtocol(repository, "memory");
+
+  const response = await handle({
+    version: 1,
+    id: "retry-no-runner",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "retry-no-runner",
+      idempotencyKey: "retry-no-runner",
+      expectedVersion: await repository.getVersion(),
+      kind: "JOB.RETRY",
+      payload: { jobId: "draft-no-runner-1" }
+    }
+  });
+
+  assert.equal(response.ok, false, JSON.stringify(response));
+  assert.equal((response.result as { error: { code: string } }).error.code, "CODEX_RUNNER_UNAVAILABLE");
+  const job = await repository.getJob("draft-no-runner-1");
+  assert.equal(job.state, "WAITING_CODEX");
+  assert.equal(job.attempts, 0);
+  assert.equal(job.lastError, "CODEX_RUNNER_UNAVAILABLE");
+});
+
+test("job.retry restores the original stop condition when the durable Codex record cannot be requeued", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-unrecoverable-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 2,
+    lastError: "CODEX_OUTPUT_MISSING"
+  });
+  const codexCoordinator = {
+    async submit() { throw new Error("not used"); },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); },
+    async recoverInterrupted() { return { recovered: false, snapshot: null }; }
+  } satisfies CodexWorkerCoordinator;
+  const handle = createEngineProtocol(repository, "memory", { codexCoordinator });
+
+  const response = await handle({
+    version: 1,
+    id: "retry-unrecoverable",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "retry-unrecoverable",
+      idempotencyKey: "retry-unrecoverable",
+      expectedVersion: await repository.getVersion(),
+      kind: "JOB.RETRY",
+      payload: { jobId: "draft-unrecoverable-1" }
+    }
+  });
+
+  assert.equal(response.ok, false, JSON.stringify(response));
+  assert.equal((response.result as { error: { code: string } }).error.code, "CODEX_RECOVERY_UNAVAILABLE");
+  const job = await repository.getJob("draft-unrecoverable-1");
+  assert.equal(job.state, "WAITING_CODEX");
+  assert.equal(job.attempts, 2);
+  assert.equal(job.lastError, "CODEX_OUTPUT_MISSING");
+});
+
+test("an interrupted Boby guidance job becomes retryable instead of staying RUNNING forever", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "boby-guidance-1",
+    kind: "CODEX",
+    state: "RUNNING",
+    attempts: 1,
+    metadata: { purpose: "BOBY_GUIDANCE", question: "Sonraki adım ne?" }
+  });
+  const coordinator = {
+    async submit() { throw new Error("not used"); },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); },
+    async recoverInterrupted() { return { recovered: false, snapshot: null }; }
+  } satisfies CodexWorkerCoordinator;
+
+  await recoverWaitingDraftJobs(repository, coordinator);
+
+  const job = await repository.getJob("boby-guidance-1");
+  assert.equal(job.state, "FAILED");
+  assert.equal(job.lastError, "CODEX_RUNNER_INTERRUPTED");
+  // JOB.RETRY only accepts a terminal or waiting state, so the panel and
+  // Operations can now both act on this record.
+  const handle = createEngineProtocol(repository, "memory", { codexCoordinator: coordinator });
+  const response = await handle({
+    version: 1,
+    id: "boby-retry",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "boby-retry",
+      idempotencyKey: "boby-retry",
+      expectedVersion: await repository.getVersion(),
+      kind: "JOB.RETRY",
+      payload: { jobId: "boby-guidance-1" }
+    }
+  });
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.equal((await repository.getJob("boby-guidance-1")).state, "QUEUED");
+});
+
+test("an isolation rejection is not replayed on the next engine start", async () => {
+  const repository = new InMemoryBackendStore();
+  await repository.createJob({
+    id: "draft-denied-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 1,
+    lastError: "CODEX_PROTOCOL_REJECTED",
+    metadata: {
+      codexWaitReason: "RUNNER_REQUIRES_RETRY",
+      codexDiagnosticCode: "CODEX_PROTOCOL_REJECTED",
+      sourceIds: ["source-1"],
+      urls: []
+    }
+  });
+  await repository.createJob({
+    id: "draft-auth-1",
+    kind: "DRAFT",
+    state: "WAITING_CODEX",
+    attempts: 1,
+    lastError: "AUTH_REQUIRED",
+    metadata: { codexWaitReason: "AUTH_REQUIRED", sourceIds: ["source-1"], urls: [] }
+  });
+  const recoveredIds: string[] = [];
+  const coordinator = {
+    async submit() { throw new Error("not used"); },
+    async process() { throw new Error("not used"); },
+    async retryWaiting() { throw new Error("not used"); },
+    async recoverInterrupted(jobId: string) {
+      recoveredIds.push(jobId);
+      return { recovered: true, snapshot: null };
+    }
+  } satisfies CodexWorkerCoordinator;
+
+  await recoverWaitingDraftJobs(repository, coordinator);
+
+  // The denied job carries a completed, user-visible stop condition, and its
+  // prompt may have been steered by untrusted source text.
+  assert.deepEqual(recoveredIds, ["draft-auth-1"]);
+  assert.equal((await repository.getJob("draft-denied-1")).state, "WAITING_CODEX");
+  assert.equal((await repository.getJob("draft-auth-1")).state, "QUEUED");
+});
+
+test("draft evidence collection shares one network budget across every source fetch", async () => {
+  // The desktop bridge abandons a `command` request after 30 s, so independent
+  // per-fetch timeouts for up to 70 sources could never fit inside it.
+  assert.ok(DRAFT_EVIDENCE_FETCH_BUDGET_MS < 20 * 1_000);
+  const urls = ["one", "two", "three", "four", "five"].map((name) => `https://example.com/${name}`);
+  const attempted: string[] = [];
+  const startedAt = Date.now();
+
+  const evidence = await collectDraftSourceEvidence(undefined, [], urls, {
+    async resolve() { return ["93.184.216.34"]; },
+    async request(plan) {
+      attempted.push(plan.url);
+      return new Promise(() => undefined);
+    }
+  }, undefined, 300);
+
+  const elapsed = Date.now() - startedAt;
+  assert.deepEqual(evidence, []);
+  assert.ok(elapsed < 2_000, `evidence collection must honour its shared budget, took ${elapsed} ms`);
+  assert.ok(attempted.length < urls.length, "the exhausted budget must stop further fetches");
+});
+
+test("an automatic snapshot of a real workspace round-trips through verify and restore", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-logical-snapshot-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const previousKey = process.env.BLOGBOT_DATA_KEY_HEX;
+  process.env.BLOGBOT_DATA_KEY_HEX = "77".repeat(32);
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.BLOGBOT_DATA_KEY_HEX;
+    else process.env.BLOGBOT_DATA_KEY_HEX = previousKey;
+  });
+
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  t.after(() => repository.close());
+  const database = repository.getDatabase();
+
+  // Give the workspace something worth recovering.
+  await repository.setLocalState("desktop.editorial", { author: "Editor", mutations: [{ kind: "CANDIDATE.PROMOTE" }] });
+  const before = await repository.getLocalState("desktop.editorial");
+
+  const created = await createConsistentAutomaticBackup(database, join(root, "pgdata"));
+  assert.equal(created.ok, true, JSON.stringify(created));
+  // The archive covers the rows Blogbot owns, so it is orders of magnitude
+  // smaller than the PGlite data directory a file walk would have to carry.
+  assert.ok((created.bytes as number) > 0);
+  assert.ok((created.bytes as number) < 8 * 1024 * 1024, `archive should stay small, got ${String(created.bytes)}`);
+  assert.ok((created.rows as number) > 0, "a real workspace must archive at least one row");
+
+  const backupName = String(created.outputPath).split(/[\\/]/u).at(-1);
+  const verified = await handleAutomaticBackupAccess(
+    { version: 1, id: "verify", kind: "backup.auto.verify", payload: { backupName } },
+    join(root, "pgdata"),
+    database
+  );
+  assert.equal(verified.ok, true, JSON.stringify(verified));
+  assert.equal(verified.verified, true);
+  assert.ok((verified.rows as number) > 0);
+
+  // Restore replaces every local row, so it must refuse without explicit consent.
+  const unconfirmed = await handleAutomaticBackupAccess(
+    { version: 1, id: "restore-unconfirmed", kind: "backup.auto.restore", payload: { backupName } },
+    join(root, "pgdata"),
+    database
+  );
+  assert.equal(unconfirmed.ok, false);
+  assert.equal(unconfirmed.code, "BACKUP_CONFIRMATION_REQUIRED");
+
+  // Lose the data, then bring it back from the snapshot.
+  await repository.setLocalState("desktop.editorial", { author: "Overwritten", mutations: [] });
+  const restored = await handleAutomaticBackupAccess(
+    { version: 1, id: "restore", kind: "backup.auto.restore", payload: { backupName, confirmReplaceLocalData: true } },
+    join(root, "pgdata"),
+    database
+  );
+  assert.equal(restored.ok, true, JSON.stringify(restored));
+  assert.ok((restored.restoredRows as number) > 0);
+  assert.deepEqual(await repository.getLocalState("desktop.editorial"), before);
+});
+
+test("an automatic logical restore preserves the source foreign-key graph and its derived capabilities", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-logical-source-restore-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const previousKey = process.env.BLOGBOT_DATA_KEY_HEX;
+  process.env.BLOGBOT_DATA_KEY_HEX = "78".repeat(32);
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.BLOGBOT_DATA_KEY_HEX;
+    else process.env.BLOGBOT_DATA_KEY_HEX = previousKey;
+  });
+
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  t.after(() => repository.close());
+  const database = repository.getDatabase();
+  const sources = await PGliteSourceRepository.fromDatabase(database);
+  const source = {
+    id: "restore-source",
+    url: "https://news.example/restore.xml",
+    kind: "RSS" as const,
+    status: "ACTIVE" as const,
+    trustStatus: "APPROVED" as const,
+    rightsStatus: "APPROVED" as const,
+    language: "en" as const,
+    discoveredFeeds: [],
+    createdAt: "2026-08-21T00:00:00.000Z",
+    updatedAt: "2026-08-21T00:00:00.000Z",
+    version: 1
+  };
+  await sources.saveSource(source);
+  await sources.saveEntries(source.id, [{
+    externalId: "restore-entry",
+    title: "Restore dependency ordering",
+    url: "https://news.example/restore-entry",
+    publishedAt: "2026-08-21T01:00:00.000Z",
+    summary: "The latest pointer must still reach its archived version after restore."
+  }]);
+  const entriesBefore = await sources.listEntries(source.id);
+  const capabilitiesBefore = await sources.getSourceCapabilities(source.id);
+
+  const created = await createConsistentAutomaticBackup(database, join(root, "pgdata"));
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const backupName = String(created.outputPath).split(/[\\/]/u).at(-1);
+  const restored = await handleAutomaticBackupAccess(
+    { version: 1, id: "restore-source-graph", kind: "backup.auto.restore", payload: { backupName, confirmReplaceLocalData: true } },
+    join(root, "pgdata"),
+    database
+  );
+
+  assert.equal(restored.ok, true, JSON.stringify(restored));
+  assert.deepEqual(await sources.listEntries(source.id), entriesBefore);
+  assert.deepEqual(await sources.getSourceCapabilities(source.id), capabilitiesBefore);
+});
+
+test("an automatic snapshot cannot be read back with the wrong local data key", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-logical-snapshot-key-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const previousKey = process.env.BLOGBOT_DATA_KEY_HEX;
+  process.env.BLOGBOT_DATA_KEY_HEX = "11".repeat(32);
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.BLOGBOT_DATA_KEY_HEX;
+    else process.env.BLOGBOT_DATA_KEY_HEX = previousKey;
+  });
+
+  const created = await createConsistentAutomaticBackup(logicalBackupGate().gate, root);
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const backupName = String(created.outputPath).split(/[\\/]/u).at(-1);
+
+  // The snapshot key is derived from the local data key, so a different profile
+  // key must fail closed rather than return rows.
+  process.env.BLOGBOT_DATA_KEY_HEX = "22".repeat(32);
+  const verified = await handleAutomaticBackupAccess(
+    { version: 1, id: "verify-wrong-key", kind: "backup.auto.verify", payload: { backupName } },
+    root,
+    logicalBackupGate().gate
+  );
+  assert.equal(verified.ok, false);
+  assert.equal(verified.code, "BACKUP_INVALID");
 });

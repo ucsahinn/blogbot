@@ -8,23 +8,53 @@ function response(body: unknown, status = 200) {
 
 test("GitHub publication effects dispatch a configured workflow and persist an idempotent intent", async () => {
   const saved = new Map<string, unknown>();
-  const calls: string[] = [];
+  const calls: Array<{ url: string; method: string; body?: unknown }> = [];
   const effects = new GitHubPublicationEffects({ token: "token", repository: "owner/site", baseBranch: "main", deployWorkflow: "deploy.yml" }, {
     store: { get: async (key) => saved.get(key), set: async (key, value) => { saved.set(key, value); } },
     fetcher: async (url, init) => {
-      calls.push(`${init.method} ${url}`);
-      return {
-        ok: true,
-        status: 204,
-        headers: { get: () => null },
-        json: async () => { throw new Error("204 response has no JSON body"); }
-      };
+      calls.push({
+        url,
+        method: init.method,
+        ...(init.body ? { body: JSON.parse(init.body) } : {})
+      });
+      if (init.method === "GET" && url.includes("/git/ref/heads/blogbot/deploy-")) return response({}, 404);
+      if (init.method === "GET" && url.includes("/actions/runs?")) return response({ workflow_runs: [] });
+      if (init.method === "POST" && url.endsWith("/git/refs")) return response({ object: { sha: "a".repeat(40) } }, 201);
+      if (init.method === "POST" && url.includes("/actions/workflows/deploy.yml/dispatches")) {
+        return { ok: true, status: 204, headers: { get: () => null }, json: async () => { throw new Error("204 response has no JSON body"); } };
+      }
+      throw new Error(`unexpected request: ${init.method} ${url}`);
     }
   });
   const intent = await effects.createDeployIntent({ key: "release-1", revisionId: "rev-1", mergeSha: "a".repeat(40) });
   assert.equal(intent.revisionId, "rev-1");
   assert.equal((await effects.findDeployIntent("release-1"))?.mergeSha, "a".repeat(40));
-  assert.match(calls[0] ?? "", /actions\/workflows\/deploy.yml\/dispatches/u);
+  const dispatch = calls.find((call) => call.url.includes("/actions/workflows/deploy.yml/dispatches"));
+  assert.ok(dispatch);
+  const dispatchBody = dispatch.body as { ref: string; inputs: { intent_key: string; merge_sha: string } };
+  assert.match(dispatchBody.ref, /^blogbot\/deploy-intents\/[a-f0-9]{64}$/u);
+  assert.match(dispatchBody.inputs.intent_key, /^[a-f0-9]{64}$/u);
+  assert.equal(dispatchBody.inputs.merge_sha, "a".repeat(40));
+  assert.ok(calls.some((call) => call.method === "POST" && call.url.endsWith("/git/refs") && (call.body as { ref?: string }).ref === `refs/heads/${dispatchBody.ref}`));
+  assert.ok(calls.some((call) => call.method === "POST" && call.url.endsWith("/git/refs") && (call.body as { ref?: string }).ref === `refs/heads/blogbot/deploy-dispatched/${dispatchBody.inputs.intent_key}`));
+});
+
+test("GitHub publication effects recover a completed dispatch marker without dispatching twice", async () => {
+  let dispatches = 0;
+  const mergeSha = "b".repeat(40);
+  const effects = new GitHubPublicationEffects({ token: "token", repository: "owner/site", baseBranch: "main", deployWorkflow: "deploy.yml" }, {
+    fetcher: async (url, init) => {
+      if (init.method === "GET" && url.includes("/git/ref/heads/blogbot/deploy-intents/")) return response({ object: { sha: mergeSha } });
+      if (init.method === "GET" && url.includes("/git/ref/heads/blogbot/deploy-dispatched/")) return response({ object: { sha: mergeSha } });
+      if (init.method === "POST" && url.includes("/actions/workflows/")) dispatches += 1;
+      throw new Error(`unexpected request: ${init.method} ${url}`);
+    }
+  });
+
+  const intent = await effects.createDeployIntent({ key: "release-retry", revisionId: "rev-retry", mergeSha });
+
+  assert.equal(intent.mergeSha, mergeSha);
+  assert.equal(dispatches, 0);
 });
 
 test("GitHub publication effects reject an invalid target before network access", () => {

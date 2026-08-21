@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ArticleType, SiteSection } from "../../contracts/src/index.ts";
+import {
+  evaluateEditorialQualityV3,
+  type EditorialApprovalAttestationV3,
+  type EditorialAssessmentV3,
+  type EditorialSourceRoleV3
+} from "./quality-gates.ts";
 
 export type ArticleState =
   | "DISCOVERED"
@@ -77,6 +83,8 @@ export type SourcePolicyEligibility =
 
 export interface MediaArtifact {
   role: "hero" | "inline";
+  /** Renderer provenance is approval-bound for newly materialized media. */
+  source?: "IMAGEGEN" | "LOCAL_RENDERER";
   /** Engine-owned relative asset reference. */
   path: string;
   sha256: string;
@@ -114,8 +122,13 @@ export interface EditorialGateResult {
   reasonCode?: string;
 }
 
+/**
+ * V1 gate ids whose WARN state a human may still accept. Only real gate ids
+ * belong here: this set is compared against `gate.id`, so an editorial warning
+ * *code* placed in it can never match anything and only reads as if a policy
+ * were enforced.
+ */
 export const ACCEPTABLE_EDITORIAL_WARNING_IDS = new Set([
-  "SINGLE_OFFICIAL_SOURCE_EXCEPTION",
   "contradictions",
   "seo",
   "media"
@@ -154,6 +167,13 @@ export interface ArticleRevision {
   targetBaseSha?: string;
   generatedFiles?: GeneratedFileManifestEntry[];
   qualityGates?: EditorialGateResult[];
+  /** V3-only immutable instruction and disclosure context. */
+  packageVersion?: 3;
+  editorialContext?: EditorialContextV3;
+  editorialAssessment?: EditorialAssessmentV3;
+  publicationSources?: PublicationSourceV3[];
+  deployWorkflow?: string;
+  requiredChecks?: string[];
 }
 
 /** Complete immutable package required by the V2 approval workflow. */
@@ -170,6 +190,35 @@ export interface RevisionPackageV2 extends ArticleRevision {
   qualityGates: EditorialGateResult[];
 }
 
+export interface EditorialContextV3 {
+  readonly instruction: string;
+  readonly instructionHash: string;
+  readonly contentOrigin: "CODEX_ASSISTED";
+  readonly aiDisclosure: "GENERATED_WITH_AI";
+}
+
+/**
+ * Public source metadata is intentionally narrower than SourceSnapshot:
+ * evidence excerpts, hashes, capture ids and internal policy decisions must
+ * never cross the publication boundary.
+ */
+export interface PublicationSourceV3 {
+  readonly id: string;
+  readonly title: string;
+  readonly url: string;
+  readonly role: EditorialSourceRoleV3;
+}
+
+/** Complete immutable package required by the V3 approval workflow. */
+export interface RevisionPackageV3 extends RevisionPackageV2 {
+  packageVersion: 3;
+  editorialContext: EditorialContextV3;
+  editorialAssessment: EditorialAssessmentV3;
+  publicationSources: PublicationSourceV3[];
+  deployWorkflow: string;
+  requiredChecks: string[];
+}
+
 interface ApprovalRecord {
   revisionId: string;
   revisionHash: string;
@@ -182,6 +231,14 @@ export interface Approval extends ApprovalRecord {
   approvalType?: "EDITORIAL";
 }
 
+/** Human attestations are approval records, not model-authored revision data. */
+export interface ApprovalV3 extends ApprovalRecord {
+  packageVersion: 3;
+  approvalType: "EDITORIAL";
+  attestation: EditorialApprovalAttestationV3;
+  attestationHash: string;
+}
+
 export interface HighRiskApproval extends ApprovalRecord {
   approvalType: "HIGH_RISK";
   riskChecklistHash: string;
@@ -189,7 +246,7 @@ export interface HighRiskApproval extends ApprovalRecord {
 }
 
 export interface ApprovalBundle {
-  editorial: Approval;
+  editorial: Approval | ApprovalV3;
   highRisk: HighRiskApproval | null;
 }
 
@@ -201,6 +258,11 @@ const REQUIRED_V2_QUALITY_GATES = {
   "markdown-safety": "security",
   seo: "seo",
   media: "media"
+} as const;
+
+const REQUIRED_V3_QUALITY_GATES = {
+  ...REQUIRED_V2_QUALITY_GATES,
+  "editorial-policy": "editorial"
 } as const;
 
 export interface RevisionLineageEntry {
@@ -237,6 +299,10 @@ export type PublishBlockReason =
   | "QUALITY_GATES_NOT_READY"
   | "WARNING_NOT_ALLOWLISTED"
   | "WARNING_ACCEPTANCE_MISMATCH"
+  | "EDITORIAL_ATTESTATION_REQUIRED"
+  | "EDITORIAL_ATTESTATION_HASH_MISMATCH"
+  | "EDITORIAL_ATTESTATION_INVALID"
+  | "EDITORIAL_QUALITY_NOT_READY"
   | "TRANSLATION_PARITY_MISMATCH"
   | "TRANSLATION_PARITY_PENDING"
   | "HIGH_RISK_APPROVAL_REQUIRED"
@@ -279,8 +345,16 @@ function toCanonicalValue(value: unknown, path: string): JsonValue {
     if (prototype !== Object.prototype && prototype !== null) {
       throw new TypeError(`Non-JSON object at ${path}`);
     }
-    const result: Record<string, JsonValue> = {};
+    // A plain `{}` accumulator inherits Object.prototype's `__proto__` setter,
+    // so assigning an own `__proto__` key parsed from NDJSON would set the
+    // prototype instead of adding a property: the key vanished from the emitted
+    // JSON and two different objects hashed identically. Refuse those keys
+    // outright so a collision is a hard error, never a silent drop.
+    const result = Object.create(null) as Record<string, JsonValue>;
     for (const key of Object.keys(value).sort()) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype") {
+        throw new TypeError(`Unsafe canonical JSON key at ${path}.${key}`);
+      }
       const item = (value as Record<string, unknown>)[key];
       if (item === undefined) {
         throw new TypeError(`Undefined value at ${path}.${key}`);
@@ -323,6 +397,14 @@ export function computeWarningSetHash(
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
   return createHash("sha256").update(canonicalJson(warnings), "utf8").digest("hex");
+}
+
+export function computeEditorialAttestationHash(
+  attestation: EditorialApprovalAttestationV3
+): string {
+  return createHash("sha256")
+    .update(canonicalJson(attestation), "utf8")
+    .digest("hex");
 }
 
 export function validateApprovalGates(
@@ -444,7 +526,10 @@ export function validateRevisionPackageV2(
     ) return false;
     gateIds.add(gate.id);
   }
-  if (gateIds.size !== Object.keys(REQUIRED_V2_QUALITY_GATES).length) return false;
+  // Only the required set is mandated, not the exact set. A package may carry
+  // an additional gate such as `publication-target`, whose NOT_RUN state must
+  // reach `validateApprovalGates` as a specific block instead of being hidden
+  // behind a generic "package incomplete" verdict.
   for (const [id, group] of Object.entries(REQUIRED_V2_QUALITY_GATES)) {
     const gate = revision.qualityGates.find((candidate) => candidate.id === id);
     if (!gate || gate.group !== group) return false;
@@ -465,6 +550,294 @@ export function hasRevisionPackageV2Fields(revision: ArticleRevision): boolean {
     revision.generatedFiles,
     revision.qualityGates
   ].some((value) => value !== undefined);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasNullableTextShape(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isEditorialSourceRoleV3(value: unknown): value is EditorialSourceRoleV3 {
+  return value === "primary" || value === "independent" || value === "supporting";
+}
+
+function validateEditorialAssessmentV3Shape(
+  value: unknown
+): value is EditorialAssessmentV3 {
+  if (!isRecord(value)) return false;
+  if (
+    !["news", "analysis", "deep_dive", "guide"].includes(String(value.articleType)) ||
+    typeof value.intentSatisfied !== "boolean" ||
+    typeof value.titleIsHonest !== "boolean" ||
+    typeof value.originalValuePresent !== "boolean" ||
+    typeof value.allClaimsVerified !== "boolean" ||
+    !Array.isArray(value.sources) ||
+    !hasNullableTextShape(value.singleOfficialSourceRationale) ||
+    typeof value.authorTransparent !== "boolean" ||
+    typeof value.aiDisclosureMatchesUsage !== "boolean" ||
+    typeof value.isYmyl !== "boolean" ||
+    typeof value.leadHasFiveWOneH !== "boolean" ||
+    typeof value.unverifiedClaimsClearlyLabeled !== "boolean" ||
+    typeof value.newsSchemaComplete !== "boolean" ||
+    typeof value.sensitiveTopic !== "boolean" ||
+    !hasNullableTextShape(value.clusterKey) ||
+    typeof value.aboveFoldAnswersIntent !== "boolean" ||
+    typeof value.headingHierarchyValid !== "boolean" ||
+    !Number.isSafeInteger(value.internalLinkCount) ||
+    (value.internalLinkCount as number) < 0 ||
+    !hasNullableTextShape(value.internalLinkOmissionRationale)
+  ) {
+    return false;
+  }
+
+  const ids = new Set<string>();
+  for (const item of value.sources) {
+    if (
+      !isRecord(item) ||
+      !hasText(item.sourceId) ||
+      typeof item.cited !== "boolean" ||
+      typeof item.official !== "boolean" ||
+      !isEditorialSourceRoleV3(item.role) ||
+      ids.has(item.sourceId)
+    ) {
+      return false;
+    }
+    ids.add(item.sourceId);
+  }
+  return true;
+}
+
+function normalizedRequiredChecks(
+  checks: readonly string[]
+): string[] {
+  return [...new Set(checks.map((check) => check.trim()).filter(Boolean))]
+    .sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+}
+
+function hasNormalizedRequiredChecks(value: unknown): value is string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > 32 ||
+    value.some(
+      (check) =>
+        typeof check !== "string" ||
+        check.length > 200 ||
+        check !== check.trim() ||
+        !hasText(check)
+    )
+  ) {
+    return false;
+  }
+  const normalized = normalizedRequiredChecks(value);
+  return (
+    normalized.length === value.length &&
+    normalized.every((check, index) => check === value[index])
+  );
+}
+
+function publicationSourceProjectionMatches(
+  revision: ArticleRevision,
+  assessment: EditorialAssessmentV3,
+  publicationSources: unknown
+): publicationSources is PublicationSourceV3[] {
+  if (!Array.isArray(publicationSources) || publicationSources.length === 0) {
+    return false;
+  }
+  const sourceById = new Map<string, SourceSnapshot>();
+  for (const source of revision.sources) {
+    if (!hasText(source.id) || sourceById.has(source.id)) return false;
+    sourceById.set(source.id, source);
+  }
+
+  for (const assessed of assessment.sources) {
+    if (!sourceById.has(assessed.sourceId)) return false;
+  }
+  const citedRoleById = new Map(
+    assessment.sources
+      .filter((source) => source.cited)
+      .map((source) => [source.sourceId, source.role] as const)
+  );
+  if (citedRoleById.size !== publicationSources.length) return false;
+
+  const publishedIds = new Set<string>();
+  for (const source of publicationSources) {
+    if (
+      !isRecord(source) ||
+      !hasText(source.id) ||
+      !hasText(source.title) ||
+      !hasText(source.url) ||
+      !isEditorialSourceRoleV3(source.role) ||
+      publishedIds.has(source.id)
+    ) {
+      return false;
+    }
+    const snapshot = sourceById.get(source.id);
+    if (
+      snapshot === undefined ||
+      source.title !== snapshot.title ||
+      source.url !== snapshot.url ||
+      source.role !== citedRoleById.get(source.id)
+    ) {
+      return false;
+    }
+    publishedIds.add(source.id);
+  }
+  return [...citedRoleById.keys()].every((id) => publishedIds.has(id));
+}
+
+/**
+ * Runtime boundary for immutable V3 packages. V2 validation remains a
+ * prerequisite, while every V3-only surface is independently fail-closed.
+ */
+export function validateRevisionPackageV3(
+  revision: ArticleRevision
+): revision is RevisionPackageV3 {
+  if (
+    revision.packageVersion !== 3 ||
+    !validateRevisionPackageV2(revision) ||
+    !isRecord(revision.editorialContext) ||
+    !hasText(revision.editorialContext.instruction) ||
+    !SHA256_PATTERN.test(String(revision.editorialContext.instructionHash)) ||
+    revision.editorialContext.instructionHash !== createHash("sha256")
+      .update(revision.editorialContext.instruction.replace(/\r\n?/gu, "\n"), "utf8")
+      .digest("hex") ||
+    revision.editorialContext.contentOrigin !== "CODEX_ASSISTED" ||
+    revision.editorialContext.aiDisclosure !== "GENERATED_WITH_AI" ||
+    !validateEditorialAssessmentV3Shape(revision.editorialAssessment) ||
+    !publicationSourceProjectionMatches(
+      revision,
+      revision.editorialAssessment,
+      revision.publicationSources
+    ) ||
+    !hasText(revision.deployWorkflow) ||
+    !/^[A-Za-z0-9_.-]+\.ya?ml$/u.test(revision.deployWorkflow) ||
+    !hasNormalizedRequiredChecks(revision.requiredChecks)
+  ) {
+    return false;
+  }
+
+  const editorialPolicy = revision.qualityGates.find(
+    (gate) => gate.id === "editorial-policy"
+  );
+  if (
+    editorialPolicy?.group !== REQUIRED_V3_QUALITY_GATES["editorial-policy"] ||
+    editorialPolicy.policyVersion !== "3"
+  ) {
+    return false;
+  }
+  for (const [id, group] of Object.entries(REQUIRED_V3_QUALITY_GATES)) {
+    const gate = revision.qualityGates.find((candidate) => candidate.id === id);
+    if (!gate || gate.group !== group) return false;
+  }
+  return true;
+}
+
+export function hasRevisionPackageV3Fields(revision: ArticleRevision): boolean {
+  return [
+    revision.packageVersion,
+    revision.editorialContext,
+    revision.editorialAssessment,
+    revision.publicationSources,
+    revision.deployWorkflow,
+    revision.requiredChecks
+  ].some((value) => value !== undefined);
+}
+
+/**
+ * Produce the only source shape allowed into public artifacts. Legacy V2
+ * records have no trusted role classification, so cited sources are projected
+ * conservatively as supporting.
+ */
+export function publicationSourcesFor(
+  revision: ArticleRevision
+): PublicationSourceV3[] {
+  if (revision.packageVersion === 3) {
+    if (!validateRevisionPackageV3(revision)) return [];
+    return revision.publicationSources.map(({ id, title, url, role }) => ({
+      id,
+      title,
+      url,
+      role
+    }));
+  }
+  if (hasRevisionPackageV3Fields(revision)) return [];
+
+  const citedIds = new Set(
+    revision.claims.flatMap((claim) => claim.sourceIds)
+  );
+  return revision.sources
+    .filter((source) => citedIds.has(source.id))
+    .map(({ id, title, url }) => ({
+      id,
+      title,
+      url,
+      role: "supporting"
+    }));
+}
+
+function attestationHasTypedShape(
+  value: unknown
+): value is EditorialApprovalAttestationV3 {
+  if (!isRecord(value)) return false;
+  const editorial = value.editorialReview;
+  if (editorial !== null) {
+    if (
+      !isRecord(editorial) ||
+      typeof editorial.reviewer !== "string" ||
+      !Array.isArray(editorial.sourceRoles) ||
+      editorial.sourceRoles.some(
+        (source) =>
+          !isRecord(source) ||
+          typeof source.sourceId !== "string" ||
+          !isEditorialSourceRoleV3(source.role)
+      )
+    ) {
+      return false;
+    }
+  }
+  const expert = value.expertReview;
+  if (
+    expert !== null &&
+    (
+      !isRecord(expert) ||
+      typeof expert.reviewer !== "string" ||
+      typeof expert.qualifications !== "string" ||
+      typeof expert.reviewScope !== "string"
+    )
+  ) {
+    return false;
+  }
+  const ethics = value.ethicsReview;
+  if (
+    ethics !== null &&
+    (
+      !isRecord(ethics) ||
+      typeof ethics.reviewer !== "string" ||
+      typeof ethics.reviewScope !== "string" ||
+      typeof ethics.rationale !== "string"
+    )
+  ) {
+    return false;
+  }
+  return (
+    Object.hasOwn(value, "editorialReview") &&
+    Object.hasOwn(value, "expertReview") &&
+    Object.hasOwn(value, "ethicsReview")
+  );
+}
+
+function isApprovalV3(value: Approval | ApprovalV3): value is ApprovalV3 {
+  const candidate = value as Partial<ApprovalV3>;
+  return (
+    candidate.packageVersion === 3 &&
+    candidate.approvalType === "EDITORIAL" &&
+    SHA256_PATTERN.test(String(candidate.attestationHash)) &&
+    attestationHasTypedShape(candidate.attestation)
+  );
 }
 
 /** Every publishable claim must carry bilingual text and anchored evidence. */
@@ -532,7 +905,7 @@ export function evaluateSourcePolicy(
 
 export function evaluatePublishEligibility(
   revision: ArticleRevision,
-  approval: Approval | ApprovalBundle | null,
+  approval: Approval | ApprovalV3 | ApprovalBundle | null,
   context: {
     now: Date;
     publishingPaused: boolean;
@@ -544,7 +917,7 @@ export function evaluatePublishEligibility(
     return { eligible: false, reason: "NO_APPROVAL" };
   }
   let approvalBundle: ApprovalBundle | null;
-  let editorialApproval: Approval;
+  let editorialApproval: Approval | ApprovalV3;
   if ("editorial" in approval) {
     approvalBundle = approval;
     editorialApproval = approval.editorial;
@@ -565,8 +938,39 @@ export function evaluatePublishEligibility(
   if (editorialApproval.revisionHash !== revisionHash) {
     return { eligible: false, reason: "APPROVAL_HASH_MISMATCH" };
   }
-  if (!validateRevisionPackageV2(revision)) {
-    return { eligible: false, reason: "REVISION_PACKAGE_INCOMPLETE" };
+  if (revision.packageVersion === 3) {
+    if (!validateRevisionPackageV3(revision)) {
+      return { eligible: false, reason: "REVISION_PACKAGE_INCOMPLETE" };
+    }
+    if (!isApprovalV3(editorialApproval)) {
+      return { eligible: false, reason: "EDITORIAL_ATTESTATION_REQUIRED" };
+    }
+    if (
+      editorialApproval.attestationHash !==
+      computeEditorialAttestationHash(editorialApproval.attestation)
+    ) {
+      return {
+        eligible: false,
+        reason: "EDITORIAL_ATTESTATION_HASH_MISMATCH"
+      };
+    }
+    const editorialQuality = evaluateEditorialQualityV3(
+      revision.editorialAssessment,
+      editorialApproval.attestation
+    );
+    if (editorialQuality.blockers.length > 0) {
+      return { eligible: false, reason: "EDITORIAL_QUALITY_NOT_READY" };
+    }
+    if (!editorialQuality.passed) {
+      return { eligible: false, reason: "EDITORIAL_ATTESTATION_INVALID" };
+    }
+  } else {
+    if (
+      hasRevisionPackageV3Fields(revision) ||
+      !validateRevisionPackageV2(revision)
+    ) {
+      return { eligible: false, reason: "REVISION_PACKAGE_INCOMPLETE" };
+    }
   }
   const gateStatus = validateApprovalGates(revision, editorialApproval.warningSetHash);
   if (gateStatus !== "READY") return { eligible: false, reason: gateStatus };
@@ -597,6 +1001,12 @@ export function evaluatePublishEligibility(
   }
   const sourcePolicy = evaluateSourcePolicy(revision);
   if (!sourcePolicy.eligible) return sourcePolicy;
+  // Every claim, evidence and verification check below is an `Array.every` over
+  // this list, so a revision with no claims at all would satisfy all of them
+  // vacuously and publish with zero facts bound to any evidence.
+  if (revision.claims.length === 0) {
+    return { eligible: false, reason: "NEEDS_SOURCE" };
+  }
   if (!validateClaimEvidence(revision)) {
     return { eligible: false, reason: "INVALID_CLAIM_EVIDENCE" };
   }

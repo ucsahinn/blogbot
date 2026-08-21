@@ -10,12 +10,14 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::PWSTR;
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::{
-    NtCreateFile, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_IF,
-    FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    FileRenameInformation, NtCreateFile, NtSetInformationFile, FILE_DIRECTORY_FILE,
+    FILE_NON_DIRECTORY_FILE, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
+    FILE_RENAME_INFORMATION_0, FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use windows::Win32::Foundation::{HANDLE, OBJ_CASE_INSENSITIVE, UNICODE_STRING};
 use windows::Win32::Storage::FileSystem::{
@@ -39,10 +41,13 @@ fn segments(relative: &str) -> std::io::Result<Vec<&str>> {
         return Err(invalid("unsafe preview path"));
     }
     let values = relative.split('/').collect::<Vec<_>>();
-    if values
-        .iter()
-        .any(|part| part.is_empty() || *part == "." || *part == ".." || part.contains(':'))
-    {
+    if values.iter().any(|part| {
+        part.is_empty()
+            || *part == "."
+            || *part == ".."
+            || part.contains(':')
+            || part.contains('\0')
+    }) {
         return Err(invalid("unsafe preview path"));
     }
     Ok(values)
@@ -90,8 +95,11 @@ fn root_handle(root: &Path) -> std::io::Result<File> {
         )
         .map_err(|error| std::io::Error::other(error.message().to_string()))?
     };
-    checked_directory(handle)?;
-    Ok(unsafe { File::from_raw_handle(handle.0) })
+    // Take ownership immediately. Any validation error below now drops `file`
+    // and closes the raw HANDLE instead of leaking one handle per rejected root.
+    let file = unsafe { File::from_raw_handle(handle.0) };
+    checked_directory(HANDLE(file.as_raw_handle()))?;
+    Ok(file)
 }
 
 fn relative_open(
@@ -185,7 +193,14 @@ fn open_file(root: &File, relative: &str, create: bool) -> std::io::Result<(File
 }
 
 fn copy_handle_to(root: &File, source: &mut File, backup_relative: &str) -> std::io::Result<()> {
-    let mut backup = open_file(root, backup_relative, true)?.0;
+    let (mut backup, created) = open_file(root, backup_relative, true)?;
+    if !created {
+        // The backup prefix is derived from the preview hash, so re-materializing
+        // the same preview reuses this exact path. Only the first copy holds the
+        // user's original file; overwriting it on a re-run would replace the only
+        // undo copy with content Blogbot itself generated.
+        return Ok(());
+    }
     source.seek(SeekFrom::Start(0))?;
     backup.set_len(0)?;
     let mut total = 0u64;
@@ -234,28 +249,171 @@ pub fn materialize_new_directory(
     directory_name: &str,
     files: &[(String, Vec<u8>)],
 ) -> std::io::Result<usize> {
-    let parent = root_handle(parent_path)?;
-    if segments(directory_name)?.len() != 1 {
+    materialize_new_directory_with_before_entry(parent_path, directory_name, files, |_| Ok(()))
+}
+
+fn restore_directories(files: &[(String, Vec<u8>)]) -> std::io::Result<Vec<String>> {
+    let mut file_keys = std::collections::BTreeSet::<String>::new();
+    let mut directories = std::collections::BTreeMap::<String, String>::new();
+    for (relative, _) in files {
+        let parts = segments(relative)?;
+        let file_key = relative.to_lowercase();
+        if !file_keys.insert(file_key) {
+            return Err(invalid("duplicate restore output"));
+        }
+        for depth in 1..parts.len() {
+            let directory = parts[..depth].join("/");
+            directories
+                .entry(directory.to_lowercase())
+                .or_insert(directory);
+        }
+    }
+    if file_keys.iter().any(|path| directories.contains_key(path)) {
+        return Err(invalid("restore output conflicts with a directory"));
+    }
+    let mut values = directories.into_values().collect::<Vec<_>>();
+    values.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+    Ok(values)
+}
+
+fn create_restore_staging(parent: &File) -> std::io::Result<(File, String)> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| invalid("restore staging clock unavailable"))?
+        .as_nanos();
+    for attempt in 0..32u8 {
+        let name = format!(
+            ".blogbot-restore-stage-{}-{nonce}-{attempt}",
+            std::process::id()
+        );
+        let (directory, created) = relative_open(parent, &name, true, true)?;
+        if created {
+            return Ok((directory, name));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "restore staging directory collision",
+    ))
+}
+
+fn mark_for_deletion(file: &File) -> std::io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            FileDispositionInfo,
+            &disposition as *const FILE_DISPOSITION_INFO as *const c_void,
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+        .map_err(|error| std::io::Error::other(error.message().to_string()))
+    }
+}
+
+fn rename_directory_no_replace(
+    directory: &File,
+    parent: &File,
+    destination_name: &str,
+) -> std::io::Result<()> {
+    let wide = OsStr::new(destination_name)
+        .encode_wide()
+        .collect::<Vec<_>>();
+    let name_bytes = wide
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| invalid("restore target name too long"))?;
+    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
+    let total_bytes = header_bytes
+        .checked_add(name_bytes)
+        .filter(|size| *size <= u32::MAX as usize)
+        .ok_or_else(|| invalid("restore target name too long"))?;
+    let words = total_bytes.div_ceil(std::mem::size_of::<usize>());
+    let mut buffer = vec![0usize; words];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    unsafe {
+        (*info).Anonymous = FILE_RENAME_INFORMATION_0 {
+            ReplaceIfExists: false,
+        };
+        (*info).RootDirectory = HANDLE(parent.as_raw_handle());
+        (*info).FileNameLength = name_bytes as u32;
+        std::ptr::copy_nonoverlapping(
+            wide.as_ptr(),
+            (info.cast::<u8>().add(header_bytes)).cast::<u16>(),
+            wide.len(),
+        );
+        let mut status = IO_STATUS_BLOCK::default();
+        let result = NtSetInformationFile(
+            HANDLE(directory.as_raw_handle()),
+            &mut status,
+            info.cast::<c_void>(),
+            total_bytes as u32,
+            FileRenameInformation,
+        );
+        if result.0 < 0 {
+            return Err(std::io::Error::other(format!(
+                "NtSetInformationFile rename failed: 0x{:08x}",
+                result.0 as u32
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn cleanup_restore_staging(root: File, created_files: &[String], planned_directories: &[String]) {
+    for relative in created_files.iter().rev() {
+        if let Ok((file, _)) = open_file(&root, relative, false) {
+            let _ = mark_for_deletion(&file);
+        }
+    }
+    for relative in planned_directories {
+        if let Ok(parts) = segments(relative) {
+            if let Ok(directory) = directory_for(&root, &parts, false) {
+                let _ = mark_for_deletion(&directory);
+            }
+        }
+    }
+    let _ = mark_for_deletion(&root);
+}
+
+fn materialize_new_directory_with_before_entry<F>(
+    parent_path: &Path,
+    directory_name: &str,
+    files: &[(String, Vec<u8>)],
+    mut before_entry: F,
+) -> std::io::Result<usize>
+where
+    F: FnMut(usize) -> std::io::Result<()>,
+{
+    let target_segments = segments(directory_name)?;
+    if target_segments.len() != 1 {
         return Err(invalid("restore target must be a single directory name"));
     }
-    let (root, created) = relative_open(&parent, directory_name, true, true)?;
-    if !created {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "restore target already exists",
-        ));
-    }
-    let mut written = 0usize;
-    for (relative, content) in files {
-        let (mut destination, destination_created) = open_file(&root, relative, true)?;
-        if !destination_created {
-            return Err(invalid("restore output already exists"));
+    let planned_directories = restore_directories(files)?;
+    let parent = root_handle(parent_path)?;
+    let (root, _staging_name) = create_restore_staging(&parent)?;
+    let mut created_files = Vec::<String>::new();
+    let result = (|| {
+        for (index, (relative, content)) in files.iter().enumerate() {
+            before_entry(index)?;
+            let (mut destination, destination_created) = open_file(&root, relative, true)?;
+            if !destination_created {
+                return Err(invalid("restore output already exists"));
+            }
+            created_files.push(relative.clone());
+            destination.write_all(content)?;
+            destination.sync_all()?;
         }
-        destination.write_all(content)?;
-        destination.sync_all()?;
-        written += 1;
+        // Every staged file is flushed above before commit. Windows rejects
+        // FlushFileBuffers for this directory handle with ERROR_INVALID_PARAMETER,
+        // so there must be no fallible operation between the atomic rename and
+        // returning success.
+        rename_directory_no_replace(&root, &parent, directory_name)?;
+        Ok(files.len())
+    })();
+    if result.is_err() {
+        cleanup_restore_staging(root, &created_files, &planned_directories);
     }
-    Ok(written)
+    result
 }
 
 fn materialize_with_before_first<F: FnOnce()>(
@@ -325,6 +483,97 @@ fn rollback(root: &File, applied: &[(String, Option<String>)]) {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+    fn process_handle_count() -> u32 {
+        let mut count = 0u32;
+        unsafe {
+            GetProcessHandleCount(GetCurrentProcess(), &mut count).expect("process handle count");
+        }
+        count
+    }
+
+    #[test]
+    fn rejecting_a_reparse_root_does_not_leak_the_opened_handle() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let parent = std::env::temp_dir().join(format!("blogbot-root-handle-leak-{nonce}"));
+        let target = parent.join("target");
+        let junction = parent.join("junction");
+        std::fs::create_dir_all(&target).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert!(status.success(), "junction fixture must be available");
+        assert!(root_handle(&junction).is_err());
+
+        let before = process_handle_count();
+        // A broad native run executes unrelated tests in parallel. Use a leak
+        // signal much larger than normal handle-count noise while keeping room
+        // for those concurrent fixtures.
+        for _ in 0..256 {
+            assert!(root_handle(&junction).is_err());
+        }
+        let after = process_handle_count();
+        assert!(
+            after <= before.saturating_add(64),
+            "rejected roots leaked process handles: before={before}, after={after}"
+        );
+
+        std::fs::remove_dir(&junction).unwrap();
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn re_materializing_a_preview_keeps_the_user_original_backup() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(format!("blogbot-preview-backup-{nonce}"));
+        std::fs::create_dir_all(root.join("articles")).unwrap();
+        let target = root.join("articles").join("story.md");
+        std::fs::write(&target, b"kullanicinin ozgun dosyasi").unwrap();
+
+        // The backup prefix is derived from the preview hash, so both passes of
+        // the same preview share it.
+        let prefix = ".blogbot/backups/abcdef123456";
+        materialize(
+            &root,
+            &[("articles/story.md".to_owned(), b"ilk uretim".to_vec())],
+            prefix,
+        )
+        .unwrap();
+        materialize(
+            &root,
+            &[("articles/story.md".to_owned(), b"ikinci uretim".to_vec())],
+            prefix,
+        )
+        .unwrap();
+
+        let backup = root.join(".blogbot/backups/abcdef123456/articles/story.md");
+        assert_eq!(
+            std::fs::read(backup).unwrap(),
+            b"kullanicinin ozgun dosyasi".to_vec(),
+            "the backup must still hold the user's original file, not Blogbot output"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"ikinci uretim".to_vec());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn rejects_a_junction_replaced_after_the_root_handle_is_opened() {
@@ -528,7 +777,61 @@ mod tests {
             b"restored"
         );
         assert!(materialize_new_directory(&parent, "restored", &files).is_err());
+        assert_eq!(
+            std::fs::read(parent.join("restored/articles/example.md")).unwrap(),
+            b"restored",
+            "an existing restore target must never be replaced"
+        );
+        assert_eq!(
+            std::fs::read_dir(&parent).unwrap().count(),
+            1,
+            "a failed no-replace rename must clean its sibling staging tree"
+        );
         assert!(materialize_new_directory(&parent, "../outside", &files).is_err());
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn failed_restore_materialization_leaves_no_partial_target_and_can_retry() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let parent = std::env::temp_dir().join(format!("blogbot-atomic-restore-{nonce}"));
+        std::fs::create_dir_all(&parent).unwrap();
+        let interrupted_bundle = vec![
+            ("articles/example.md".to_owned(), b"partial".to_vec()),
+            ("articles/second.md".to_owned(), b"never written".to_vec()),
+        ];
+
+        let result = materialize_new_directory_with_before_entry(
+            &parent,
+            "restored",
+            &interrupted_bundle,
+            |index| {
+                if index == 1 {
+                    return Err(std::io::Error::other("injected restore write failure"));
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!parent.join("restored").exists());
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0);
+
+        let valid_bundle = vec![("articles/example.md".to_owned(), b"complete".to_vec())];
+        assert_eq!(
+            materialize_new_directory(&parent, "restored", &valid_bundle).unwrap(),
+            1
+        );
+        assert_eq!(
+            std::fs::read(parent.join("restored/articles/example.md")).unwrap(),
+            b"complete"
+        );
         let _ = std::fs::remove_dir_all(&parent);
     }
 }

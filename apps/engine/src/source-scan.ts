@@ -7,15 +7,17 @@ import {
 } from "../../../packages/database/src/source-repository.ts";
 import { canonicalJson } from "../../../packages/editorial/src/revision.ts";
 import {
-  analyzeSourceDocument,
   SourceDocumentError
 } from "../../../packages/security/src/source-document.ts";
 import {
-  fetchSource,
   FetchBoundaryError,
   type FetchTransport
 } from "../../fetcher/src/fetch-source.ts";
 import type { LocalQueueRuntime } from "./local-queue.ts";
+import {
+  collectSourceDocument,
+  SitemapCrawlError
+} from "./sitemap-crawl.ts";
 
 type SourceScanCommand = Extract<EngineCommandV1, { kind: "SOURCE.SCAN" }>;
 
@@ -138,15 +140,10 @@ export class SourceScanWorker {
       if (source.status !== "ACTIVE") {
         throw new Error(`SOURCE_DISABLED: Source ${source.id} is disabled`);
       }
-      const fetched = await fetchSource(source.url, this.transport, {
+      const { fetched, analysis } = await collectSourceDocument(source.url, this.transport, {
         timeoutMs: 8_000,
         maxBytes: 2_000_000,
         maxRedirects: 5
-      });
-      const analysis = analyzeSourceDocument({
-        finalUrl: fetched.finalUrl,
-        contentType: fetched.contentType,
-        body: fetched.body
       });
       await this.repository.completeSourceScan(job.scanId, {
         kind: analysis.kind,
@@ -194,6 +191,13 @@ function classifySourceScanError(error: unknown): SourceScanError {
     };
   }
   if (error instanceof SourceDocumentError) {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: false
+    };
+  }
+  if (error instanceof SitemapCrawlError) {
     return {
       code: error.code,
       message: error.message,

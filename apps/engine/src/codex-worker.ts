@@ -23,6 +23,8 @@ export type CodexRunnerDiagnosticCode =
   | "CODEX_OUTPUT_MISSING"
   | "CODEX_CLI_INVALID_EVENT"
   | "CODEX_CLI_INVALID_FINAL_OUTPUT"
+  | "CODEX_CLI_UNSUPPORTED"
+  | "CODEX_SESSION_RETENTION_FAILED"
   | "CODEX_PROCESS_FAILED"
   | "CODEX_UNKNOWN_FAILURE";
 
@@ -372,7 +374,7 @@ function isRunnerTimeout(error: unknown): boolean {
 
 function isTerminalRunnerFailure(error: unknown): boolean {
   if (typeof error !== "object" || error === null || !("code" in error)) return false;
-  return ["DENIED_EVENT", "INVALID_OUTPUT", "MISSING_OUTPUT", "INVALID_EVENT", "INVALID_FINAL_OUTPUT", "PROCESS_FAILED"].includes(
+  return ["DENIED_EVENT", "INVALID_OUTPUT", "MISSING_OUTPUT", "INVALID_EVENT", "INVALID_FINAL_OUTPUT", "UNSUPPORTED_CLI", "SESSION_RETENTION_FAILED", "PROCESS_FAILED"].includes(
     String((error as { code?: unknown }).code)
   );
 }
@@ -387,6 +389,8 @@ function runnerDiagnosticCode(error: unknown): CodexRunnerDiagnosticCode {
     case "MISSING_OUTPUT": return "CODEX_OUTPUT_MISSING";
     case "INVALID_EVENT": return "CODEX_CLI_INVALID_EVENT";
     case "INVALID_FINAL_OUTPUT": return "CODEX_CLI_INVALID_FINAL_OUTPUT";
+    case "UNSUPPORTED_CLI": return "CODEX_CLI_UNSUPPORTED";
+    case "SESSION_RETENTION_FAILED": return "CODEX_SESSION_RETENTION_FAILED";
     case "PROCESS_FAILED": return "CODEX_PROCESS_FAILED";
     default: return "CODEX_UNKNOWN_FAILURE";
   }

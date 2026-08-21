@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { userFacingBridgeError, userFacingPublicationQueueError, type BlogbotBridge } from "../bridge.ts";
+import {
+  userFacingBridgeError,
+  userFacingPublicationQueueError,
+  type BlogbotBridge,
+  type EditorialApprovalAttestationV3
+} from "../bridge.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
 import { contentCategoryLabel, sectionLabel } from "../app-model.ts";
@@ -28,6 +33,30 @@ interface ReviewWorkspaceProps {
 
 type ReviewTab = "content" | "claims" | "media" | "gates" | "diff";
 type Locale = "tr" | "en";
+type EditorialApprovalRequirement = "EDITORIAL_REVIEW" | "EXPERT_REVIEW" | "ETHICS_REVIEW";
+type ReviewRevisionV3 = ReviewRevision & {
+  packageVersion: 3;
+  publicationSources: NonNullable<ReviewRevision["publicationSources"]>;
+  approvalRequirements: EditorialApprovalRequirement[];
+};
+
+function asReviewRevisionV3(revision: ReviewRevision | null): ReviewRevisionV3 | null {
+  if (
+    revision?.packageVersion !== 3 ||
+    !Array.isArray(revision.publicationSources) ||
+    revision.publicationSources.length === 0 ||
+    !Array.isArray((revision as Partial<ReviewRevisionV3>).approvalRequirements)
+  ) {
+    return null;
+  }
+  return revision as ReviewRevisionV3;
+}
+
+function sourceRoleLabel(role: ReviewRevisionV3["publicationSources"][number]["role"]): string {
+  if (role === "primary") return "birincil";
+  if (role === "independent") return "bağımsız";
+  return "destekleyici";
+}
 
 type PublicationPreviewRequest = {
   revisionId: string;
@@ -178,6 +207,7 @@ export function ReviewWorkspace({
   onDraftQueued,
   onPublicationQueued,
   onRevisionApproved,
+  embedded = false,
   initialRevisionId
 }: ReviewWorkspaceProps) {
   const siteMode = connectorState.mode;
@@ -210,7 +240,19 @@ export function ReviewWorkspace({
   const [editRequestOpen, setEditRequestOpen] = useState(false);
   const [editInstruction, setEditInstruction] = useState("");
   const [notice, setNotice] = useState("");
+  const [revokeReason, setRevokeReason] = useState("");
+  const [revokePanelOpen, setRevokePanelOpen] = useState(false);
+  const [revokeConfirmationOpen, setRevokeConfirmationOpen] = useState(false);
+  const [revoking, setRevoking] = useState(false);
   const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
+  const [editorialReviewer, setEditorialReviewer] = useState("");
+  const [sourceRoleAcknowledgements, setSourceRoleAcknowledgements] = useState<Record<string, boolean>>({});
+  const [expertReviewer, setExpertReviewer] = useState("");
+  const [expertQualifications, setExpertQualifications] = useState("");
+  const [expertReviewScope, setExpertReviewScope] = useState("");
+  const [ethicsReviewer, setEthicsReviewer] = useState("");
+  const [ethicsReviewScope, setEthicsReviewScope] = useState("");
+  const [ethicsRationale, setEthicsRationale] = useState("");
 
   useEffect(() => {
     if (!selectedId) {
@@ -222,6 +264,14 @@ export function ReviewWorkspace({
       .then((value) => {
         if (alive) {
           setRevision(value);
+          setEditorialReviewer("");
+          setSourceRoleAcknowledgements({});
+          setExpertReviewer("");
+          setExpertQualifications("");
+          setExpertReviewScope("");
+          setEthicsReviewer("");
+          setEthicsReviewScope("");
+          setEthicsRationale("");
         }
       })
       .catch((reason) => {
@@ -279,6 +329,23 @@ export function ReviewWorkspace({
   const activeContent = revision?.[locale];
   const previousContent = revision?.previous[locale];
   const heroMedia = revision?.media.find((media) => media.role === "hero");
+  const v3Revision = asReviewRevisionV3(revision);
+  const requiresExpertReview = Boolean(v3Revision?.approvalRequirements.includes("EXPERT_REVIEW"));
+  const requiresEthicsReview = Boolean(v3Revision?.approvalRequirements.includes("ETHICS_REVIEW"));
+  const sourceRolesAcknowledged = Boolean(
+    v3Revision?.publicationSources.every((source) => sourceRoleAcknowledgements[source.id] === true)
+  );
+  const humanAttestationComplete = Boolean(
+    v3Revision &&
+      editorialReviewer.trim() &&
+      sourceRolesAcknowledged &&
+      (!requiresExpertReview || (
+        expertReviewer.trim() && expertQualifications.trim() && expertReviewScope.trim()
+      )) &&
+      (!requiresEthicsReview || (
+        ethicsReviewer.trim() && ethicsReviewScope.trim() && ethicsRationale.trim()
+      ))
+  );
   const visibleQueue = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("tr-TR");
     return snapshot.queue.filter((item) => {
@@ -316,6 +383,7 @@ export function ReviewWorkspace({
       (revision.gates.every((gate) => gate.state !== "WARN") || warningsAcknowledged) &&
       revision.claims.every((claim) => claim.status === "VERIFIED")
   );
+  const approvalReady = inspectionComplete && humanAttestationComplete;
 
   const actionBusy = approving || approvingHighRisk || requestingEdit || requestingComprehensiveRewrite || repairingMedia || enqueueingPublication || previewingPublication || materializingLocal;
 
@@ -333,20 +401,50 @@ export function ReviewWorkspace({
     if (!revision) {
       return;
     }
+    const approvalRevision = asReviewRevisionV3(revision);
+    if (!approvalRevision) {
+      setNotice("Bu eski revizyon yalnızca okunabilir. İnsan inceleme beyanı içeren V3 paketini oluşturup yeni revizyonu açın.");
+      return;
+    }
+    if (!humanAttestationComplete) {
+      setNotice("Onaydan önce editör adını, her kaynağın rol onayını ve gerekli uzman veya etik inceleme alanlarını tamamlayın.");
+      return;
+    }
     setApproving(true);
     setNotice("");
     try {
-      const acceptedWarningSetHash = await warningSetHash(revision.gates);
+      const acceptedWarningSetHash = await warningSetHash(approvalRevision.gates);
+      const attestation: EditorialApprovalAttestationV3 = {
+        editorialReview: {
+          reviewer: editorialReviewer.trim(),
+          sourceRoles: approvalRevision.publicationSources.map((source) => ({
+            sourceId: source.id,
+            role: source.role
+          }))
+        },
+        expertReview: requiresExpertReview ? {
+          reviewer: expertReviewer.trim(),
+          qualifications: expertQualifications.trim(),
+          reviewScope: expertReviewScope.trim()
+        } : null,
+        ethicsReview: requiresEthicsReview ? {
+          reviewer: ethicsReviewer.trim(),
+          reviewScope: ethicsReviewScope.trim(),
+          rationale: ethicsRationale.trim()
+        } : null
+      };
       const result = await bridge.approveRevision({
-        revisionId: revision.id,
-        expectedHash: revision.revisionHash,
-        warningSetHash: acceptedWarningSetHash
+        revisionId: approvalRevision.id,
+        expectedHash: approvalRevision.revisionHash,
+        warningSetHash: acceptedWarningSetHash,
+        packageVersion: 3,
+        attestation
       });
       setRevision((current) =>
         current ? { ...current, state: result.state, editorialApproved: true } : current
       );
       if (dispatchAfterApproval && result.state === "APPROVED") {
-        const approvedRevision = { ...revision, state: "APPROVED" as const, editorialApproved: true };
+        const approvedRevision = { ...approvalRevision, state: "APPROVED" as const, editorialApproved: true };
         if (isScheduledForFuture(approvedRevision.scheduledAt)) {
           await prepareScheduledPublication(approvedRevision);
         } else {
@@ -397,6 +495,39 @@ export function ReviewWorkspace({
       setNotice(userFacingBridgeError(reason, "Yüksek risk onayı kaydedilemedi."));
     } finally {
       setApprovingHighRisk(false);
+    }
+  };
+
+  const revokeApproval = async () => {
+    if (!revision || revision.state !== "APPROVED" || revokeReason.trim().length < 10) return;
+    setRevoking(true);
+    setNotice("");
+    try {
+      const result = await bridge.revokeApproval({
+        revisionId: revision.id,
+        expectedHash: revision.revisionHash,
+        reason: revokeReason.trim()
+      });
+      setRevision((current) => current ? {
+        ...current,
+        state: "REVIEW_REQUIRED",
+        editorialApproved: false,
+        highRiskApproved: false
+      } : current);
+      setRevokeReason("");
+      setRevokePanelOpen(false);
+      setLastPreview(null);
+      try {
+        await onRevisionApproved?.();
+        setNotice(`Revizyon onayı geri çekildi · ${result.revisionHash.slice(0, 12)}…`);
+      } catch {
+        setNotice(`Revizyon onayı geri çekildi · ${result.revisionHash.slice(0, 12)}… İnceleme kuyruğu henüz yenilenemedi; sayfayı yenileyin.`);
+      }
+    } catch (reason) {
+      setNotice(userFacingBridgeError(reason, "Onay geri çekilemedi."));
+    } finally {
+      setRevoking(false);
+      setRevokeConfirmationOpen(false);
     }
   };
 
@@ -610,7 +741,7 @@ export function ReviewWorkspace({
   };
 
   return (
-    <div className="review-page">
+    <div className={`review-page${embedded ? " review-page-embedded" : ""}`}>
       <aside className="review-queue" aria-label="İnceleme kuyruğu">
         <header>
           <p className="section-kicker">İNCELEME</p>
@@ -716,16 +847,35 @@ export function ReviewWorkspace({
                     {approvingHighRisk ? "Risk onayı kaydediliyor…" : "Yüksek risk onayını ver"}
                   </button>
                 ) : null}
+                {revision.state === "APPROVED" ? (
+                  <button
+                    className="button button-danger"
+                    type="button"
+                    disabled={readOnly || revoking}
+                    aria-expanded={revokePanelOpen}
+                    onClick={() => setRevokePanelOpen((current) => !current)}
+                  >
+                    Onayı geri çek
+                  </button>
+                ) : null}
                 <button
                   className="button button-primary"
                   type="button"
                   disabled={
                     approving ||
                     readOnly ||
-                    !inspectionComplete ||
+                    !approvalReady ||
                     revision.state === "APPROVED"
                   }
-                  aria-describedby={readOnly ? "review-approval-read-only" : !inspectionComplete ? "review-approval-prerequisite" : undefined}
+                  aria-describedby={
+                    readOnly
+                      ? "review-approval-read-only"
+                      : !v3Revision
+                        ? "review-v3-upgrade-required"
+                        : !approvalReady
+                          ? "review-approval-prerequisite"
+                          : undefined
+                  }
                   onClick={() => void approve(remotePublicationReady)}
                 >
                   {approving
@@ -748,6 +898,33 @@ export function ReviewWorkspace({
               </div>
               {readOnly ? <small id="review-approval-read-only" className="action-unavailable-reason">Yerel çalışma alanı yeniden bağlanana kadar bu revizyon onaylanamaz.</small> : null}
             </header>
+
+            {revokePanelOpen && revision.state === "APPROVED" ? (
+              <section className="edit-request-panel" aria-label="Revizyon onayını geri çek">
+                <label className="field">
+                  <span>Onayı geri çekme gerekçesi</span>
+                  <textarea
+                    value={revokeReason}
+                    maxLength={512}
+                    rows={3}
+                    autoFocus
+                    onChange={(event) => setRevokeReason(event.target.value)}
+                    placeholder="Örnek: Kaynak doğrulaması yeniden yapılacak."
+                  />
+                </label>
+                <div className="review-actions">
+                  <button className="button button-ghost" type="button" onClick={() => setRevokePanelOpen(false)}>Vazgeç</button>
+                  <button
+                    className="button button-danger"
+                    type="button"
+                    disabled={revoking || revokeReason.trim().length < 10}
+                    onClick={() => setRevokeConfirmationOpen(true)}
+                  >
+                    Geri çekmeyi onayla
+                  </button>
+                </div>
+              </section>
+            ) : null}
 
             {editRequestOpen ? (
               <section className="edit-request-panel" aria-label="Düzenleme isteği">
@@ -810,9 +987,67 @@ export function ReviewWorkspace({
                 </span>
               </label>
             ) : null}
-            {!inspectionComplete ? (
+            {revision.state !== "APPROVED" && !v3Revision ? (
+              <div id="review-v3-upgrade-required" className="inline-notice review-notice is-warning" role="status">
+                Bu kayıt eski inceleme paketi (V2) olduğu için yalnızca okunabilir. İnsan inceleme beyanı içeren yeni bir V3 revizyonu oluşturun; mevcut içerik sessizce onaylanamaz.
+              </div>
+            ) : null}
+            {revision.state !== "APPROVED" && v3Revision ? (
+              <section className="edit-request-panel" aria-label="İnsan editoryal inceleme beyanı">
+                <div className="review-section-heading">
+                  <div>
+                    <p className="section-kicker">İNSAN İNCELEMESİ</p>
+                    <h2>Onayı veren kişileri ve kaynak rollerini doğrulayın</h2>
+                  </div>
+                </div>
+                <label className="field">
+                  <span>Sorumlu editörün adı</span>
+                  <input
+                    value={editorialReviewer}
+                    maxLength={256}
+                    autoComplete="name"
+                    onChange={(event) => setEditorialReviewer(event.target.value)}
+                    placeholder="Ad ve soyad"
+                  />
+                </label>
+                <div className="snapshot-list" aria-label="Kaynak rol onayları">
+                  {v3Revision.publicationSources.map((source) => (
+                    <label className="acknowledgement" key={source.id}>
+                      <input
+                        type="checkbox"
+                        checked={sourceRoleAcknowledgements[source.id] === true}
+                        onChange={(event) => setSourceRoleAcknowledgements((current) => ({
+                          ...current,
+                          [source.id]: event.target.checked
+                        }))}
+                      />
+                      <span>
+                        <strong>{source.title}</strong> kaynağının <strong>{sourceRoleLabel(source.role)}</strong> rolünü ve bu revizyonda atıf aldığını doğruladım.
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                {requiresExpertReview ? (
+                  <div className="edit-request-panel" aria-label="Uzman incelemesi">
+                    <strong>Maddi, sağlık veya hukuki etkili içerik için uzman incelemesi gerekli</strong>
+                    <label className="field"><span>Uzmanın adı</span><input value={expertReviewer} maxLength={256} onChange={(event) => setExpertReviewer(event.target.value)} /></label>
+                    <label className="field"><span>Uzmanlık ve yeterlilik</span><textarea value={expertQualifications} maxLength={1000} rows={2} onChange={(event) => setExpertQualifications(event.target.value)} /></label>
+                    <label className="field"><span>İnceleme kapsamı</span><textarea value={expertReviewScope} maxLength={2000} rows={2} onChange={(event) => setExpertReviewScope(event.target.value)} /></label>
+                  </div>
+                ) : null}
+                {requiresEthicsReview ? (
+                  <div className="edit-request-panel" aria-label="Etik inceleme">
+                    <strong>Hassas konu etik incelemesi gerekli</strong>
+                    <label className="field"><span>Etik incelemeyi yapan kişi</span><input value={ethicsReviewer} maxLength={256} onChange={(event) => setEthicsReviewer(event.target.value)} /></label>
+                    <label className="field"><span>İnceleme kapsamı</span><textarea value={ethicsReviewScope} maxLength={2000} rows={2} onChange={(event) => setEthicsReviewScope(event.target.value)} /></label>
+                    <label className="field"><span>Gerekçe ve zarar azaltma değerlendirmesi</span><textarea value={ethicsRationale} maxLength={4000} rows={3} onChange={(event) => setEthicsRationale(event.target.value)} /></label>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+            {!approvalReady && v3Revision && revision.state !== "APPROVED" ? (
               <div id="review-approval-prerequisite" className="inline-notice review-notice is-warning" role="status">
-                Onay kapalı: iddia, kaynak, medya ve kalite kontrollerinin tamamı çalışmış olmalı; engeller kaldırılmalı ve izin verilen uyarılar açıkça kabul edilmelidir.
+                Onay kapalı: iddia, kaynak, medya ve kalite kontrolleri tamamlanmalı; izin verilen uyarılar kabul edilmeli ve insan inceleme beyanı eksiksiz doldurulmalıdır.
               </div>
             ) : null}
             {siteMode === "PUBLISH" && !remotePublicationReady ? (
@@ -1250,6 +1485,16 @@ export function ReviewWorkspace({
             setMaterializeConfirmationOpen(false);
             void materializeLocal();
           }}
+        />
+      ) : null}
+      {revokeConfirmationOpen ? (
+        <ConfirmationDialog
+          title="Revizyon onayını geri çek"
+          detail="Bu revizyonun exact-hash onayı geçersiz kılınacak ve henüz başlamamış yayın etkileri geri çağrılacak. Yeniden yayınlamak için yeni bir revizyon ve yeni insan onayı gerekir."
+          confirmLabel="Onayı geri çek"
+          busy={revoking}
+          onCancel={() => setRevokeConfirmationOpen(false)}
+          onConfirm={() => void revokeApproval()}
         />
       ) : null}
     </div>

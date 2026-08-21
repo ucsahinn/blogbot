@@ -1,9 +1,11 @@
-use std::io::Write;
 use std::cmp::Ordering;
+use std::fmt::Write as _;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
@@ -16,7 +18,86 @@ const MANIFEST_URL: &str =
 const RELEASES_API_URL: &str = "https://api.github.com/repos/ucsahinn/blogbot/releases/latest";
 const RELEASE_HOST: &str = "github.com";
 const RELEASE_PATH_PREFIX: &str = "/ucsahinn/blogbot/releases/download/";
+const MAX_MANIFEST_JSON_BYTES: usize = 64 * 1024;
+const MAX_GITHUB_RELEASE_JSON_BYTES: usize = 1024 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateJsonResource {
+    Manifest,
+    GithubRelease,
+}
+
+impl UpdateJsonResource {
+    fn max_bytes(self) -> usize {
+        match self {
+            Self::Manifest => MAX_MANIFEST_JSON_BYTES,
+            Self::GithubRelease => MAX_GITHUB_RELEASE_JSON_BYTES,
+        }
+    }
+
+    fn too_large_error(self) -> &'static str {
+        match self {
+            Self::Manifest => "UPDATE_MANIFEST_TOO_LARGE",
+            Self::GithubRelease => "UPDATE_RELEASE_TOO_LARGE",
+        }
+    }
+
+    fn invalid_error(self) -> &'static str {
+        match self {
+            Self::Manifest => "UPDATE_MANIFEST_INVALID",
+            Self::GithubRelease => "UPDATE_RELEASE_INVALID",
+        }
+    }
+}
+
+fn validate_update_json_content_length(
+    resource: UpdateJsonResource,
+    content_length: Option<u64>,
+) -> Result<(), CommandError> {
+    if content_length.is_some_and(|length| length > resource.max_bytes() as u64) {
+        return Err(CommandError::UpdateUnavailable(
+            resource.too_large_error().into(),
+        ));
+    }
+    Ok(())
+}
+
+fn append_update_json_chunk(
+    resource: UpdateJsonResource,
+    body: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<(), CommandError> {
+    if chunk.len() > resource.max_bytes().saturating_sub(body.len()) {
+        return Err(CommandError::UpdateUnavailable(
+            resource.too_large_error().into(),
+        ));
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn read_bounded_update_json<T: DeserializeOwned>(
+    mut response: reqwest::Response,
+    resource: UpdateJsonResource,
+) -> Result<T, CommandError> {
+    validate_update_json_content_length(resource, response.content_length())?;
+    let initial_capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+        .min(resource.max_bytes());
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| CommandError::UpdateUnavailable(resource.invalid_error().into()))?
+    {
+        append_update_json_chunk(resource, &mut body, &chunk)?;
+    }
+    serde_json::from_slice(&body)
+        .map_err(|_| CommandError::UpdateUnavailable(resource.invalid_error().into()))
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,7 +109,11 @@ pub struct UnsignedUpdate {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum UnsignedUpdateCheck {
     UpdateAvailable { update: UnsignedUpdate },
     UpToDate { latest_version: String },
@@ -135,11 +220,13 @@ enum UpdateFreshness {
 /// newest GitHub Release. That is not the same as a verified, published
 /// "up-to-date" state and must be surfaced distinctly to the editor.
 fn update_freshness_for_version(version: &str) -> Result<UpdateFreshness, CommandError> {
-    Ok(match version_parts(version)?.cmp(&version_parts(current_version())?) {
-        Ordering::Greater => UpdateFreshness::UpdateAvailable,
-        Ordering::Equal => UpdateFreshness::UpToDate,
-        Ordering::Less => UpdateFreshness::LocalBuildNewer,
-    })
+    Ok(
+        match version_parts(version)?.cmp(&version_parts(current_version())?) {
+            Ordering::Greater => UpdateFreshness::UpdateAvailable,
+            Ordering::Equal => UpdateFreshness::UpToDate,
+            Ordering::Less => UpdateFreshness::LocalBuildNewer,
+        },
+    )
 }
 
 fn validate_release_url(raw: &str) -> Result<(), CommandError> {
@@ -200,8 +287,16 @@ fn github_release_update(release: GithubRelease) -> Result<UnsignedUpdateCheck, 
         .unwrap_or(&release.tag_name)
         .to_string();
     match update_freshness_for_version(&version)? {
-        UpdateFreshness::UpToDate => return Ok(UnsignedUpdateCheck::UpToDate { latest_version: version }),
-        UpdateFreshness::LocalBuildNewer => return Ok(UnsignedUpdateCheck::LocalBuildNewer { latest_version: version }),
+        UpdateFreshness::UpToDate => {
+            return Ok(UnsignedUpdateCheck::UpToDate {
+                latest_version: version,
+            })
+        }
+        UpdateFreshness::LocalBuildNewer => {
+            return Ok(UnsignedUpdateCheck::LocalBuildNewer {
+                latest_version: version,
+            })
+        }
         UpdateFreshness::UpdateAvailable => {}
     }
 
@@ -260,11 +355,11 @@ async fn fetch_update() -> Result<UnsignedUpdateCheck, CommandError> {
                 .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_HTTP_ERROR".into()))
         });
     let manifest_update_result = match manifest {
-        Ok(response) => response
-            .json::<ReleaseManifest>()
-            .await
-            .map_err(|_| CommandError::UpdateUnavailable("UPDATE_MANIFEST_INVALID".into()))
-            .and_then(manifest_update),
+        Ok(response) => {
+            read_bounded_update_json::<ReleaseManifest>(response, UpdateJsonResource::Manifest)
+                .await
+                .and_then(manifest_update)
+        }
         Err(error) => Err(error),
     };
     if manifest_update_result.is_ok() {
@@ -279,18 +374,22 @@ async fn fetch_update() -> Result<UnsignedUpdateCheck, CommandError> {
         .await
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_UNAVAILABLE".into()))?
         .error_for_status()
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_HTTP_ERROR".into()))?
-        .json::<GithubRelease>()
-        .await
-        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_INVALID".into()))
-        .and_then(github_release_update);
+        .map_err(|_| CommandError::UpdateUnavailable("UPDATE_RELEASE_HTTP_ERROR".into()))?;
+    let release_update_result = read_bounded_update_json::<GithubRelease>(
+        release_update_result,
+        UpdateJsonResource::GithubRelease,
+    )
+    .await
+    .and_then(github_release_update);
     resolve_manifest_or_release(manifest_update_result, release_update_result)
 }
 
 pub async fn check_unsigned_update() -> Result<UnsignedUpdateCheck, CommandError> {
     let result = fetch_update().await?;
     let authorization = match &result {
-        UnsignedUpdateCheck::UpdateAvailable { update } => Some(CheckedUpdateAuthorization::new(update)),
+        UnsignedUpdateCheck::UpdateAvailable { update } => {
+            Some(CheckedUpdateAuthorization::new(update))
+        }
         UnsignedUpdateCheck::UpToDate { .. } | UnsignedUpdateCheck::LocalBuildNewer { .. } => None,
     };
     *checked_update_authorization().lock().map_err(|_| {
@@ -312,9 +411,15 @@ fn powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-fn deferred_installer_script_visible(installer_path: &Path, parent_pid: u32, app_path: &Path) -> String {
+fn deferred_installer_script_visible(
+    installer_path: &Path,
+    parent_pid: u32,
+    app_path: &Path,
+    expected_sha256: &str,
+) -> String {
     let installer = powershell_single_quoted(&installer_path.display().to_string());
     let app = powershell_single_quoted(&app_path.display().to_string());
+    let expected = powershell_single_quoted(&expected_sha256.to_ascii_lowercase());
     format!(
         r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
 $form = New-Object System.Windows.Forms.Form; $form.Text = 'OPE güncelleme'; $form.Width = 620; $form.Height = 330; $form.StartPosition = 'CenterScreen'; $form.TopMost = $true; $form.FormBorderStyle = 'FixedDialog'; $form.MaximizeBox = $false; $form.MinimizeBox = $false;
@@ -327,26 +432,27 @@ $form.Show(); [System.Windows.Forms.Application]::DoEvents(); $status.Text = 'Uy
 $deadline = (Get-Date).AddSeconds(60); while ((Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 250; [System.Windows.Forms.Application]::DoEvents() }}
 if (Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) {{ $status.Text = 'OPE kapatılamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Uygulamayı kapatıp güncellemeyi yeniden başlatın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✗ Uygulama kapatılamadı`r`n○ Kurulum sihirbazı başlatılmadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
 $status.Text = 'Kurulum sihirbazı başlatılıyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n→ Kurulum sihirbazı başlatılıyor`r`n○ Kurulum tamamlanacak ve OPE yeniden açılacak"; $bar.Value = 50; [System.Windows.Forms.Application]::DoEvents();
+$actualHash = (Get-FileHash -LiteralPath '{installer}' -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash; if ($actualHash -ne '{expected}') {{ $status.Text = 'Güncelleme paketi doğrulanamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Kurulum başlatılmadı; mevcut sürüm korundu.'; $steps.Text = "✗ Güncelleme paketi doğrulanamadı`r`n✓ Uygulama kapatıldı`r`n○ Kurulum sihirbazı başlatılmadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; Remove-Item -LiteralPath '{installer}' -Force -ErrorAction SilentlyContinue; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
 try {{ $installerProcess = Start-Process -FilePath '{installer}' -PassThru -WindowStyle Normal }} catch {{ $status.Text = 'Kurulum başlatılamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✗ Kurulum sihirbazı başlatılamadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
 $status.Text = 'Kurulum devam ediyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✓ Kurulum sihirbazı çalışıyor`r`n→ Kurulum tamamlanacak ve OPE yeniden açılacak"; $bar.Value = 65; [System.Windows.Forms.Application]::DoEvents(); while (-not $installerProcess.HasExited) {{ if ($bar.Value -lt 95) {{ $bar.Value += 1 }}; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 350 }}
+Remove-Item -LiteralPath '{installer}' -Force -ErrorAction SilentlyContinue;
 if ($installerProcess.ExitCode -eq 0) {{ $status.Text = 'Kurulum tamamlandı; OPE yeniden başlatılıyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✓ Kurulum tamamlandı`r`n✓ OPE yeniden açılıyor"; $bar.Value = 100; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 800; Start-Process -FilePath '{app}' }} else {{ $status.Text = 'Kurulum hata koduyla sonlandı: ' + $installerProcess.ExitCode; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✗ Kurulum hata ile sonlandı`r`n○ OPE yeniden başlatılmadı"; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit $installerProcess.ExitCode }}
 $form.Close();"#
     )
 }
-fn launch_installer_after_exit(installer_path: &Path, parent_pid: u32) -> Result<(), CommandError> {
+fn launch_installer_after_exit(
+    installer_path: &Path,
+    parent_pid: u32,
+    expected_sha256: &str,
+) -> Result<(), CommandError> {
     let app_path = std::env::current_exe()
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_APP_PATH_UNAVAILABLE".into()))?;
-    let installer_script = deferred_installer_script_visible(installer_path, parent_pid, &app_path);
+    let installer_script =
+        deferred_installer_script_visible(installer_path, parent_pid, &app_path, expected_sha256);
     let mut launcher = Command::new("powershell.exe");
     configure_hidden_command(&mut launcher);
     launcher
-        .args([
-            "-NoProfile",
-            "-STA",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-        ])
+        .args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command"])
         .arg(installer_script);
     launcher
         .spawn()
@@ -363,10 +469,10 @@ fn create_installer_file(version: &str) -> Result<(PathBuf, std::fs::File), Comm
             ));
         }
     }
-    let entropy = random
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let mut entropy = String::with_capacity(random.len() * 2);
+    for byte in random {
+        write!(&mut entropy, "{byte:02x}").expect("writing to a String cannot fail");
+    }
     for attempt in 0..32u32 {
         let path =
             std::env::temp_dir().join(format!("OPE-{version}-{entropy}-{attempt}.setup.exe"));
@@ -413,10 +519,10 @@ pub async fn install_unsigned_update(
         return Err(CommandError::InvalidInput("UPDATE_NOT_NEWER".into()));
     }
     let (path, mut installer_file) = create_installer_file(&request.version)?;
-    if launch_installer_after_exit(&path, std::process::id()).is_err() {
-        let _ = std::fs::remove_file(&path);
-        return Err(CommandError::UpdateUnavailable("UPDATE_INSTALLER_START_FAILED".into()));
-    }
+    // The deferred launcher is armed only after the download is verified. Arming
+    // it first meant that quitting the app mid-download handed an unverified,
+    // truncated installer to an elevated Start-Process, and that its 60-second
+    // wait-for-exit deadline expired during any download slower than a minute.
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -433,6 +539,7 @@ pub async fn install_unsigned_update(
         .content_length()
         .is_some_and(|length| length > MAX_INSTALLER_BYTES)
     {
+        let _ = std::fs::remove_file(&path);
         return Err(CommandError::UpdateUnavailable(
             "UPDATE_DOWNLOAD_TOO_LARGE".into(),
         ));
@@ -479,6 +586,17 @@ pub async fn install_unsigned_update(
         ));
     }
 
+    // Only a fully downloaded, hash-verified installer may be handed to the
+    // elevated launcher. The launcher re-checks the digest before executing it,
+    // because the file waits in a user-writable temp directory until this
+    // process exits.
+    if launch_installer_after_exit(&path, std::process::id(), &actual).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(CommandError::UpdateUnavailable(
+            "UPDATE_INSTALLER_START_FAILED".into(),
+        ));
+    }
+
     app.exit(0);
     Ok(())
 }
@@ -488,11 +606,12 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        current_version, github_release_update, is_newer_version, manifest_update,
-        resolve_manifest_or_release, validate_release_url, validate_sha256,
+        append_update_json_chunk, current_version, github_release_update, is_newer_version,
+        manifest_update, resolve_manifest_or_release, update_freshness_for_version,
+        validate_release_url, validate_sha256, validate_update_json_content_length,
         CheckedUpdateAuthorization, CommandError, GithubRelease, InstallUnsignedUpdateRequest,
-        ReleaseManifest, UnsignedUpdate, UnsignedUpdateCheck, UpdateFreshness,
-        update_freshness_for_version,
+        ReleaseManifest, UnsignedUpdate, UnsignedUpdateCheck, UpdateFreshness, UpdateJsonResource,
+        MAX_GITHUB_RELEASE_JSON_BYTES, MAX_MANIFEST_JSON_BYTES,
     };
 
     fn next_test_version() -> String {
@@ -507,6 +626,43 @@ mod tests {
             "package version has three segments"
         );
         format!("{major}.{minor}.{patch}")
+    }
+
+    #[test]
+    fn update_json_content_length_rejects_oversized_manifest_before_reading_the_body() {
+        let error = validate_update_json_content_length(
+            UpdateJsonResource::Manifest,
+            Some((MAX_MANIFEST_JSON_BYTES + 1) as u64),
+        )
+        .expect_err("an oversized manifest must be rejected from Content-Length");
+
+        assert_eq!(
+            error.to_string(),
+            "UPDATE_UNAVAILABLE: UPDATE_MANIFEST_TOO_LARGE"
+        );
+        assert!(
+            validate_update_json_content_length(
+                UpdateJsonResource::GithubRelease,
+                Some((MAX_MANIFEST_JSON_BYTES + 1) as u64),
+            )
+            .is_ok(),
+            "the GitHub release response has its own larger JSON budget"
+        );
+    }
+
+    #[test]
+    fn update_json_incremental_read_rejects_an_oversized_github_release_without_content_length() {
+        let mut body = vec![b'a'; MAX_GITHUB_RELEASE_JSON_BYTES - 1];
+        append_update_json_chunk(UpdateJsonResource::GithubRelease, &mut body, b"bc")
+            .expect_err("a streamed release response must not grow past its byte budget");
+
+        assert_eq!(body.len(), MAX_GITHUB_RELEASE_JSON_BYTES - 1);
+        let error = append_update_json_chunk(UpdateJsonResource::GithubRelease, &mut body, b"bc")
+            .expect_err("the over-limit error must be stable");
+        assert_eq!(
+            error.to_string(),
+            "UPDATE_UNAVAILABLE: UPDATE_RELEASE_TOO_LARGE"
+        );
     }
 
     #[test]
@@ -574,7 +730,9 @@ mod tests {
                 "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }]
         })).unwrap();
-        let UnsignedUpdateCheck::UpdateAvailable { update } = github_release_update(release).unwrap() else {
+        let UnsignedUpdateCheck::UpdateAvailable { update } =
+            github_release_update(release).unwrap()
+        else {
             panic!("newer GitHub release must offer an installer");
         };
         assert_eq!(update.version, version);
@@ -655,6 +813,7 @@ mod tests {
             Path::new(r"C:\Temp\OPE O'Brien.setup.exe"),
             4242,
             Path::new(r"C:\Program Files\OPE\OPE.exe"),
+            "AABBCC",
         );
         assert!(script.contains("System.Windows.Forms"));
         assert!(script.contains("ProgressBar"));
@@ -667,5 +826,36 @@ mod tests {
         assert!(script.contains("-PassThru -WindowStyle Normal"));
         assert!(script.contains("Start-Process -FilePath 'C:\\Program Files\\OPE\\OPE.exe'"));
         assert!(!script.contains("/S"));
+    }
+
+    #[test]
+    fn the_launcher_refuses_an_installer_whose_digest_changed_after_verification() {
+        // The verified installer waits in a user-writable temp directory until
+        // this process exits, so the elevated launcher must re-check the digest
+        // instead of trusting the earlier in-process verification.
+        let script = super::deferred_installer_script_visible(
+            Path::new(r"C:\Temp\OPE.setup.exe"),
+            4242,
+            Path::new(r"C:\Program Files\OPE\OPE.exe"),
+            "AbCdEf",
+        );
+
+        let gate = script
+            .find("Get-FileHash")
+            .expect("the launcher must re-verify the installer digest");
+        let launch = script
+            .find("$installerProcess = Start-Process")
+            .expect("the launcher must start the installer");
+        assert!(
+            gate < launch,
+            "the digest gate must precede the elevated launch"
+        );
+        assert!(
+            script.contains("if ($actualHash -ne 'abcdef')"),
+            "the expected digest must be normalised so the comparison cannot depend on the caller's casing"
+        );
+        assert!(script.contains("Güncelleme paketi doğrulanamadı"));
+        // A rejected or finished installer must not be left behind in %TEMP%.
+        assert!(script.contains("Remove-Item -LiteralPath 'C:\\Temp\\OPE.setup.exe' -Force"));
     }
 }

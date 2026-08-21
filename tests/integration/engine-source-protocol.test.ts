@@ -6,11 +6,178 @@ import test from "node:test";
 import sharp from "sharp";
 
 import type { FetchTransport } from "../../apps/fetcher/src/fetch-source.ts";
+import { rankCandidateStories } from "../../apps/engine/src/candidate-ranking.ts";
 import { createEngineProtocol, createPersistentEngineProtocol } from "../../apps/engine/src/stdio-entrypoint.ts";
 import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
 import { PGliteSourceRepository, type SourceRepository } from "../../packages/database/src/source-repository.ts";
 
 const encoder = new TextEncoder();
+const rankingNow = Date.parse("2026-08-20T12:00:00.000Z");
+
+function finalEditorialAssessment(sourceId: string) {
+  return {
+    intentSatisfied: true, titleIsHonest: true, originalValuePresent: true,
+    sources: [{ sourceId, official: true, role: "primary" as const }],
+    singleOfficialSourceRationale: "Bu test senaryosunda tek yetkili kaynak kullanılıyor.",
+    authorTransparent: true, isYmyl: false, leadHasFiveWOneH: true,
+    unverifiedClaimsClearlyLabeled: true, newsSchemaComplete: true, sensitiveTopic: false,
+    clusterKey: null, aboveFoldAnswersIntent: true, headingHierarchyValid: true,
+    internalLinkCount: 0, internalLinkOmissionRationale: "İlgili yerel içerik henüz yok."
+  };
+}
+
+function codexRequestSourceId(input: unknown, finalReview: boolean): string {
+  const candidate = input as {
+    task?: { sources?: Array<{ id?: string }> };
+    revision?: { revision?: { sources?: Array<{ id?: string }> } };
+  };
+  const sourceId = finalReview
+    ? candidate.revision?.revision?.sources?.[0]?.id
+    : candidate.task?.sources?.[0]?.id;
+  assert.ok(sourceId, "Codex fixture must receive the engine-selected immutable source id");
+  return sourceId;
+}
+
+function rankingStory(
+  id: string,
+  overrides: Partial<Parameters<typeof rankCandidateStories>[0][number]> = {}
+): Parameters<typeof rankCandidateStories>[0][number] {
+  return {
+    id,
+    title: `Distinct ${id} event`,
+    summary: `Independent ${id} reporting`,
+    discoveredAt: "2026-08-20T10:00:00.000Z",
+    evidence: [{
+      sourceId: `${id}-source-1`,
+      policyApproved: true,
+      publishedAt: "2026-08-20T10:00:00.000Z",
+      defaultSection: "haberler",
+      defaultArticleType: "news"
+    }],
+    ...overrides
+  };
+}
+
+test("candidate ranking raises only source sufficiency when a distinct approved source corroborates the story", () => {
+  const single = rankCandidateStories([rankingStory("single")], rankingNow)[0]!;
+  const corroborated = rankCandidateStories([rankingStory("corroborated", {
+    evidence: [
+      rankingStory("corroborated").evidence[0]!,
+      {
+        sourceId: "corroborated-source-2",
+        policyApproved: true,
+        publishedAt: "2026-08-20T10:00:00.000Z"
+      }
+    ]
+  })], rankingNow)[0]!;
+
+  assert.equal(single.sourceSufficiencyScore, 45);
+  assert.equal(corroborated.sourceSufficiencyScore, 80);
+  assert.equal(corroborated.freshnessScore, single.freshnessScore);
+  assert.equal(corroborated.originalityScore, single.originalityScore);
+  assert.equal(corroborated.topicFitScore, single.topicFitScore);
+  assert.ok(corroborated.rankingScore > single.rankingScore);
+});
+
+test("candidate ranking raises only freshness for a recent dated story", () => {
+  const missingDate = rankCandidateStories([rankingStory("missing-date", {
+    discoveredAt: "1970-01-01T00:00:00.000Z",
+    evidence: [{
+      sourceId: "freshness-source",
+      policyApproved: true,
+      defaultSection: "haberler",
+      defaultArticleType: "news"
+    }]
+  })], rankingNow)[0]!;
+  const recent = rankCandidateStories([rankingStory("recent-date", {
+    evidence: [{
+      sourceId: "freshness-source",
+      policyApproved: true,
+      publishedAt: "2026-08-20T10:00:00.000Z",
+      defaultSection: "haberler",
+      defaultArticleType: "news"
+    }]
+  })], rankingNow)[0]!;
+
+  assert.equal(missingDate.freshnessScore, 10);
+  assert.equal(recent.freshnessScore, 100);
+  assert.equal(recent.sourceSufficiencyScore, missingDate.sourceSufficiencyScore);
+  assert.equal(recent.originalityScore, missingDate.originalityScore);
+  assert.equal(recent.topicFitScore, missingDate.topicFitScore);
+  assert.ok(recent.rankingScore > missingDate.rankingScore);
+});
+
+test("candidate ranking lowers only originality when another distinct story cluster is highly similar", () => {
+  const target = rankingStory("target", {
+    title: "Alpha zero trust access rollout",
+    summary: "Organizations begin an alpha zero trust access rollout"
+  });
+  const uniqueRanking = rankCandidateStories([
+    target,
+    rankingStory("unique-comparison", {
+      title: "Maritime weather station maintenance",
+      summary: "Coastal sensors receive scheduled repairs"
+    })
+  ], rankingNow).find((candidate) => candidate.id === "target")!;
+  const similarRanking = rankCandidateStories([
+    target,
+    rankingStory("similar-comparison", {
+      title: "Alpha zero trust access deployment",
+      summary: "Organizations begin an alpha zero trust access deployment"
+    })
+  ], rankingNow).find((candidate) => candidate.id === "target")!;
+
+  assert.equal(uniqueRanking.originalityScore, 100);
+  assert.ok(similarRanking.originalityScore < uniqueRanking.originalityScore);
+  assert.equal(similarRanking.sourceSufficiencyScore, uniqueRanking.sourceSufficiencyScore);
+  assert.equal(similarRanking.freshnessScore, uniqueRanking.freshnessScore);
+  assert.equal(similarRanking.topicFitScore, uniqueRanking.topicFitScore);
+  assert.ok(uniqueRanking.rankingScore > similarRanking.rankingScore);
+});
+
+test("candidate ranking raises only topic fit when corroborating sources agree on explicit routing", () => {
+  const evidenceBase = [
+    { sourceId: "topic-source-1", policyApproved: true, publishedAt: "2026-08-20T10:00:00.000Z" },
+    { sourceId: "topic-source-2", policyApproved: true, publishedAt: "2026-08-20T10:00:00.000Z" }
+  ];
+  const unmapped = rankCandidateStories([rankingStory("unmapped-topic", { evidence: evidenceBase })], rankingNow)[0]!;
+  const agreed = rankCandidateStories([rankingStory("agreed-topic", {
+    evidence: evidenceBase.map((item) => ({
+      ...item,
+      defaultSection: "teknoloji",
+      defaultArticleType: "analysis"
+    }))
+  })], rankingNow)[0]!;
+
+  assert.equal(unmapped.topicFitScore, 20);
+  assert.equal(agreed.topicFitScore, 100);
+  assert.equal(agreed.sourceSufficiencyScore, unmapped.sourceSufficiencyScore);
+  assert.equal(agreed.freshnessScore, unmapped.freshnessScore);
+  assert.equal(agreed.originalityScore, unmapped.originalityScore);
+  assert.ok(agreed.rankingScore > unmapped.rankingScore);
+});
+
+test("candidate ranking never treats missing date or topic mapping as a passing default", () => {
+  const candidate = rankCandidateStories([rankingStory("unknown-signals", {
+    discoveredAt: "1970-01-01T00:00:00.000Z",
+    evidence: [{ sourceId: "unknown-source", policyApproved: true }]
+  })], rankingNow)[0]!;
+
+  assert.equal(candidate.freshnessScore, 10);
+  assert.equal(candidate.topicFitScore, 20);
+  assert.ok(candidate.scoreReasons.some((reason) => reason.includes("Yay\u0131n tarihi yok")));
+  assert.ok(candidate.scoreReasons.some((reason) => reason.includes("konu e\u015flemesi yok")));
+});
+
+test("candidate ranking sorts by score, then discovery time, then stable id", () => {
+  const ranked = rankCandidateStories([
+    rankingStory("z-later", { discoveredAt: "2026-08-20T11:00:00.000Z" }),
+    rankingStory("z-same", { discoveredAt: "2026-08-20T10:00:00.000Z" }),
+    rankingStory("a-same", { discoveredAt: "2026-08-20T10:00:00.000Z" })
+  ], rankingNow);
+
+  assert.deepEqual(ranked.map((candidate) => candidate.id), ["z-later", "a-same", "z-same"]);
+});
 
 test("source.list derives capabilities from its already loaded source records", async () => {
   const sourceRepository = {
@@ -241,8 +408,16 @@ test("candidate.list materializes persisted feed entries with source policy cont
   const response = await runtime.handle({ version: 1, id: "candidate-list-1", kind: "candidate.list" });
   assert.equal(response.ok, true);
   assert.equal(response.kind, "candidate.list");
-  assert.equal((response.candidates as Array<Record<string, unknown>>)[0]?.title, "Patch released");
-  assert.equal((response.candidates as Array<Record<string, unknown>>)[0]?.confidence, 85);
+  const candidate = (response.candidates as Array<Record<string, unknown>>)[0]!;
+  assert.equal(candidate.title, "Patch released");
+  assert.equal(candidate.confidence, 85);
+  assert.equal(candidate.sourceSufficiencyScore, 45);
+  assert.equal(candidate.originalityScore, 50);
+  assert.equal(candidate.topicFitScore, 65);
+  assert.equal(typeof candidate.freshnessScore, "number");
+  assert.equal(typeof candidate.rankingScore, "number");
+  assert.equal((candidate.scoreReasons as string[]).length, 4);
+  assert.ok((candidate.scoreReasons as string[]).every((reason) => reason.length <= 180));
 });
 
 test("a persisted candidate can become a durable editorial draft without a Codex runner", async (t) => {
@@ -334,8 +509,8 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
   t.after(() => rm(root, { recursive: true, force: true }));
   const observedTasks: unknown[] = [];
   const sourceEvidence = "Güvenilir kanıt metni. ".repeat(1_000);
-  const fullTrBody = "Türkçe ".repeat(700);
-  const fullEnBody = "English ".repeat(700);
+  const fullTrBody = "## Ne oldu\n\n" + "Türkçe ".repeat(700);
+  const fullEnBody = "## What happened\n\n" + "English ".repeat(700);
   const generatedImage = await sharp({
     create: { width: 1536, height: 1024, channels: 3, background: "#2456a6" }
   }).png().toBuffer();
@@ -350,9 +525,10 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
       async *run(request) {
         observedTasks.push(request.input);
         const finalReview = Object.hasOwn((request.outputSchema.properties as Record<string, unknown> | undefined) ?? {}, "translationParity");
+        const sourceId = codexRequestSourceId(request.input, finalReview);
         yield { type: "output.completed", output: finalReview
-          ? { translationParity: { status: "MATCHED", detail: "Test paritesi doğrulandı." }, riskLevel: "STANDARD", gates: [{ id: "claims", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Kanıt bağlı." }, { id: "contradictions", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Çelişki yok." }, { id: "bilingual-parity", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Parite eşleşti." }, { id: "markdown-safety", group: "security", state: "PASS", reasonCode: "CHECKED", detail: "Markdown güvenli." }, { id: "seo", group: "seo", state: "PASS", reasonCode: "CHECKED", detail: "SEO tamam." }, { id: "media", group: "media", state: "PASS", reasonCode: "CHECKED", detail: "Medya gerekmiyor." }] }
-          : { translationKey: "terminal-test", author: "Test Editörü", tags: ["test"], tr: { title: "Terminal test haberi", slug: "terminal-test-haberi", description: "Test açıklaması.", bodyMarkdown: fullTrBody, heroImageAlt: "Test görseli" }, en: { title: "Terminal test story", slug: "terminal-test-story", description: "Test description.", bodyMarkdown: fullEnBody, heroImageAlt: "Test visual" }, claims: [{ claimKey: "claim-1", trText: "Doğrulanan test iddiası", enText: "Verified test claim", sourceIds: ["https://news.example/story"], status: "NEEDS_SOURCE", quoteHash: "" }] }
+          ? { translationParity: { status: "MATCHED", detail: "Test paritesi doğrulandı." }, riskLevel: "STANDARD", editorialAssessment: finalEditorialAssessment(sourceId), gates: [{ id: "claims", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Kanıt bağlı." }, { id: "contradictions", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Çelişki yok." }, { id: "bilingual-parity", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Parite eşleşti." }, { id: "markdown-safety", group: "security", state: "PASS", reasonCode: "CHECKED", detail: "Markdown güvenli." }, { id: "seo", group: "seo", state: "PASS", reasonCode: "CHECKED", detail: "SEO tamam." }, { id: "media", group: "media", state: "PASS", reasonCode: "CHECKED", detail: "Medya gerekmiyor." }] }
+          : { translationKey: "terminal-test", author: "Test Editörü", tags: ["test"], tr: { title: "Terminal test haberi", slug: "terminal-test-haberi", description: "Test açıklaması.", bodyMarkdown: fullTrBody, heroImageAlt: "Test görseli" }, en: { title: "Terminal test story", slug: "terminal-test-story", description: "Test description.", bodyMarkdown: fullEnBody, heroImageAlt: "Test visual" }, claims: [{ claimKey: "claim-1", trText: "Doğrulanan test iddiası", enText: "Verified test claim", sourceIds: [sourceId], status: "VERIFIED", evidenceQuotes: [{ sourceId, quote: "Güvenilir kanıt metni." }] }] }
         };
       }
     },
@@ -381,12 +557,15 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
   assert.equal(created.ok, true);
 
   let state = "QUEUED";
+  let failureDetail = "";
   for (let attempt = 0; attempt < 160 && state !== "SUCCEEDED"; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 125));
     const snapshot = await runtime.handle({ version: 1, id: `terminal-state-${attempt}`, kind: "state", afterCursor: 0 });
-    state = ((snapshot.snapshot as { jobs: Array<{ id: string; state: string }> }).jobs.find((job) => job.id === "draft-terminal")?.state ?? "MISSING");
+    const job = (snapshot.snapshot as { jobs: Array<{ id: string; state: string; lastError?: string }> }).jobs.find((item) => item.id === "draft-terminal");
+    state = job?.state ?? "MISSING";
+    failureDetail = job?.lastError ?? "";
   }
-  assert.equal(state, "SUCCEEDED");
+  assert.equal(state, "SUCCEEDED", failureDetail);
   const draftTask = observedTasks.find((task) => typeof task === "object" && task !== null && "task" in task) as { task?: { sources?: Array<{ excerpt?: string; evidenceText?: unknown }> } } | undefined;
   assert.ok(draftTask?.task);
   const revisionState = await runtime.handle({ version: 1, id: "terminal-revision-state", kind: "state", afterCursor: 0 });
@@ -405,7 +584,7 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
     }
   });
   assert.equal(revisionResponse.ok, true);
-  const revision = (revisionResponse.result as { value: { revision: { media: Array<{ path: string; contentBase64?: string; byteSize?: number; width: number; height: number }>; sources: Array<{ trustStatus?: string; rightsStatus?: string }> } } }).value.revision;
+  const revision = (revisionResponse.result as { value: { revision: { media: Array<{ path: string; contentBase64?: string; byteSize?: number; width: number; height: number; source?: string }>; sources: Array<{ trustStatus?: string; rightsStatus?: string }>; qualityGates: Array<{ id: string; reasonCode?: string }> } } }).value.revision;
   assert.deepEqual(
     revision.media.map((item) => [item.path, item.width, item.height]),
     [
@@ -415,6 +594,8 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
     ]
   );
   assert.ok(revision.media.every((item) => item.contentBase64 === undefined && Number.isSafeInteger(item.byteSize) && item.byteSize! > 0));
+  assert.ok(revision.media.every((item) => item.source === "IMAGEGEN"));
+  assert.equal(revision.qualityGates.find((gate) => gate.id === "media")?.reasonCode, "IMAGEGEN_VISUAL");
   assert.equal("evidenceText" in (draftTask.task.sources?.[0] ?? {}), false, "raw source evidence must not bypass the bounded draft contract");
   assert.ok(draftTask.task.sources?.[0]?.excerpt?.startsWith("Güvenilir kanıt metni."), "the bounded source evidence must reach the drafting task as an excerpt");
   assert.equal(revision.sources[0]?.trustStatus, "PENDING", "unreviewed direct URLs must not acquire implicit trust");
@@ -423,6 +604,92 @@ test("a persistent Codex draft reaches reviewed local completion through the dur
     draftTask.task.sources?.[0]?.excerpt?.split(/\s+/u).filter(Boolean).length,
     sourceEvidence.slice(0, 12_000).split(/\s+/u).filter(Boolean).length
   );
+});
+
+test("the default visual policy still produces an approvable hero package when ImageGen is not configured", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-codex-no-imagegen-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const previousImageGenKey = process.env.BLOGBOT_IMAGEGEN_API_KEY;
+  delete process.env.BLOGBOT_IMAGEGEN_API_KEY;
+  t.after(() => {
+    if (previousImageGenKey === undefined) delete process.env.BLOGBOT_IMAGEGEN_API_KEY;
+    else process.env.BLOGBOT_IMAGEGEN_API_KEY = previousImageGenKey;
+  });
+  const fullTrBody = "## Ne oldu\n\n" + "Türkçe ".repeat(700);
+  const fullEnBody = "## What happened\n\n" + "English ".repeat(700);
+  // No `imageGenerator` and no ImageGen key: the GENERATE default is therefore
+  // unattainable, and leaving `media` empty produced a finished revision that
+  // HERO_MEDIA_REQUIRED blocked and nobody could ever approve.
+  const runtime = await createPersistentEngineProtocol(dataDir, {
+    startSourceWorker: false,
+    codexPort: {
+      async *run(request) {
+        const finalReview = Object.hasOwn((request.outputSchema.properties as Record<string, unknown> | undefined) ?? {}, "translationParity");
+        const sourceId = codexRequestSourceId(request.input, finalReview);
+        yield { type: "output.completed", output: finalReview
+          ? { translationParity: { status: "MATCHED", detail: "Test paritesi doğrulandı." }, riskLevel: "STANDARD", editorialAssessment: finalEditorialAssessment(sourceId), gates: [{ id: "claims", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Kanıt bağlı." }, { id: "contradictions", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Çelişki yok." }, { id: "bilingual-parity", group: "editorial", state: "PASS", reasonCode: "CHECKED", detail: "Parite eşleşti." }, { id: "markdown-safety", group: "security", state: "PASS", reasonCode: "CHECKED", detail: "Markdown güvenli." }, { id: "seo", group: "seo", state: "PASS", reasonCode: "CHECKED", detail: "SEO tamam." }, { id: "media", group: "media", state: "PASS", reasonCode: "CHECKED", detail: "Medya denetlendi." }] }
+          : { translationKey: "no-imagegen-test", author: "Test Editörü", tags: ["test"], tr: { title: "Görsel sağlayıcısı olmayan haber", slug: "gorsel-saglayicisi-olmayan-haber", description: "Test açıklaması.", bodyMarkdown: fullTrBody, heroImageAlt: "Test görseli" }, en: { title: "Story without a visual provider", slug: "story-without-a-visual-provider", description: "Test description.", bodyMarkdown: fullEnBody, heroImageAlt: "Test visual" }, claims: [{ claimKey: "claim-1", trText: "Doğrulanan test iddiası", enText: "Verified test claim", sourceIds: [sourceId], status: "VERIFIED", evidenceQuotes: [{ sourceId, quote: "Güvenilir kanıt metni." }] }] }
+        };
+      }
+    },
+    sourceTransport: {
+      resolve: async () => ["93.184.216.34"],
+      request: async () => ({ status: 200, headers: { "content-type": "text/html" }, body: encoder.encode("<article>Güvenilir kanıt metni.</article>") })
+    }
+  });
+  t.after(() => runtime.close());
+
+  const initial = await runtime.handle({ version: 1, id: "no-imagegen-before", kind: "state", afterCursor: 0 });
+  const created = await runtime.handle({
+    version: 1,
+    id: "no-imagegen-draft",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "no-imagegen-draft",
+      idempotencyKey: "no-imagegen-draft",
+      expectedVersion: (initial.snapshot as { serverCursor: number }).serverCursor,
+      kind: "DRAFT.CREATE",
+      // Deliberately no visualPolicy: this is the default instant-create path.
+      payload: { draftId: "draft-no-imagegen", urls: ["https://news.example/story"], sourceIds: [], instruction: "Özgün test haberi hazırla.", section: "haberler", articleType: "news" }
+    }
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+
+  let state = "QUEUED";
+  let failureDetail = "";
+  for (let attempt = 0; attempt < 160 && state !== "SUCCEEDED"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    const snapshot = await runtime.handle({ version: 1, id: `no-imagegen-state-${attempt}`, kind: "state", afterCursor: 0 });
+    const job = (snapshot.snapshot as { jobs: Array<{ id: string; state: string; lastError?: string }> }).jobs.find((item) => item.id === "draft-no-imagegen");
+    state = job?.state ?? "MISSING";
+    failureDetail = job?.lastError ?? "";
+  }
+  assert.equal(state, "SUCCEEDED", failureDetail);
+
+  const revisionState = await runtime.handle({ version: 1, id: "no-imagegen-revision-state", kind: "state", afterCursor: 0 });
+  const revisionResponse = await runtime.handle({
+    version: 1,
+    id: "no-imagegen-revision-get",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "no-imagegen-revision-get",
+      idempotencyKey: "no-imagegen-revision-get",
+      expectedVersion: (revisionState.snapshot as { serverCursor: number }).serverCursor,
+      kind: "REVISION.GET",
+      payload: { revisionId: "draft-no-imagegen" }
+    }
+  });
+  assert.equal(revisionResponse.ok, true, JSON.stringify(revisionResponse));
+  const revision = (revisionResponse.result as { value: { revision: { media: Array<{ role: string; source?: string }>; qualityGates: Array<{ id: string; state: string; reasonCode?: string }> } } }).value.revision;
+  assert.equal(revision.media.length, 3, "the local renderer must supply the hero package");
+  assert.ok(revision.media.every((item) => item.source === "LOCAL_RENDERER"));
+  const mediaGate = revision.qualityGates.find((gate) => gate.id === "media");
+  assert.equal(mediaGate?.reasonCode, "LOCAL_RENDERER_VISUAL");
+  assert.notEqual(mediaGate?.reasonCode, "HERO_MEDIA_REQUIRED");
+  assert.notEqual(mediaGate?.state, "BLOCK");
 });
 
 test("a long-running Codex task does not block local workspace reads", async (t) => {

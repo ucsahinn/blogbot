@@ -12,6 +12,25 @@ const binding = {
   adapterVersion: "astro-generic@2.0.0"
 };
 
+async function waitForOutboxState(
+  repository: InMemoryBackendStore,
+  effectId: string,
+  predicate: (state: string | undefined) => boolean
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const saved = (await repository.sync(0)).snapshot.outbox.find((item) => item.id === effectId);
+    if (saved && predicate(saved.state)) return saved;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`Outbox effect ${effectId} did not reach the expected state`);
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 test("publication outbox worker claims each pending effect once and records success", async () => {
   const repository = new InMemoryBackendStore();
   const revisionId = "revision-1";
@@ -184,4 +203,109 @@ test("publication outbox worker reports a transient repository fault and recover
   const saved = (await repository.sync(0)).snapshot.outbox.find((item) => item.id === effect.id);
   assert.deepEqual(faults, ["OUTBOX_STORAGE_UNAVAILABLE"]);
   assert.equal(saved?.state, "SUCCEEDED");
+});
+
+test("a stale worker result cannot overwrite a newer terminal result", async () => {
+  const repository = new InMemoryBackendStore();
+  const effect = await repository.enqueuePublication("revision-competing-success", "2".repeat(64), binding);
+  const firstStarted = deferred();
+  const releaseFirst = deferred();
+
+  const firstWorker = startPublicationOutboxWorker(repository, {
+    async process() {
+      firstStarted.resolve();
+      await releaseFirst.promise;
+      return { state: "SUCCEEDED", resultRef: "merge:stale-worker" } as const;
+    }
+  }, 1_000);
+  await firstStarted.promise;
+
+  const secondWorker = startPublicationOutboxWorker(repository, {
+    async process() {
+      return { state: "SUCCEEDED", resultRef: "merge:newer-worker" } as const;
+    }
+  }, 1_000);
+  const newer = await waitForOutboxState(repository, effect.id, (state) => state === "SUCCEEDED");
+  assert.equal(newer.resultRef, "merge:newer-worker");
+
+  releaseFirst.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  firstWorker.stop();
+  secondWorker.stop();
+
+  const saved = (await repository.sync(0)).snapshot.outbox.find((item) => item.id === effect.id);
+  assert.equal(saved?.state, "SUCCEEDED");
+  assert.equal(saved?.resultRef, "merge:newer-worker");
+  assert.equal(saved?.attempts, 2);
+});
+
+test("a stale listed row cannot claim over a newer terminal state", async () => {
+  const repository = new InMemoryBackendStore();
+  const effect = await repository.enqueuePublication("revision-stale-claim", "4".repeat(64), binding);
+  const originalGetVersion = repository.getOutboxVersion.bind(repository);
+  let advanceBeforeVersionRead = true;
+  repository.getOutboxVersion = async (effectId) => {
+    if (advanceBeforeVersionRead) {
+      advanceBeforeVersionRead = false;
+      const current = (await repository.sync(0)).snapshot.outbox.find((item) => item.id === effectId);
+      assert.ok(current);
+      const version = await originalGetVersion(effectId);
+      await repository.updateOutbox(
+        { ...current, state: "SUCCEEDED", resultRef: "merge:manual-terminal" },
+        version
+      );
+    }
+    return originalGetVersion(effectId);
+  };
+  let calls = 0;
+
+  const worker = startPublicationOutboxWorker(repository, {
+    async process() {
+      calls += 1;
+      return { state: "SUCCEEDED", resultRef: "merge:stale-claim" } as const;
+    }
+  }, 1_000);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  worker.stop();
+
+  const saved = (await repository.sync(0)).snapshot.outbox.find((item) => item.id === effect.id);
+  assert.equal(calls, 0);
+  assert.equal(saved?.state, "SUCCEEDED");
+  assert.equal(saved?.resultRef, "merge:manual-terminal");
+  assert.equal(saved?.attempts, 0);
+});
+
+test("a stale processor failure cannot overwrite a newer retry decision", async () => {
+  const repository = new InMemoryBackendStore();
+  const effect = await repository.enqueuePublication("revision-competing-retry", "3".repeat(64), binding);
+  const firstStarted = deferred();
+  const releaseFirst = deferred();
+
+  const firstWorker = startPublicationOutboxWorker(repository, {
+    async process() {
+      firstStarted.resolve();
+      await releaseFirst.promise;
+      throw new Error("stale connector failure");
+    }
+  }, 1_000, { retryBaseMs: 60_000 });
+  await firstStarted.promise;
+
+  const secondWorker = startPublicationOutboxWorker(repository, {
+    async process() {
+      return { state: "UNKNOWN", lastError: "newer retry decision", retryAfterMs: 60_000 } as const;
+    }
+  }, 1_000, { retryBaseMs: 60_000 });
+  const newer = await waitForOutboxState(repository, effect.id, (state) => state === "UNKNOWN");
+  assert.equal(newer.lastError, "newer retry decision");
+
+  releaseFirst.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  firstWorker.stop();
+  secondWorker.stop();
+
+  const saved = (await repository.sync(0)).snapshot.outbox.find((item) => item.id === effect.id);
+  assert.equal(saved?.state, "UNKNOWN");
+  assert.equal(saved?.lastError, "newer retry decision");
+  assert.equal(saved?.attempts, 2);
+  assert.ok(saved?.nextAttemptAt);
 });

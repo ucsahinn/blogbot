@@ -73,25 +73,57 @@ export type StructuredCodexResult<T> =
       model: string;
     };
 
+export const CODEX_DISABLED_FEATURES = [
+  "shell_tool",
+  "browser_use",
+  "computer_use",
+  "image_generation",
+  "view_image",
+  "apps",
+  "plugins",
+  "memories",
+  "hooks",
+  "standalone_web_search",
+  "network_proxy"
+] as const;
+
+const safeConversationSessionIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+export function safeConversationSessionId(value: unknown): string | undefined {
+  return typeof value === "string" && safeConversationSessionIdPattern.test(value)
+    ? value
+    : undefined;
+}
+
 export function buildCodexExecArgs(
   model: string,
   outputSchemaPath: string,
   options: { conversationSessionId?: string; persistSession?: boolean } = {}
 ): string[] {
+  const conversationSessionId = options.persistSession === true
+    ? safeConversationSessionId(options.conversationSessionId)
+    : undefined;
   const args = [
     "exec",
-    ...(options.conversationSessionId ? ["resume", options.conversationSessionId] : []),
+    ...(!options.persistSession ? ["--ephemeral"] : []),
     "--sandbox",
     "read-only",
+    ...(conversationSessionId ? ["resume", conversationSessionId] : []),
+    "--strict-config",
     "--ignore-user-config",
     "--ignore-rules",
     "--skip-git-repo-check",
+    "-c",
+    "mcp_servers={}",
+    "-c",
+    "tools.web_search=false",
+    ...CODEX_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
     "--json",
     "--output-schema",
     outputSchemaPath,
     "-"
   ];
-  if (!options.persistSession) args.splice(1, 0, "--ephemeral");
   if (model !== "default") {
     args.splice(args.length - 1, 0, "--model", model);
   }
@@ -148,20 +180,22 @@ export async function runStructuredCodexTask<T>(
   const selection = resolveCodexRole(task.taskKind, task.roleModels);
   let output: unknown;
   let outputReceived = false;
-  let conversationSessionId = task.conversationSessionId;
+  let malformedAgentMessageReceived = false;
+  const requestedConversationSessionId = task.persistSession === true
+    ? safeConversationSessionId(task.conversationSessionId)
+    : undefined;
+  let conversationSessionId: string | undefined;
 
   for await (const event of port.run({
     model: selection.model,
     input: task.input,
     outputSchema: task.outputSchema,
-    ...(task.conversationSessionId ? { conversationSessionId: task.conversationSessionId } : {}),
+    ...(requestedConversationSessionId ? { conversationSessionId: requestedConversationSessionId } : {}),
     ...(task.persistSession !== undefined ? { persistSession: task.persistSession } : {})
   })) {
     if (event.type === "thread.started") {
-      const threadId = event.thread_id ?? event.threadId;
-      if (typeof threadId === "string" && threadId.length > 0 && threadId.length <= 128) {
-        conversationSessionId = threadId;
-      }
+      const threadId = safeConversationSessionId(event.thread_id ?? event.threadId);
+      if (threadId) conversationSessionId = threadId;
     }
     const waitingReason =
       waitingReasons[event.type as keyof typeof waitingReasons];
@@ -205,18 +239,21 @@ export async function runStructuredCodexTask<T>(
         output = JSON.parse(event.item.text);
         outputReceived = true;
       } catch {
-        throw new CodexRunnerError(
-          "INVALID_OUTPUT",
-          "Codex agent message was not valid structured JSON"
-        );
+        // Streamed agent messages are not authoritative. Codex can emit a
+        // human-readable progress item before the schema-bound final output.
+        // Remember the malformed item so an agent-only run still fails with
+        // INVALID_OUTPUT, but continue waiting for output.completed.
+        malformedAgentMessageReceived = true;
       }
     }
   }
 
   if (!outputReceived) {
     throw new CodexRunnerError(
-      "MISSING_OUTPUT",
-      "Codex runner completed without structured output"
+      malformedAgentMessageReceived ? "INVALID_OUTPUT" : "MISSING_OUTPUT",
+      malformedAgentMessageReceived
+        ? "Codex agent message was not valid structured JSON and no authoritative output arrived"
+        : "Codex runner completed without structured output"
     );
   }
   const normalizedOutput = task.normalizeOutput ? task.normalizeOutput(output) : output;

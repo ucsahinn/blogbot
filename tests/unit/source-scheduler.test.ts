@@ -152,3 +152,84 @@ test("source scheduler does not enqueue after stop cancels an in-flight catalog 
 
   assert.equal(enqueued, 0);
 });
+
+test("a source version change inside the window schedules again instead of stalling", async () => {
+  const nowMs = Date.parse("2026-07-30T10:00:00.000Z");
+  const keys: string[] = [];
+  const used = new Set<string>();
+  let version = 3;
+  const backend = {
+    getAutomation: async () => ({
+      mode: "INGEST_ONLY",
+      onboardingComplete: true,
+      ingestionPaused: false,
+      publishingPaused: false,
+      timezone: "Europe/Istanbul",
+      scanIntervalMinutes: 30
+    })
+  } as never;
+  const sources = {
+    listSources: async () => [{ id: "source-1", version, status: "ACTIVE" }]
+  } as never;
+  // The durable store rejects a key that was already used with a different
+  // request, which is exactly what a version bump produces.
+  const coordinator = {
+    enqueue: async (command: { idempotencyKey: string }) => {
+      if (used.has(command.idempotencyKey)) {
+        throw new Error("IDEMPOTENCY_KEY_REUSED: Idempotency key was already used with a different request");
+      }
+      used.add(command.idempotencyKey);
+      keys.push(command.idempotencyKey);
+      return { batchKey: "ok", scans: [] };
+    }
+  } as never;
+
+  const first = new SourceScanScheduler(backend, sources, coordinator, () => new Date(nowMs));
+  assert.equal(await first.tick(), true);
+
+  // A completed scan bumps the source version. A key built from the time bucket
+  // alone then described a different target list, so the store rejected it and
+  // scanning stopped for the rest of the window.
+  version = 4;
+  const afterRestart = new SourceScanScheduler(backend, sources, coordinator, () => new Date(nowMs));
+  assert.equal(await afterRestart.tick(), true, "a version change must still schedule");
+  assert.equal(keys.length, 2);
+  assert.notEqual(keys[0], keys[1], "the batch key must cover the scan targets");
+});
+
+test("an already-scheduled window is not reported as a store fault", async () => {
+  const nowMs = Date.parse("2026-07-30T10:00:00.000Z");
+  const faults: string[] = [];
+  const backend = {
+    getAutomation: async () => ({
+      mode: "INGEST_ONLY",
+      onboardingComplete: true,
+      ingestionPaused: false,
+      publishingPaused: false,
+      timezone: "Europe/Istanbul",
+      scanIntervalMinutes: 30
+    })
+  } as never;
+  const sources = {
+    listSources: async () => [{ id: "source-1", version: 3, status: "ACTIVE" }]
+  } as never;
+  const coordinator = {
+    enqueue: async () => {
+      throw new Error("IDEMPOTENCY_KEY_REUSED: Idempotency key was already used with a different request");
+    }
+  } as never;
+  const scheduler = new SourceScanScheduler(
+    backend,
+    sources,
+    coordinator,
+    () => new Date(nowMs),
+    undefined,
+    { onFault: (_error, phase) => faults.push(String(phase)) }
+  );
+
+  // Another process already claimed this window. That is not a fault, and
+  // reporting it as one left the bucket unclaimed so every later tick repeated
+  // the rejection.
+  assert.equal(await scheduler.tick(), true);
+  assert.deepEqual(faults, []);
+});

@@ -2,9 +2,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_FILES: usize = 256;
-const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 50 * 1024 * 1024;
-const RETRY_AFTER_SECONDS: u32 = 30;
+pub(crate) const RETRY_AFTER_SECONDS: u32 = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileContent {
@@ -107,11 +107,45 @@ impl PublicationError {
             safe_message: format!("GitHub {operation} failed; retry is safe"),
         }
     }
+
+    fn from_remote(operation: &str, error: String) -> Self {
+        if error == "GITHUB_REAUTHORIZATION_REQUIRED" {
+            return Self {
+                code: "GITHUB_REAUTHORIZATION_REQUIRED",
+                safe_message: "GitHub authorization must be renewed before publication".into(),
+            };
+        }
+        Self::remote(operation)
+    }
 }
 
 pub trait GithubRestPort {
     fn base_sha(&mut self, repository: &str, base_branch: &str) -> Result<String, String>;
     fn find_branch(&mut self, repository: &str, branch: &str) -> Result<Option<String>, String>;
+    /// Whether the base branch still contains a commit.
+    ///
+    /// After a merge the base tip legitimately keeps moving, so equality with
+    /// the merge commit is the wrong test. A history rewrite can remove the
+    /// merge commit entirely; a normal revert preserves its ancestry, so
+    /// callers must also verify approved files against the current base ref.
+    fn base_contains_commit(
+        &mut self,
+        repository: &str,
+        base_branch: &str,
+        commit_sha: &str,
+    ) -> Result<bool, String>;
+    /// Paths the publication branch changes relative to the approved base.
+    ///
+    /// Presence of the approved files is not the same as absence of anything
+    /// else. Without this, a branch carrying extra commits could be merged as
+    /// long as the approved files happened to match, so content that no human
+    /// approved would reach the site.
+    fn changed_paths(
+        &mut self,
+        repository: &str,
+        base_sha: &str,
+        head: &str,
+    ) -> Result<Vec<String>, String>;
     fn file_matches(
         &mut self,
         repository: &str,
@@ -184,6 +218,36 @@ pub trait GithubRestPort {
         intent_key: &str,
         merge_sha: &str,
     ) -> Result<bool, String>;
+    /// Removes only the three refs owned by a terminal publication.
+    /// Implementations must verify each current SHA before deletion and treat
+    /// an already absent ref as success so interrupted cleanup can reconcile.
+    fn cleanup_publication_refs(
+        &mut self,
+        repository: &str,
+        branch: &str,
+        expected_head_sha: &str,
+        intent_key: &str,
+        merge_sha: &str,
+    ) -> Result<(), String>;
+}
+
+/// Rejects a publication branch that changes anything the approval did not cover.
+fn assert_only_approved_paths_changed(
+    claim: &ApprovedClaim,
+    github: &mut impl GithubRestPort,
+    head: &str,
+) -> Result<(), PublicationError> {
+    let approved: BTreeSet<&str> = claim.files.iter().map(|file| file.path.as_str()).collect();
+    let changed = github
+        .changed_paths(&claim.repository, &claim.approved_base_sha, head)
+        .map_err(|error| PublicationError::from_remote("branch comparison", error))?;
+    if changed.iter().any(|path| !approved.contains(path.as_str())) {
+        return Err(PublicationError::validation(
+            "REMOTE_STATE_INVALID",
+            "publication branch changes files outside the approved bundle",
+        ));
+    }
+    Ok(())
 }
 
 pub fn reconcile(
@@ -193,56 +257,54 @@ pub fn reconcile(
 ) -> Result<ReconcileResult, PublicationError> {
     validate(claim, config)?;
     let branch = deterministic_branch(&claim.idempotency_key);
-    let mut result_ref = format!("{}/{}", claim.repository, branch);
     let base_sha = github
         .base_sha(&claim.repository, &claim.base_branch)
-        .map_err(|_| PublicationError::remote("base lookup"))?;
+        .map_err(|error| PublicationError::from_remote("base lookup", error))?;
     let mut pull = github
         .find_pull_request(&claim.repository, &branch, &claim.base_branch)
-        .map_err(|_| PublicationError::remote("pull request lookup"))?;
-    let merged_sha = pull
-        .as_ref()
-        .filter(|pull| pull.merged)
-        .and_then(|pull| pull.merge_sha.as_deref());
-    match merged_sha {
-        Some(merge_sha) if base_sha != merge_sha => {
-            return Err(PublicationError::validation(
-                "MERGED_BASE_SHA_MISMATCH",
-                "merged pull request is not the current approved base",
-            ));
-        }
-        None if base_sha != claim.approved_base_sha => {
-            return Err(PublicationError::validation(
-                "BASE_SHA_MISMATCH",
-                "approved base SHA no longer matches",
-            ));
-        }
-        _ => {}
+        .map_err(|error| PublicationError::from_remote("pull request lookup", error))?;
+    // Once GitHub reports the pull request merged, the base tip can legitimately
+    // keep moving. The merged path below therefore verifies both ancestry and
+    // current approved file content instead of requiring tip equality.
+    let merged = pull.as_ref().is_some_and(|pull| pull.merged);
+    if !merged && base_sha != claim.approved_base_sha {
+        return Err(PublicationError::validation(
+            "BASE_SHA_MISMATCH",
+            "approved base SHA no longer matches",
+        ));
     }
+    let mut created_pull = false;
     if pull.is_none() {
         let branch_sha = github
             .find_branch(&claim.repository, &branch)
-            .map_err(|_| PublicationError::remote("branch lookup"))?;
+            .map_err(|error| PublicationError::from_remote("branch lookup", error))?;
         if let Some(existing) = branch_sha {
+            // A pass interrupted between the first content write and the pull
+            // request creation leaves the deterministic branch created and
+            // already advanced past the approved base, so a plain head
+            // comparison rejected the exact state recovery reproduces forever.
+            // Accept that head only when every approved file is already present
+            // exactly as approved; anything else is still remote drift.
             if existing != claim.approved_base_sha {
-                return Err(PublicationError::validation(
-                    "REMOTE_STATE_INVALID",
-                    "publication branch has an unexpected head",
-                ));
+                // Accept the recovered head only when the branch changes
+                // nothing beyond the approved bundle. Checking that the
+                // approved files are merely present would let unrelated
+                // commits ride along into the merge.
+                assert_only_approved_paths_changed(claim, github, &existing)?;
             }
         } else {
             github
                 .create_branch(&claim.repository, &branch, &claim.approved_base_sha)
-                .map_err(|_| PublicationError::remote("branch creation"))?;
+                .map_err(|error| PublicationError::from_remote("branch creation", error))?;
         }
         for file in &claim.files {
             let matches = github
                 .file_matches(&claim.repository, &branch, file)
-                .map_err(|_| PublicationError::remote("content lookup"))?;
+                .map_err(|error| PublicationError::from_remote("content lookup", error))?;
             if !matches {
                 github
                     .put_file(&claim.repository, &branch, file)
-                    .map_err(|_| PublicationError::remote("content write"))?;
+                    .map_err(|error| PublicationError::from_remote("content write", error))?;
             }
         }
         pull = Some(
@@ -253,10 +315,23 @@ pub fn reconcile(
                     &claim.base_branch,
                     &claim.idempotency_key,
                 )
-                .map_err(|_| PublicationError::remote("pull request creation"))?,
+                .map_err(|error| PublicationError::from_remote("pull request creation", error))?,
         );
+        created_pull = true;
     }
     let pull = pull.expect("pull request is established");
+    let result_ref = format!("pr:{}:{}", pull.number, pull.head_sha);
+    // A pull request head is remote state, not part of the original approval.
+    // Persist it through the outbox result before checks or merge can run. This
+    // also covers recovery after a crash between PR creation and completion:
+    // an existing open PR without a persisted head remains waiting.
+    if !pull.merged && (created_pull || claim.approved_head_sha.is_none()) {
+        return Ok(waiting(
+            PublicationStage::WaitingForChecks,
+            result_ref,
+            None,
+        ));
+    }
     if let Some(approved_head) = &claim.approved_head_sha {
         if &pull.head_sha != approved_head {
             return Err(PublicationError::validation(
@@ -265,10 +340,20 @@ pub fn reconcile(
             ));
         }
     }
+    let content_reference = if pull.merged {
+        pull.merge_sha.as_deref().ok_or_else(|| {
+            PublicationError::validation(
+                "REMOTE_STATE_INVALID",
+                "merged pull request has no merge SHA",
+            )
+        })?
+    } else {
+        pull.head_sha.as_str()
+    };
     for file in &claim.files {
         let matches = github
-            .file_matches(&claim.repository, &branch, file)
-            .map_err(|_| PublicationError::remote("content revalidation"))?;
+            .file_matches(&claim.repository, content_reference, file)
+            .map_err(|error| PublicationError::from_remote("content revalidation", error))?;
         if !matches {
             return Err(PublicationError::validation(
                 "REMOTE_STATE_INVALID",
@@ -276,24 +361,29 @@ pub fn reconcile(
             ));
         }
     }
-    result_ref = format!("pr:{}:{}", pull.number, pull.head_sha);
     let checks = github
         .checks(&claim.repository, &pull.head_sha)
-        .map_err(|_| PublicationError::remote("check lookup"))?;
-    let mut failed = false;
+        .map_err(|error| PublicationError::from_remote("check lookup", error))?;
+    let mut failed = Vec::new();
     let mut pending = false;
     for required in &config.required_checks {
         match checks.get(required) {
             Some(CheckState::Success) => {}
-            Some(CheckState::Failed) => failed = true,
+            Some(CheckState::Failed) => failed.push(required.as_str()),
             Some(CheckState::Pending) | None => pending = true,
         }
     }
-    if failed {
-        return Ok(waiting(
-            PublicationStage::WaitingForChecks,
-            result_ref,
-            Some("required checks failed"),
+    if !failed.is_empty() {
+        let listed = failed
+            .iter()
+            .take(8)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if failed.len() > 8 { ", ..." } else { "" };
+        return Err(PublicationError::validation(
+            "REQUIRED_CHECK_FAILED",
+            &format!("required GitHub checks failed: {listed}{suffix}"),
         ));
     }
     if pending {
@@ -311,20 +401,42 @@ pub fn reconcile(
                 "merged pull request has no merge SHA",
             )
         })?;
-        let current_base = github
-            .base_sha(&claim.repository, &claim.base_branch)
-            .map_err(|_| PublicationError::remote("base verification"))?;
-        if current_base != merge_sha {
+        // Auto-delete-head repositories remove the topic branch immediately
+        // after merge. The merge commit is immutable and survives that cleanup,
+        // so both exact content and the approved path set are revalidated there.
+        assert_only_approved_paths_changed(claim, github, &merge_sha)?;
+        // The base tip legitimately advances after the merge (the next
+        // publication, a human push, the deploy workflow's own commit), so
+        // requiring it to still equal this merge commit is too strict. Ancestry
+        // detects a force-push that removed the merge; exact file checks on the
+        // current base below separately detect an ordinary revert.
+        let still_published = github
+            .base_contains_commit(&claim.repository, &claim.base_branch, &merge_sha)
+            .map_err(|error| PublicationError::from_remote("base history verification", error))?;
+        if !still_published {
             return Err(PublicationError::validation(
                 "MERGED_BASE_SHA_MISMATCH",
-                "merged pull request is not the current approved base",
+                "merged publication is no longer part of the base branch history",
             ));
+        }
+        for file in &claim.files {
+            let matches = github
+                .file_matches(&claim.repository, &claim.base_branch, file)
+                .map_err(|error| {
+                    PublicationError::from_remote("base content verification", error)
+                })?;
+            if !matches {
+                return Err(PublicationError::validation(
+                    "MERGED_BASE_CONTENT_MISMATCH",
+                    "approved files no longer match the current base branch",
+                ));
+            }
         }
         merge_sha
     } else {
         let current_base = github
             .base_sha(&claim.repository, &claim.base_branch)
-            .map_err(|_| PublicationError::remote("pre-merge base verification"))?;
+            .map_err(|error| PublicationError::from_remote("pre-merge base verification", error))?;
         if current_base != claim.approved_base_sha {
             return Err(PublicationError::validation(
                 "BASE_SHA_MISMATCH",
@@ -337,19 +449,22 @@ pub fn reconcile(
                 &claim.base_branch,
                 &config.required_checks,
             )
-            .map_err(|_| PublicationError::remote("branch protection lookup"))?;
+            .map_err(|error| PublicationError::from_remote("branch protection lookup", error))?;
         if !strict_base {
             return Err(PublicationError::validation(
                 "BASE_SHA_GUARANTEE_UNAVAILABLE",
                 "automatic merge requires strict up-to-date required checks",
             ));
         }
+        // Presence of the approved files was already revalidated above; this
+        // also proves the branch changes nothing else before it is merged.
+        assert_only_approved_paths_changed(claim, github, &pull.head_sha)?;
         // GitHub's strict required-check protection then rejects a merge whose
         // checks were not evaluated against the current target base, while the
         // endpoint atomically binds the approved PR head SHA.
         github
             .squash_merge(&claim.repository, pull.number, &pull.head_sha)
-            .map_err(|_| PublicationError::remote("squash merge"))?
+            .map_err(|error| PublicationError::from_remote("squash merge", error))?
     };
     let intent_key = deploy_intent_key(claim, &merge_sha);
     let result_ref = format!("deploy:{intent_key}:{merge_sha}");
@@ -360,7 +475,7 @@ pub fn reconcile(
             &config.deploy_workflow,
             &merge_sha,
         )
-        .map_err(|_| PublicationError::remote("deploy intent lookup"))?;
+        .map_err(|error| PublicationError::from_remote("deploy intent lookup", error))?;
     if !dispatched {
         github
             .dispatch_deploy(
@@ -370,7 +485,7 @@ pub fn reconcile(
                 &intent_key,
                 &merge_sha,
             )
-            .map_err(|_| PublicationError::remote("workflow dispatch"))?;
+            .map_err(|error| PublicationError::from_remote("workflow dispatch", error))?;
     }
     let verified = github
         .deploy_verified(
@@ -379,7 +494,7 @@ pub fn reconcile(
             &intent_key,
             &merge_sha,
         )
-        .map_err(|_| PublicationError::remote("deployment verification"))?;
+        .map_err(|error| PublicationError::from_remote("deployment verification", error))?;
     if !verified {
         return Ok(waiting(
             PublicationStage::WaitingForDeployVerification,
@@ -387,6 +502,24 @@ pub fn reconcile(
             None,
         ));
     }
+    github
+        .cleanup_publication_refs(
+            &claim.repository,
+            &branch,
+            &pull.head_sha,
+            &intent_key,
+            &merge_sha,
+        )
+        .map_err(|error| {
+            if error == "GITHUB_PUBLICATION_REF_CONFLICT" {
+                PublicationError::validation(
+                    "REMOTE_STATE_INVALID",
+                    "publication cleanup ref no longer matches the approved commit",
+                )
+            } else {
+                PublicationError::from_remote("publication ref cleanup", error)
+            }
+        })?;
     Ok(ReconcileResult {
         status: "SUCCEEDED",
         stage: PublicationStage::WaitingForDeployVerification,
@@ -603,6 +736,13 @@ mod tests {
         strict_base: bool,
         actions: Vec<String>,
         failure: Option<String>,
+        /// `None` means "exactly the approved bundle"; the default honest case.
+        changed: Option<Vec<String>>,
+        /// Commits removed from base ancestry by a force-push/history rewrite.
+        commits_missing_from_base_history: BTreeSet<String>,
+        /// Exact reference/path pairs whose content no longer matches approval.
+        mismatched_files: BTreeSet<(String, String)>,
+        file_match_refs: Vec<String>,
     }
 
     impl FakeGithub {
@@ -643,13 +783,31 @@ mod tests {
         fn find_branch(&mut self, _: &str, _: &str) -> Result<Option<String>, String> {
             Ok(self.branch.clone())
         }
-        fn file_matches(
+        fn base_contains_commit(
             &mut self,
             _: &str,
             _: &str,
+            commit_sha: &str,
+        ) -> Result<bool, String> {
+            Ok(!self.commits_missing_from_base_history.contains(commit_sha))
+        }
+        fn changed_paths(&mut self, _: &str, _: &str, _: &str) -> Result<Vec<String>, String> {
+            Ok(self
+                .changed
+                .clone()
+                .unwrap_or_else(|| self.files.iter().cloned().collect()))
+        }
+        fn file_matches(
+            &mut self,
+            _: &str,
+            reference: &str,
             file: &PublicationFile,
         ) -> Result<bool, String> {
-            Ok(self.files.contains(&file.path))
+            self.file_match_refs.push(reference.to_string());
+            Ok(self.files.contains(&file.path)
+                && !self
+                    .mismatched_files
+                    .contains(&(reference.to_string(), file.path.clone())))
         }
         fn create_branch(&mut self, _: &str, branch: &str, _: &str) -> Result<(), String> {
             self.actions.push(format!("WRITE:create-branch:{branch}"));
@@ -745,6 +903,19 @@ mod tests {
             self.actions.push(format!("VERIFY:{intent_key}"));
             Ok(self.verified)
         }
+        fn cleanup_publication_refs(
+            &mut self,
+            _: &str,
+            branch: &str,
+            expected_head_sha: &str,
+            intent_key: &str,
+            merge_sha: &str,
+        ) -> Result<(), String> {
+            self.actions.push(format!(
+                "WRITE:cleanup:{branch}:{intent_key}:{expected_head_sha}:{merge_sha}"
+            ));
+            Ok(())
+        }
     }
 
     fn test_claim() -> ApprovedClaim {
@@ -764,7 +935,7 @@ mod tests {
             approved_base_sha: "aaaaaaaa".into(),
             approved_revision_hash: "bbbbbbbb".into(),
             approved_files_sha: claim_files_digest(&files),
-            approved_head_sha: None,
+            approved_head_sha: Some("cccccccc".into()),
             revision_id: "revision-1".into(),
             idempotency_key: "publication-1".into(),
             adapter_version: "astro-generic@2.0.0".into(),
@@ -841,8 +1012,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_missing_and_failed_checks_never_merge() {
-        for state in [Some(CheckState::Pending), None, Some(CheckState::Failed)] {
+    fn pending_and_missing_checks_never_merge() {
+        for state in [Some(CheckState::Pending), None] {
             let mut github = FakeGithub::ready();
             match state {
                 Some(value) => {
@@ -857,6 +1028,82 @@ mod tests {
             assert_eq!(result.status, "UNKNOWN");
             assert!(!github.actions.iter().any(|a| a.contains("squash")));
         }
+    }
+
+    #[test]
+    fn a_completed_failed_required_check_is_terminal_and_actionable() {
+        let mut github = FakeGithub::ready();
+        github.checks.insert("ci/test".into(), CheckState::Failed);
+
+        let error = reconcile(&test_claim(), &test_config(), &mut github).unwrap_err();
+
+        assert_eq!(error.code, "REQUIRED_CHECK_FAILED");
+        assert!(error.safe_message.contains("ci/test"));
+        assert!(!github
+            .actions
+            .iter()
+            .any(|action| action.contains("squash")));
+    }
+
+    #[test]
+    fn a_new_pull_request_requires_a_durable_head_binding_roundtrip() {
+        let mut claim = test_claim();
+        claim.approved_head_sha = None;
+        let mut github = FakeGithub::with_base_sha("aaaaaaaa");
+        github.checks.insert("ci/test".into(), CheckState::Success);
+        github.checks.insert("ci/lint".into(), CheckState::Success);
+        github.strict_base = true;
+
+        let first = reconcile(&claim, &test_config(), &mut github).unwrap();
+
+        assert_eq!(first.status, "UNKNOWN");
+        assert_eq!(first.result_ref, "pr:7:cccccccc");
+        assert!(!github
+            .actions
+            .iter()
+            .any(|action| action.contains("squash")));
+
+        // The engine persists the result ref before the next claim. If another
+        // commit lands on the topic branch in between, that next pass must fail
+        // against the persisted approved head rather than checking or merging it.
+        let mut rebound = claim;
+        rebound.approved_head_sha = Some("cccccccc".into());
+        github.pull = Some(PullRequest {
+            number: 7,
+            head_sha: "eeeeeeee".into(),
+            merged: false,
+            merge_sha: None,
+        });
+        let error = reconcile(&rebound, &test_config(), &mut github).unwrap_err();
+        assert_eq!(error.code, "HEAD_SHA_MISMATCH");
+        assert!(!github
+            .actions
+            .iter()
+            .any(|action| action == "WRITE:squash:eeeeeeee"));
+    }
+
+    #[test]
+    fn a_merged_pull_with_an_auto_deleted_head_is_revalidated_at_merge_and_base() {
+        let mut github = FakeGithub::ready();
+        github.pull = Some(PullRequest {
+            number: 7,
+            head_sha: "cccccccc".into(),
+            merged: true,
+            merge_sha: Some("dddddddd".into()),
+        });
+        github.branch = None;
+
+        reconcile(&test_claim(), &test_config(), &mut github).unwrap();
+
+        assert_eq!(
+            github.file_match_refs,
+            vec![
+                "dddddddd".to_string(),
+                "dddddddd".to_string(),
+                "main".to_string(),
+                "main".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -889,7 +1136,10 @@ mod tests {
         github.strict_base = false;
         let error = reconcile(&test_claim(), &test_config(), &mut github).unwrap_err();
         assert_eq!(error.code, "BASE_SHA_GUARANTEE_UNAVAILABLE");
-        assert!(!github.actions.iter().any(|action| action.contains("squash")));
+        assert!(!github
+            .actions
+            .iter()
+            .any(|action| action.contains("squash")));
     }
 
     #[test]
@@ -917,7 +1167,65 @@ mod tests {
     }
 
     #[test]
-    fn merged_pull_request_rejects_unrelated_base_movement_before_deploy() {
+    fn an_unapproved_change_on_the_branch_is_never_merged() {
+        // Revalidating that the approved files are present says nothing about
+        // what else the branch carries. Without comparing the change set, a
+        // commit no human approved rode along into the merge and onto the site.
+        let mut github = FakeGithub::ready();
+        github.changed = Some(vec![
+            "content/tr/article.md".into(),
+            ".github/workflows/deploy.yml".into(),
+        ]);
+
+        let error = reconcile(&test_claim(), &test_config(), &mut github).unwrap_err();
+
+        assert_eq!(error.code, "REMOTE_STATE_INVALID");
+        assert!(!github
+            .actions
+            .iter()
+            .any(|action| action.starts_with("WRITE:squash")));
+    }
+
+    #[test]
+    fn a_branch_changing_only_approved_files_still_merges() {
+        let mut github = FakeGithub::ready();
+        github.changed = Some(vec!["content/tr/article.md".into()]);
+
+        let result = reconcile(&test_claim(), &test_config(), &mut github)
+            .expect("an approved-only change set must be publishable");
+
+        assert_ne!(result.status, "FAILED");
+        assert!(github
+            .actions
+            .iter()
+            .any(|action| action.starts_with("WRITE:squash")));
+    }
+
+    #[test]
+    fn an_interrupted_pass_recovers_only_when_the_branch_matches_the_approval() {
+        // A pass interrupted between the first content write and the pull
+        // request creation leaves the branch created and already advanced past
+        // the approved base. That exact state must be recoverable, but only
+        // when nothing outside the approved bundle changed.
+        let mut recoverable = FakeGithub::ready();
+        recoverable.pull = None;
+        recoverable.branch = Some("ffffffff".into());
+        recoverable.changed = Some(vec!["content/tr/article.md".into()]);
+        assert!(reconcile(&test_claim(), &test_config(), &mut recoverable).is_ok());
+
+        let mut drifted = FakeGithub::ready();
+        drifted.pull = None;
+        drifted.branch = Some("ffffffff".into());
+        drifted.changed = Some(vec!["content/tr/article.md".into(), "src/config.ts".into()]);
+        let error = reconcile(&test_claim(), &test_config(), &mut drifted).unwrap_err();
+        assert_eq!(error.code, "REMOTE_STATE_INVALID");
+    }
+
+    #[test]
+    fn a_merged_publication_survives_later_commits_on_the_base() {
+        // A human push, the next publication or the deploy workflow own
+        // commit all advance the base after the merge. Demanding the tip still
+        // equal this merge commit failed an already published revision.
         let mut github = FakeGithub::ready();
         github.pull = Some(PullRequest {
             number: 7,
@@ -927,6 +1235,32 @@ mod tests {
         });
         github.base = "eeeeeeee".into();
 
+        let result = reconcile(&test_claim(), &test_config(), &mut github)
+            .expect("a merged publication must keep reconciling");
+
+        assert!(github
+            .actions
+            .iter()
+            .any(|action| action.contains("dispatch")));
+        assert_ne!(result.status, "FAILED");
+    }
+
+    #[test]
+    fn a_history_rewrite_that_removes_the_merge_cannot_deploy() {
+        // A force-push can remove the merge from base ancestry entirely, so
+        // deploying the current tip would ship something other than approval.
+        let mut github = FakeGithub::ready();
+        github.pull = Some(PullRequest {
+            number: 7,
+            head_sha: "cccccccc".into(),
+            merged: true,
+            merge_sha: Some("dddddddd".into()),
+        });
+        github.base = "eeeeeeee".into();
+        github
+            .commits_missing_from_base_history
+            .insert("dddddddd".into());
+
         let error = reconcile(&test_claim(), &test_config(), &mut github).unwrap_err();
 
         assert_eq!(error.code, "MERGED_BASE_SHA_MISMATCH");
@@ -934,6 +1268,28 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.contains("dispatch")));
+    }
+
+    #[test]
+    fn a_normal_revert_that_keeps_merge_ancestry_cannot_deploy() {
+        let claim = test_claim();
+        let mut github = FakeGithub::ready();
+        github.pull = Some(PullRequest {
+            number: 7,
+            head_sha: "cccccccc".into(),
+            merged: true,
+            merge_sha: Some("dddddddd".into()),
+        });
+        github.base = "eeeeeeee".into();
+        github
+            .mismatched_files
+            .insert((claim.base_branch.clone(), claim.files[0].path.clone()));
+
+        let error = reconcile(&claim, &test_config(), &mut github).unwrap_err();
+        assert_eq!(error.code, "MERGED_BASE_CONTENT_MISMATCH");
+        assert!(error.safe_message.contains("approved files"));
+        assert!(error.safe_message.contains("base branch"));
+        assert!(github.writes().is_empty());
     }
 
     #[test]
@@ -958,6 +1314,37 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.starts_with("VERIFY:")));
+    }
+
+    #[test]
+    fn terminal_success_cleans_only_its_bounded_publication_refs() {
+        let mut github = FakeGithub::ready();
+        github.pull = Some(PullRequest {
+            number: 7,
+            head_sha: "cccccccc".into(),
+            merged: true,
+            merge_sha: Some("dddddddd".into()),
+        });
+        github.base = "dddddddd".into();
+        github.intent = true;
+
+        let waiting_result = reconcile(&test_claim(), &test_config(), &mut github).unwrap();
+        assert_eq!(waiting_result.status, "UNKNOWN");
+        assert!(!github
+            .actions
+            .iter()
+            .any(|action| action.starts_with("WRITE:cleanup:")));
+
+        github.verified = true;
+        let success = reconcile(&test_claim(), &test_config(), &mut github).unwrap();
+        assert_eq!(success.status, "SUCCEEDED");
+        let cleanup = github
+            .actions
+            .iter()
+            .filter(|action| action.starts_with("WRITE:cleanup:"))
+            .collect::<Vec<_>>();
+        assert_eq!(cleanup.len(), 1);
+        assert!(cleanup[0].contains("cccccccc:dddddddd"));
     }
 
     #[test]
@@ -1006,5 +1393,14 @@ mod tests {
         assert!(!error.safe_message.contains(&redaction_canary));
         assert!(!format!("{error:?}").contains(&redaction_canary));
         assert!(!deterministic_branch(&test_claim().idempotency_key).contains(&redaction_canary));
+    }
+
+    #[test]
+    fn github_authorization_failures_survive_reconcile_as_a_stable_code() {
+        let mut github = FakeGithub::with_base_sha("aaaaaaaa");
+        github.failure = Some("GITHUB_REAUTHORIZATION_REQUIRED".into());
+        let error = reconcile(&test_claim(), &test_config(), &mut github).unwrap_err();
+        assert_eq!(error.code, "GITHUB_REAUTHORIZATION_REQUIRED");
+        assert!(!error.safe_message.contains("token"));
     }
 }

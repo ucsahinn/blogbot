@@ -10,6 +10,29 @@ const blockedHostnames = new Set([
   "gateway.docker.internal"
 ]);
 
+const credentialBearingQueryParameters = new Set([
+  "access_token",
+  "api_key",
+  "apikey",
+  "auth",
+  "authorization",
+  "credential",
+  "jwt",
+  "password",
+  "passwd",
+  "secret",
+  "signature",
+  "sig",
+  "token"
+]);
+
+function isCredentialBearingQueryParameter(name: string): boolean {
+  const normalizedName = name.toLowerCase();
+  return credentialBearingQueryParameters.has(normalizedName) ||
+    normalizedName.startsWith("x-amz-") ||
+    normalizedName.startsWith("x-goog-");
+}
+
 function ipv4ToNumber(address: string): number {
   return address
     .split(".")
@@ -97,7 +120,13 @@ function isBlockedIpv6(address: string): boolean {
   const value = ipv6ToBigInt(address);
   const globalUnicast = inIpv6Cidr(value, 0x20000000000000000000000000000000n, 3);
   const documentation = inIpv6Cidr(value, 0x20010db8000000000000000000000000n, 32);
-  return !globalUnicast || documentation;
+  // Transition mechanisms can tunnel an IPv4 destination past the ordinary
+  // IPv6 global-unicast check. A 6to4 address embeds IPv4 in 2002::/16 and
+  // Teredo uses 2001:0000::/32; neither is a valid direct public source target
+  // for this local fetcher, so reject both before any socket is opened.
+  const sixToFour = inIpv6Cidr(value, 0x20020000000000000000000000000000n, 16);
+  const teredo = inIpv6Cidr(value, 0x20010000000000000000000000000000n, 32);
+  return !globalUnicast || documentation || sixToFour || teredo;
 }
 
 function stripIpv6Brackets(hostname: string): string {
@@ -135,6 +164,11 @@ export function assertSafeSourceUrl(input: string): string {
   if (parsed.username || parsed.password) {
     throw new Error("Source URL credentials are forbidden");
   }
+  for (const queryName of parsed.searchParams.keys()) {
+    if (isCredentialBearingQueryParameter(queryName)) {
+      throw new Error("Source URL credential-bearing query parameters are forbidden");
+    }
+  }
   if (parsed.port && parsed.port !== "443") {
     throw new Error("Source URLs must use HTTPS port 443");
   }
@@ -142,7 +176,16 @@ export function assertSafeSourceUrl(input: string): string {
     throw new Error("Source URL hostname is required");
   }
 
-  const hostname = stripIpv6Brackets(parsed.hostname.toLowerCase());
+  const rawHostname = stripIpv6Brackets(parsed.hostname.toLowerCase());
+  if (rawHostname.includes("..")) {
+    throw new Error("Source URL hostname is malformed");
+  }
+  const hostname = rawHostname.endsWith(".")
+    ? rawHostname.slice(0, -1)
+    : rawHostname;
+  if (!hostname) {
+    throw new Error("Source URL hostname is required");
+  }
   if (
     blockedHostnames.has(hostname) ||
     hostname.endsWith(".localhost") ||
@@ -157,6 +200,9 @@ export function assertSafeSourceUrl(input: string): string {
     throw new Error("Private, local, reserved, and metadata addresses are forbidden");
   }
 
+  if (rawHostname !== hostname) {
+    parsed.hostname = hostname;
+  }
   parsed.hash = "";
   return parsed.toString();
 }

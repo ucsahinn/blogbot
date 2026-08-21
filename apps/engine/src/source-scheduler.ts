@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   BackendRepository
 } from "../../../packages/database/src/backend-repository.ts";
@@ -6,6 +8,7 @@ import type {
   SourceScanTarget
 } from "../../../packages/database/src/source-repository.ts";
 import { deriveAutomationCapabilities } from "../../../packages/editorial/src/automation.ts";
+import { canonicalJson } from "../../../packages/editorial/src/revision.ts";
 import type { SourceScanCoordinator } from "./source-scan.ts";
 
 export interface SourceScanSchedulerOptions {
@@ -98,17 +101,31 @@ export class SourceScanScheduler {
       if (this.stopped) return false;
       if (targets.length === 0) return false;
 
-      const key = `scheduler:source-scan:${bucket}`;
+      // The batch key must cover everything the stored request fingerprint
+      // covers. A successful scan bumps the source version, so a key made from
+      // the time bucket alone described a different target list after the very
+      // first scan; the in-memory bucket guard hid that until a restart, and
+      // then every tick in the window was rejected as a reused key. Covering
+      // the targets costs at most one extra batch per window after a version
+      // change, and never stalls scanning.
+      const key = `scheduler:source-scan:${bucket}:${scanTargetsFingerprint(targets)}`;
       this.lastFaultPhase = "queue";
       if (this.stopped) return false;
-      await this.coordinator.enqueue({
-        version: 1,
-        requestId: key,
-        idempotencyKey: key,
-        expectedVersion: 0,
-        kind: "SOURCE.SCAN",
-        payload: { targets }
-      });
+      try {
+        await this.coordinator.enqueue({
+          version: 1,
+          requestId: key,
+          idempotencyKey: key,
+          expectedVersion: 0,
+          kind: "SOURCE.SCAN",
+          payload: { targets }
+        });
+      } catch (error) {
+        // A key that already belongs to another request means this window was
+        // scheduled; it is not a store fault. Treating it as one left the
+        // bucket unclaimed and made every later tick repeat the rejection.
+        if (!(error instanceof Error) || !error.message.includes("IDEMPOTENCY_KEY_REUSED")) throw error;
+      }
       if (this.stopped) return false;
       this.lastBucket = bucket;
       return true;
@@ -116,4 +133,8 @@ export class SourceScanScheduler {
       this.tickInFlight = false;
     }
   }
+}
+
+function scanTargetsFingerprint(targets: SourceScanTarget[]): string {
+  return createHash("sha256").update(canonicalJson(targets)).digest("hex");
 }

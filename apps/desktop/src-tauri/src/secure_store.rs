@@ -1,7 +1,10 @@
 use std::fs::{self, OpenOptions};
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::ptr;
 use std::slice;
+use std::sync::atomic::{compiler_fence, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager};
@@ -30,6 +33,72 @@ const MAX_RECOVERY_KEY_CANDIDATES: usize = 8;
 // encrypted database created by earlier desktop builds.
 const CURRENT_APP_IDENTIFIER: &str = "app.blogbot.desktop";
 const LEGACY_IDENTIFIERS: &[&str] = &["net.siberdergi.blogbot"];
+const GITHUB_AUTH_STATE_VALIDATED: &[u8] = b"blogbot-github-auth-state:v1:validated";
+const GITHUB_AUTH_STATE_REAUTH_REQUIRED: &[u8] =
+    b"blogbot-github-auth-state:v1:reauthorization-required";
+
+/// App-owned plaintext GitHub token storage. The wrapper is intentionally not
+/// cloneable or printable. It removes durable and per-request application
+/// copies; transient reqwest/TLS/OS buffers while a request is active remain
+/// outside this best-effort zeroization boundary.
+pub(crate) struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    pub(crate) fn new(bytes: Vec<u8>) -> Result<Self, String> {
+        let secret = Self(bytes);
+        if secret.0.is_empty() || secret.0.len() > 1024 {
+            return Err("GITHUB_TOKEN_INVALID".into());
+        }
+        let value =
+            std::str::from_utf8(&secret.0).map_err(|_| "GITHUB_TOKEN_INVALID".to_string())?;
+        if value.trim().is_empty() {
+            return Err("GITHUB_TOKEN_INVALID".into());
+        }
+        Ok(secret)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub(crate) fn expose_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("SecretBytes construction validates UTF-8")
+    }
+
+    pub(crate) fn wipe(&mut self) {
+        let capacity = self.0.capacity();
+        let pointer = self.0.as_mut_ptr();
+        for index in 0..capacity {
+            unsafe { ptr::write_volatile(pointer.add(index), 0) };
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+fn volatile_zero(bytes: &mut [u8]) {
+    for byte in bytes {
+        unsafe { ptr::write_volatile(byte, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
+fn copy_then_wipe(source: &mut [u8]) -> Vec<u8> {
+    let bytes = source.to_vec();
+    volatile_zero(source);
+    bytes
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubAuthorizationState {
+    Validated,
+    ReauthorizationRequired,
+}
 
 pub fn stable_data_key_path(app: &AppHandle) -> Option<PathBuf> {
     app.path()
@@ -96,29 +165,21 @@ fn existing_valid_key(path: &Path) -> Option<Vec<u8>> {
         .filter(|plaintext| plaintext.len() == 32)
 }
 
+/// Once a candidate has successfully opened the encrypted workspace it is
+/// persisted as the canonical stable key, so try that first, then the current
+/// Tauri identifier key, then keys left by earlier identifiers. Only a
+/// candidate that actually decrypts is used, so this order is a preference and
+/// never a decision.
 fn ordered_key_candidates(
     stable: PathBuf,
     app_key: Option<PathBuf>,
     legacy: Vec<PathBuf>,
-    persisted_data: bool,
 ) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if persisted_data {
-        // Once a candidate has successfully opened the encrypted workspace it
-        // is persisted here as the canonical key. Prefer it over stale keys
-        // from earlier Tauri identifiers.
-        candidates.push(stable);
-        if let Some(app_key) = app_key {
-            candidates.push(app_key);
-        }
-        candidates.extend(legacy);
-    } else {
-        candidates.push(stable);
-        if let Some(app_key) = app_key {
-            candidates.push(app_key);
-        }
-        candidates.extend(legacy);
+    let mut candidates = vec![stable];
+    if let Some(app_key) = app_key {
+        candidates.push(app_key);
     }
+    candidates.extend(legacy);
     candidates
 }
 
@@ -158,15 +219,10 @@ pub fn load_or_create_data_key(app: &AppHandle) -> Result<String, String> {
         .map_err(|error| format!("DATA_KEY_DIRECTORY_CREATE_FAILED: {error}"))?;
 
     let app_key = app_secret_path(app);
-    // If a persisted Blogbot database predates the current Tauri identifier,
-    // use its same-user DPAPI key directly. This avoids creating a second key
-    // during an identifier migration and does not require touching user data.
-    let persisted_data = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|root| root.join("Blogbot").join("data").join("pgdata"))
-        .is_some_and(|path| path.exists());
-    let candidates =
-        ordered_key_candidates(path.clone(), app_key, legacy_secret_paths(), persisted_data);
+    // If a persisted Blogbot database predates the current Tauri identifier, its
+    // same-user DPAPI key is still a candidate here. This avoids creating a
+    // second key during an identifier migration and never touches user data.
+    let candidates = ordered_key_candidates(path.clone(), app_key, legacy_secret_paths());
     let plaintext = if let Some((candidate, key)) = candidates
         .iter()
         .find_map(|candidate| existing_valid_key(candidate).map(|key| (candidate, key)))
@@ -191,7 +247,11 @@ pub fn load_or_create_data_key(app: &AppHandle) -> Result<String, String> {
     if plaintext.len() != 32 {
         return Err("DATA_KEY_INVALID_LENGTH".to_string());
     }
-    Ok(plaintext.iter().map(|byte| format!("{byte:02x}")).collect())
+    let mut encoded = String::with_capacity(plaintext.len() * 2);
+    for byte in plaintext {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(encoded)
 }
 
 /// Return same-user DPAPI key candidates without changing any existing key.
@@ -215,14 +275,19 @@ pub fn load_data_key_candidates(app: &AppHandle) -> Result<Vec<String>, String> 
         .and_then(|candidate| candidate.parent().map(Path::to_path_buf))
         .into_iter()
         .chain(app_key_directory)
-        .chain(legacy.iter().filter_map(|candidate| candidate.parent().map(Path::to_path_buf)));
+        .chain(
+            legacy
+                .iter()
+                .filter_map(|candidate| candidate.parent().map(Path::to_path_buf)),
+        );
     let recovery_paths = recovery_key_paths(recovery_directories);
-    for path in std::iter::once(app_key)
-        .chain(legacy)
-        .chain(recovery_paths)
-    {
+    for path in std::iter::once(app_key).chain(legacy).chain(recovery_paths) {
         if let Some(key) = existing_valid_key(&path) {
-            let encoded: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+            let mut encoded = String::with_capacity(key.len() * 2);
+            for byte in key {
+                write!(&mut encoded, "{byte:02x}")
+                    .expect("writing to a String cannot fail");
+            }
             if !candidates.iter().any(|candidate| candidate == &encoded) {
                 candidates.push(encoded);
             }
@@ -289,7 +354,11 @@ fn replace_protected_key_atomically(
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("DATA_KEY_CLOCK_FAILED: {error}"))?
         .as_nanos();
-    let temp_path = directory.join(format!("data-key-promote.{}.{}.tmp", std::process::id(), nonce));
+    let temp_path = directory.join(format!(
+        "data-key-promote.{}.{}.tmp",
+        std::process::id(),
+        nonce
+    ));
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -350,11 +419,16 @@ fn input_blob(data: &[u8]) -> Result<CRYPT_INTEGER_BLOB, WindowsError> {
     })
 }
 
-fn copy_and_free(blob: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+fn copy_and_free(blob: CRYPT_INTEGER_BLOB, wipe_before_free: bool) -> Vec<u8> {
     if blob.pbData.is_null() || blob.cbData == 0 {
         return Vec::new();
     }
-    let bytes = unsafe { slice::from_raw_parts(blob.pbData, blob.cbData as usize) }.to_vec();
+    let source = unsafe { slice::from_raw_parts_mut(blob.pbData, blob.cbData as usize) };
+    let bytes = if wipe_before_free {
+        copy_then_wipe(source)
+    } else {
+        source.to_vec()
+    };
     unsafe {
         let _ = LocalFree(Some(HLOCAL(blob.pbData.cast())));
     }
@@ -375,7 +449,7 @@ pub fn protect_for_current_user(plaintext: &[u8]) -> Result<Vec<u8>, WindowsErro
             &mut output,
         )?;
     }
-    Ok(copy_and_free(output))
+    Ok(copy_and_free(output, false))
 }
 
 pub fn unprotect_for_current_user(ciphertext: &[u8]) -> Result<Vec<u8>, WindowsError> {
@@ -392,7 +466,7 @@ pub fn unprotect_for_current_user(ciphertext: &[u8]) -> Result<Vec<u8>, WindowsE
             &mut output,
         )?;
     }
-    Ok(copy_and_free(output))
+    Ok(copy_and_free(output, true))
 }
 
 #[allow(dead_code)]
@@ -405,6 +479,10 @@ pub fn store_github_token_at(path: &Path, token: &[u8]) -> Result<(), String> {
         .ok_or_else(|| "GITHUB_TOKEN_DIRECTORY_UNAVAILABLE".to_string())?;
     fs::create_dir_all(directory)
         .map_err(|error| format!("GITHUB_TOKEN_DIRECTORY_CREATE_FAILED: {error}"))?;
+    // Invalidate authorization before replacing the token. If invalidation
+    // fails, the old token remains untouched; if the later write fails, no
+    // stale validated state can authorize either token.
+    clear_github_authorization_state_at(path)?;
     let protected = protect_for_current_user(token)
         .map_err(|error| format!("GITHUB_TOKEN_PROTECT_FAILED: {error}"))?;
     let nonce = SystemTime::now()
@@ -440,14 +518,95 @@ pub fn store_github_token_at(path: &Path, token: &[u8]) -> Result<(), String> {
 }
 
 #[allow(dead_code)]
-pub fn load_github_token_at(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn load_github_token_at(path: &Path) -> Result<SecretBytes, String> {
     let protected = fs::read(path).map_err(|_| "GITHUB_TOKEN_UNAVAILABLE".to_string())?;
     let token = unprotect_for_current_user(&protected)
         .map_err(|_| "GITHUB_TOKEN_UNAVAILABLE".to_string())?;
-    if token.is_empty() || token.len() > 1024 {
-        return Err("GITHUB_TOKEN_INVALID".into());
+    SecretBytes::new(token)
+}
+
+pub fn github_authorization_state_path(token_path: &Path) -> Result<PathBuf, String> {
+    let file_name = token_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "GITHUB_AUTHORIZATION_STATE_PATH_INVALID".to_string())?;
+    Ok(token_path.with_file_name(format!("{file_name}.authorization-state.dpapi")))
+}
+
+pub fn store_github_authorization_state_at(
+    token_path: &Path,
+    state: GithubAuthorizationState,
+) -> Result<(), String> {
+    let path = github_authorization_state_path(token_path)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| "GITHUB_AUTHORIZATION_STATE_PATH_INVALID".to_string())?;
+    fs::create_dir_all(directory)
+        .map_err(|_| "GITHUB_AUTHORIZATION_STATE_STORE_FAILED".to_string())?;
+    let plaintext = match state {
+        GithubAuthorizationState::Validated => GITHUB_AUTH_STATE_VALIDATED,
+        GithubAuthorizationState::ReauthorizationRequired => GITHUB_AUTH_STATE_REAUTH_REQUIRED,
+    };
+    let protected = protect_for_current_user(plaintext)
+        .map_err(|_| "GITHUB_AUTHORIZATION_STATE_STORE_FAILED".to_string())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = directory.join(format!(
+        "github-authorization-state.{}.{}.tmp",
+        std::process::id(),
+        nonce
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .map_err(|_| "GITHUB_AUTHORIZATION_STATE_STORE_FAILED".to_string())?;
+        file.write_all(&protected)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "GITHUB_AUTHORIZATION_STATE_STORE_FAILED".to_string())?;
+        let source = windows::core::HSTRING::from(temp.as_os_str());
+        let destination = windows::core::HSTRING::from(path.as_os_str());
+        unsafe {
+            MoveFileExW(
+                &source,
+                &destination,
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+            .map_err(|_| "GITHUB_AUTHORIZATION_STATE_STORE_FAILED".to_string())?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
     }
-    Ok(token)
+    result
+}
+
+pub fn load_github_authorization_state_at(
+    token_path: &Path,
+) -> Result<GithubAuthorizationState, String> {
+    let path = github_authorization_state_path(token_path)?;
+    let protected =
+        fs::read(path).map_err(|_| "GITHUB_AUTHORIZATION_STATE_UNAVAILABLE".to_string())?;
+    let plaintext = unprotect_for_current_user(&protected)
+        .map_err(|_| "GITHUB_AUTHORIZATION_STATE_INVALID".to_string())?;
+    match plaintext.as_slice() {
+        GITHUB_AUTH_STATE_VALIDATED => Ok(GithubAuthorizationState::Validated),
+        GITHUB_AUTH_STATE_REAUTH_REQUIRED => Ok(GithubAuthorizationState::ReauthorizationRequired),
+        _ => Err("GITHUB_AUTHORIZATION_STATE_INVALID".into()),
+    }
+}
+
+pub fn clear_github_authorization_state_at(token_path: &Path) -> Result<(), String> {
+    let path = github_authorization_state_path(token_path)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("GITHUB_AUTHORIZATION_STATE_CLEAR_FAILED".into()),
+    }
 }
 
 #[cfg(test)]
@@ -486,16 +645,36 @@ mod tests {
         let disk = fs::read(&path).expect("read protected token");
         assert!(!String::from_utf8_lossy(&disk).contains("native-token-secret"));
         assert_eq!(
-            super::load_github_token_at(&path).expect("load token"),
+            super::load_github_token_at(&path)
+                .expect("load token")
+                .as_bytes(),
             b"native-token-secret"
         );
         super::store_github_token_at(&path, b"rotated-native-token")
             .expect("atomically rotate token");
         assert_eq!(
-            super::load_github_token_at(&path).expect("load rotated token"),
+            super::load_github_token_at(&path)
+                .expect("load rotated token")
+                .as_bytes(),
             b"rotated-native-token"
         );
         fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn github_secret_buffer_is_volatile_wiped_without_retaining_plaintext() {
+        let mut secret =
+            super::SecretBytes::new(b"native-token-secret".to_vec()).expect("valid token fixture");
+        secret.wipe();
+        assert!(secret.as_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn dpapi_plaintext_copy_wipes_the_source_before_it_can_be_freed() {
+        let mut source = b"native-token-secret".to_vec();
+        let copied = super::copy_then_wipe(&mut source);
+        assert_eq!(copied, b"native-token-secret");
+        assert!(source.iter().all(|byte| *byte == 0));
     }
 
     #[test]
@@ -504,18 +683,95 @@ mod tests {
     }
 
     #[test]
-    fn persisted_data_prefers_the_canonical_stable_key_before_identifier_or_legacy_keys() {
+    fn rotating_github_token_clears_previously_validated_authorization_state() {
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-token-rotation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create token directory");
+        let token_path = directory.join("github-token.dpapi");
+        super::store_github_token_at(&token_path, b"first-token").expect("store initial token");
+        super::store_github_authorization_state_at(
+            &token_path,
+            super::GithubAuthorizationState::Validated,
+        )
+        .expect("store authorization state");
+
+        super::store_github_token_at(&token_path, b"rotated-token").expect("rotate token");
+
+        assert_eq!(
+            super::load_github_authorization_state_at(&token_path),
+            Err("GITHUB_AUTHORIZATION_STATE_UNAVAILABLE".to_string())
+        );
+        assert_eq!(
+            super::load_github_token_at(&token_path)
+                .expect("load rotated token")
+                .as_bytes(),
+            b"rotated-token"
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn github_authorization_state_is_token_free_persistent_and_corruption_fails_closed() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-github-auth-state-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create authorization state directory");
+        let token_path = directory.join("github-token.dpapi");
+
+        super::store_github_authorization_state_at(
+            &token_path,
+            super::GithubAuthorizationState::Validated,
+        )
+        .expect("store validated authorization state");
+        assert_eq!(
+            super::load_github_authorization_state_at(&token_path).unwrap(),
+            super::GithubAuthorizationState::Validated
+        );
+        let state_path = super::github_authorization_state_path(&token_path).unwrap();
+        let disk = fs::read(&state_path).expect("read protected authorization state");
+        assert!(!String::from_utf8_lossy(&disk).contains("validated"));
+        assert!(!String::from_utf8_lossy(&disk).contains("token"));
+
+        super::store_github_authorization_state_at(
+            &token_path,
+            super::GithubAuthorizationState::ReauthorizationRequired,
+        )
+        .expect("store reauthorization latch");
+        assert_eq!(
+            super::load_github_authorization_state_at(&token_path).unwrap(),
+            super::GithubAuthorizationState::ReauthorizationRequired
+        );
+        fs::write(&state_path, b"corrupt").expect("corrupt state fixture");
+        assert!(super::load_github_authorization_state_at(&token_path).is_err());
+
+        super::clear_github_authorization_state_at(&token_path).expect("clear state");
+        assert!(!state_path.exists());
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn candidates_prefer_the_canonical_stable_key_before_identifier_or_legacy_keys() {
         let stable = PathBuf::from("stable/data-key.dpapi");
         let app = PathBuf::from("current-app/data-key.dpapi");
         let legacy = PathBuf::from("legacy/data-key.dpapi");
         assert_eq!(
-            super::ordered_key_candidates(
-                stable.clone(),
-                Some(app.clone()),
-                vec![legacy.clone()],
-                true
-            ),
-            vec![stable, app, legacy]
+            super::ordered_key_candidates(stable.clone(), Some(app.clone()), vec![legacy.clone()]),
+            vec![stable.clone(), app, legacy.clone()]
+        );
+        assert_eq!(
+            super::ordered_key_candidates(stable.clone(), None, vec![legacy.clone()]),
+            vec![stable, legacy]
         );
     }
 
@@ -541,12 +797,21 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir_all(&directory).expect("create recovery directory");
-        fs::write(directory.join("data-key.dpapi.recovery-1.bak"), b"candidate")
-            .expect("write backup");
-        fs::write(directory.join("data-key.dpapi.recovery-2.bak"), b"candidate")
-            .expect("write backup");
-        fs::write(directory.join("data-key.dpapi.tmp"), b"not a recovery backup")
-            .expect("write temp");
+        fs::write(
+            directory.join("data-key.dpapi.recovery-1.bak"),
+            b"candidate",
+        )
+        .expect("write backup");
+        fs::write(
+            directory.join("data-key.dpapi.recovery-2.bak"),
+            b"candidate",
+        )
+        .expect("write backup");
+        fs::write(
+            directory.join("data-key.dpapi.tmp"),
+            b"not a recovery backup",
+        )
+        .expect("write temp");
         fs::write(directory.join("other-secret.bak"), b"not a data key")
             .expect("write unrelated backup");
 

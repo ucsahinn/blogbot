@@ -1,4 +1,5 @@
-import { astroGenericAdapter } from "../../../packages/site-adapter/src/astro-generic.ts";
+import { resolveApprovedSiteAdapter } from "../../../packages/site-adapter/src/astro-generic.ts";
+import { writesSiteNativePaths } from "../../../packages/site-adapter/src/index.ts";
 import type { ConnectorStateSnapshot, ReviewRevision } from "./types.ts";
 
 export interface EngineMediaReference {
@@ -26,11 +27,37 @@ async function sha256(content: string | Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
+function safePublicationSources(revision: ReviewRevision) {
+  if (revision.packageVersion === 3) {
+    if (!Array.isArray(revision.publicationSources) || revision.publicationSources.length === 0) {
+      throw new Error("REVISION_PUBLICATION_SOURCES_INVALID");
+    }
+    const ids = new Set<string>();
+    return revision.publicationSources.map((source) => {
+      if (!source || typeof source.id !== "string" || !source.id.trim() || ids.has(source.id) ||
+          typeof source.title !== "string" || !source.title.trim() ||
+          typeof source.url !== "string" || !source.url.trim() ||
+          !["primary", "independent", "supporting"].includes(source.role)) {
+        throw new Error("REVISION_PUBLICATION_SOURCES_INVALID");
+      }
+      ids.add(source.id);
+      return { id: source.id, title: source.title, url: source.url, role: source.role };
+    });
+  }
+  const citedIds = new Set(revision.claims.flatMap((claim) => claim.sourceIds));
+  return revision.sources.flatMap((source) => citedIds.has(source.id)
+    ? [{ id: source.id, title: source.title, url: source.url, role: "supporting" as const }]
+    : []
+  );
+}
+
 export async function buildPublicationFiles(
   revision: ReviewRevision,
   mode: ConnectorStateSnapshot["mode"],
   adapterId: string
 ): Promise<PublicationFile[]> {
+  const adapter = resolveApprovedSiteAdapter(adapterId, revision.adapterVersion);
+  const publicationSources = safePublicationSources(revision);
   const mediaPath = (filename: string) => mode === "LOCAL_ONLY" ? `.blogbot/generated/media/${filename}` : `public/images/${filename}`;
   const mediaFiles: PublicationFile[] = (revision.media ?? []).flatMap<PublicationFile>((media): PublicationFile[] => {
     if (Number.isSafeInteger(media.byteSize) && media.byteSize! > 0 && /^[a-f0-9]{64}$/iu.test(media.sha256)) {
@@ -41,7 +68,7 @@ export async function buildPublicationFiles(
     return [{ path: mediaPath(media.filename), content: binary }];
   });
   const hero = revision.media?.find((media) => media.role === "hero");
-  const generated = astroGenericAdapter.buildRevisionFiles({
+  const generated = await adapter.buildRevisionFiles({
     id: revision.id,
     // Generated article files use a fixed sentinel so their digests can be
     // included in the revision hash without creating a circular dependency.
@@ -54,7 +81,7 @@ export async function buildPublicationFiles(
       authorId: revision.author,
       publishedAt: revision.scheduledAt,
       tags: revision.tags,
-      sources: revision.sources,
+      sources: publicationSources,
       ...(hero ? { heroImage: mediaPath(hero.filename), heroImageAlt: hero.altTr } : {})
     },
     en: {
@@ -64,12 +91,13 @@ export async function buildPublicationFiles(
       authorId: revision.author,
       publishedAt: revision.scheduledAt,
       tags: revision.tags,
-      sources: revision.sources,
+      sources: publicationSources,
       ...(hero ? { heroImage: mediaPath(hero.filename), heroImageAlt: hero.altEn } : {})
     }
-  }, { siteOrigin: "", repositoryPath: "", adapterId: astroGenericAdapter.id });
+  }, { siteOrigin: "", repositoryPath: "", adapterId: adapter.id });
   const contentEntries = Object.entries(generated).map(([path, content]) => {
-    if (mode === "PUBLISH" || (mode === "LOCAL_DEV" && adapterId === "astro-generic")) return [path, content] as const;
+    // One shared rule with the engine manifest; see `writesSiteNativePaths`.
+    if (writesSiteNativePaths(mode, adapterId)) return [path, content] as const;
     const localPath = path.startsWith("src/content/articles/")
       ? path.replace(/^src\/content\/articles\//u, ".blogbot/generated/")
       : path;

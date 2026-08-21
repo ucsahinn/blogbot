@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { lstat, open, readdir, realpath, stat, unlink } from "node:fs/promises";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { link, lstat, open, readdir, realpath, stat, unlink } from "node:fs/promises";
+import { mkdir, rmdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -13,8 +13,8 @@ import {
 } from "../../fetcher/src/fetch-source.ts";
 import { createNodeFetchTransport } from "../../fetcher/src/node-transport.ts";
 import { createFetcherSidecarTransport } from "./fetcher-sidecar-transport.ts";
-import { validateEngineCommandV1 } from "../../../packages/contracts/src/index.ts";
-import type { BackendJob, BackendRepository, BackendRepositoryTransaction } from "../../../packages/database/src/backend-repository.ts";
+import { validateEngineCommandV1, type EngineCommandV1 } from "../../../packages/contracts/src/index.ts";
+import { BackendStoreError, type BackendJob, type BackendRepository, type BackendRepositoryTransaction } from "../../../packages/database/src/backend-repository.ts";
 import { InMemoryBackendStore } from "../../../packages/database/src/in-memory-backend-store.ts";
 import { PGliteBackendRepository } from "../../../packages/database/src/pglite-backend-repository.ts";
 import {
@@ -25,15 +25,20 @@ import {
 } from "../../../packages/database/src/source-repository.ts";
 import {
   canonicalJson,
+  computeEditorialAttestationHash,
   computeRevisionHash,
   evaluatePublishEligibility,
+  isRevisionSuperseded,
   validateApprovalGates,
   validateClaimEvidence,
   validateRevisionPackageV2,
+  validateRevisionPackageV3,
   type Approval,
   type ArticleRevision,
-  type HighRiskApproval
+  type HighRiskApproval,
+  type RevisionPackageV3
 } from "../../../packages/editorial/src/revision.ts";
+import { evaluateEditorialQualityV3 } from "../../../packages/editorial/src/quality-gates.ts";
 import { createEditedRevision } from "../../../packages/editorial/src/workflow.ts";
 import {
   analyzeSourceDocument,
@@ -41,6 +46,12 @@ import {
 } from "../../../packages/security/src/source-document.ts";
 import { assertSafeSourceUrl } from "../../../packages/security/src/url-policy.ts";
 import { createPortableBackup, nativeRestoreEntries, planPortableRestore } from "../../../packages/backup/src/portable-backup.ts";
+import {
+  createLogicalBackup,
+  logicalRestoreTables,
+  planLogicalRestore,
+  type LogicalTableDump
+} from "../../../packages/backup/src/logical-backup.ts";
 import { planBackupRetention } from "../../../packages/backup/src/retention.ts";
 import { LocalEngine } from "./local-engine.ts";
 import { LocalQueueRuntime } from "./local-queue.ts";
@@ -66,6 +77,10 @@ import { PGliteCodexJobStore, PGliteCodexQueueAdapter, registerCodexQueueWorker 
 import { startPublicationOutboxWorker, type PublicationEffectProcessor, type PublicationOutboxWorker } from "./publication-outbox-worker.ts";
 import { PublicationScheduler } from "./publication-scheduler.ts";
 import { publicationIntentBinding } from "./publication-intent.ts";
+import {
+  rankCandidateStories,
+  type CandidateRankingEvidence
+} from "./candidate-ranking.ts";
 import { renderCoverVariants, renderGeneratedImageVariants, type ArtDirection } from "../../../packages/visuals/src/index.ts";
 import { imageGeneratorFromEnvironment, type ImageGeneratorPort } from "./imagegen-provider.ts";
 import { isEngineMediaReference, type ApprovedPublicationCommand, type PublicationBundlePolicy, type PublicationEffectsPort, type PublicationFile } from "../../publisher/src/publication.ts";
@@ -77,8 +92,12 @@ const MAX_LINE_BYTES = 1_000_000;
 // points the engine at an unexpectedly large file.  Portable archives are
 // intended for local application state, not unbounded disk imaging.
 const MAX_BACKUP_ARCHIVE_BYTES = 256 * 1024 * 1024;
-const MAX_AUTOMATIC_BACKUP_FILES = 256;
 const PUBLICATION_PREVIEW_TTL_MS = 24 * 60 * 60 * 1_000;
+// The native host verifies Windows consent immediately before it builds the
+// high-risk approval command, so a valid timestamp is seconds old. Allow a
+// short window for that hand-off plus a small allowance for clock skew.
+const WINDOWS_REAUTH_MAX_AGE_MS = 5 * 60 * 1_000;
+const WINDOWS_REAUTH_MAX_SKEW_MS = 60 * 1_000;
 // Backup data is JSON/base64 encoded and then authenticated/encrypted. Keep
 // raw input under half the archive limit so every successfully created backup
 // remains readable by this build's verify/restore path.
@@ -87,6 +106,28 @@ const MAX_BACKUP_INPUT_BYTES = 128 * 1024 * 1024;
 // decrypting an unbounded feed catalog on every desktop refresh was the main
 // source of multi-second freezes on large local workspaces.
 const MAX_CANDIDATE_ENTRIES = 500;
+// `backup.restore` runs on the serialized mutation chain, so a restore writer
+// that never exits would freeze every later mutation and the graceful shutdown
+// that awaits them. Stay well inside the host's 5 minute maintenance budget so
+// the engine still answers with a reason instead of being killed mid-write.
+const SECURE_RESTORE_DEADLINE_MS = 3 * 60 * 1_000;
+
+/**
+ * The native restore writer receives its entire write plan over stdin and has
+ * no reason to inherit the engine data key, provider credentials, Codex home,
+ * or user profile. Keep only the Windows process-bootstrap variables needed
+ * to start the packaged helper.
+ */
+export function scrubbedRestoreEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const key of ["SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP"] as const) {
+    const value = source[key];
+    if (value) environment[key] = value;
+  }
+  return environment;
+}
 
 async function applyRestoreThroughNativeWriter(plan: Awaited<ReturnType<typeof planPortableRestore>>): Promise<void> {
   const executable = process.env.BLOGBOT_SECURE_RESTORE_BIN?.trim();
@@ -100,10 +141,52 @@ async function applyRestoreThroughNativeWriter(plan: Awaited<ReturnType<typeof p
     }))
   });
   await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn(executable, [], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
-    child.once("error", () => reject(new Error("SECURE_RESTORE_SIDECAR_UNAVAILABLE")));
-    child.once("exit", (code) => code === 0 ? resolvePromise() : reject(new Error("SECURE_RESTORE_WRITE_FAILED")));
-    child.stdin.end(payload, "utf8");
+    const child = spawn(executable, [], {
+      stdio: ["pipe", "ignore", "ignore"],
+      windowsHide: true,
+      env: scrubbedRestoreEnvironment()
+    });
+    let settled = false;
+    const settle = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (error) reject(error);
+      else resolvePromise();
+    };
+    // A writer blocked inside the filesystem (a stalled cloud-sync or network
+    // parent) must be stopped rather than left holding directory handles on a
+    // half-written restore root.
+    const deadline = setTimeout(() => {
+      child.kill();
+      settle(new Error("SECURE_RESTORE_TIMEOUT"));
+    }, SECURE_RESTORE_DEADLINE_MS);
+    deadline.unref?.();
+    // Only a fully written payload plus a clean exit is a real restore. A large
+    // archive is far bigger than the OS pipe buffer, so the write completes long
+    // after `end()` returns and the exit code alone would have reported an
+    // unwritten restore as done.
+    let writeFinished = false;
+    let cleanExit = false;
+    const finishWhenWritten = (): void => {
+      if (writeFinished && cleanExit) settle();
+    };
+    child.once("error", () => settle(new Error("SECURE_RESTORE_SIDECAR_UNAVAILABLE")));
+    child.once("exit", (code) => {
+      if (code !== 0) {
+        settle(new Error("SECURE_RESTORE_WRITE_FAILED"));
+        return;
+      }
+      cleanExit = true;
+      finishWhenWritten();
+    });
+    // A writer that stops reading makes this pipe emit EPIPE. Without a listener
+    // that unhandled 'error' takes down the whole engine sidecar mid-restore.
+    child.stdin.on("error", () => settle(new Error("SECURE_RESTORE_WRITE_FAILED")));
+    child.stdin.end(payload, "utf8", () => {
+      writeFinished = true;
+      finishWhenWritten();
+    });
   });
 }
 
@@ -152,9 +235,28 @@ async function readDashboardSync(
 function dashboardJobSummary(job: BackendJob): Record<string, unknown> {
   const metadata = job.metadata ?? {};
   const boundedMetadata: Record<string, unknown> = {};
-  for (const key of ["candidateId", "candidateTitle", "instruction", "section", "progressStage", "codexWaitReason", "scheduledAt"] as const) {
+  for (const key of ["candidateId", "candidateTitle", "instruction", "section", "progressStage", "codexWaitReason", "scheduledAt", "purpose", "bobySessionId"] as const) {
     const value = metadata[key];
     if (typeof value === "string" && value.trim()) boundedMetadata[key] = value.trim().slice(0, 500);
+  }
+  // The desktop resolves a Boby answer out of this projection. Dropping these
+  // fields left `BOBY.GUIDE` advertised and persisted while every read reported
+  // "guidance request not found". The Boby schema bounds the reply to 900
+  // characters and the actions to two short labels, so they stay small enough
+  // for an envelope the shell polls.
+  if (typeof metadata.bobyReply === "string" && metadata.bobyReply.trim()) {
+    boundedMetadata.bobyReply = metadata.bobyReply.trim().slice(0, 900);
+  }
+  if (Array.isArray(metadata.bobyActions)) {
+    const actions = metadata.bobyActions
+      .filter(isRecord)
+      .slice(0, 2)
+      .flatMap((action) => {
+        const id = typeof action.id === "string" ? action.id.slice(0, 64) : undefined;
+        const label = typeof action.label === "string" ? action.label.trim().slice(0, 80) : undefined;
+        return id && label ? [{ id, label }] : [];
+      });
+    if (actions.length > 0) boundedMetadata.bobyActions = actions;
   }
   for (const key of ["recoveryCount", "completedAtUnixMs", "lastQueuedAtUnixMs", "createdAtUnixMs"] as const) {
     const value = metadata[key];
@@ -197,7 +299,7 @@ export function reportBackgroundTaskFault(
  * queue diagnosable without turning the diagnostic bundle into user data.
  */
 export function reportCodexLifecycle(
-  code: "CODEX_JOB_STARTED" | "CODEX_JOB_WAITING" | "CODEX_JOB_RETRYING" | "CODEX_JOB_COMPLETED" | "CODEX_PROTOCOL_REJECTED" | "CODEX_OUTPUT_INVALID" | "CODEX_OUTPUT_MISSING" | "CODEX_CLI_INVALID_EVENT" | "CODEX_CLI_INVALID_FINAL_OUTPUT" | "CODEX_PROCESS_FAILED" | "CODEX_UNKNOWN_FAILURE" | "IMAGEGEN_FALLBACK_LOCAL" | "IMAGEGEN_REQUIRED_FAILED" | "IMAGEGEN_REQUIRED_UNAVAILABLE",
+  code: "CODEX_JOB_STARTED" | "CODEX_JOB_WAITING" | "CODEX_JOB_RETRYING" | "CODEX_JOB_COMPLETED" | "CODEX_PROTOCOL_REJECTED" | "CODEX_OUTPUT_INVALID" | "CODEX_OUTPUT_MISSING" | "CODEX_CLI_INVALID_EVENT" | "CODEX_CLI_INVALID_FINAL_OUTPUT" | "CODEX_CLI_UNSUPPORTED" | "CODEX_SESSION_RETENTION_FAILED" | "CODEX_PROCESS_FAILED" | "CODEX_UNKNOWN_FAILURE" | "IMAGEGEN_FALLBACK_LOCAL" | "IMAGEGEN_REQUIRED_FAILED" | "IMAGEGEN_REQUIRED_UNAVAILABLE",
   writeOrDetail: ((line: string) => void) | string = (line) => process.stderr.write(line),
   detail?: string
 ): void {
@@ -223,9 +325,16 @@ function publicationContentBytes(content: unknown): Buffer {
   throw new Error("APPROVAL_BOUND_FILE_CONTENT_INVALID");
 }
 
-function approvalBoundFilesDigest(files: readonly PublicationFile[]): string {
+export function approvalBoundFilesDigest(files: readonly PublicationFile[]): string {
   const digest = createHash("sha256");
-  for (const file of [...files].sort((left, right) => left.path.localeCompare(right.path))) {
+  // UTF-8 byte order, not host-locale collation: the native verifier hashes the
+  // same bundle after sorting the paths byte-wise, and an ICU collation orders
+  // punctuation and case differently. Two paths differing only by `_` vs `-`
+  // (or by case) would then produce a digest the native side rejects, which is
+  // unrecoverable because the approved revision is immutable.
+  for (const file of [...files].sort((left, right) =>
+    Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8"))
+  )) {
     const content = publicationContentBytes(file.content);
     const size = Buffer.alloc(8);
     size.writeBigUInt64BE(BigInt(content.byteLength));
@@ -292,6 +401,20 @@ export function assertRevisionGeneratedFilesMatch(
   }
 }
 
+/** Boolean form of the approval-bound file-set assertion, for boundary checks
+ * that answer with a protocol code instead of propagating the exact reason. */
+function isApprovalBoundPayload(
+  revision: Pick<ArticleRevision, "id" | "adapterVersion" | "generatedFiles">,
+  payload: unknown
+): boolean {
+  try {
+    assertRevisionGeneratedFilesMatch(revision, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function revisionBundlePolicy(
   revision: Pick<ArticleRevision, "id" | "adapterVersion" | "generatedFiles">
 ): PublicationBundlePolicy {
@@ -317,32 +440,6 @@ export function revisionBundlePolicy(
   };
 }
 
-async function collectAutomaticBackupPaths(root: string): Promise<string[]> {
-  const output: string[] = [];
-  let totalBytes = 0;
-  async function walk(current: string, relative: string): Promise<void> {
-    const entries = await readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name === "backups" || entry.name.startsWith(".")) continue;
-      const nextRelative = relative ? `${relative}/${entry.name}` : entry.name;
-      const next = join(current, entry.name);
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) {
-        await walk(next, nextRelative);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      const info = await stat(next);
-      totalBytes += info.size;
-      if (output.length >= MAX_AUTOMATIC_BACKUP_FILES || totalBytes > MAX_BACKUP_INPUT_BYTES) {
-        throw new Error("AUTOMATIC_BACKUP_LIMIT_EXCEEDED");
-      }
-      output.push(nextRelative);
-    }
-  }
-  await walk(root, "");
-  return output;
-}
 
 type MaintenanceCode = "SOURCE_RETENTION_UNAVAILABLE" | "AUTOMATIC_BACKUP_UNAVAILABLE";
 
@@ -414,17 +511,33 @@ function automaticBackupRecoveryKey(): string {
   return createHash("sha256").update(`${dataKey}\0blogbot-automatic-backup`, "utf8").digest("hex");
 }
 
+/**
+ * The one name shape the engine owns. Listing, restore selection and retention
+ * must agree: a user's own manual archive can legitimately sit in the same
+ * folder, and retention deleting a file no read path ever showed is silent
+ * data loss.
+ */
+const AUTOMATIC_BACKUP_NAME = /^automatic-[A-Za-z0-9-]+\.backup$/u;
+
 async function applyAutomaticBackupRetention(directory: string): Promise<void> {
   const entries = await readdir(directory, { withFileTypes: true });
   const records = [] as Array<{ id: string; createdAt: string }>;
   for (const entry of entries) {
-    if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".backup")) continue;
+    if (!entry.isFile() || entry.isSymbolicLink() || !AUTOMATIC_BACKUP_NAME.test(entry.name)) continue;
     const file = join(directory, entry.name);
     const info = await stat(file);
     records.push({ id: entry.name, createdAt: info.mtime.toISOString() });
   }
   const plan = planBackupRetention(records, { daily: 14, weekly: 8 });
-  for (const item of plan.remove) await unlink(join(directory, item.id));
+  // A plan that retains nothing cannot be a retention decision about a healthy
+  // snapshot history; never let it empty the folder.
+  if (plan.keep.length === 0) return;
+  for (const item of plan.remove) {
+    // A snapshot still held open by an indexer or anti-virus scanner is simply
+    // retried on the next pass. It must never turn an already written, valid
+    // backup into a reported failure.
+    await unlink(join(directory, item.id)).catch(() => undefined);
+  }
 }
 
 interface AutomaticBackupRecord {
@@ -438,7 +551,7 @@ async function listAutomaticBackups(directory: string): Promise<AutomaticBackupR
     const entries = await readdir(directory, { withFileTypes: true, encoding: "utf8" });
     const records: AutomaticBackupRecord[] = [];
     for (const entry of entries) {
-      if (!entry.isFile() || entry.isSymbolicLink() || !/^automatic-[A-Za-z0-9-]+\.backup$/u.test(entry.name)) continue;
+      if (!entry.isFile() || entry.isSymbolicLink() || !AUTOMATIC_BACKUP_NAME.test(entry.name)) continue;
       const info = await stat(join(directory, entry.name));
       records.push({ name: entry.name, bytes: info.size, createdAt: info.mtime.toISOString() });
     }
@@ -450,12 +563,48 @@ async function listAutomaticBackups(directory: string): Promise<AutomaticBackupR
 }
 
 async function resolveAutomaticBackupPath(directory: string, name: unknown): Promise<string> {
-  if (typeof name !== "string" || !/^automatic-[A-Za-z0-9-]+\.backup$/u.test(name)) {
+  if (typeof name !== "string" || !AUTOMATIC_BACKUP_NAME.test(name)) {
     throw new Error("AUTOMATIC_BACKUP_NAME_INVALID");
   }
   const record = (await listAutomaticBackups(directory)).find((entry) => entry.name === name);
   if (!record) throw new Error("AUTOMATIC_BACKUP_NOT_FOUND");
   return join(directory, record.name);
+}
+
+/**
+ * Writes and finalizes a backup without ever replacing an existing path.
+ *
+ * The temporary file is a sibling of the destination, so creating a hard link
+ * is one same-filesystem, atomic no-replace operation. Windows `rename` replaces
+ * an existing destination and therefore cannot provide this guarantee.
+ */
+export async function writeBackupArchiveNoReplace(
+  temporaryPath: string,
+  outputPath: string,
+  archive: Uint8Array,
+  writeTemporary: (target: string, content: Uint8Array) => Promise<void> =
+    async (target, content) => writeFile(target, content, { flag: "wx" })
+): Promise<boolean> {
+  let ownsTemporaryPath = true;
+  try {
+    try {
+      await writeTemporary(temporaryPath, archive);
+    } catch (error) {
+      // `wx` never owns a path when another writer already created it. Do not
+      // delete that writer's file while handling our exclusive-create failure.
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") ownsTemporaryPath = false;
+      throw error;
+    }
+    try {
+      await link(temporaryPath, outputPath);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+  } finally {
+    if (ownsTemporaryPath) await unlink(temporaryPath).catch(() => undefined);
+  }
 }
 
 function createCandidateKey(sourceId: string, externalId: string): string {
@@ -481,9 +630,241 @@ export interface EngineProtocolRuntime {
   close(): Promise<void>;
 }
 
-export interface AutomaticBackupConsistencyGate {
-  runExclusive<T>(work: () => Promise<T>): Promise<T>;
-  exec(query: string): Promise<unknown>;
+/** Minimal read surface a snapshot needs. */
+export interface BackupQueryPort {
+  query<Row>(sql: string, parameters?: readonly unknown[]): Promise<{ rows: Row[] }>;
+}
+
+/**
+ * A snapshot reads every table inside ONE transaction, which is already a
+ * consistent MVCC view: the archive can never mix rows from before and after a
+ * concurrent write.
+ *
+ * It deliberately does not use `runExclusive`. That gate existed for the old
+ * file walk, which had to stop writes and CHECKPOINT before reading PGlite's
+ * data directory. Reading rows needs neither, and PGlite's exclusive lock is
+ * not re-entrant: querying from inside `runExclusive` deadlocks.
+ */
+export interface AutomaticBackupConsistencyGate extends BackupQueryPort {
+  transaction<T>(operation: (transaction: BackupQueryPort) => Promise<T>): Promise<T>;
+}
+
+/** Identifier grammar every dumped table and column must satisfy before it is interpolated. */
+const SAFE_SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/u;
+
+function quotedIdentifier(value: string): string {
+  if (!SAFE_SQL_IDENTIFIER.test(value)) throw new Error("BACKUP_IDENTIFIER_INVALID");
+  return `"${value}"`;
+}
+
+/**
+ * Reads every table Blogbot owns so a snapshot can archive the rows instead of
+ * PGlite's data directory.
+ *
+ * A real workspace holds roughly a thousand relation and WAL files totalling
+ * hundreds of megabytes, with a single relation file already past the per-file
+ * restore bound, so the file walk could never produce a restorable archive.
+ * Recovery needs these rows, not Postgres internals. Values are read exactly as
+ * stored, so the repository's own AES-256-GCM envelope stays intact and the
+ * same-profile recovery boundary in ADR 0003 is unchanged.
+ */
+/**
+ * Converts one column value into the JSON form the archive stores.
+ *
+ * The driver hands back native values (a `Date` for a timestamp, a `bigint` for
+ * an identity column) that do not survive a JSON round-trip unchanged. Hashing
+ * the native value at create time and the parsed value at verify time made
+ * every snapshot fail its own integrity check, so normalisation happens once,
+ * here, and the archive only ever contains plain JSON.
+ */
+function archivedValue(value: unknown, table: string, column: string): unknown {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
+    // No table Blogbot owns stores binary columns. Encoding one as a JSON
+    // object would restore silently corrupted bytes, so refuse instead.
+    throw new Error(`BACKUP_BINARY_COLUMN_UNSUPPORTED:${table}.${column}`);
+  }
+  if (typeof value === "object") return JSON.parse(JSON.stringify(value)) as unknown;
+  return value;
+}
+
+export async function dumpApplicationTables(
+  gate: BackupQueryPort
+): Promise<LogicalTableDump[]> {
+  const tables = await gate.query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name LIKE 'blogbot%'
+      ORDER BY table_name`
+  );
+  const dumps: LogicalTableDump[] = [];
+  for (const { table_name: name } of tables.rows) {
+    if (!SAFE_SQL_IDENTIFIER.test(name)) continue;
+    const columns = await gate.query<{ column_name: string; is_identity: string }>(
+      `SELECT column_name, is_identity FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = $1
+        ORDER BY ordinal_position`,
+      [name]
+    );
+    const columnNames = columns.rows
+      .map((row) => row.column_name)
+      .filter((column) => SAFE_SQL_IDENTIFIER.test(column));
+    // A GENERATED ALWAYS identity column rejects a plain INSERT, and letting it
+    // regenerate would renumber the change cursor the optimistic version is
+    // built from. Restore therefore overrides it and resets its sequence.
+    const generatedColumns = columns.rows
+      .filter((row) => row.is_identity === "YES" && SAFE_SQL_IDENTIFIER.test(row.column_name))
+      .map((row) => row.column_name);
+    if (columnNames.length === 0) continue;
+    const selected = columnNames.map(quotedIdentifier).join(", ");
+    const rows = await gate.query<Record<string, unknown>>(
+      `SELECT ${selected} FROM ${quotedIdentifier(name)}`
+    );
+    dumps.push({
+      name,
+      columns: columnNames,
+      rows: rows.rows.map((row) =>
+        columnNames.map((column) => archivedValue(row[column], name, column))
+      ),
+      generatedColumns
+    });
+  }
+  return dumps;
+}
+
+interface RestoreForeignKeyDependency {
+  child_schema: string;
+  child_table: string;
+  parent_schema: string;
+  parent_table: string;
+}
+
+/**
+ * Orders archived tables from foreign-key parents to children.
+ *
+ * Metadata is resolved before the first DELETE so a partial archive, an
+ * unexpected cross-scope foreign key, or a dependency cycle fails without
+ * touching local data.
+ */
+function dependencyOrderedRestoreTables(
+  tables: readonly LogicalTableDump[],
+  dependencies: readonly RestoreForeignKeyDependency[]
+): LogicalTableDump[] {
+  const byName = new Map(tables.map((table) => [table.name, table]));
+  if (byName.size !== tables.length) {
+    throw new Error("BACKUP_RESTORE_TABLE_SET_AMBIGUOUS");
+  }
+  const childrenByParent = new Map<string, Set<string>>(
+    [...byName.keys()].map((name) => [name, new Set()])
+  );
+  const parentCount = new Map<string, number>(
+    [...byName.keys()].map((name) => [name, 0])
+  );
+  for (const dependency of dependencies) {
+    const childIncluded = dependency.child_schema === "public" && byName.has(dependency.child_table);
+    const parentIncluded = dependency.parent_schema === "public" && byName.has(dependency.parent_table);
+    if (!childIncluded && !parentIncluded) continue;
+    if (!childIncluded || !parentIncluded) {
+      throw new Error(
+        `BACKUP_RESTORE_FOREIGN_KEY_SCOPE_MISMATCH:${dependency.child_schema}.${dependency.child_table}->${dependency.parent_schema}.${dependency.parent_table}`
+      );
+    }
+    const children = childrenByParent.get(dependency.parent_table)!;
+    if (children.has(dependency.child_table)) continue;
+    children.add(dependency.child_table);
+    parentCount.set(dependency.child_table, parentCount.get(dependency.child_table)! + 1);
+  }
+
+  const ready = [...byName.keys()]
+    .filter((name) => parentCount.get(name) === 0)
+    .sort();
+  const ordered: LogicalTableDump[] = [];
+  while (ready.length > 0) {
+    const name = ready.shift()!;
+    ordered.push(byName.get(name)!);
+    for (const child of [...childrenByParent.get(name)!].sort()) {
+      const remaining = parentCount.get(child)! - 1;
+      parentCount.set(child, remaining);
+      if (remaining === 0) {
+        ready.push(child);
+        ready.sort();
+      }
+    }
+  }
+  if (ordered.length !== tables.length) {
+    throw new Error("BACKUP_RESTORE_FOREIGN_KEY_CYCLE");
+  }
+  return ordered;
+}
+
+/**
+ * Replaces every archived table inside one transaction.
+ *
+ * Restore is all-or-nothing on purpose: a partially applied snapshot would
+ * leave revisions without their approvals, which is worse than a failed
+ * restore. The caller holds PGlite's exclusive gate so no other engine
+ * request can observe the intermediate state.
+ */
+export async function applyLogicalRestore(
+  gate: AutomaticBackupConsistencyGate,
+  tables: readonly LogicalTableDump[]
+): Promise<number> {
+  let restored = 0;
+  await gate.transaction(async (transaction) => {
+    const dependencies = await transaction.query<RestoreForeignKeyDependency>(
+      `SELECT child_namespace.nspname AS child_schema,
+              child.relname AS child_table,
+              parent_namespace.nspname AS parent_schema,
+              parent.relname AS parent_table
+         FROM pg_catalog.pg_constraint AS foreign_key
+         JOIN pg_catalog.pg_class AS child ON child.oid = foreign_key.conrelid
+         JOIN pg_catalog.pg_namespace AS child_namespace ON child_namespace.oid = child.relnamespace
+         JOIN pg_catalog.pg_class AS parent ON parent.oid = foreign_key.confrelid
+         JOIN pg_catalog.pg_namespace AS parent_namespace ON parent_namespace.oid = parent.relnamespace
+        WHERE foreign_key.contype = 'f'
+          AND (child_namespace.nspname = 'public' OR parent_namespace.nspname = 'public')
+        ORDER BY child_schema, child_table, parent_schema, parent_table`
+    );
+    const insertionOrder = dependencyOrderedRestoreTables(tables, dependencies.rows);
+
+    // Children must be empty before their parents; doing every delete before
+    // any insert also prevents a later parent cascade from erasing restored
+    // rows.
+    for (const table of [...insertionOrder].reverse()) {
+      await transaction.query(`DELETE FROM ${quotedIdentifier(table.name)}`);
+    }
+
+    // Parents must exist before rows carrying foreign keys are inserted.
+    for (const table of insertionOrder) {
+      const identifier = quotedIdentifier(table.name);
+      if (table.rows.length === 0) continue;
+      const columns = table.columns.map(quotedIdentifier).join(", ");
+      const placeholders = table.columns.map((_, index) => `$${String(index + 1)}`).join(", ");
+      const generated = (table.generatedColumns ?? []).filter((column) => table.columns.includes(column));
+      const overriding = generated.length > 0 ? " OVERRIDING SYSTEM VALUE" : "";
+      for (const row of table.rows) {
+        await transaction.query(
+          `INSERT INTO ${identifier} (${columns})${overriding} VALUES (${placeholders})`,
+          row as readonly unknown[]
+        );
+        restored += 1;
+      }
+      // Leave each identity sequence past the restored maximum, or the next
+      // insert would collide with a row this restore just brought back.
+      for (const column of generated) {
+        await transaction.query(
+          `SELECT setval(
+             pg_get_serial_sequence($1, $2),
+             COALESCE((SELECT MAX(${quotedIdentifier(column)}) FROM ${identifier}), 1),
+             true
+           )`,
+          [table.name, column]
+        );
+      }
+    }
+  });
+  return restored;
 }
 
 /**
@@ -495,15 +876,142 @@ export async function createConsistentAutomaticBackup(
   database: AutomaticBackupConsistencyGate,
   dataDir: string
 ): Promise<EngineResponse> {
-  return database.runExclusive(async () => {
-    await database.exec("CHECKPOINT");
-    return handleBackupRequest({
+  const id = `automatic-backup-${Date.now()}`;
+  try {
+    const tables = await database.transaction((transaction) => dumpApplicationTables(transaction));
+    const archive = await createLogicalBackup({
+      tables,
+      recoveryKey: automaticBackupRecoveryKey(),
+      createdAt: new Date().toISOString()
+    });
+    return await writeAutomaticBackupArchive(id, dataDir, archive, tables);
+  } catch (error) {
+    return {
       version: 1,
-      id: `automatic-backup-${Date.now()}`,
-      kind: "backup.auto",
-      payload: {}
-    }, dataDir);
+      id,
+      ok: false,
+      kind: "error",
+      code: "BACKUP_INVALID",
+      message: error instanceof Error ? error.message : "automatic backup failed"
+    };
+  }
+}
+
+/**
+ * Writes an automatic snapshot atomically, then applies retention.
+ *
+ * The archive is durable once the no-replace link lands. Retention is separate
+ * housekeeping: a locked older snapshot must never make this new, valid
+ * backup report itself as failed.
+ */
+async function writeAutomaticBackupArchive(
+  id: string,
+  dataDir: string,
+  archive: Buffer,
+  tables: readonly LogicalTableDump[]
+): Promise<EngineResponse> {
+  const automaticDirectory = join(dataDir, "backups");
+  const outputPath = join(
+    automaticDirectory,
+    `automatic-${new Date().toISOString().replace(/[:.]/gu, "-")}.backup`
+  );
+  await mkdir(automaticDirectory, { recursive: true });
+  const temporaryPath = `${outputPath}.tmp-${randomUUID()}`;
+  if (!await writeBackupArchiveNoReplace(temporaryPath, outputPath, archive)) {
+    return {
+      version: 1,
+      id,
+      ok: false,
+      kind: "error",
+      code: "BACKUP_OUTPUT_EXISTS",
+      message: "automatic backup output already exists"
+    };
+  }
+  await applyAutomaticBackupRetention(automaticDirectory)
+    .catch(() => reportBackgroundTaskFault("AUTOMATIC_BACKUP_UNAVAILABLE", undefined, "retention"));
+  return {
+    version: 1,
+    id,
+    ok: true,
+    kind: "backup.auto",
+    outputPath,
+    archiveSha256: createHash("sha256").update(archive).digest("hex"),
+    bytes: archive.byteLength,
+    entries: tables.length,
+    rows: tables.reduce((total, table) => total + table.rows.length, 0)
+  };
+}
+
+/**
+ * Verify, preview and restore for the logical automatic snapshots.
+ *
+ * These share the file-based request kinds but not their implementation: an
+ * automatic snapshot now carries rows, so it is read back through
+ * `planLogicalRestore` and applied to the live database instead of being
+ * unpacked into a directory.
+ */
+export async function handleAutomaticBackupAccess(
+  input: Record<string, unknown>,
+  dataDir: string,
+  gate: AutomaticBackupConsistencyGate
+): Promise<EngineResponse> {
+  const id = typeof input.id === "string" ? input.id : "unknown";
+  const kind = String(input.kind);
+  const payload = isRecord(input.payload) ? input.payload : {};
+  const automaticDirectory = join(dataDir, "backups");
+  const failure = (code: string, message: string): EngineResponse => ({
+    version: 1,
+    id,
+    ok: false,
+    kind: "error",
+    code,
+    message
   });
+  let archivePath: string;
+  let recoveryKey: string;
+  try {
+    archivePath = await resolveAutomaticBackupPath(automaticDirectory, payload.backupName);
+    recoveryKey = automaticBackupRecoveryKey();
+  } catch (error) {
+    return failure("BACKUP_INVALID", error instanceof Error ? error.message : "automatic backup selection failed");
+  }
+  let plan: Awaited<ReturnType<typeof planLogicalRestore>>;
+  try {
+    const info = await lstat(archivePath);
+    if (!info.isFile() || info.isSymbolicLink()) {
+      return failure("BACKUP_INVALID", "automatic backup must be a regular file");
+    }
+    if (info.size > MAX_BACKUP_ARCHIVE_BYTES) {
+      return failure("BACKUP_INVALID", "automatic backup exceeds the local verification size limit");
+    }
+    plan = await planLogicalRestore({ archive: await readFile(archivePath), recoveryKey });
+  } catch (error) {
+    return failure("BACKUP_INVALID", error instanceof Error ? error.message : "automatic backup could not be verified");
+  }
+  const summary = {
+    archivePath,
+    createdAt: plan.createdAt,
+    tables: plan.tables.map((table) => ({ name: table.name, rowCount: table.rowCount })),
+    rows: plan.totalRows
+  };
+  if (kind === "backup.auto.verify" || kind === "backup.auto.restore.preview") {
+    // Preview-first: reading the plan alone never mutates anything.
+    return { version: 1, id, ok: true, kind, verified: true, ...summary };
+  }
+  if (kind !== "backup.auto.restore") {
+    return failure("INVALID_REQUEST", "automatic backup request kind is not supported");
+  }
+  if (payload.confirmReplaceLocalData !== true) {
+    // Restore replaces every local row. It must never happen as a side effect
+    // of a verify or a mis-routed request.
+    return failure("BACKUP_CONFIRMATION_REQUIRED", "restoring an automatic backup replaces local data and needs explicit confirmation");
+  }
+  try {
+    const restored = await applyLogicalRestore(gate, logicalRestoreTables(plan));
+    return { version: 1, id, ok: true, kind, restoredRows: restored, ...summary };
+  } catch (error) {
+    return failure("BACKUP_RESTORE_FAILED", error instanceof Error ? error.message : "automatic backup restore failed");
+  }
 }
 
 export async function handleBackupRequest(
@@ -511,13 +1019,18 @@ export async function handleBackupRequest(
   dataDir: string
 ): Promise<EngineResponse> {
   const id = typeof input.id === "string" ? input.id : "unknown";
-  const kind = input.kind === "backup.create" || input.kind === "backup.auto" || input.kind === "backup.auto.list" || input.kind === "backup.auto.verify" || input.kind === "backup.auto.restore.preview" || input.kind === "backup.auto.restore" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore"
+  // Automatic snapshots are logical row archives handled by
+  // `createConsistentAutomaticBackup` / `handleAutomaticBackupAccess`; only
+  // their directory listing still belongs to this file-based handler. The
+  // former `backup.auto` file walk is gone: it could never produce a
+  // restorable archive of a real PGlite data directory.
+  const kind = input.kind === "backup.create" || input.kind === "backup.auto.list" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore"
     ? input.kind
     : null;
   if (!kind) return { version: 1, id, ok: false, kind: "error", code: "INVALID_REQUEST", message: "backup request kind is not supported" };
   const payload = isRecord(input.payload) ? input.payload : {};
-  const automatic = kind === "backup.auto";
-  const automaticAccess = kind === "backup.auto.list" || kind === "backup.auto.verify" || kind === "backup.auto.restore.preview" || kind === "backup.auto.restore";
+  const automatic = false;
+  const automaticAccess = kind === "backup.auto.list";
   const automaticDirectory = join(dataDir, "backups");
   if (kind === "backup.auto.list") {
     try {
@@ -540,11 +1053,9 @@ export async function handleBackupRequest(
   const sourceDirectory = typeof payload.sourceDirectory === "string" ? payload.sourceDirectory : dataDir;
   let relativePaths: string[];
   try {
-    relativePaths = automatic
-      ? await collectAutomaticBackupPaths(sourceDirectory)
-      : Array.isArray(payload.relativePaths)
-        ? payload.relativePaths.filter((value): value is string => typeof value === "string")
-        : [];
+    relativePaths = Array.isArray(payload.relativePaths)
+      ? payload.relativePaths.filter((value): value is string => typeof value === "string")
+      : [];
   } catch (error) {
     return { version: 1, id, ok: false, kind: "error", code: "BACKUP_INVALID", message: error instanceof Error ? error.message : "automatic backup file discovery failed" };
   }
@@ -556,10 +1067,10 @@ export async function handleBackupRequest(
   const targetDirectory = typeof payload.targetDirectory === "string"
     ? payload.targetDirectory
     : join(dataDir, ".backup-verify-preview");
-  if ((kind === "backup.create" || automatic) && (!outputPath || !sourceDirectory || relativePaths.length === 0 || relativePaths.length > MAX_AUTOMATIC_BACKUP_FILES)) {
+  if (kind === "backup.create" && (!outputPath || !sourceDirectory || relativePaths.length === 0)) {
     return { version: 1, id, ok: false, kind: "error", code: "INVALID_REQUEST", message: "backup output, source directory, recovery key, and bounded file allowlist are required" };
   }
-  if (kind !== "backup.create" && !automatic && (!archivePath || !recoveryKey || ((kind === "backup.restore.preview" || kind === "backup.restore" || kind === "backup.auto.restore.preview" || kind === "backup.auto.restore") && !payload.targetDirectory))) {
+  if (kind !== "backup.create" && !automatic && (!archivePath || !recoveryKey || ((kind === "backup.restore.preview" || kind === "backup.restore") && !payload.targetDirectory))) {
     return { version: 1, id, ok: false, kind: "error", code: "INVALID_REQUEST", message: "archive path, recovery key, and restore target are required" };
   }
   try {
@@ -582,16 +1093,23 @@ export async function handleBackupRequest(
         }
         return { version: 1, id, ok: false, kind: "error", code: "BACKUP_OUTPUT_EXISTS", message: "backup output already exists; choose a new file name" };
       } catch {
-        // A missing output is the expected path; the atomic rename below owns creation.
+        // A missing output is expected; the atomic no-replace link below owns creation.
       }
       await mkdir(outputDirectory, { recursive: true });
       if (archive.byteLength > MAX_BACKUP_ARCHIVE_BYTES) {
         return { version: 1, id, ok: false, kind: "error", code: "BACKUP_INVALID", message: "backup archive exceeds the local verification size limit" };
       }
-      const temporaryPath = `${outputPath}.tmp-${process.pid}-${Date.now()}`;
-      await writeFile(temporaryPath, archive, { flag: "wx" });
-      await rename(temporaryPath, outputPath);
-      if (automatic) await applyAutomaticBackupRetention(automaticDirectory);
+      const temporaryPath = `${outputPath}.tmp-${randomUUID()}`;
+      if (!await writeBackupArchiveNoReplace(temporaryPath, outputPath, archive)) {
+        return { version: 1, id, ok: false, kind: "error", code: "BACKUP_OUTPUT_EXISTS", message: "backup output already exists; choose a new file name" };
+      }
+      // The archive is already durable at this point. Retention is separate
+      // housekeeping: a locked older snapshot must not report this new, valid
+      // backup as a failed one.
+      if (automatic) {
+        await applyAutomaticBackupRetention(automaticDirectory)
+          .catch(() => reportBackgroundTaskFault("AUTOMATIC_BACKUP_UNAVAILABLE", undefined, "retention"));
+      }
       return {
         version: 1,
         id,
@@ -629,7 +1147,7 @@ export async function handleBackupRequest(
       recoveryKey,
       targetDirectory
     });
-    if (kind === "backup.restore" || kind === "backup.auto.restore") {
+    if (kind === "backup.restore") {
       await applyRestoreThroughNativeWriter(plan);
       return {
         version: 1,
@@ -686,6 +1204,12 @@ export interface EngineProtocolOptions {
   publicationReady?: boolean;
   /** Native host drains credential-free broker commands. */
   nativePublicationBroker?: boolean;
+  /** Test seam for deterministic durable native claim ownership. */
+  nativePublicationRuntimeId?: string;
+  /** Test seam for the native claim lease; production uses five minutes. */
+  nativePublicationLeaseMs?: number;
+  /** Test seam for lease and retry deadlines. */
+  nativePublicationNow?: () => number;
   /**
    * Test-fixture seam only. Production protocol callers must persist revisions
    * through the internal draft/final-review materializer, never a caller
@@ -711,6 +1235,12 @@ export interface PersistentEngineProtocolOptions {
   publicationBroker?: ProductionPublicationBroker;
   /** Native desktop owns all credentialed GitHub effects and drains through broker protocol calls. */
   nativePublicationBroker?: boolean;
+  /** Test seam for deterministic durable native claim ownership. */
+  nativePublicationRuntimeId?: string;
+  /** Test seam for the native claim lease; production uses five minutes. */
+  nativePublicationLeaseMs?: number;
+  /** Test seam for lease and recovery deadlines. */
+  nativePublicationNow?: () => number;
   publicationProcessor?: PublicationEffectProcessor;
   /** Enabled by default so due approved work is recovered after restart. */
   startPublicationScheduler?: boolean;
@@ -853,6 +1383,16 @@ export function createEngineProtocol(
   // Serializes native claims inside this engine process. The durable outbox
   // state prevents later reclaims; this guard closes the pre-update await gap.
   const activeNativePublicationClaims = new Set<string>();
+  const nativePublicationRuntimeId = typeof options.nativePublicationRuntimeId === "string"
+    && /^[A-Za-z0-9._:-]{1,128}$/u.test(options.nativePublicationRuntimeId)
+      ? options.nativePublicationRuntimeId
+      : randomUUID();
+  const nativePublicationLeaseMs = Number.isSafeInteger(options.nativePublicationLeaseMs)
+    && Number(options.nativePublicationLeaseMs) >= 1_000
+    && Number(options.nativePublicationLeaseMs) <= 10 * 60 * 1_000
+      ? Number(options.nativePublicationLeaseMs)
+      : 5 * 60 * 1_000;
+  const nativePublicationNow = options.nativePublicationNow ?? Date.now;
 
   return async (input: unknown): Promise<EngineResponse> => {
     if (!isRecord(input) || input.version !== 1 || typeof input.id !== "string") {
@@ -906,6 +1446,7 @@ export function createEngineProtocol(
           "REVISION.GET",
           ...(options.mediaDataDir ? ["REVISION.REPAIR_MEDIA"] : []),
           "APPROVAL.GRANT",
+          "APPROVAL.REVOKE",
           "APPROVAL.GRANT_HIGH_RISK",
           "PUBLICATION.PREVIEW",
           ...(options.publicationReady ? ["PUBLICATION.ENQUEUE"] : []),
@@ -1014,7 +1555,10 @@ export function createEngineProtocol(
         };
       }
       const sources = await options.sourceRepository.listSources();
-      const candidateByStory = new Map<string, Record<string, unknown>>();
+      const candidateByStory = new Map<string, {
+        candidate: Record<string, unknown>;
+        evidence: CandidateRankingEvidence[];
+      }>();
       const storyTokens = new Map<string, Set<string>>();
       const storyIndex = new Map<string, Set<string>>();
       const activeSources = new Map(
@@ -1034,40 +1578,48 @@ export function createEngineProtocol(
           const storyKey = [...possibleStories].find((key) => candidateSimilarityTokens(storyTokens.get(key) ?? new Set(), titleTokens) >= 0.72)
             ?? (title.toLocaleLowerCase("tr-TR").replace(/[^\p{L}\p{N}]+/gu, " ").trim() || entry.externalId);
           const existing = candidateByStory.get(storyKey);
+          const rankingEvidence: CandidateRankingEvidence = {
+            sourceId: source.id,
+            policyApproved: source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED",
+            ...(entry.publishedAt ? { publishedAt: entry.publishedAt } : {}),
+            ...(source.defaultSection ? { defaultSection: source.defaultSection } : {}),
+            ...(source.defaultArticleType ? { defaultArticleType: source.defaultArticleType } : {})
+          };
           if (existing) {
-            existing.sourceCount = Number(existing.sourceCount ?? 1) + 1;
-            const sourceIds = Array.isArray(existing.sourceIds) ? existing.sourceIds : [];
+            const candidate = existing.candidate;
+            const sourceIds = Array.isArray(candidate.sourceIds) ? candidate.sourceIds : [];
             if (!sourceIds.includes(source.id) && sourceIds.length < 12) sourceIds.push(source.id);
-            existing.sourceIds = sourceIds;
-            const sourceUrls = Array.isArray(existing.sourceUrls) ? existing.sourceUrls : [];
+            candidate.sourceIds = sourceIds;
+            candidate.sourceCount = sourceIds.length;
+            const sourceUrls = Array.isArray(candidate.sourceUrls) ? candidate.sourceUrls : [];
             const sourceUrl = String(entry.url).slice(0, 320);
             if (sourceUrl && !sourceUrls.includes(sourceUrl) && sourceUrls.length < 12) sourceUrls.push(sourceUrl);
-            existing.sourceUrls = sourceUrls;
-            existing.duplicateScore = Math.min(100, Number(existing.duplicateScore ?? 0) + 35);
-            existing.confidence = Math.max(Number(existing.confidence ?? 0), source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? 85 : 60);
+            candidate.sourceUrls = sourceUrls;
+            candidate.duplicateScore = Math.min(100, Number(candidate.duplicateScore ?? 0) + 35);
+            candidate.confidence = Math.max(Number(candidate.confidence ?? 0), source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? 85 : 60);
+            existing.evidence.push(rankingEvidence);
             continue;
           }
           candidateByStory.set(storyKey, {
-            id: candidateId,
-            title: String(entry.title).slice(0, 240),
-            summary: String(entry.summary ?? entry.title).slice(0, 240),
-            primarySource: String(source.title ?? source.url).slice(0, 240),
-            sourceCount: 1,
-            section: source.defaultSection ?? "haberler",
-            articleType: source.defaultArticleType ?? "news",
-            confidence: source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? 85 : 60,
-            duplicateScore: 0,
-            discoveredAt: entry.publishedAt ?? new Date(0).toISOString(),
-            sourceId: source.id,
-            sourceUrl: String(entry.url).slice(0, 320),
-            // Preserve bounded corroborating provenance instead of turning a
-            // multi-source story into a misleading counter plus one source.
-            sourceIds: [source.id],
-            sourceUrls: [String(entry.url).slice(0, 320)],
-            scoreReasons: [
-              source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? "Güven ve kullanım hakkı doğrulandı" : "Kaynak incelemesi bekliyor",
-              entry.publishedAt ? "Güncel yayın zamanı bulundu" : "Yayın zamanı yok"
-            ]
+            candidate: {
+              id: candidateId,
+              title: String(entry.title).slice(0, 240),
+              summary: String(entry.summary ?? entry.title).slice(0, 240),
+              primarySource: String(source.title ?? source.url).slice(0, 240),
+              sourceCount: 1,
+              section: source.defaultSection ?? "haberler",
+              articleType: source.defaultArticleType ?? "news",
+              confidence: source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? 85 : 60,
+              duplicateScore: 0,
+              discoveredAt: entry.publishedAt ?? new Date(0).toISOString(),
+              sourceId: source.id,
+              sourceUrl: String(entry.url).slice(0, 320),
+              // Preserve bounded corroborating provenance instead of turning a
+              // multi-source story into a misleading counter plus one source.
+              sourceIds: [source.id],
+              sourceUrls: [String(entry.url).slice(0, 320)]
+            },
+            evidence: [rankingEvidence]
           });
           storyTokens.set(storyKey, titleTokens);
           for (const token of titleTokens) {
@@ -1079,8 +1631,28 @@ export function createEngineProtocol(
       // Candidate inventory is polled by the desktop shell. Keep this a
       // bounded triage projection so a large feed catalog never freezes the
       // bridge; the selected candidate is re-read when research starts.
-      const candidates = [...candidateByStory.values()]
-        .sort((left, right) => String(right.discoveredAt).localeCompare(String(left.discoveredAt)))
+      const candidateById = new Map(
+        [...candidateByStory.values()].map(({ candidate }) => [String(candidate.id), candidate])
+      );
+      const candidates = rankCandidateStories(
+        [...candidateByStory.values()].map(({ candidate, evidence }) => ({
+          id: String(candidate.id),
+          title: String(candidate.title),
+          summary: String(candidate.summary),
+          discoveredAt: String(candidate.discoveredAt),
+          evidence
+        })),
+        now
+      )
+        .map((ranked) => ({
+          ...candidateById.get(ranked.id),
+          sourceSufficiencyScore: ranked.sourceSufficiencyScore,
+          freshnessScore: ranked.freshnessScore,
+          originalityScore: ranked.originalityScore,
+          topicFitScore: ranked.topicFitScore,
+          rankingScore: ranked.rankingScore,
+          scoreReasons: ranked.scoreReasons
+        }))
         .slice(0, 50);
       candidateCache = { expiresAt: Date.now() + 2_000, candidates };
       return {
@@ -1133,23 +1705,33 @@ export function createEngineProtocol(
           (isRecord(desktopConnectorState) ? desktopConnectorState.site : undefined);
         const result = await repository.runIdempotent(
           `publication-preview:${idempotencyKey}`,
-          canonicalJson({ revisionId, revisionHash, expectedVersion, payload }),
+          // `expectedVersion` is an optimistic-concurrency precondition, not part
+          // of this request's identity. The desktop derives the key from the
+          // revision and payload only, so leaving the version in the fingerprint
+          // meant the second preview of the same revision always failed with
+          // IDEMPOTENCY_KEY_REUSED — permanently, because the key is stable.
+          // Revision id, hash and payload stay in the fingerprint, so reusing the
+          // key for genuinely different content is still rejected.
+          canonicalJson({ revisionId, revisionHash, payload }),
           async (transaction) => {
             const currentVersion = await transaction.getVersion();
             if (currentVersion !== expectedVersion) throw new Error(`VERSION_CONFLICT:${expectedVersion}:${currentVersion}`);
             const revision = await transaction.getRevision(revisionId);
             if (computeRevisionHash(revision) !== revisionHash) throw new Error("APPROVAL_HASH_MISMATCH");
+            if (await transaction.getApprovalRevocation(revisionId)) throw new Error("APPROVAL_REVOKED");
+            if (isRevisionSuperseded(revision, approvalSnapshot.snapshot.revisions)) throw new Error("REVISION_SUPERSEDED");
             const approval = approvalSnapshot.snapshot.approvals.find((item) => item.revisionId === revisionId);
             if (!approval || approval.revisionHash !== revisionHash) throw new Error("NO_VALID_APPROVAL");
-            if (!validateRevisionPackageV2(revision)) throw new Error("REVISION_PACKAGE_INCOMPLETE");
-            const gateStatus = validateApprovalGates(revision, approval.warningSetHash);
-            if (gateStatus !== "READY") throw new Error(gateStatus);
-            if (revision.riskLevel === "HIGH") {
-              const highRisk = approvalSnapshot.snapshot.highRiskApprovals.find((item) =>
-                item.revisionId === revisionId && item.revisionHash === revisionHash
-              );
-              if (!highRisk) throw new Error("HIGH_RISK_APPROVAL_REQUIRED");
-            }
+            const highRisk = approvalSnapshot.snapshot.highRiskApprovals.find((item) =>
+              item.revisionId === revisionId && item.revisionHash === revisionHash
+            ) ?? null;
+            const scheduledAt = new Date(revision.scheduledAt);
+            const eligibility = evaluatePublishEligibility(revision, { editorial: approval, highRisk }, {
+              now: scheduledAt,
+              publishingPaused: false,
+              revisionLineage: approvalSnapshot.snapshot.revisions
+            });
+            if (!eligibility.eligible) throw new Error(eligibility.reason);
             assertRevisionGeneratedFilesMatch(revision, payload);
             // Setup stores the generic site connector in the encrypted
             // desktop catalog. Keep the old standalone key as a migration
@@ -1177,6 +1759,22 @@ export function createEngineProtocol(
                 ? deployObject.workflowName
                 : null;
             if (publishMode && (!requiredChecks || !deployWorkflow)) throw new Error("PUBLICATION_POLICY_UNAVAILABLE");
+            const approvalBoundRequiredChecks = revision.packageVersion === 3
+              ? revision.requiredChecks
+              : requiredChecks ?? [];
+            const approvalBoundDeployWorkflow = revision.packageVersion === 3
+              ? revision.deployWorkflow
+              : deployWorkflow ?? "";
+            if (
+              revision.packageVersion === 3 &&
+              publishMode &&
+              (
+                approvalBoundDeployWorkflow !== deployWorkflow ||
+                canonicalJson(approvalBoundRequiredChecks) !== canonicalJson(requiredChecks)
+              )
+            ) {
+              throw new Error("APPROVAL_TARGET_MISMATCH");
+            }
             const configuredTargetRepository = publishMode &&
               typeof githubObject.owner === "string" && typeof githubObject.repository === "string"
                 ? `${githubObject.owner.trim()}/${githubObject.repository.trim()}`
@@ -1214,8 +1812,8 @@ export function createEngineProtocol(
               adapterVersion: approvedAdapterIdentity,
               adapterId: bundlePolicy.adapterId,
               bundlePolicy,
-              requiredChecks: requiredChecks ?? [],
-              deployWorkflow: deployWorkflow ?? "",
+              requiredChecks: approvalBoundRequiredChecks,
+              deployWorkflow: approvalBoundDeployWorkflow,
               siteOrigin,
               contentRoot,
               ...(approvedBaseSha ? { approvedBaseSha, currentBaseSha: approvedBaseSha } : {})
@@ -1229,8 +1827,8 @@ export function createEngineProtocol(
               ...(approvedBaseSha ? { approvedBaseSha, currentBaseSha: approvedBaseSha } : {}),
               files: Array.isArray(payload.files) ? payload.files as never : [],
               bundlePolicy,
-              requiredChecks: requiredChecks ?? [],
-              deployWorkflow: deployWorkflow ?? "",
+              requiredChecks: approvalBoundRequiredChecks,
+              deployWorkflow: approvalBoundDeployWorkflow,
               siteOrigin,
               contentRoot,
               now: String(payload.now ?? new Date().toISOString())
@@ -1254,7 +1852,8 @@ export function createEngineProtocol(
         );
         return { version: 1, id: input.id, ok: true, kind: "publication.preview", value: result };
       } catch (error) {
-        return sourceProtocolError(input.id, "command", "PUBLICATION_PREVIEW_FAILED", error instanceof Error ? error.message : "Publication preview failed");
+        const message = error instanceof Error ? error.message : "Publication preview failed";
+        return sourceProtocolError(input.id, "command", message === "APPROVAL_REVOKED" ? "APPROVAL_REVOKED" : "PUBLICATION_PREVIEW_FAILED", message);
       }
     }
 
@@ -1273,6 +1872,9 @@ export function createEngineProtocol(
         // from inside that transaction opens a second PGlite transaction and
         // blocks the durable enqueue path.
         const approvalSnapshot = await repository.sync(0);
+        if (approvalSnapshot.snapshot.automation.publishingPaused !== false) {
+          return sourceProtocolError(input.id, "command", "PUBLISHING_PAUSED", "Publishing is paused");
+        }
         const result = await repository.runIdempotent(
           `publication:${idempotencyKey}`,
           canonicalJson({ revisionId, revisionHash, previewHash, expectedVersion }),
@@ -1281,12 +1883,13 @@ export function createEngineProtocol(
             if (currentVersion !== expectedVersion) throw new Error(`VERSION_CONFLICT:${expectedVersion}:${currentVersion}`);
             const revision = await transaction.getRevision(revisionId);
             if (computeRevisionHash(revision) !== revisionHash) throw new Error("APPROVAL_HASH_MISMATCH");
+            if (await transaction.getApprovalRevocation(revisionId)) throw new Error("APPROVAL_REVOKED");
             const approval = approvalSnapshot.snapshot.approvals.find((item) => item.revisionId === revisionId);
             if (!approval || approval.revisionHash !== revisionHash) throw new Error("NO_VALID_APPROVAL");
             const highRisk = approvalSnapshot.snapshot.highRiskApprovals.find((item) => item.revisionId === revisionId) ?? null;
             const eligibility = evaluatePublishEligibility(revision, { editorial: approval, highRisk }, {
               now: new Date(),
-              publishingPaused: false,
+              publishingPaused: approvalSnapshot.snapshot.automation.publishingPaused,
               revisionLineage: approvalSnapshot.snapshot.revisions
             });
             if (!eligibility.eligible) throw new Error(eligibility.reason);
@@ -1308,7 +1911,8 @@ export function createEngineProtocol(
         );
         return { version: 1, id: input.id, ok: true, kind: "publication.enqueue", value: result };
       } catch (error) {
-        return sourceProtocolError(input.id, "command", "PUBLICATION_ENQUEUE_FAILED", error instanceof Error ? error.message : "Publication enqueue failed");
+        const message = error instanceof Error ? error.message : "Publication enqueue failed";
+        return sourceProtocolError(input.id, "command", message === "APPROVAL_REVOKED" ? "APPROVAL_REVOKED" : "PUBLICATION_ENQUEUE_FAILED", message);
       }
     }
 
@@ -1316,10 +1920,20 @@ export function createEngineProtocol(
       if (!options.nativePublicationBroker) {
         return sourceProtocolError(input.id, "command", "PUBLICATION_BROKER_UNAVAILABLE", "Native publication broker is not configured");
       }
-      const now = Date.now();
+      const automationSnapshot = await readDashboardSync(repository, 0, 1, 1, 1);
+      if (automationSnapshot.automation.publishingPaused !== false) {
+        return { version: 1, id: input.id, ok: true, kind: input.kind, value: { effectIds: [] } };
+      }
+      const now = nativePublicationNow();
       const effectIds = (await repository.listOutbox())
-        .filter((effect) => ["PENDING", "UNKNOWN"].includes(effect.state))
-        .filter((effect) => !effect.nextAttemptAt || Date.parse(effect.nextAttemptAt) <= now)
+        .filter((effect) => {
+          if (["PENDING", "UNKNOWN"].includes(effect.state)) {
+            return !effect.nextAttemptAt || Date.parse(effect.nextAttemptAt) <= now;
+          }
+          return effect.state === "IN_PROGRESS"
+            && Number.isFinite(Date.parse(effect.nativeClaimLeaseUntil ?? ""))
+            && Date.parse(effect.nativeClaimLeaseUntil ?? "") <= now;
+        })
         .slice(0, 16)
         .map((effect) => effect.id);
       return { version: 1, id: input.id, ok: true, kind: input.kind, value: { effectIds } };
@@ -1329,18 +1943,34 @@ export function createEngineProtocol(
       if (!options.nativePublicationBroker) {
         return sourceProtocolError(input.id, "command", "PUBLICATION_BROKER_UNAVAILABLE", "Native publication broker is not configured");
       }
+      const automationSnapshot = await readDashboardSync(repository, 0, 1, 1, 1);
+      if (automationSnapshot.automation.publishingPaused !== false) {
+        return sourceProtocolError(input.id, "command", "PUBLISHING_PAUSED", "Publishing is paused");
+      }
       const effectId = typeof input.effectId === "string" ? input.effectId : "";
       if (!effectId || activeNativePublicationClaims.has(effectId)) {
         return sourceProtocolError(input.id, "command", "PUBLICATION_EFFECT_NOT_CLAIMABLE", "Publication effect is not claimable");
       }
       activeNativePublicationClaims.add(effectId);
       try {
-        const effect = (await repository.listOutbox()).find((item) => item.id === effectId);
-        // An active native effect is owned by its first claimant. Reclaiming is
-        // permitted only after restart, when the worker recovery path resets the
-        // durable state; concurrent claims must never duplicate remote effects.
-        if (!effect || !["PENDING", "UNKNOWN"].includes(effect.state)) {
+        const observed = await repository.getOutboxEffect(effectId);
+        const effect = observed.effect;
+        const nowUnixMs = nativePublicationNow();
+        const retryIsDue = !effect.nextAttemptAt || Date.parse(effect.nextAttemptAt) <= nowUnixMs;
+        const leaseDeadline = Date.parse(effect.nativeClaimLeaseUntil ?? "");
+        const unclaimed = ["PENDING", "UNKNOWN"].includes(effect.state) && retryIsDue;
+        const expiredClaim = effect.state === "IN_PROGRESS"
+          && Number.isFinite(leaseDeadline)
+          && leaseDeadline <= nowUnixMs;
+        // Every runtime observes the row and its CAS token atomically. A live
+        // owner keeps the claim until its durable lease expires; only then may
+        // another runtime advance the fencing token.
+        if (!unclaimed && !expiredClaim) {
           return sourceProtocolError(input.id, "command", "PUBLICATION_EFFECT_NOT_CLAIMABLE", "Publication effect is not claimable");
+        }
+        if (await repository.getApprovalRevocation(effect.aggregateId)) {
+          await repository.updateOutbox({ ...effect, state: "FAILED", lastError: "APPROVAL_REVOKED" }, observed.version);
+          return sourceProtocolError(input.id, "command", "APPROVAL_REVOKED", "Editorial approval was revoked before publication");
         }
         const revision = await repository.getRevision(effect.aggregateId);
         const preview = await repository.getLocalState(`publication.preview:${effect.aggregateId}`);
@@ -1353,8 +1983,19 @@ export function createEngineProtocol(
           !isPublicationPreviewCurrent(preview) ||
           computeRevisionHash(revision) !== effect.revisionHash ||
           preview.revisionHash !== effect.revisionHash ||
-          preview.previewHash !== effect.previewHash
+          preview.previewHash !== effect.previewHash ||
+          // The preview row is mutable local state, while `revision.generatedFiles`
+          // is bound to the approval. The revision hash and preview hash are both
+          // readable by any protocol caller, so matching them does not prove the
+          // stored bytes are still the reviewed ones. Re-assert the exact file set
+          // here, at the boundary that actually hands bytes to the publisher.
+          !isApprovalBoundPayload(revision, payload)
         ) {
+          // An expired or mismatched preview cannot be published without a new
+          // preview, so this is terminal. Leaving the row PENDING/UNKNOWN made
+          // the native drainer reclaim it every poll, discard the reason, and
+          // present the publication as merely "not started" forever.
+          await repository.updateOutbox({ ...effect, state: "FAILED", lastError: "PUBLICATION_EFFECT_STALE" }, observed.version);
           return sourceProtocolError(input.id, "command", "PUBLICATION_EFFECT_STALE", "Publication effect no longer matches its approved preview");
         }
         const materializedFiles = options.mediaDataDir
@@ -1407,14 +2048,20 @@ export function createEngineProtocol(
         if (Buffer.byteLength(JSON.stringify(claimValue), "utf8") > 70 * 1024 * 1024) {
           return sourceProtocolError(input.id, "command", "PUBLICATION_CLAIM_TOO_LARGE", "Approved publication claim exceeds the native boundary");
         }
+        const nativeClaimLeaseUntil = new Date(nowUnixMs + nativePublicationLeaseMs).toISOString();
         await repository.updateOutbox({
           ...effect,
           state: "IN_PROGRESS",
           attempts: effect.attempts + 1,
-          claimAttempt
-        });
+          claimAttempt,
+          nativeClaimOwnerId: nativePublicationRuntimeId,
+          nativeClaimLeaseUntil
+        }, observed.version);
         return { version: 1, id: input.id, ok: true, kind: input.kind, value: claimValue };
       } catch (error) {
+        if (error instanceof BackendStoreError && error.code === "WRITE_VERSION_CONFLICT") {
+          return sourceProtocolError(input.id, "command", "PUBLICATION_EFFECT_NOT_CLAIMABLE", "Publication effect is not claimable");
+        }
         return sourceProtocolError(input.id, "command", "PUBLICATION_MEDIA_INVALID", error instanceof Error ? error.message : "Approved publication media is invalid");
       } finally {
         activeNativePublicationClaims.delete(effectId);
@@ -1431,10 +2078,13 @@ export function createEngineProtocol(
         ? Number(input.claimAttempt)
         : 0;
       const state = input.state === "SUCCEEDED" || input.state === "FAILED" || input.state === "UNKNOWN" ? input.state : null;
-      const effect = (await repository.listOutbox()).find((item) => item.id === effectId);
-      if (!effect || effect.state !== "IN_PROGRESS" || effect.claimAttempt !== claimAttempt || !state) {
+      let observed: Awaited<ReturnType<BackendRepository["getOutboxEffect"]>>;
+      try {
+        observed = await repository.getOutboxEffect(effectId);
+      } catch {
         return sourceProtocolError(input.id, "command", "INVALID_PUBLICATION_BROKER_RESULT", "Publication broker result is invalid");
       }
+      const effect = observed.effect;
       const resultRef = typeof input.resultRef === "string" ? input.resultRef.slice(0, 512) : undefined;
       const lastError = typeof input.lastError === "string" ? input.lastError.slice(0, 512) : undefined;
       const retryAfterMs = Number.isSafeInteger(input.retryAfterMs)
@@ -1442,18 +2092,92 @@ export function createEngineProtocol(
         && Number(input.retryAfterMs) <= 86_400_000
         ? Number(input.retryAfterMs)
         : undefined;
-      const { nextAttemptAt: _previousRetryDeadline, ...withoutPreviousRetryDeadline } = effect;
+      const revocation = await repository.getApprovalRevocation(effect.aggregateId);
+      const isRecalledClaim = effect.state === "FAILED" && effect.lastError === "APPROVAL_REVOKED";
+      if (revocation) {
+        if (
+          (effect.state === "IN_PROGRESS" || isRecalledClaim)
+          && effect.claimAttempt === claimAttempt
+          && effect.nativeClaimOwnerId === nativePublicationRuntimeId
+        ) {
+          const {
+            nextAttemptAt: _previousRetryDeadline,
+            nativeClaimOwnerId: _nativeClaimOwnerId,
+            nativeClaimLeaseUntil: _nativeClaimLeaseUntil,
+            completedAt: _completedAt,
+            ...revokedEffect
+          } = effect;
+          try {
+            await repository.updateOutbox({
+              ...revokedEffect,
+              state: "FAILED",
+              lastError: "APPROVAL_REVOKED",
+              ...(resultRef ? { resultRef } : {})
+            }, observed.version);
+          } catch (error) {
+            if (!(error instanceof BackendStoreError) || error.code !== "WRITE_VERSION_CONFLICT") throw error;
+          }
+        }
+        return sourceProtocolError(input.id, "command", "APPROVAL_REVOKED", "Editorial approval was revoked before native publication completion");
+      }
+      if (effect.state !== "IN_PROGRESS"
+        || effect.claimAttempt !== claimAttempt
+        || effect.nativeClaimOwnerId !== nativePublicationRuntimeId
+        || !state) {
+        return sourceProtocolError(input.id, "command", "INVALID_PUBLICATION_BROKER_RESULT", "Publication broker result is invalid");
+      }
+      const {
+        nextAttemptAt: _previousRetryDeadline,
+        nativeClaimOwnerId: _nativeClaimOwnerId,
+        nativeClaimLeaseUntil: _nativeClaimLeaseUntil,
+        ...withoutPreviousRetryDeadline
+      } = effect;
       const nextAttemptAt = state === "UNKNOWN" && retryAfterMs !== undefined
         ? new Date(Date.now() + retryAfterMs).toISOString()
         : undefined;
-      const saved = await repository.updateOutbox({
-        ...withoutPreviousRetryDeadline,
-        state,
-        ...(nextAttemptAt ? { nextAttemptAt } : {}),
-        ...(resultRef ? { resultRef } : {}),
-        ...(lastError ? { lastError } : {}),
-        ...(state === "SUCCEEDED" ? { completedAt: new Date().toISOString() } : {})
-      });
+      let saved;
+      try {
+        saved = await repository.updateOutbox({
+          ...withoutPreviousRetryDeadline,
+          state,
+          ...(nextAttemptAt ? { nextAttemptAt } : {}),
+          ...(resultRef ? { resultRef } : {}),
+          ...(lastError ? { lastError } : {}),
+          ...(state === "SUCCEEDED" ? { completedAt: new Date(nativePublicationNow()).toISOString() } : {})
+        }, observed.version);
+      } catch (error) {
+        if (error instanceof BackendStoreError && error.code === "WRITE_VERSION_CONFLICT") {
+          const revokedDuringCompletion = await repository.getApprovalRevocation(effect.aggregateId);
+          if (revokedDuringCompletion) {
+            const current = await repository.getOutboxEffect(effect.id);
+            if (
+              current.effect.state === "FAILED"
+              && current.effect.lastError === "APPROVAL_REVOKED"
+              && current.effect.claimAttempt === claimAttempt
+              && current.effect.nativeClaimOwnerId === nativePublicationRuntimeId
+            ) {
+              const {
+                nextAttemptAt: _currentRetryDeadline,
+                nativeClaimOwnerId: _currentClaimOwnerId,
+                nativeClaimLeaseUntil: _currentClaimLeaseUntil,
+                completedAt: _currentCompletedAt,
+                ...revokedEffect
+              } = current.effect;
+              await repository.updateOutbox({
+                ...revokedEffect,
+                state: "FAILED",
+                lastError: "APPROVAL_REVOKED",
+                ...(resultRef ? { resultRef } : {})
+              }, current.version).catch((conflict) => {
+                if (!(conflict instanceof BackendStoreError) || conflict.code !== "WRITE_VERSION_CONFLICT") throw conflict;
+              });
+            }
+            return sourceProtocolError(input.id, "command", "APPROVAL_REVOKED", "Editorial approval was revoked during native publication completion");
+          }
+          return sourceProtocolError(input.id, "command", "INVALID_PUBLICATION_BROKER_RESULT", "Publication broker result is invalid");
+        }
+        throw error;
+      }
       return { version: 1, id: input.id, ok: true, kind: input.kind, value: saved };
     }
 
@@ -1580,13 +2304,22 @@ export function createEngineProtocol(
         : Math.min(requestedChangeLimit, 200);
       const sync = await readDashboardSync(repository, input.afterCursor, changeLimit, 100, 100);
       const changes = changeLimit === 0 ? [] : sync.changes;
+      // `syncDashboard` reports the cursor of the last change it delivered, which
+      // is a paging watermark, not the optimistic version. The desktop reads
+      // state with a bounded change page and then sends `serverCursor` back as
+      // `expectedVersion`, so once a workspace produced more changes than fit in
+      // one page every mutation failed with VERSION_CONFLICT forever. Report the
+      // authoritative version here and keep the watermark under its own name for
+      // clients that page through changes.
+      const optimisticVersion = await repository.getVersion();
       return {
         version: 1,
         id: input.id,
         ok: true,
         kind: "state",
         snapshot: {
-          serverCursor: sync.serverCursor,
+          serverCursor: optimisticVersion,
+          changeCursor: sync.serverCursor,
           automation: sync.automation,
           // The state envelope is polled by the desktop shell. Keep it a
           // dashboard projection: completed Codex records can contain large
@@ -1610,15 +2343,71 @@ export function createEngineProtocol(
       };
     }
 
-    const workflow = await handleLocalWorkflowCommand(
-      input.id,
-      input.command,
-      repository,
-      options
-    );
-    if (workflow) return workflow;
-
     const validation = validateEngineCommandV1(input.command);
+    if (!validation.valid) {
+      return revisionCommandFailure(
+        input.id,
+        validation.error.code,
+        validation.error.message,
+        validation.error.retryable
+      );
+    }
+
+    const workflow = await handleLocalWorkflowCommand(input.id, validation.command, repository, options);
+    if (workflow) return workflow;
+    if (validation.valid && validation.command.kind === "APPROVAL.REVOKE") {
+      const command = validation.command;
+      try {
+        const result = await repository.runIdempotent(
+          `engine:${command.idempotencyKey}`,
+          canonicalJson({ kind: command.kind, payload: command.payload, expectedVersion: command.expectedVersion }),
+          async (transaction) => {
+            const currentVersion = await transaction.getVersion();
+            if (currentVersion !== command.expectedVersion) {
+              throw new Error(`VERSION_CONFLICT:${command.expectedVersion}:${currentVersion}`);
+            }
+            const revision = await transaction.getRevision(command.payload.revisionId);
+            const actualHash = computeRevisionHash(revision);
+            if (actualHash !== command.payload.revisionHash) throw new Error("APPROVAL_HASH_MISMATCH");
+            const revocation = await transaction.revokeApproval({
+              revisionId: revision.id,
+              revisionHash: actualHash,
+              deviceId: command.payload.deviceId,
+              reason: command.payload.reason,
+              revokedAt: new Date().toISOString()
+            });
+            const recalledEffectIds: string[] = [];
+            for (const listed of await transaction.listOutbox()) {
+              const observed = await transaction.getOutboxEffect(listed.id);
+              const effect = observed.effect;
+              if (
+                effect.aggregateId === revision.id &&
+                effect.revisionHash === actualHash &&
+                (effect.state === "PENDING" || effect.state === "UNKNOWN" || effect.state === "IN_PROGRESS")
+              ) {
+                await transaction.updateOutbox({ ...effect, state: "FAILED", lastError: "APPROVAL_REVOKED" }, observed.version);
+                recalledEffectIds.push(effect.id);
+              }
+            }
+            return { revocation, recalledEffectIds };
+          }
+        );
+        return revisionCommandSuccess(input.id, command, result, await repository.getVersion());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Approval revocation failed";
+        const code = message.startsWith("VERSION_CONFLICT:")
+          ? "VERSION_CONFLICT"
+          : message.includes("IDEMPOTENCY_KEY_REUSED")
+            ? "IDEMPOTENCY_KEY_REUSED"
+            : ([
+                "APPROVAL_HASH_MISMATCH",
+                "APPROVAL_NOT_FOUND",
+                "APPROVAL_ALREADY_REVOKED",
+                "INVALID_APPROVAL_REVOCATION"
+              ].includes(message) ? message : "ENGINE_OPERATION_FAILED");
+        return revisionCommandFailure(input.id, code, message, code === "VERSION_CONFLICT");
+      }
+    }
     if (
       validation.valid &&
       (validation.command.kind === "APPROVAL.GRANT" ||
@@ -1643,12 +2432,42 @@ export function createEngineProtocol(
             const revision = await transaction.getRevision(
               command.payload.revisionId
             );
+            if (await transaction.getApprovalRevocation(revision.id)) {
+              throw new Error("APPROVAL_REVOKED");
+            }
             if (revision.state !== "REVIEW_REQUIRED") {
               throw new Error("REVISION_NOT_REVIEWABLE");
             }
             const actualHash = computeRevisionHash(revision);
             if (actualHash !== command.payload.revisionHash) {
               throw new Error("APPROVAL_HASH_MISMATCH");
+            }
+            if (command.kind === "APPROVAL.GRANT") {
+              if (revision.packageVersion !== 3) {
+                throw new Error("REVISION_REVIEW_UPGRADE_REQUIRED");
+              }
+              if (!validateRevisionPackageV3(revision)) {
+                throw new Error("REVISION_PACKAGE_INCOMPLETE");
+              }
+              if (!("packageVersion" in command.payload) || command.payload.packageVersion !== 3) {
+                throw new Error("EDITORIAL_ATTESTATION_REQUIRED");
+              }
+              const editorialQuality = evaluateEditorialQualityV3(
+                revision.editorialAssessment,
+                command.payload.attestation
+              );
+              if (editorialQuality.blockers.length > 0) {
+                throw new Error("EDITORIAL_QUALITY_NOT_READY");
+              }
+              if (!editorialQuality.passed) {
+                throw new Error("EDITORIAL_ATTESTATION_INVALID");
+              }
+            } else if (
+              revision.packageVersion === 3
+                ? !validateRevisionPackageV3(revision)
+                : !validateRevisionPackageV2(revision)
+            ) {
+              throw new Error("REVISION_PACKAGE_INCOMPLETE");
             }
             if (revision.translationParity?.status === "MISMATCHED" || revision.translationParity?.status === "PENDING") {
               throw new Error("TRANSLATION_PARITY_NOT_READY");
@@ -1672,6 +2491,19 @@ export function createEngineProtocol(
               ) {
                 throw new Error("EDITORIAL_APPROVAL_REQUIRED");
               }
+              // The engine cannot invoke the Windows verifier itself, so this
+              // timestamp stays caller-supplied — but an audit record must not
+              // be able to assert a reauthentication that is not recent. Bound
+              // it against the engine clock the way `approvedAt` already is.
+              const reauthenticatedAt = Date.parse(command.payload.windowsReauthenticatedAt);
+              const reauthenticationAgeMs = Date.now() - reauthenticatedAt;
+              if (
+                !Number.isFinite(reauthenticatedAt) ||
+                reauthenticationAgeMs > WINDOWS_REAUTH_MAX_AGE_MS ||
+                reauthenticationAgeMs < -WINDOWS_REAUTH_MAX_SKEW_MS
+              ) {
+                throw new Error("WINDOWS_REAUTH_STALE");
+              }
               // The renderer may display this checklist, but it is never the
               // authority for its approval binding. Persist only a digest
               // reconstructed from the immutable revision held by the engine.
@@ -1687,13 +2519,19 @@ export function createEngineProtocol(
                 windowsReauthenticatedAt: command.payload.windowsReauthenticatedAt
               });
             }
+            if (!("packageVersion" in command.payload) || command.payload.packageVersion !== 3) {
+              throw new Error("EDITORIAL_ATTESTATION_REQUIRED");
+            }
             return transaction.saveApproval({
               revisionId: revision.id,
               revisionHash: actualHash,
               deviceId: command.payload.deviceId,
               approvedAt: new Date().toISOString(),
               warningSetHash: command.payload.warningSetHash,
-              approvalType: "EDITORIAL"
+              approvalType: "EDITORIAL",
+              packageVersion: 3,
+              attestation: command.payload.attestation,
+              attestationHash: computeEditorialAttestationHash(command.payload.attestation)
             });
           }
         );
@@ -1722,7 +2560,14 @@ export function createEngineProtocol(
                       "QUALITY_GATES_NOT_READY",
                       "WARNING_NOT_ALLOWLISTED",
                       "WARNING_ACCEPTANCE_MISMATCH",
-                      "EDITORIAL_APPROVAL_REQUIRED"
+                      "EDITORIAL_APPROVAL_REQUIRED",
+                      "WINDOWS_REAUTH_STALE",
+                      "REVISION_REVIEW_UPGRADE_REQUIRED",
+                      "EDITORIAL_ATTESTATION_REQUIRED",
+                      "EDITORIAL_ATTESTATION_INVALID",
+                      "EDITORIAL_QUALITY_NOT_READY",
+                      "APPROVAL_REVOKED",
+                      "REVISION_PACKAGE_INCOMPLETE"
                     ].includes(message)
                     ? message
                     : "ENGINE_OPERATION_FAILED";
@@ -1822,6 +2667,14 @@ export function createEngineProtocol(
               };
             }
           );
+          if (options.mediaDataDir && repository.listRevisionSnapshot) {
+            const snapshot = await repository.listRevisionSnapshot();
+            await pruneSupersededRevisionMedia(
+              options.mediaDataDir,
+              snapshot.revisions,
+              [command.payload.revisionId]
+            ).catch(() => undefined);
+          }
           return revisionCommandSuccess(input.id, command, result, await repository.getVersion());
         }
 
@@ -1832,7 +2685,9 @@ export function createEngineProtocol(
           : summaryOnly && repository.listRevisionSnapshot
             ? await repository.listRevisionSnapshot()
           : (await repository.sync(0)).snapshot;
-        const materialize = (revision: ArticleRevision) => ({
+        const materialize = async (revision: ArticleRevision) => {
+          const revoked = await repository.getApprovalRevocation(revision.id);
+          return ({
           revision: summaryOnly ? {
             id: revision.id,
             tr: {
@@ -1848,18 +2703,19 @@ export function createEngineProtocol(
           } : revision,
           revisionHash: computeRevisionHash(revision),
           editorialApproval:
-            snapshot.approvals.find(
+            revoked ? null : snapshot.approvals.find(
               (approval: Approval) => approval.revisionId === revision.id
             ) ?? null,
           highRiskApproval:
-            snapshot.highRiskApprovals.find(
+            revoked ? null : snapshot.highRiskApprovals.find(
               (approval: HighRiskApproval) => approval.revisionId === revision.id
             ) ?? null
-        });
+          });
+        };
         const value =
           command.kind === "REVISION.LIST"
-            ? snapshot.revisions.map(materialize)
-            : materialize(await repository.getRevision(command.payload.revisionId));
+            ? await Promise.all(snapshot.revisions.map(materialize))
+            : await materialize(await repository.getRevision(command.payload.revisionId));
         return revisionCommandSuccess(input.id, command, value, currentVersion);
       } catch (error) {
         const message =
@@ -2102,7 +2958,7 @@ export function createEngineProtocol(
       }
     }
 
-    const result = await engine.execute(input.command);
+    const result = await engine.execute(validation.command);
     return {
       version: 1,
       id: input.id,
@@ -2118,7 +2974,7 @@ export function createEngineProtocol(
  * explicitly WAITING_CODEX. */
 async function handleLocalWorkflowCommand(
   envelopeId: string,
-  value: Record<string, unknown>,
+  value: EngineCommandV1,
   repository: BackendRepository,
   options: EngineProtocolOptions
 ): Promise<EngineResponse | null> {
@@ -2127,9 +2983,26 @@ async function handleLocalWorkflowCommand(
   const requestId = typeof value.requestId === "string" ? value.requestId : "";
   const idempotencyKey = typeof value.idempotencyKey === "string" ? value.idempotencyKey : "";
   const expectedVersion = typeof value.expectedVersion === "number" ? value.expectedVersion : -1;
-  const payload = isRecord(value.payload) ? value.payload : {};
-  if (!requestId || !idempotencyKey || !Number.isSafeInteger(expectedVersion)) {
-    return revisionCommandFailure(envelopeId, "INVALID_COMMAND", "Workflow command metadata is invalid", false);
+  const payload = value.payload as Record<string, unknown>;
+  // A retry has to be a real recovery action. Read the pre-retry job so the
+  // handler can both refuse a retry nothing can run and restore the original
+  // stop condition when the durable Codex record turns out to be unrecoverable.
+  const retriedJob = kind === "JOB.RETRY" && typeof payload.jobId === "string" && payload.jobId
+    ? await repository.getJob(payload.jobId).catch(() => undefined)
+    : undefined;
+  const retryableCodexState = retriedJob &&
+    ["WAITING_CODEX", "FAILED", "DEAD_LETTER", "RETRY_SCHEDULED"].includes(retriedJob.state);
+  const requiresCodexExecutor = retriedJob?.kind === "DRAFT" || retriedJob?.kind === "CODEX";
+  if (retryableCodexState && requiresCodexExecutor && !options.codexCoordinator) {
+    // Every retryable DRAFT/CODEX stop needs the isolated executor, not only
+    // WAITING_CODEX. Requeueing a FAILED/DEAD_LETTER/RETRY_SCHEDULED row would
+    // otherwise erase its diagnosis and strand a healthy-looking QUEUED job.
+    return revisionCommandFailure(
+      envelopeId,
+      "CODEX_RUNNER_UNAVAILABLE",
+      "Local Codex runner is not configured, so this job cannot be retried yet.",
+      false
+    );
   }
   try {
     const result = await repository.runIdempotent(
@@ -2223,12 +3096,13 @@ async function handleLocalWorkflowCommand(
         }
         const jobId = typeof payload.jobId === "string" ? payload.jobId : "";
         if (!jobId) throw new Error("INVALID_JOB_ID");
-        const job = await transaction.getJob(jobId);
-        if (job.state !== "FAILED" && job.state !== "DEAD_LETTER" && job.state !== "RETRY_SCHEDULED" && job.state !== "WAITING_CODEX") {
-          throw new Error("JOB_NOT_RETRYABLE");
-        }
-        const { lastError: _lastError, ...retryableJob } = job;
-        return transaction.saveJob({ ...retryableJob, state: "QUEUED", attempts: job.attempts + 1 });
+        return updateJobWithCas(transaction, jobId, (job) => {
+          if (job.state !== "FAILED" && job.state !== "DEAD_LETTER" && job.state !== "RETRY_SCHEDULED" && job.state !== "WAITING_CODEX") {
+            throw new Error("JOB_NOT_RETRYABLE");
+          }
+          const { lastError: _lastError, ...retryableJob } = job;
+          return { ...retryableJob, state: "QUEUED", attempts: job.attempts + 1 };
+        });
       }
     );
     const createdDraft = kind === "DRAFT.CREATE" ? result as BackendJob : undefined;
@@ -2266,14 +3140,14 @@ async function handleLocalWorkflowCommand(
           ...(typeof source.evidenceVersionId === "string" ? { evidenceVersionId: source.evidenceVersionId } : {})
         }))
       };
-      await repository.saveJob({
-        ...createdDraft,
+      await updateJobWithCas(repository, createdDraft.id, (job) => ({
+        ...job,
         metadata: {
-          ...(createdDraft.metadata ?? {}),
+          ...(job.metadata ?? {}),
           progressStage: researchSnapshot.status === "READY" ? "RESEARCH_COMPLETE" : "RESEARCH_NEEDS_SOURCE",
           researchSnapshot
         }
-      });      codex = await options.codexCoordinator.submit({
+      }));      codex = await options.codexCoordinator.submit({
         jobId: draftId,
         idempotencyKey: `draft:${idempotencyKey}`,
         definitionId: "DRAFT.CREATE",
@@ -2304,7 +3178,25 @@ async function handleLocalWorkflowCommand(
       // The workflow row and the Codex coordinator record share the draft ID,
       // but have separate durable state. Requeue both sides so the Operations
       // button is a real recovery action rather than a misleading success.
-      codex = await options.codexCoordinator.recoverInterrupted(codexRecoveryJobId(await repository.getJob(jobId)));
+      const recovery = await options.codexCoordinator.recoverInterrupted(
+        codexRecoveryJobId(retriedJob ?? await repository.getJob(jobId))
+      );
+      if (!recovery.recovered && retriedJob?.state === "WAITING_CODEX") {
+        // Nothing was requeued on the runner side, so the QUEUED row written
+        // above is a job no worker will claim. Put the original stop condition
+        // back instead of reporting a recovery that did not happen.
+        await updateJobWithCas(repository, jobId, (job) => ({
+          ...retriedJob,
+          metadata: { ...(retriedJob.metadata ?? {}), ...(job.metadata ?? {}) }
+        }));
+        return revisionCommandFailure(
+          envelopeId,
+          "CODEX_RECOVERY_UNAVAILABLE",
+          "The durable Codex record for this job could not be requeued.",
+          false
+        );
+      }
+      codex = recovery;
     }
     return revisionCommandSuccess(envelopeId, { requestId, idempotencyKey, kind: kind as "LOCAL_STATE.SET" }, { backendJob: result, codex }, await repository.getVersion());
   } catch (error) {
@@ -2412,6 +3304,11 @@ const MAX_EVIDENCE_TEXT = 12_000;
 // quarter-hour without a user-visible decision. Longer work can be retried
 // explicitly from Operations after the runner explains its stop condition.
 export const CODEX_RUNNER_TIMEOUT_MS = 5 * 60 * 1_000;
+// Evidence collection happens inside the DRAFT.CREATE request, which the desktop
+// bridge abandons after 30 s. Keep the whole collection well inside that budget;
+// a source the engine could not read in time stays out of the evidence set.
+export const DRAFT_EVIDENCE_FETCH_BUDGET_MS = 15 * 1_000;
+const DRAFT_EVIDENCE_FETCH_TIMEOUT_MS = 8 * 1_000;
 
 function boundedEvidenceText(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -2464,15 +3361,54 @@ export function fallbackDraftSourceEvidence(value: unknown): Array<Record<string
  * the catalog. At drafting time we may use the already bounded fetched bytes
  * as untrusted evidence, after stripping executable and presentational HTML.
  */
+const SKIPPED_EVIDENCE_ELEMENTS = ["script", "style", "noscript"] as const;
+
+/**
+ * Reduces fetched HTML to plain evidence text in a single linear pass.
+ *
+ * The previous regex pipeline was quadratic on malformed markup, and source
+ * pages are untrusted input: 1 MB of unclosed `<script>` took about 29 s and
+ * 512 KB of bare `<` about 171 s on the engine's single thread. One broken or
+ * hostile page therefore froze every other engine request well past the desktop
+ * bridge's timeout. A draft fetches many pages, so this was reachable by adding
+ * one ordinary source.
+ */
+export function htmlToEvidenceText(html: string): string {
+  const lower = html.toLowerCase();
+  const parts: string[] = [];
+  let index = 0;
+  while (index < html.length) {
+    const open = html.indexOf("<", index);
+    if (open < 0) {
+      parts.push(html.slice(index));
+      break;
+    }
+    if (open > index) parts.push(html.slice(index, open));
+    const tagEnd = html.indexOf(">", open);
+    // An unterminated tag means the remainder is markup, exactly as a browser
+    // would treat it. Never fall back to scanning it again as text.
+    if (tagEnd < 0) break;
+    const skipped = SKIPPED_EVIDENCE_ELEMENTS.find((name) =>
+      lower.startsWith(`<${name}`, open) &&
+      !/[a-z0-9-]/u.test(lower.charAt(open + name.length + 1))
+    );
+    if (skipped) {
+      const closeAt = lower.indexOf(`</${skipped}`, tagEnd + 1);
+      if (closeAt < 0) break;
+      const closeEnd = html.indexOf(">", closeAt);
+      index = closeEnd < 0 ? html.length : closeEnd + 1;
+    } else {
+      index = tagEnd + 1;
+    }
+    parts.push(" ");
+  }
+  return parts.join("").replace(/\s+/gu, " ").trim();
+}
+
 function sourceEvidenceText(body: Uint8Array): string {
   try {
     return boundedEvidenceText(
-      new TextDecoder("utf-8", { fatal: true })
-        .decode(body)
-        .replace(/<(?:script|style|noscript)\b[^>]*>[\s\S]*?<\/(?:script|style|noscript)\s*>/giu, " ")
-        .replace(/<[^>]*>/gu, " ")
-        .replace(/\s+/gu, " ")
-        .trim()
+      htmlToEvidenceText(new TextDecoder("utf-8", { fatal: true }).decode(body))
     );
   } catch {
     return "";
@@ -2496,14 +3432,22 @@ function mediaRepairTarget(revision: ArticleRevision) {
   return { mode: "PUBLISH" as const };
 }
 
-function repairMediaGates(revision: ArticleRevision) {
+/**
+ * A repaired revision may carry either an article-specific ImageGen visual or
+ * the generic local cover. Both are publishable, but the gate must say which
+ * one it recorded: reporting the fallback as a checked hero package told the
+ * reviewer the article visual had been verified when it was never produced.
+ */
+function repairMediaGates(revision: ArticleRevision, provenance: "IMAGEGEN_VISUAL" | "LOCAL_FALLBACK_VISUAL") {
   const ready = {
     id: "media",
     group: "media" as const,
     state: "PASS" as const,
-    detail: "Hero medya paketi üç yayın oranında yerel olarak doğrulandı.",
+    detail: provenance === "IMAGEGEN_VISUAL"
+      ? "Hero medya paketi ImageGen görselinden üç yayın oranında üretildi."
+      : "Hero medya paketi yerel, metinsiz kapaktan üç yayın oranında üretildi; ImageGen görseli üretilemedi.",
     policyVersion: "2",
-    reasonCode: "CHECKED"
+    reasonCode: provenance
   };
   const existing = revision.qualityGates ?? [];
   const replacesMediaGate = existing.some((gate) => gate.id === "media");
@@ -2521,7 +3465,7 @@ async function createMediaRepairSuccessor(
   if (revision.state !== "REVIEW_REQUIRED") {
     throw new Error("REVISION_NOT_REVIEWABLE");
   }
-  if (!validateRevisionPackageV2(revision)) {
+  if (!validateRevisionPackageV2(revision) && !validateRevisionPackageV3(revision)) {
     throw new Error("REVISION_PACKAGE_INCOMPLETE");
   }
   if (revision.media.some((asset) => asset.role === "hero" &&
@@ -2540,6 +3484,7 @@ async function createMediaRepairSuccessor(
   };
   const successorId = mediaRepairRevisionId(revision);
   let artifacts;
+  let provenance: "IMAGEGEN_VISUAL" | "LOCAL_FALLBACK_VISUAL" = "LOCAL_FALLBACK_VISUAL";
   if (imageGenerator) {
     try {
       const generated = await imageGenerator.generate({
@@ -2553,6 +3498,7 @@ async function createMediaRepairSuccessor(
         join(dataDir, "media", successorId),
         revision.tr.slug
       );
+      provenance = "IMAGEGEN_VISUAL";
     } catch {
       reportCodexLifecycle("IMAGEGEN_FALLBACK_LOCAL");
     }
@@ -2563,15 +3509,16 @@ async function createMediaRepairSuccessor(
     join(dataDir, "media", successorId),
     revision.tr.slug
   );
-  const media = await Promise.all(artifacts.map(async (artifact) => ({
+  const media = artifacts.map((artifact) => ({
     role: "hero" as const,
     path: `media/${successorId}/${artifact.path}`,
     sha256: artifact.sha256,
     width: artifact.width,
     height: artifact.height,
-    byteSize: (await stat(artifact.absolutePath)).size,
-  })));
-  const qualityGates = repairMediaGates(revision);
+    byteSize: artifact.byteSize,
+    source: artifact.source
+  }));
+  const qualityGates = repairMediaGates(revision, provenance);
   const successor = createEditedRevision(revision, successorId, {
     media,
     qualityGates,
@@ -2610,9 +3557,10 @@ function candidateSimilarityTokens(a: Set<string>, b: Set<string>): number {
 
 function evidenceFields(text: unknown, sourceId: string): Record<string, unknown> {
   const evidenceText = boundedEvidenceText(text);
-  const quoteHash = createHash("sha256").update(evidenceText).digest("hex");
+  const quoteHash = createHash("sha256").update(evidenceText, "utf8").digest("hex");
   return {
     evidenceText,
+    evidenceSourceId: sourceId,
     evidenceAnchors: evidenceText
       ? [{ sourceId, start: 0, end: evidenceText.length, quoteHash }]
       : [],
@@ -2621,14 +3569,119 @@ function evidenceFields(text: unknown, sourceId: string): Record<string, unknown
   };
 }
 
+function bindMediaProvenanceToReview(revision: RevisionPackageV3): RevisionPackageV3 {
+  const sources = new Set(revision.media.map((asset) => asset.source));
+  if (sources.size !== 1 || sources.has(undefined)) return revision;
+  const source = revision.media[0]!.source!;
+  const qualityGates = revision.qualityGates.map((gate) => gate.id !== "media" || gate.state !== "PASS"
+    ? gate
+    : {
+        ...gate,
+        reasonCode: source === "IMAGEGEN" ? "IMAGEGEN_VISUAL" : "LOCAL_RENDERER_VISUAL",
+        detail: source === "IMAGEGEN"
+          ? "Hero medya paketi ImageGen çıktısından üretildi; tam revizyon paketi adlandırılmış editoryal incelemeye bağlıdır."
+          : "Hero medya paketi doğrulanmış yerel görsel politikasıyla üretildi; tam revizyon paketi adlandırılmış editoryal incelemeye bağlıdır."
+      });
+  return {
+    ...revision,
+    qualityGates,
+    editorialReviewReportHash: createHash("sha256").update(canonicalJson({
+      kind: "FINAL_REVIEW_WITH_MEDIA_PROVENANCE",
+      baseReviewReportHash: revision.editorialReviewReportHash,
+      media: revision.media.map(({ path, sha256, byteSize, source }) => ({ path, sha256, byteSize, source })),
+      qualityGates
+    }), "utf8").digest("hex")
+  };
+}
+
+const MEDIA_PRUNE_MAX_REVISIONS = 512;
+const MEDIA_PRUNE_MAX_CANDIDATES = 32;
+const MEDIA_PRUNE_MAX_FILES_PER_REVISION = 16;
+const MEDIA_PRUNE_MAX_FILE_BYTES = 32 * 1024 * 1024;
+const MEDIA_PRUNE_MAX_TOTAL_BYTES = 96 * 1024 * 1024;
+
+function mediaRootId(path: string): string | null {
+  const segments = path.replaceAll("\\", "/").split("/");
+  return segments.length >= 3 && segments[0] === "media" && /^[A-Za-z0-9-]{1,128}$/u.test(segments[1] ?? "")
+    ? segments[1]!
+    : null;
+}
+
+async function removeBoundedRevisionMediaRoot(dataDir: string, revisionId: string): Promise<boolean> {
+  if (!/^[A-Za-z0-9-]{1,128}$/u.test(revisionId)) return false;
+  const mediaParent = resolve(dataDir, "media");
+  const root = resolve(mediaParent, revisionId);
+  if (relative(mediaParent, root) !== revisionId) return false;
+  let rootInfo;
+  try {
+    rootInfo = await lstat(root);
+  } catch {
+    return false;
+  }
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) return false;
+  const entries = await readdir(root, { withFileTypes: true });
+  if (entries.length > MEDIA_PRUNE_MAX_FILES_PER_REVISION) return false;
+  const files: string[] = [];
+  let totalBytes = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink() || !/^[A-Za-z0-9._-]{1,180}$/u.test(entry.name)) return false;
+    const file = join(root, entry.name);
+    const info = await lstat(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > MEDIA_PRUNE_MAX_FILE_BYTES) return false;
+    totalBytes += info.size;
+    if (totalBytes > MEDIA_PRUNE_MAX_TOTAL_BYTES) return false;
+    files.push(file);
+  }
+  for (const file of files) await unlink(file);
+  await rmdir(root);
+  return true;
+}
+
+/**
+ * Deletes only superseded media roots that no current revision still uses.
+ * Every scan and deletion is deliberately bounded; an unexpected directory is
+ * retained for a later operator decision instead of traversed recursively.
+ */
+export async function pruneSupersededRevisionMedia(
+  dataDir: string,
+  revisions: readonly ArticleRevision[],
+  candidateIds: readonly string[]
+): Promise<string[]> {
+  if (
+    revisions.length > MEDIA_PRUNE_MAX_REVISIONS ||
+    candidateIds.length > MEDIA_PRUNE_MAX_CANDIDATES
+  ) return [];
+  const current = revisions.filter((revision) => !isRevisionSuperseded(revision, revisions));
+  const referencedRoots = new Set(current.flatMap((revision) =>
+    revision.media.flatMap((asset) => {
+      const id = mediaRootId(asset.path);
+      return id ? [id] : [];
+    })
+  ));
+  const removed: string[] = [];
+  for (const revisionId of [...new Set(candidateIds)].sort()) {
+    const revision = revisions.find((candidate) => candidate.id === revisionId);
+    if (!revision || !isRevisionSuperseded(revision, revisions) || referencedRoots.has(revisionId)) continue;
+    if (await removeBoundedRevisionMediaRoot(dataDir, revisionId)) removed.push(revisionId);
+  }
+  return removed;
+}
+
 export async function collectDraftSourceEvidence(
   repository: SourceRepository | undefined,
   sourceIds: string[],
   urls: string[],
   transport?: FetchTransport,
-  candidateUrl?: string
+  candidateUrl?: string,
+  budgetMs: number = DRAFT_EVIDENCE_FETCH_BUDGET_MS
 ): Promise<Array<Record<string, unknown>>> {
   const evidence: Array<Record<string, unknown>> = [];
+  // One shared network budget for the whole collection. Per-fetch timeouts alone
+  // meant an unreachable publisher could cost 8 s each for up to 70 fetches
+  // while the engine's serialized mutation lane was held, so the desktop bridge
+  // timed out and dropped the sidecar mid-submit.
+  const deadlineAtUnixMs = Date.now() + budgetMs;
+  const remainingFetchMs = (): number => Math.min(DRAFT_EVIDENCE_FETCH_TIMEOUT_MS, deadlineAtUnixMs - Date.now());
   for (const sourceId of [...new Set(sourceIds)].slice(0, 50)) {
     if (!repository) break;
     try {
@@ -2648,9 +3701,9 @@ export async function collectDraftSourceEvidence(
         let evidenceText = entry.summary?.trim() || entry.title;
         // A selected story deserves its article context rather than just the
         // feed teaser. Never fan out across an entire feed at draft time.
-        if (transport && candidateUrl && entry.url === candidateUrl) {
+        if (transport && candidateUrl && entry.url === candidateUrl && remainingFetchMs() > 0) {
           try {
-            const fetched = await fetchSource(entry.url, transport, { timeoutMs: 8_000, maxBytes: 2_000_000 });
+            const fetched = await fetchSource(entry.url, transport, { timeoutMs: remainingFetchMs(), maxBytes: 2_000_000 });
             evidenceText = sourceEvidenceText(fetched.body) || evidenceText;
           } catch {
             // Retain the reviewed local feed excerpt if the article page is
@@ -2686,8 +3739,12 @@ export async function collectDraftSourceEvidence(
   }
   if (transport) {
     for (const url of [...new Set(urls)].slice(0, 20)) {
+      // Once the shared budget is gone the remaining URLs stay absent from the
+      // evidence, which keeps the revision NEEDS_SOURCE instead of trusting a
+      // page the engine never actually read.
+      if (remainingFetchMs() <= 0) break;
       try {
-        const fetched = await fetchSource(url, transport, { timeoutMs: 8_000, maxBytes: 2_000_000 });
+        const fetched = await fetchSource(url, transport, { timeoutMs: remainingFetchMs(), maxBytes: 2_000_000 });
         const analysis = analyzeSourceDocument({ finalUrl: fetched.finalUrl, contentType: fetched.contentType, body: fetched.body }, { maxEntries: 20 });
         const bodyHash = createHash("sha256").update(fetched.body).digest("hex");
         const entries = analysis.entries.length > 0 ? analysis.entries : [{ externalId: fetched.finalUrl, title: analysis.title ?? fetched.finalUrl, url: fetched.finalUrl, summary: "" }];
@@ -2789,6 +3846,49 @@ export function automaticBackupInitialDelayMs(): number {
   return 24 * 60 * 60 * 1_000;
 }
 
+/**
+ * A desktop session rarely stays open for a whole interval, so an interval-only
+ * schedule meant the documented daily snapshot never ran at all. Startup catches
+ * up whenever the last successful snapshot is missing or older than one interval.
+ */
+/**
+ * Deliberately a few minutes, not immediate: taking the snapshot holds PGlite's
+ * exclusive query gate, and an in-flight archive during the interactive startup
+ * window would delay the first workspace reads.
+ */
+export const AUTOMATIC_BACKUP_CATCH_UP_DELAY_MS = 5 * 60 * 1_000;
+
+/**
+ * Schedules the one deferred catch-up snapshot when the last successful one is
+ * missing or older than an interval. Fire-and-forget and unref'd like the
+ * recurring timer: a failing snapshot is recorded as maintenance state and must
+ * never keep the engine from becoming ready or from shutting down.
+ */
+export function scheduleOverdueAutomaticBackup(
+  state: unknown,
+  run: () => void,
+  nowUnixMs: number = Date.now(),
+  delayMs: number = AUTOMATIC_BACKUP_CATCH_UP_DELAY_MS
+): ReturnType<typeof setTimeout> | undefined {
+  if (!automaticBackupIsOverdue(state, nowUnixMs)) return undefined;
+  const timer = setTimeout(run, delayMs);
+  timer.unref?.();
+  return timer;
+}
+
+export function automaticBackupIsOverdue(
+  state: unknown,
+  nowUnixMs: number,
+  intervalMs: number = automaticBackupInitialDelayMs()
+): boolean {
+  if (!isRecord(state)) return true;
+  const succeededAt = typeof state.succeededAt === "string" ? Date.parse(state.succeededAt) : Number.NaN;
+  if (!Number.isFinite(succeededAt)) return true;
+  // A clock moved backwards must not postpone recovery coverage indefinitely.
+  if (succeededAt > nowUnixMs) return true;
+  return nowUnixMs - succeededAt >= intervalMs;
+}
+
 /** Resolves legacy candidate jobs to the one feed entry the editor selected.
  * Older queue records predate `candidateUrl`; keep their durable identity but
  * never send an entire feed to the Codex runner when the selected entry can
@@ -2812,6 +3912,36 @@ export async function resolveCandidateSourceUrl(
 }
 
 /**
+ * A completed, user-visible stop condition must not be replayed on the next
+ * application start: an automatic replay hides the failure and makes the
+ * promised manual retry pointless. A bounded runner timeout and an exhausted
+ * retry budget are both such conditions, and so is an isolation rejection —
+ * `CODEX_PROTOCOL_REJECTED` means the runner refused an event the task tried to
+ * perform. Untrusted source text can be exactly what produced that attempt, so
+ * replaying it would silently re-execute the same prompt on every start. The
+ * genuinely resumable waits (authentication, rate and usage limits) stay
+ * replayable.
+ */
+export function isFinalCodexStopCondition(job: BackendJob): boolean {
+  if (job.state !== "WAITING_CODEX") return false;
+  const metadata = isRecord(job.metadata) ? job.metadata : {};
+  return metadata.codexWaitReason === "RUNNER_TIMEOUT"
+    || metadata.codexWaitReason === "RETRY_LIMIT_REACHED"
+    || metadata.codexWaitReason === "PAID_FALLBACK_DISABLED"
+    || metadata.codexDiagnosticCode === "CODEX_PROTOCOL_REJECTED";
+}
+
+async function updateJobWithCas(
+  repository: BackendRepositoryTransaction,
+  jobId: string,
+  update: (job: BackendJob) => BackendJob | undefined
+): Promise<BackendJob | undefined> {
+  const observed = await repository.getJobRecord(jobId);
+  const next = update(observed.job);
+  return next ? repository.saveJob(next, observed.version) : undefined;
+}
+
+/**
  * A local process can stop after a Codex job is claimed but before it writes
  * a result. On the next engine start, requeue the persisted Codex record with
  * its original idempotency identity; do not ask the editor to recreate work.
@@ -2824,56 +3954,98 @@ export async function recoverWaitingDraftJobs(
 ): Promise<number> {
   let recovered = 0;
   const jobs = await repository.listJobs();
-  for (const job of jobs) {
-    if (job.kind !== "DRAFT" || !["QUEUED", "RUNNING", "WAITING_CODEX", "RETRY_SCHEDULED"].includes(job.state)) continue;
+  for (const listed of jobs) {
+    const job = (await repository.getJobRecord(listed.id)).job;
+    if (job.kind !== "DRAFT" && job.kind !== "CODEX") continue;
+    if (!["QUEUED", "RUNNING", "WAITING_CODEX", "RETRY_SCHEDULED"].includes(job.state)) continue;
     const metadata = isRecord(job.metadata) ? job.metadata : {};
+    if (job.kind === "CODEX") {
+      // Boby guidance is a durable CODEX job. Excluding it from recovery left it
+      // RUNNING forever after an interrupted run: the queue can only claim a
+      // QUEUED record and `JOB.RETRY` refuses a RUNNING job, so neither the
+      // Boby panel nor Operations had any way to act on it.
+      if (isFinalCodexStopCondition(job)) continue;
+      const persisted = await coordinator.recoverInterrupted(job.id);
+      if (persisted.recovered) {
+        await updateJobWithCas(repository, job.id, (current) => {
+          if (isFinalCodexStopCondition(current)) return undefined;
+          const currentMetadata = isRecord(current.metadata) ? current.metadata : {};
+          const { lastError: _lastError, ...queued } = current;
+          return {
+            ...queued,
+            state: "QUEUED",
+            metadata: {
+              ...currentMetadata,
+              recoveryCount: typeof currentMetadata.recoveryCount === "number" && Number.isSafeInteger(currentMetadata.recoveryCount)
+                ? Math.max(0, currentMetadata.recoveryCount) + 1
+                : 1,
+              lastQueuedAtUnixMs: Date.now(),
+              recoveryReason: "ENGINE_RESTART"
+            }
+          };
+        });
+        recovered += 1;
+      } else if (job.state === "RUNNING") {
+        // Nothing can resume this run. Record a terminal, retryable outcome
+        // rather than an unreachable RUNNING row that accumulates forever.
+        await updateJobWithCas(repository, job.id, (current) => current.state === "RUNNING"
+          ? { ...current, state: "FAILED", lastError: "CODEX_RUNNER_INTERRUPTED" }
+          : undefined);
+      }
+      continue;
+    }
     const finalReviewJobId = typeof metadata.finalReviewJobId === "string" && metadata.finalReviewJobId.trim()
       ? metadata.finalReviewJobId
       : undefined;
     if (finalReviewJobId && typeof metadata.progressStage === "string" && metadata.progressStage.startsWith("FINAL_REVIEW")) {
       const persisted = await coordinator.recoverInterrupted(finalReviewJobId);
       if (persisted.recovered) {
-        const { lastError: _lastError, ...queued } = job;
-        await repository.saveJob({
-          ...queued,
-          state: "QUEUED",
-          metadata: {
-            ...metadata,
-            progressStage: "FINAL_REVIEW_RETRYING",
-            lastQueuedAtUnixMs: Date.now(),
-            recoveryReason: "ENGINE_RESTART"
-          }
+        await updateJobWithCas(repository, job.id, (current) => {
+          const currentMetadata = isRecord(current.metadata) ? current.metadata : {};
+          const { lastError: _lastError, ...queued } = current;
+          return {
+            ...queued,
+            state: "QUEUED",
+            metadata: {
+              ...currentMetadata,
+              progressStage: "FINAL_REVIEW_RETRYING",
+              lastQueuedAtUnixMs: Date.now(),
+              recoveryReason: "ENGINE_RESTART"
+            }
+          };
         });
         recovered += 1;
       } else if (job.state === "RUNNING") {
-        await repository.saveJob({
-          ...job,
-          state: "WAITING_CODEX",
-          lastError: "FINAL_REVIEW_RECOVERY_REQUIRED",
-          metadata: { ...metadata, progressStage: "FINAL_REVIEW_RECOVERY_REQUIRED", finalReviewJobId }
-        });
+        await updateJobWithCas(repository, job.id, (current) => current.state === "RUNNING"
+          ? {
+              ...current,
+              state: "WAITING_CODEX",
+              lastError: "FINAL_REVIEW_RECOVERY_REQUIRED",
+              metadata: { ...(current.metadata ?? {}), progressStage: "FINAL_REVIEW_RECOVERY_REQUIRED", finalReviewJobId }
+            }
+          : undefined);
       }
       continue;
     }
-    // A bounded runner timeout is a completed, user-visible stop condition,
-    // not an interrupted process. Replaying it on every application start
-    // would hide the failure and make the promised manual retry ineffective.
-    if (job.state === "WAITING_CODEX" && metadata.codexWaitReason === "RUNNER_TIMEOUT") continue;
+    if (isFinalCodexStopCondition(job)) continue;
     const persisted = await coordinator.recoverInterrupted(job.id);
     if (persisted.recovered) {
-      const { lastError: _lastError, ...queued } = job;
-      const recoveryCount = typeof metadata.recoveryCount === "number" && Number.isSafeInteger(metadata.recoveryCount)
-        ? Math.max(0, metadata.recoveryCount) + 1
-        : 1;
-      await repository.saveJob({
-        ...queued,
-        state: "QUEUED",
-        metadata: {
-          ...metadata,
-          recoveryCount,
-          lastQueuedAtUnixMs: Date.now(),
-          recoveryReason: "ENGINE_RESTART"
-        }
+      await updateJobWithCas(repository, job.id, (current) => {
+        const currentMetadata = isRecord(current.metadata) ? current.metadata : {};
+        const { lastError: _lastError, ...queued } = current;
+        const recoveryCount = typeof currentMetadata.recoveryCount === "number" && Number.isSafeInteger(currentMetadata.recoveryCount)
+          ? Math.max(0, currentMetadata.recoveryCount) + 1
+          : 1;
+        return {
+          ...queued,
+          state: "QUEUED",
+          metadata: {
+            ...currentMetadata,
+            recoveryCount,
+            lastQueuedAtUnixMs: Date.now(),
+            recoveryReason: "ENGINE_RESTART"
+          }
+        };
       });
       recovered += 1;
       continue;
@@ -2916,37 +4088,60 @@ export async function recoverWaitingDraftJobs(
       definitionId: "DRAFT.CREATE",
       payload
     });
-    const { lastError: _lastError, ...queued } = job;
-    const recoveryMetadata = isRecord(job.metadata) ? job.metadata : {};
-    const recoveryCount = typeof recoveryMetadata.recoveryCount === "number" && Number.isSafeInteger(recoveryMetadata.recoveryCount)
-      ? Math.max(0, recoveryMetadata.recoveryCount) + 1
-      : 1;
-    await repository.saveJob({
-      ...queued,
-      state: "QUEUED",
-      metadata: {
-        ...recoveryMetadata,
-        recoveryCount,
-        lastQueuedAtUnixMs: Date.now(),
-        recoveryReason: "ENGINE_RESTART"
-      }
+    await updateJobWithCas(repository, job.id, (current) => {
+      const { lastError: _lastError, ...queued } = current;
+      const recoveryMetadata = isRecord(current.metadata) ? current.metadata : {};
+      const recoveryCount = typeof recoveryMetadata.recoveryCount === "number" && Number.isSafeInteger(recoveryMetadata.recoveryCount)
+        ? Math.max(0, recoveryMetadata.recoveryCount) + 1
+        : 1;
+      return {
+        ...queued,
+        state: "QUEUED",
+        metadata: {
+          ...recoveryMetadata,
+          recoveryCount,
+          lastQueuedAtUnixMs: Date.now(),
+          recoveryReason: "ENGINE_RESTART"
+        }
+      };
     });
     recovered += 1;
   }
   return recovered;
 }
 
-async function recoverInterruptedNativePublications(repository: BackendRepository): Promise<number> {
+export async function recoverInterruptedNativePublications(
+  repository: BackendRepository,
+  nowUnixMs = Date.now()
+): Promise<number> {
   let recovered = 0;
-  for (const effect of await repository.listOutbox()) {
+  for (const listed of await repository.listOutbox()) {
+    if (listed.state !== "IN_PROGRESS") continue;
+    const observed = await repository.getOutboxEffect(listed.id);
+    const effect = observed.effect;
     if (effect.state !== "IN_PROGRESS") continue;
-    await repository.updateOutbox({
-      ...effect,
-      state: "UNKNOWN",
-      nextAttemptAt: new Date().toISOString(),
-      lastError: "NATIVE_PUBLICATION_INTERRUPTED"
-    });
-    recovered += 1;
+    const ownerIsValid = typeof effect.nativeClaimOwnerId === "string"
+      && /^[A-Za-z0-9._:-]{1,128}$/u.test(effect.nativeClaimOwnerId);
+    const leaseDeadline = Date.parse(effect.nativeClaimLeaseUntil ?? "");
+    if (ownerIsValid && Number.isFinite(leaseDeadline) && leaseDeadline > nowUnixMs) continue;
+    const {
+      nativeClaimOwnerId: _nativeClaimOwnerId,
+      nativeClaimLeaseUntil: _nativeClaimLeaseUntil,
+      ...requeued
+    } = effect;
+    try {
+      await repository.updateOutbox({
+        ...requeued,
+        state: "UNKNOWN",
+        nextAttemptAt: new Date(nowUnixMs).toISOString(),
+        lastError: "NATIVE_PUBLICATION_INTERRUPTED"
+      }, observed.version);
+      recovered += 1;
+    } catch (error) {
+      if (!(error instanceof BackendStoreError) || error.code !== "WRITE_VERSION_CONFLICT") throw error;
+      // Another live lane completed or renewed the row after this recovery
+      // read. The CAS conflict is the desired stop condition.
+    }
   }
   return recovered;
 }
@@ -2957,7 +4152,7 @@ export async function createPersistentEngineProtocol(
 ): Promise<EngineProtocolRuntime> {
   const repository = await PGliteBackendRepository.open(dataDir);
   if (options.nativePublicationBroker) {
-    await recoverInterruptedNativePublications(repository);
+    await recoverInterruptedNativePublications(repository, options.nativePublicationNow?.() ?? Date.now());
   }
   const sourceRepository = await PGliteSourceRepository.fromDatabase(
     repository.getDatabase()
@@ -3009,6 +4204,7 @@ export async function createPersistentEngineProtocol(
     () => createConsistentAutomaticBackup(repository.getDatabase(), dataDir)
   );
   let automaticBackupTimer: ReturnType<typeof setInterval> | undefined;
+  let automaticBackupCatchUpTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     await queue.start();
     await sourceScanCoordinator.recover();
@@ -3089,7 +4285,7 @@ export async function createPersistentEngineProtocol(
         onWaiting: async ({ submission, reason, diagnosticCode, diagnosticDetail }) => {
           reportCodexLifecycle("CODEX_JOB_WAITING");
           if (diagnosticCode) reportCodexLifecycle(diagnosticCode, (line) => process.stderr.write(line), diagnosticDetail);
-          await syncCodexParentJobState(repository, submission, { kind: "WAITING", reason, ...(diagnosticDetail ? { diagnosticDetail } : {}) });
+          await syncCodexParentJobState(repository, submission, { kind: "WAITING", reason, ...(diagnosticCode ? { diagnosticCode } : {}), ...(diagnosticDetail ? { diagnosticDetail } : {}) });
         },
         onRetrying: async ({ submission, failure, transientFailureCount, retryAt }) => {
           reportCodexLifecycle("CODEX_JOB_RETRYING");
@@ -3103,8 +4299,7 @@ export async function createPersistentEngineProtocol(
             runtimeState: "ONLINE",
             safeWorkspaceSummary: { draftCount: 0, reviewCount: 0, sourceCount: 0 }
           }).validateOutput(output)) {
-            const job = await repository.getJob(submission.jobId);
-            await repository.saveJob({
+            await updateJobWithCas(repository, submission.jobId, (job) => ({
               ...job,
               state: "SUCCEEDED",
               metadata: {
@@ -3114,7 +4309,7 @@ export async function createPersistentEngineProtocol(
                 bobyActions: (output as BobyGuideOutput).suggestedActions,
                 ...(conversationSessionId ? { bobySessionId: conversationSessionId } : {})
               }
-            });
+            }));
             return;
           }
           if (submission.definitionId === "DRAFT.CREATE" && isDraftCodexOutput(output)) {
@@ -3150,7 +4345,14 @@ export async function createPersistentEngineProtocol(
               if (visualPolicy === "GENERATE" && !imageGenerator) {
                 reportCodexLifecycle("IMAGEGEN_REQUIRED_UNAVAILABLE");
               }
-              if (visualPolicy === "LOCAL_RENDERER") {
+              // A GENERATE policy with no configured provider is unattainable,
+              // not a failed attempt: leaving `media` empty made
+              // `finalizeReviewedRevision` stamp HERO_MEDIA_REQUIRED and the
+              // finished revision could never be approved by anyone. Render the
+              // local, textless cover instead. A provider that was configured
+              // and then failed still fails closed above, because there the
+              // article-specific visual was a reachable editorial requirement.
+              if (visualPolicy === "LOCAL_RENDERER" || (visualPolicy === "GENERATE" && !imageGenerator)) {
                 const direction: ArtDirection = {
                   title: output.tr.title,
                   palette: ["#08131f", "#32d3a6"],
@@ -3161,21 +4363,21 @@ export async function createPersistentEngineProtocol(
                 };
                 artifacts = await renderCoverVariants(direction, join(dataDir, "media", revision.id), revision.tr.slug);
               }
-              revision.media = await Promise.all((artifacts ?? []).map(async (artifact) => ({
+              revision.media = (artifacts ?? []).map((artifact) => ({
                 role: "hero",
                 path: `media/${revision.id}/${artifact.path}`,
                 sha256: artifact.sha256,
                 width: artifact.width,
                 height: artifact.height,
-                byteSize: (await stat(artifact.absolutePath)).size,
-              })));
+                byteSize: artifact.byteSize,
+                source: artifact.source
+              }));
             }
-            const job = await repository.getJob(submission.jobId);
-            await repository.saveJob({
+            await updateJobWithCas(repository, submission.jobId, (job) => ({
               ...job,
               state: "RUNNING",
               metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW_QUEUED", finalReviewJobId: `${submission.jobId}:final-review`, qualityReviewQueuedAtUnixMs: Date.now() }
-            });
+            }));
             await codexCoordinator!.submit({
               jobId: `${submission.jobId}:final-review`,
               idempotencyKey: `final-review:${submission.idempotencyKey}`,
@@ -3196,30 +4398,43 @@ export async function createPersistentEngineProtocol(
           const checks = isRecord(connectorChecks) ? connectorChecks : {};
           const site = isRecord(connectors.site) ? connectors.site : {};
           const github = isRecord(connectors.github) ? connectors.github : {};
+          const deploy = isRecord(connectors.deploy) ? connectors.deploy : {};
           const siteCheck = isRecord(checks.site) ? checks.site : {};
           const adapterDryRun = isRecord(siteCheck.adapterDryRun) ? siteCheck.adapterDryRun : {};
-          const revision = finalizeReviewedRevision(rawRevision as unknown as ArticleRevision, output, {
+          const revision = bindMediaProvenanceToReview(finalizeReviewedRevision(rawRevision as unknown as ArticleRevision, output, {
             mode: site.mode === "PUBLISH" || site.mode === "LOCAL_DEV" ? site.mode : "LOCAL_ONLY",
             owner: typeof github.owner === "string" ? github.owner : undefined,
             repository: typeof github.repository === "string" ? github.repository : undefined,
             branch: typeof github.branch === "string" ? github.branch : undefined,
             baseSha: typeof github.baseSha === "string" ? github.baseSha : undefined,
             adapterId: typeof adapterDryRun.adapterId === "string" ? adapterDryRun.adapterId : undefined,
-            adapterVersion: typeof adapterDryRun.adapterVersion === "string" ? adapterDryRun.adapterVersion : undefined
-          });
-          await repository.runIdempotent(
+            adapterVersion: typeof adapterDryRun.adapterVersion === "string" ? adapterDryRun.adapterVersion : undefined,
+            deployWorkflow: typeof deploy.workflowName === "string" ? deploy.workflowName : undefined,
+            requiredChecks: Array.isArray(deploy.requiredChecks)
+              ? deploy.requiredChecks.filter((value): value is string => typeof value === "string")
+              : undefined
+          }));
+          // The fingerprint has to be stable across replays. Using the produced
+          // revision poisoned this key: these durable effects run before the
+          // Codex job is CAS'd to COMPLETED, so a crash in between leaves the
+          // job RUNNING, restart recovery requeues it, the retry produces
+          // different Codex output, the fingerprint no longer matches, and the
+          // draft can never finish. The first successful materialization is the
+          // durable outcome for this job, so replays must return it unchanged.
+          const materialized = await repository.runIdempotent(
             `codex-materialize:${originalJobId}`,
-            canonicalJson(revision),
+            `codex-materialize:${originalJobId}`,
             (transaction) => transaction.insertRevision(revision)
           );
-          const job = await repository.getJob(originalJobId);
-          const completedJob: BackendJob = {
-            ...job,
-            state: "SUCCEEDED",
-            metadata: { ...(job.metadata ?? {}), revisionId: revision.id, completedAtUnixMs: Date.now() }
-          };
-          delete completedJob.lastError;
-          await repository.saveJob(completedJob);
+          await updateJobWithCas(repository, originalJobId, (job) => {
+            const completedJob: BackendJob = {
+              ...job,
+              state: "SUCCEEDED",
+              metadata: { ...(job.metadata ?? {}), revisionId: materialized.id, completedAtUnixMs: Date.now() }
+            };
+            delete completedJob.lastError;
+            return completedJob;
+          });
         }
       });
       await recoverWaitingDraftJobs(
@@ -3234,11 +4449,16 @@ export async function createPersistentEngineProtocol(
     if (effectivePublicationProcessor) {
       publicationOutboxWorker = startPublicationOutboxWorker(repository, effectivePublicationProcessor);
     }
-    // A scheduler without a processor can only create durable effects that no
-    // bundled runtime is able to reconcile. Keep recovery fail-closed: due
-    // work remains scheduled until the host supplies the same processor that
-    // drains the outbox.
-    if (options.startPublicationScheduler === true && effectivePublicationProcessor) {
+    // A scheduler without any drain path could only create durable effects that
+    // nothing is able to reconcile. Keep that fail-closed, but recognise BOTH
+    // drain paths: the in-process outbox worker above, and the native Windows
+    // broker, which claims the same outbox over `publication.broker.*`. The
+    // shipped desktop supplies only the native broker, so gating on the
+    // in-process processor alone left scheduled publishing permanently dead
+    // while `PUBLICATION.ENQUEUE` was still advertised as ready.
+    const publicationDrainAvailable =
+      Boolean(effectivePublicationProcessor) || options.nativePublicationBroker === true;
+    if (options.startPublicationScheduler === true && publicationDrainAvailable) {
       publicationScheduler = new PublicationScheduler(
         repository,
         () => new Date(),
@@ -3254,7 +4474,17 @@ export async function createPersistentEngineProtocol(
     sourceRetentionTimer.unref?.();
     automaticBackupTimer = setInterval(() => { void runAutomaticBackup(); }, automaticBackupInitialDelayMs());
     automaticBackupTimer.unref?.();
+    // `setInterval` first fires one whole interval from now, and the timer is
+    // recreated from zero on every sidecar spawn. An ordinary desktop session
+    // never stays open that long, so the documented daily snapshot never ran at
+    // all. Catch up once, deferred past the interactive startup window, whenever
+    // the last successful snapshot is missing or older than an interval.
+    automaticBackupCatchUpTimer = scheduleOverdueAutomaticBackup(
+      await repository.getLocalState("maintenance.automatic-backup"),
+      () => { void runAutomaticBackup(); }
+    );
   } catch (error) {
+    if (automaticBackupCatchUpTimer) clearTimeout(automaticBackupCatchUpTimer);
     if (automaticBackupTimer) clearInterval(automaticBackupTimer);
     if (sourceRetentionTimer) clearInterval(sourceRetentionTimer);
     publicationOutboxWorker?.stop();
@@ -3269,6 +4499,9 @@ export async function createPersistentEngineProtocol(
     sourceScanCoordinator,
     publicationReady,
     nativePublicationBroker: options.nativePublicationBroker === true,
+    ...(options.nativePublicationRuntimeId ? { nativePublicationRuntimeId: options.nativePublicationRuntimeId } : {}),
+    ...(options.nativePublicationLeaseMs ? { nativePublicationLeaseMs: options.nativePublicationLeaseMs } : {}),
+    ...(options.nativePublicationNow ? { nativePublicationNow: options.nativePublicationNow } : {}),
     allowUnsafeRevisionSaveForTests: options.allowUnsafeRevisionSaveForTests === true,
     verifyEncryptionIntegrity: async () => {
       await repository.verifyEncryptionIntegrity();
@@ -3303,21 +4536,35 @@ export async function createPersistentEngineProtocol(
           const chunk = bytes.subarray(offset, Math.min(bytes.byteLength, offset + length));
           return { version: 1, id, ok: true, kind: "media.read", value: { offset, totalBytes: bytes.byteLength, contentBase64: chunk.toString("base64"), eof: offset + chunk.byteLength >= bytes.byteLength } };
         } catch (error) {
-          return sourceProtocolError(id, "command", error instanceof Error ? error.message : "MEDIA_READ_FAILED", "Media asset could not be read");
+          // `code` is what a caller switches on, so it has to stay a stable
+          // sentinel. Passing the raw exception text put an unbounded string
+          // there — one that can echo a revision id or local detail — while the
+          // human-readable slot got a constant.
+          const failure = error instanceof Error ? error.message : "";
+          const code = failure === "MEDIA_ASSET_NOT_FOUND" || failure === "MEDIA_ASSET_INTEGRITY_FAILURE"
+            ? failure
+            : "MEDIA_READ_FAILED";
+          return sourceProtocolError(id, "command", code, "Media asset could not be read");
         }
       }
       if (isRecord(input) && input.kind === "backup.auto") {
         return createConsistentAutomaticBackup(repository.getDatabase(), dataDir);
       }
-      if (isRecord(input) && (input.kind === "backup.create" || input.kind === "backup.auto.list" || input.kind === "backup.auto.verify" || input.kind === "backup.auto.restore.preview" || input.kind === "backup.auto.restore" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore")) {
+      // Automatic snapshots are logical row archives, so verify, preview and
+      // restore go through the database rather than the directory unpacker.
+      if (isRecord(input) && (input.kind === "backup.auto.verify" || input.kind === "backup.auto.restore.preview" || input.kind === "backup.auto.restore")) {
+        return handleAutomaticBackupAccess(input, dataDir, repository.getDatabase());
+      }
+      if (isRecord(input) && (input.kind === "backup.create" || input.kind === "backup.auto.list" || input.kind === "backup.verify" || input.kind === "backup.restore.preview" || input.kind === "backup.restore")) {
         return handleBackupRequest(input, dataDir);
       }
       return protocol(input);
     },
     close: async () => {
       try {
+        if (automaticBackupCatchUpTimer) clearTimeout(automaticBackupCatchUpTimer);
         if (automaticBackupTimer) clearInterval(automaticBackupTimer);
-        if (sourceRetentionTimer) clearInterval(sourceRetentionTimer);
+            if (sourceRetentionTimer) clearInterval(sourceRetentionTimer);
         publicationOutboxWorker?.stop();
         publicationScheduler?.stop();
       sourceScanScheduler.stop();
@@ -3335,7 +4582,7 @@ export async function syncCodexParentJobState(
   update:
     | { kind: "STARTED" }
     | { kind: "TASK_READY" }
-    | { kind: "WAITING"; reason: string; diagnosticDetail?: string }
+    | { kind: "WAITING"; reason: string; diagnosticCode?: string; diagnosticDetail?: string }
     | { kind: "RETRYING"; failure: string; transientFailureCount: number; retryAt: string }
 ): Promise<void> {
   const finalReview = submission.definitionId === "REVISION.FINAL_REVIEW";
@@ -3343,80 +4590,76 @@ export async function syncCodexParentJobState(
     ? submission.payload.originalJobId
     : submission.jobId;
   if (!originalJobId) return;
-  const job = await repository.getJob(originalJobId);
-  if (finalReview) {
+  await updateJobWithCas(repository, originalJobId, (job) => {
+    if (finalReview) {
+      if (!["QUEUED", "RUNNING", "RETRY_SCHEDULED"].includes(job.state)) return undefined;
+      if (update.kind === "STARTED") {
+        return {
+          ...job,
+          state: "RUNNING",
+          metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW", finalReviewJobId: submission.jobId, finalReviewStartedAtUnixMs: Date.now() }
+        };
+      }
+      if (update.kind === "WAITING") {
+        return {
+          ...job,
+          state: "WAITING_CODEX",
+          metadata: {
+            ...(job.metadata ?? {}),
+            progressStage: "FINAL_REVIEW_WAITING_CODEX",
+            finalReviewJobId: submission.jobId,
+            finalReviewWaitReason: update.reason,
+            ...(update.diagnosticDetail ? { codexDiagnosticDetail: update.diagnosticDetail.slice(0, 240) } : {}),
+            waitingAtUnixMs: Date.now()
+          }
+        };
+      }
+      if (update.kind === "RETRYING") {
+        return {
+          ...job,
+          state: "RETRY_SCHEDULED",
+          metadata: {
+            ...(job.metadata ?? {}),
+            progressStage: "FINAL_REVIEW_RETRYING",
+            finalReviewJobId: submission.jobId,
+            finalReviewRetryReason: update.failure,
+            finalReviewRetryAttempt: update.transientFailureCount,
+            finalReviewRetryAtUnixMs: Date.parse(update.retryAt)
+          }
+        };
+      }
+      return undefined;
+    }
     if (update.kind === "STARTED") {
-      if (!["QUEUED", "RUNNING", "RETRY_SCHEDULED"].includes(job.state)) return;
-      await repository.saveJob({
-        ...job,
-        state: "RUNNING",
-        metadata: { ...(job.metadata ?? {}), progressStage: "FINAL_REVIEW", finalReviewJobId: submission.jobId, finalReviewStartedAtUnixMs: Date.now() }
-      });
-      return;
+      return job.state === "QUEUED"
+        ? { ...job, state: "RUNNING", metadata: { ...(job.metadata ?? {}), startedAtUnixMs: Date.now(), progressStage: "PREPARING_SOURCES" } }
+        : undefined;
+    }
+    if (update.kind === "TASK_READY") {
+      return job.state === "RUNNING"
+        ? { ...job, metadata: { ...(job.metadata ?? {}), progressStage: "RUNNING_CODEX", codexStartedAtUnixMs: Date.now() } }
+        : undefined;
     }
     if (update.kind === "WAITING") {
-      if (!["QUEUED", "RUNNING", "RETRY_SCHEDULED"].includes(job.state)) return;
-      await repository.saveJob({
+      if (job.state !== "RUNNING" && job.state !== "QUEUED") return undefined;
+      return {
         ...job,
         state: "WAITING_CODEX",
-        metadata: {
-          ...(job.metadata ?? {}),
-          progressStage: "FINAL_REVIEW_WAITING_CODEX",
-          finalReviewJobId: submission.jobId,
-          finalReviewWaitReason: update.reason,
-          ...(update.diagnosticDetail ? { codexDiagnosticDetail: update.diagnosticDetail.slice(0, 240) } : {}),
-          waitingAtUnixMs: Date.now()
-        }
-      });
-      return;
+        // The reason alone cannot distinguish a resumable wait from an isolation
+        // rejection: both are RUNNER_REQUIRES_RETRY. Persist the diagnostic code
+        // so restart recovery can tell them apart.
+        metadata: { ...(job.metadata ?? {}), codexWaitReason: update.reason, ...(update.diagnosticCode ? { codexDiagnosticCode: update.diagnosticCode } : {}), ...(update.diagnosticDetail ? { codexDiagnosticDetail: update.diagnosticDetail.slice(0, 240) } : {}), waitingAtUnixMs: Date.now() }
+      };
     }
-    if (update.kind === "RETRYING") {
-      if (!["QUEUED", "RUNNING", "RETRY_SCHEDULED"].includes(job.state)) return;
-      await repository.saveJob({
+    if (update.kind === "RETRYING" && (job.state === "RUNNING" || job.state === "QUEUED")) {
+      return {
         ...job,
-        state: "RETRY_SCHEDULED",
-        metadata: {
-          ...(job.metadata ?? {}),
-          progressStage: "FINAL_REVIEW_RETRYING",
-          finalReviewJobId: submission.jobId,
-          finalReviewRetryReason: update.failure,
-          finalReviewRetryAttempt: update.transientFailureCount,
-          finalReviewRetryAtUnixMs: Date.parse(update.retryAt)
-        }
-      });
+        state: "QUEUED",
+        metadata: { ...(job.metadata ?? {}), progressStage: "RETRYING_CODEX", codexRetryReason: update.failure, codexRetryAttempt: update.transientFailureCount, codexRetryAtUnixMs: Date.parse(update.retryAt) }
+      };
     }
-    return;
-  }
-  if (update.kind === "STARTED") {
-    if (job.state !== "QUEUED") return;
-    await repository.saveJob({
-      ...job,
-      state: "RUNNING",
-      metadata: { ...(job.metadata ?? {}), startedAtUnixMs: Date.now(), progressStage: "PREPARING_SOURCES" }
-    });
-    return;
-  }
-  if (update.kind === "TASK_READY") {
-    if (job.state !== "RUNNING") return;
-    await repository.saveJob({ ...job, metadata: { ...(job.metadata ?? {}), progressStage: "RUNNING_CODEX", codexStartedAtUnixMs: Date.now() } });
-    return;
-  }
-  if (update.kind === "WAITING") {
-    if (job.state !== "RUNNING" && job.state !== "QUEUED") return;
-    await repository.saveJob({
-      ...job,
-      state: "WAITING_CODEX",
-      metadata: { ...(job.metadata ?? {}), codexWaitReason: update.reason, ...(update.diagnosticDetail ? { codexDiagnosticDetail: update.diagnosticDetail.slice(0, 240) } : {}), waitingAtUnixMs: Date.now() }
-    });
-    return;
-  }
-  if (update.kind === "RETRYING" && (job.state === "RUNNING" || job.state === "QUEUED")) {
-    await repository.saveJob({
-      ...job,
-      state: "QUEUED",
-      metadata: { ...(job.metadata ?? {}), progressStage: "RETRYING_CODEX", codexRetryReason: update.failure, codexRetryAttempt: update.transientFailureCount, codexRetryAtUnixMs: Date.parse(update.retryAt) }
-    });
-  }
+    return undefined;
+  });
 }
 
 export function codexRecoveryJobId(job: BackendJob): string {
@@ -3509,7 +4752,7 @@ export async function runStdioEngine(
           ok: false,
           kind: "error",
           code: "REQUEST_TOO_LARGE",
-          message: "request exceeds the 1 MiB protocol limit"
+          message: "request exceeds the 1,000,000-byte protocol limit"
         })) break;
         continue;
       }

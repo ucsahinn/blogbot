@@ -3,14 +3,26 @@ import { createRoot } from "react-dom/client";
 
 import { App } from "./App.tsx";
 import { createInvokeBridge, type BlogbotBridge, type InvokeTransport } from "./bridge.ts";
-import { createDemoTransport } from "./demo-data.ts";
+import {
+  createDemoTransport,
+  DEMO_REVIEW_MEDIA_BYTES,
+  DEMO_REVIEW_MEDIA_SHA256
+} from "./demo-data.ts";
 import "./styles.css";
 
 async function createQaBridge(): Promise<BlogbotBridge> {
-  const state = new URLSearchParams(window.location.search).get("state") ?? "ready";
+  const requestedState = new URLSearchParams(window.location.search).get("state");
+  if (requestedState) window.sessionStorage.setItem("blogbot.qa.state", requestedState);
+  const state = requestedState ?? window.sessionStorage.getItem("blogbot.qa.state") ?? "ready";
   if (state === "error") throw new Error("QA_SENTINEL: Yerel engine başlatılamadı.");
   if (state === "loading") return new Promise<BlogbotBridge>(() => undefined);
   const base = createDemoTransport();
+  if (state === "materialization-ready" && window.sessionStorage.getItem("blogbot.qa.materialization-target") === "saved") {
+    await base("save_setup_connector", {
+      connector: "site",
+      config: { repositoryPath: "C:\\OPE-Demo", publicSiteUrl: "", mode: "LOCAL_ONLY" }
+    });
+  }
   let bootstrapCompleted = false;
   let bootstrapCalls = 0;
   let setupTargetSaved = false;
@@ -74,6 +86,34 @@ async function createQaBridge(): Promise<BlogbotBridge> {
       if (bootstrapCalls > 1) bootstrapCompleted = false;
     }
     const value = await base(command, args);
+    if (state === "materialization-ready" && command === "save_setup_connector") {
+      window.sessionStorage.setItem("blogbot.qa.materialization-target", "saved");
+    }
+    if (state === "missing-media" && command === "get_review_revision") {
+      const revision = structuredClone(value) as { media: Array<Record<string, unknown>> };
+      revision.media = [];
+      return revision;
+    }
+    if (state === "materialization-ready" && command === "preview_publication") {
+      const payload = args?.payload as { files?: Array<{ content?: unknown }> } | undefined;
+      const files = payload?.files ?? [];
+      const revisionId = String(args?.revisionId ?? "");
+      const mediaReferences = files.filter((file) => {
+        const content = file.content as { kind?: unknown; revisionId?: unknown; sha256?: unknown; byteSize?: unknown } | undefined;
+        return content?.kind === "engine-media-ref" &&
+          content.revisionId === revisionId &&
+          revisionId === "rev-identity" &&
+          content.sha256 === DEMO_REVIEW_MEDIA_SHA256 &&
+          content.byteSize === DEMO_REVIEW_MEDIA_BYTES;
+      });
+      if (files.length !== 5 || mediaReferences.length !== 2) {
+        throw new Error("QA_SENTINEL: MATERIALIZATION_BUNDLE_INCOMPLETE");
+      }
+      return value;
+    }
+    if (state === "materialization-ready" && command === "materialize_local_preview") {
+      return { ...(value as Record<string, unknown>), written: 5 };
+    }
     if (state === "publish-ready" && command === "enqueue_publication") {
       publicationEnqueued = true;
     }

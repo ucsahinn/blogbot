@@ -13,6 +13,14 @@ export type LocalQueueName =
 
 const POLL_MS = 500;
 const STOP_WAIT_MS = 10_000;
+/**
+ * How long a finished or dead-lettered row is kept. Terminal rows carry their
+ * full payload, so an unpruned table grows for the lifetime of the workspace
+ * and every claim scans a larger index. The window is deliberately long: after
+ * a row is pruned its deterministic key is enqueueable again, so it must
+ * outlive any recovery path that could still replay the same work.
+ */
+const TERMINAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 const QUEUE_PLANS: Record<LocalQueueName, { retryLimit: number; retryDelaySeconds: number }> = {
   "blogbot.source-scan": { retryLimit: 5, retryDelaySeconds: 30 },
@@ -95,6 +103,11 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
         "UPDATE blogbot_local_queue_jobs SET state = 'created', available_at_unix_ms = $1, updated_at_unix_ms = $1 WHERE state = 'active'",
         [now]
       );
+      try {
+        await this.pruneTerminated(now);
+      } catch {
+        // Retention is housekeeping. A workspace must still start when it fails.
+      }
       if (generation !== this.lifecycleGeneration || this.stopping) return;
       this.started = true;
     })();
@@ -135,13 +148,14 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
     this.assertStarted();
     const id = deterministicQueueJobId(idempotencyKey);
     const now = Date.now();
+    const availableAt = now + Math.max(0, options?.startAfterSeconds ?? 0) * 1_000;
     return this.database.transaction(async (transaction) => {
       await transaction.query(
         `INSERT INTO blogbot_local_queue_jobs
           (id, queue_name, payload, state, attempts, available_at_unix_ms, updated_at_unix_ms)
          VALUES ($1, $2, $3::jsonb, 'created', 0, $4, $5)
          ON CONFLICT (id) DO NOTHING`,
-        [id, name, JSON.stringify(data), now + Math.max(0, options?.startAfterSeconds ?? 0) * 1_000, now]
+        [id, name, JSON.stringify(data), availableAt, now]
       );
       const existing = await transaction.query<QueueRow>(
         "SELECT id, queue_name, payload, state, attempts, available_at_unix_ms FROM blogbot_local_queue_jobs WHERE id = $1",
@@ -150,6 +164,18 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
       const row = existing.rows[0];
       if (!row || row.queue_name !== name || canonicalJson(row.payload) !== canonicalJson(data)) {
         throw new Error("IDEMPOTENCY_KEY_REUSED: queue key already belongs to different payload");
+      }
+      // A dead letter must not absorb a later request for the same durable
+      // work. Recovery paths re-enqueue a deterministic key and would otherwise
+      // be handed a job id no worker can claim, i.e. success they did not earn.
+      // 'completed' stays inert so finished work is never silently redone.
+      if (row.state === "failed") {
+        await transaction.query(
+          `UPDATE blogbot_local_queue_jobs
+              SET state = 'created', attempts = 0, available_at_unix_ms = $2, updated_at_unix_ms = $3
+            WHERE id = $1 AND state = 'failed'`,
+          [id, availableAt, now]
+        );
       }
       return id;
     });
@@ -226,6 +252,12 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
         [job.id, Date.now()]
       );
     } catch {
+      // Shutdown tears down the resources handlers depend on (fetcher sidecar,
+      // Codex CLI, sockets), so a throw here says nothing about the job. Leave
+      // the row 'active' and let start()'s recovery hand it back on the next
+      // launch, exactly as it does after a hard kill; writing a terminal state
+      // would dead-letter healthy work on its first attempt.
+      if (this.stopping) return;
       const plan = QUEUE_PLANS[worker.queue];
       const row = await this.database.query<{ attempts: number }>(
         "SELECT attempts FROM blogbot_local_queue_jobs WHERE id = $1",
@@ -241,6 +273,21 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
         [job.id, retryable ? "created" : "failed", retryable ? now + plan.retryDelaySeconds * 1_000 : now, now]
       );
     }
+  }
+
+  /**
+   * Drops terminal rows past the retention window. Safe to call from start()
+   * before the runtime is marked started, and safe to repeat from a periodic
+   * maintenance pass; only 'completed' and 'failed' rows are ever removed.
+   */
+  async pruneTerminated(nowMs = Date.now()): Promise<number> {
+    const removed = await this.database.query<{ id: string }>(
+      `DELETE FROM blogbot_local_queue_jobs
+        WHERE state IN ('completed', 'failed') AND updated_at_unix_ms < $1
+        RETURNING id`,
+      [nowMs - TERMINAL_RETENTION_MS]
+    );
+    return removed.rows.length;
   }
 
   private async claim(name: LocalQueueName): Promise<LocalJob<object> | null> {

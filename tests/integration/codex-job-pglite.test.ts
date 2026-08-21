@@ -197,3 +197,57 @@ test("Codex queue worker delegates only the typed queue message", async () => {
   assert.equal(workerId, "codex-worker-1");
   assert.deepEqual(processed, [message]);
 });
+
+test("the transient retry budget survives the requeue-claim cycle so the limit stays reachable", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-codex-retry-budget-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  t.after(() => repository.close());
+  const store = new PGliteCodexJobStore(repository.getDatabase());
+
+  const reserved = await store.reserveQueued(submission);
+  assert.equal(reserved.created, true);
+
+  const claimed = await store.claimQueued({
+    jobId: submission.jobId,
+    idempotencyKey: submission.idempotencyKey,
+    generation: reserved.snapshot.version
+  });
+  assert.equal(claimed.claimed, true);
+
+  // One transient Codex failure spends one unit of the retry budget.
+  const requeued = await store.returnToQueued({
+    jobId: submission.jobId,
+    expectedVersion: claimed.snapshot.version,
+    failure: "EXECUTION_FAILED",
+    transientFailureCount: 1,
+    retryAt: "2026-08-19T10:00:00.000Z"
+  });
+  assert.equal(requeued.transientFailureCount, 1);
+
+  // The queue redelivers the job. Claiming it must not reset the budget, or
+  // `transientFailureCount` can never exceed 1, RETRY_LIMIT_REACHED becomes
+  // unreachable, and a permanently failing job retries forever.
+  const reclaimed = await store.claimQueued({
+    jobId: submission.jobId,
+    idempotencyKey: submission.idempotencyKey,
+    generation: requeued.version
+  });
+  assert.equal(reclaimed.claimed, true);
+  assert.equal(
+    reclaimed.snapshot.transientFailureCount,
+    1,
+    "claiming a redelivered job must carry the spent retry budget into the RUNNING snapshot"
+  );
+
+  // A restart must not hand the job a fresh budget either.
+  const recovered = await new PGliteCodexJobStore(repository.getDatabase())
+    .recoverInterrupted(submission.jobId);
+  assert.equal(recovered.recovered, true);
+  assert.equal(recovered.snapshot?.state, "QUEUED");
+  assert.equal(
+    recovered.snapshot?.transientFailureCount,
+    1,
+    "restart recovery must not reset the spent retry budget"
+  );
+});

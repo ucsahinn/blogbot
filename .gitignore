@@ -9,7 +9,6 @@ __pycache__/
 *.pyc
 .env
 .env.*
-!.env.example
 *.pem
 *.key
 *.pfx
@@ -22,6 +21,11 @@ artifacts/
 test-results/
 playwright-report/
 output/
+/build/
+/IDEA.md
+/.claude/
+/apps/desktop/src-tauri/binaries/*.exe
+/apps/desktop/src-tauri/resources/secure-restore/*.exe
 .debug-local/
 .debug-pg/
 .tmp-pg/

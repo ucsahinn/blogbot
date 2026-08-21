@@ -314,3 +314,145 @@ test("retryable source scan failures return to the durable queue", async (t) => 
   assert.equal(reclaimed.scan.attempts, 2);
   await backend.close();
 });
+
+test("SOURCE.SCAN follows a sitemap index and atomically persists its URL-set entries", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-source-scan-sitemap-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await seedSources(dataDir, [
+    source("source-sitemap", "https://scan.example/sitemap.xml")
+  ]);
+
+  const documents = new Map<string, string>([
+    ["https://scan.example/sitemap.xml", `<sitemapindex>
+      <sitemap><loc>https://scan.example/news.xml</loc></sitemap>
+    </sitemapindex>`],
+    ["https://scan.example/news.xml", `<urlset>
+      <url><loc>https://scan.example/stories/one</loc></url>
+      <url><loc>https://scan.example/stories/two</loc></url>
+    </urlset>`]
+  ]);
+  const transport: FetchTransport = {
+    resolve: async () => ["93.184.216.34"],
+    request: async (plan) => ({
+      status: 200,
+      headers: { "content-type": "application/xml" },
+      body: encoder.encode(documents.get(plan.url) ?? "")
+    })
+  };
+  const runtime = await createPersistentEngineProtocol(dataDir, {
+    sourceTransport: transport
+  });
+  let runtimeClosed = false;
+  t.after(async () => {
+    if (!runtimeClosed) await runtime.close();
+  });
+
+  const accepted = await runtime.handle({
+    version: 1,
+    id: "scan-sitemap-envelope",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "scan-sitemap-request",
+      idempotencyKey: "scan-sitemap-key",
+      expectedVersion: 0,
+      kind: "SOURCE.SCAN",
+      payload: {
+        targets: [{ sourceId: "source-sitemap", expectedVersion: 1 }]
+      }
+    }
+  });
+  assert.equal(accepted.ok, true);
+  const settled = await waitForBatch(
+    runtime,
+    "scan-sitemap-key",
+    (runs) => runs[0]?.state === "SUCCEEDED"
+  );
+  assert.equal(settled[0]?.entriesAdded, 2);
+  await runtime.close();
+  runtimeClosed = true;
+
+  const backend = await PGliteBackendRepository.open(dataDir);
+  const repository = await PGliteSourceRepository.fromDatabase(backend.getDatabase());
+  const scanned = await repository.getSource("source-sitemap");
+  assert.equal(scanned.kind, "SITEMAP");
+  assert.equal(scanned.version, 2);
+  assert.equal(scanned.lastTest?.entryCount, 2);
+  assert.deepEqual(scanned.discoveredFeeds, ["https://scan.example/news.xml"]);
+  assert.deepEqual(
+    (await repository.listEntries("source-sitemap")).map((entry) => entry.url),
+    [
+      "https://scan.example/stories/one",
+      "https://scan.example/stories/two"
+    ]
+  );
+  await backend.close();
+});
+
+test("SOURCE.SCAN leaves the source untouched when a child sitemap is malformed", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "blogbot-source-scan-sitemap-fail-"));
+  const dataDir = join(root, "pgdata");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await seedSources(dataDir, [
+    source("source-sitemap-fail", "https://scan.example/sitemap.xml")
+  ]);
+
+  const documents = new Map<string, string>([
+    ["https://scan.example/sitemap.xml", `<sitemapindex>
+      <sitemap><loc>https://scan.example/good.xml</loc></sitemap>
+      <sitemap><loc>https://scan.example/bad.xml</loc></sitemap>
+    </sitemapindex>`],
+    ["https://scan.example/good.xml", `<urlset>
+      <url><loc>https://scan.example/stories/partial</loc></url>
+    </urlset>`],
+    ["https://scan.example/bad.xml", `<urlset><url><loc>https://scan.example/stories/broken</loc></url>`]
+  ]);
+  const transport: FetchTransport = {
+    resolve: async () => ["93.184.216.34"],
+    request: async (plan) => ({
+      status: 200,
+      headers: { "content-type": "application/xml" },
+      body: encoder.encode(documents.get(plan.url) ?? "")
+    })
+  };
+  const runtime = await createPersistentEngineProtocol(dataDir, {
+    sourceTransport: transport
+  });
+  let runtimeClosed = false;
+  t.after(async () => {
+    if (!runtimeClosed) await runtime.close();
+  });
+  await runtime.handle({
+    version: 1,
+    id: "scan-sitemap-fail-envelope",
+    kind: "command",
+    command: {
+      version: 1,
+      requestId: "scan-sitemap-fail-request",
+      idempotencyKey: "scan-sitemap-fail-key",
+      expectedVersion: 0,
+      kind: "SOURCE.SCAN",
+      payload: {
+        targets: [{ sourceId: "source-sitemap-fail", expectedVersion: 1 }]
+      }
+    }
+  });
+  const settled = await waitForBatch(
+    runtime,
+    "scan-sitemap-fail-key",
+    (runs) => runs[0]?.state === "FAILED"
+  );
+  assert.equal(settled[0]?.error?.code, "INVALID_SITEMAP");
+  assert.equal(settled[0]?.error?.retryable, false);
+  await runtime.close();
+  runtimeClosed = true;
+
+  const backend = await PGliteBackendRepository.open(dataDir);
+  const repository = await PGliteSourceRepository.fromDatabase(backend.getDatabase());
+  const untouched = await repository.getSource("source-sitemap-fail");
+  assert.equal(untouched.version, 1);
+  assert.equal(untouched.lastTest, undefined);
+  assert.deepEqual(await repository.listEntries("source-sitemap-fail"), []);
+  await backend.close();
+});

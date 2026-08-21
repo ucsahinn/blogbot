@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::github_publication::{
-    reconcile, ApprovedClaim, FileContent, PublicationConfig,
-    PublicationBundlePolicy as ApprovedBundlePolicy,
-    PublicationFile as NativePublicationFile,
+    reconcile, ApprovedClaim, FileContent, GithubRestPort,
+    PublicationBundlePolicy as ApprovedBundlePolicy, PublicationConfig, PublicationError,
+    PublicationFile as NativePublicationFile, RETRY_AFTER_SECONDS,
 };
 use crate::github_rest_adapter::GithubRestAdapter;
 use crate::secure_store;
@@ -90,24 +90,32 @@ pub struct DeviceAuthorization {
     interval: u64,
 }
 
-#[derive(Debug, Clone)]
-pub enum TokenPoll {
-    Authorized(String),
+enum TokenPoll {
+    Authorized(secure_store::SecretBytes),
     Pending,
     SlowDown,
     Expired,
     AccessDenied,
 }
 
-pub trait GitHubAuthTransport: Send + Sync {
+trait GitHubAuthTransport: Send + Sync {
     fn request_device_code(&self, client_id: &str) -> Result<Value, String>;
     fn poll_access_token(&self, client_id: &str, device_code: &str) -> Result<TokenPoll, String>;
     fn validate_token(&self, token: &str) -> Result<String, String>;
 }
 
-pub trait GitHubTokenStore: Send + Sync {
-    fn load(&self, path: &Path) -> Result<Vec<u8>, String>;
+trait GitHubTokenStore: Send + Sync {
+    fn load(&self, path: &Path) -> Result<secure_store::SecretBytes, String>;
     fn store(&self, path: &Path, token: &[u8]) -> Result<(), String>;
+    fn authorization_state(
+        &self,
+        path: &Path,
+    ) -> Result<secure_store::GithubAuthorizationState, String>;
+    fn store_authorization_state(
+        &self,
+        path: &Path,
+        state: secure_store::GithubAuthorizationState,
+    ) -> Result<(), String>;
     fn clear(&self, path: &Path) -> Result<(), String>;
 }
 
@@ -126,19 +134,73 @@ impl Clock for SystemClock {
 
 struct DpapiTokenStore;
 impl GitHubTokenStore for DpapiTokenStore {
-    fn load(&self, path: &Path) -> Result<Vec<u8>, String> {
+    fn load(&self, path: &Path) -> Result<secure_store::SecretBytes, String> {
         secure_store::load_github_token_at(path)
     }
     fn store(&self, path: &Path, token: &[u8]) -> Result<(), String> {
         secure_store::store_github_token_at(path, token)
     }
+    fn authorization_state(
+        &self,
+        path: &Path,
+    ) -> Result<secure_store::GithubAuthorizationState, String> {
+        secure_store::load_github_authorization_state_at(path)
+    }
+    fn store_authorization_state(
+        &self,
+        path: &Path,
+        state: secure_store::GithubAuthorizationState,
+    ) -> Result<(), String> {
+        secure_store::store_github_authorization_state_at(path, state)
+    }
     fn clear(&self, path: &Path) -> Result<(), String> {
-        match std::fs::remove_file(path) {
+        let token_result = match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err("GITHUB_TOKEN_CLEAR_FAILED".into()),
-        }
+        };
+        let state_result = secure_store::clear_github_authorization_state_at(path);
+        token_result.and(state_result)
     }
+}
+
+fn authorization_ready(store: &dyn GitHubTokenStore, token_path: &Path) -> bool {
+    load_authorized_token(store, token_path).is_ok()
+}
+
+fn load_authorized_token(
+    store: &dyn GitHubTokenStore,
+    token_path: &Path,
+) -> Result<secure_store::SecretBytes, String> {
+    if !matches!(
+        store.authorization_state(token_path),
+        Ok(secure_store::GithubAuthorizationState::Validated)
+    ) {
+        return Err("GITHUB_REAUTHORIZATION_REQUIRED".into());
+    }
+    store
+        .load(token_path)
+        .map_err(|_| "GITHUB_REAUTHORIZATION_REQUIRED".to_string())
+}
+
+fn latch_reauthorization_required(
+    store: &dyn GitHubTokenStore,
+    token_path: &Path,
+) -> Result<(), String> {
+    if store
+        .store_authorization_state(
+            token_path,
+            secure_store::GithubAuthorizationState::ReauthorizationRequired,
+        )
+        .is_ok()
+    {
+        return Ok(());
+    }
+    // If the latch cannot be persisted, deleting both records is the only
+    // restart-safe fail-closed state. A token must never remain publishable
+    // merely because the authorization-state write failed.
+    let _ = store.clear(token_path);
+    Err("GITHUB_AUTHORIZATION_STATE_STORE_FAILED".into())
 }
 
 struct ReqwestGitHubAuthTransport {
@@ -174,7 +236,7 @@ impl GitHubAuthTransport for ReqwestGitHubAuthTransport {
         )
     }
     fn poll_access_token(&self, client_id: &str, device_code: &str) -> Result<TokenPoll, String> {
-        let value = self.post_form(
+        let mut value = self.post_form(
             ACCESS_TOKEN_ENDPOINT,
             &[
                 ("client_id", client_id),
@@ -182,8 +244,13 @@ impl GitHubAuthTransport for ReqwestGitHubAuthTransport {
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ],
         )?;
-        if let Some(token) = value.get("access_token").and_then(Value::as_str) {
-            return Ok(TokenPoll::Authorized(token.into()));
+        if let Some(Value::String(token)) = value
+            .as_object_mut()
+            .and_then(|object| object.remove("access_token"))
+        {
+            return Ok(TokenPoll::Authorized(secure_store::SecretBytes::new(
+                token.into_bytes(),
+            )?));
         }
         match value.get("error").and_then(Value::as_str) {
             Some("authorization_pending") => Ok(TokenPoll::Pending),
@@ -200,7 +267,12 @@ impl GitHubAuthTransport for ReqwestGitHubAuthTransport {
             .bearer_auth(token)
             .header("Accept", "application/vnd.github+json")
             .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(|_| "GITHUB_TOKEN_VALIDATION_FAILED".to_string())?;
+        if matches!(response.status().as_u16(), 401 | 403) {
+            return Err("GITHUB_REAUTHORIZATION_REQUIRED".into());
+        }
+        let response = response
+            .error_for_status()
             .map_err(|_| "GITHUB_TOKEN_VALIDATION_FAILED".to_string())?;
         response
             .headers()
@@ -384,7 +456,7 @@ fn validate_claim(claim: &ClaimedPublication) -> bool {
         && claim
             .prior_result_ref
             .as_ref()
-            .map_or(true, |value| value.len() <= 512)
+            .is_none_or(|value| value.len() <= 512)
         && !claim.required_checks.is_empty()
         && claim.required_checks.len() <= 32
         && claim
@@ -497,6 +569,25 @@ where
             "lastError": last_error,
             "retryAfterMs": retry_after_ms
         }),
+        Err(error) if error == "GITHUB_REAUTHORIZATION_REQUIRED" => json!({
+            "version": 1,
+            "id": format!("native-complete-{effect_id}"),
+            "kind": "publication.broker.complete",
+            "effectId": effect_id,
+            "claimAttempt": claim.claim_attempt,
+            "state": "UNKNOWN",
+            "lastError": "GITHUB_REAUTHORIZATION_REQUIRED",
+            "retryAfterMs": u64::from(RETRY_AFTER_SECONDS) * 1_000
+        }),
+        Err(error) if error == "REQUIRED_CHECK_FAILED" => json!({
+            "version": 1,
+            "id": format!("native-complete-{effect_id}"),
+            "kind": "publication.broker.complete",
+            "effectId": effect_id,
+            "claimAttempt": claim.claim_attempt,
+            "state": "FAILED",
+            "lastError": "REQUIRED_CHECK_FAILED"
+        }),
         Err(_) => json!({
             "version": 1,
             "id": format!("native-complete-{effect_id}"),
@@ -542,7 +633,7 @@ impl GitHubBroker {
     }
 
     pub fn status(&self, token_path: Option<&Path>) -> DeviceFlowResult {
-        if token_path.is_some_and(|path| self.store.load(path).is_ok()) {
+        if token_path.is_some_and(|path| authorization_ready(self.store.as_ref(), path)) {
             let mut result = DeviceFlowResult::state(
                 "authorized",
                 false,
@@ -550,6 +641,18 @@ impl GitHubBroker {
             );
             result.scopes = Some(vec![OAUTH_SCOPE.into()]);
             return result;
+        }
+        if token_path.is_some_and(|path| {
+            matches!(
+                self.store.authorization_state(path),
+                Ok(secure_store::GithubAuthorizationState::ReauthorizationRequired)
+            )
+        }) {
+            return DeviceFlowResult::state(
+                "reauthorization-required",
+                false,
+                "GitHub yetkilendirmesi yenilenmeden yayın yapılamaz.",
+            );
         }
         if self.pending.lock().is_ok_and(|pending| pending.is_some()) {
             return DeviceFlowResult::state(
@@ -645,16 +748,28 @@ impl GitHubBroker {
                 ))
             }
             TokenPoll::Authorized(token) => {
-                if token.is_empty() || token.len() > 1024 {
-                    *guard = None;
-                    return Err("GITHUB_TOKEN_INVALID".into());
-                }
-                let scopes = self.transport.validate_token(&token)?;
+                let scopes = match self.transport.validate_token(token.expose_str()) {
+                    Ok(scopes) => scopes,
+                    Err(error) if error == "GITHUB_REAUTHORIZATION_REQUIRED" => {
+                        *guard = None;
+                        latch_reauthorization_required(self.store.as_ref(), token_path)?;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                };
                 if !has_repo_scope(&scopes) {
                     *guard = None;
                     return Err("GITHUB_REPO_SCOPE_REQUIRED".into());
                 }
                 self.store.store(token_path, token.as_bytes())?;
+                if let Err(error) = self.store.store_authorization_state(
+                    token_path,
+                    secure_store::GithubAuthorizationState::Validated,
+                ) {
+                    let _ = self.store.clear(token_path);
+                    *guard = None;
+                    return Err(error);
+                }
                 *guard = None;
                 let mut result = DeviceFlowResult::state(
                     "authorized",
@@ -698,8 +813,37 @@ impl GitHubBroker {
         }
     }
 
-    pub fn publication_ready(&self, token_path: &Path) -> bool {
-        self.store.load(token_path).is_ok()
+    pub fn publication_readiness(&self, token_path: &Path) -> Result<(), String> {
+        if authorization_ready(self.store.as_ref(), token_path) {
+            Ok(())
+        } else {
+            Err("GITHUB_REAUTHORIZATION_REQUIRED".into())
+        }
+    }
+
+    /// Reads the current tip of a repository's base branch.
+    ///
+    /// Approval binds a revision to `targetBaseSha`, and that value has to exist
+    /// before the draft is materialized. Nothing captured it, so the
+    /// `publication-target` quality gate stayed NOT_RUN and no revision in
+    /// PUBLISH mode could ever be approved. Setup calls this once the repository
+    /// is chosen; a stale value is still caught later by the reconciler's
+    /// BASE_SHA_MISMATCH check.
+    pub fn base_sha(
+        &self,
+        token_path: &Path,
+        repository: &str,
+        base_branch: &str,
+    ) -> Result<String, String> {
+        let token = load_authorized_token(self.store.as_ref(), token_path)?;
+        let mut github = GithubRestAdapter::new(token)?;
+        match GithubRestPort::base_sha(&mut github, repository, base_branch) {
+            Err(error) if error == "GITHUB_REAUTHORIZATION_REQUIRED" => {
+                latch_reauthorization_required(self.store.as_ref(), token_path)?;
+                Err(error)
+            }
+            result => result,
+        }
     }
 }
 
@@ -707,6 +851,28 @@ pub struct NativePublicationEffects<'a> {
     store: &'a dyn GitHubTokenStore,
     token_path: &'a Path,
     trusted_repository: &'a str,
+}
+
+/// Decides whether a failed reconcile pass may be retried.
+///
+/// `PublicationError::remote` documents that a retry is safe: network
+/// interruptions, rate limits and transient GitHub errors all produce it.
+/// Reporting those as the caller's terminal `FAILED` made an approved
+/// publication unrecoverable, because the outbox idempotency key collides with
+/// the failed effect and no later attempt is ever made. Validation errors stay
+/// terminal: they mean the approved state no longer matches the remote, which a
+/// retry cannot repair.
+pub(crate) fn outcome_for_reconcile_error(
+    error: &PublicationError,
+) -> Result<PublicationEffectOutcome, String> {
+    if error.code == "REMOTE_FAILURE" {
+        return Ok(PublicationEffectOutcome::Waiting {
+            result_ref: String::new(),
+            last_error: Some(error.code.to_string()),
+            retry_after_ms: u64::from(RETRY_AFTER_SECONDS) * 1_000,
+        });
+    }
+    Err(error.code.to_string())
 }
 
 impl PublicationBrokerEffects for NativePublicationEffects<'_> {
@@ -719,12 +885,7 @@ impl PublicationBrokerEffects for NativePublicationEffects<'_> {
         if !repository_matches_trusted(&claim.target_repository, self.trusted_repository) {
             return Err("PUBLICATION_REPOSITORY_NOT_CONFIGURED".into());
         }
-        let mut token_bytes = self.store.load(self.token_path)?;
-        let token = String::from_utf8(token_bytes.clone()).map_err(|_| {
-            token_bytes.fill(0);
-            "GITHUB_TOKEN_INVALID".to_string()
-        })?;
-        token_bytes.fill(0);
+        let token = load_authorized_token(self.store, self.token_path)?;
         let mut github = GithubRestAdapter::new(token)?;
         let approved_head_sha = match claim.prior_result_ref.as_deref() {
             Some(value) => approved_head_from_result_ref(value)?,
@@ -774,8 +935,21 @@ impl PublicationBrokerEffects for NativePublicationEffects<'_> {
             required_checks: claim.required_checks,
             deploy_workflow: claim.deploy_workflow,
         };
-        let result =
-            reconcile(&approved, &config, &mut github).map_err(|error| error.code.to_string())?;
+        let result = match reconcile(&approved, &config, &mut github) {
+            Ok(result) => result,
+            // `PublicationError::remote` documents that a retry is safe: network
+            // interruptions, rate limits and transient GitHub errors all produce
+            // it. Collapsing it into the caller's terminal `FAILED` arm made an
+            // approved publication unrecoverable, because the outbox idempotency
+            // key collides with the failed effect and no later attempt is made.
+            // Validation errors stay terminal: they mean the approved state no
+            // longer matches the remote and a new approval is required.
+            Err(error) if error.code == "GITHUB_REAUTHORIZATION_REQUIRED" => {
+                latch_reauthorization_required(self.store, self.token_path)?;
+                return Err("GITHUB_REAUTHORIZATION_REQUIRED".into());
+            }
+            Err(error) => return outcome_for_reconcile_error(&error),
+        };
         if result.status == "SUCCEEDED" {
             Ok(PublicationEffectOutcome::Succeeded {
                 result_ref: result.result_ref,
@@ -794,7 +968,7 @@ impl PublicationBrokerEffects for NativePublicationEffects<'_> {
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use serde_json::json;
@@ -971,9 +1145,125 @@ mod tests {
     }
 
     #[test]
+    fn failed_required_checks_keep_the_actionable_terminal_code() {
+        struct RequiredCheckFailed;
+        impl PublicationBrokerEffects for RequiredCheckFailed {
+            fn execute(
+                &self,
+                _command: &serde_json::Value,
+            ) -> Result<PublicationEffectOutcome, String> {
+                Err("REQUIRED_CHECK_FAILED".into())
+            }
+        }
+        let mut requests = Vec::new();
+
+        let result = drive_publication_broker(
+            "effect-1",
+            |request| {
+                requests.push(request.clone());
+                match request["kind"].as_str() {
+                    Some("publication.broker.claim") => Ok(valid_claim()),
+                    Some("publication.broker.complete") => {
+                        Ok(json!({"ok":true,"value":{"state":"FAILED"}}))
+                    }
+                    _ => Err("unexpected".into()),
+                }
+            },
+            &RequiredCheckFailed,
+        )
+        .unwrap();
+
+        assert_eq!(result["state"], "FAILED");
+        assert_eq!(requests[1]["state"], "FAILED");
+        assert_eq!(requests[1]["lastError"], "REQUIRED_CHECK_FAILED");
+        assert!(requests[1].get("retryAfterMs").is_none());
+    }
+
+    #[test]
+    fn reauthorization_is_reconciled_as_retryable_with_the_stable_code() {
+        struct ReauthorizationRequired;
+        impl PublicationBrokerEffects for ReauthorizationRequired {
+            fn execute(
+                &self,
+                _command: &serde_json::Value,
+            ) -> Result<PublicationEffectOutcome, String> {
+                Err("GITHUB_REAUTHORIZATION_REQUIRED".into())
+            }
+        }
+        let mut requests = Vec::new();
+        let result = drive_publication_broker(
+            "effect-1",
+            |request| {
+                requests.push(request.clone());
+                match request["kind"].as_str() {
+                    Some("publication.broker.claim") => Ok(valid_claim()),
+                    Some("publication.broker.complete") => {
+                        Ok(json!({"ok":true,"value":{"state":"UNKNOWN"}}))
+                    }
+                    _ => Err("unexpected".into()),
+                }
+            },
+            &ReauthorizationRequired,
+        )
+        .unwrap();
+        assert_eq!(result["state"], "UNKNOWN");
+        assert_eq!(requests[1]["state"], "UNKNOWN");
+        assert_eq!(requests[1]["lastError"], "GITHUB_REAUTHORIZATION_REQUIRED");
+        assert_eq!(requests[1]["retryAfterMs"], 30_000);
+    }
+
+    #[test]
+    fn a_retry_safe_remote_failure_is_never_reported_as_terminal() {
+        use crate::github_publication::PublicationError;
+
+        let remote = PublicationError {
+            code: "REMOTE_FAILURE",
+            safe_message: "GitHub base lookup failed; retry is safe".into(),
+        };
+        match super::outcome_for_reconcile_error(&remote) {
+            Ok(PublicationEffectOutcome::Waiting {
+                result_ref,
+                last_error,
+                retry_after_ms,
+            }) => {
+                assert!(
+                    result_ref.is_empty(),
+                    "no result ref exists before a successful pass"
+                );
+                assert_eq!(last_error.as_deref(), Some("REMOTE_FAILURE"));
+                assert!(
+                    retry_after_ms > 0,
+                    "a retryable effect needs a retry deadline"
+                );
+            }
+            Ok(PublicationEffectOutcome::Succeeded { .. }) => {
+                panic!("a failed reconcile pass must never report success")
+            }
+            Err(code) => panic!("a retry-safe failure must stay retryable, got {code}"),
+        }
+
+        // A validation failure means the approved state no longer matches the
+        // remote, so it must stay terminal rather than retry forever.
+        let validation = PublicationError {
+            code: "BASE_SHA_MISMATCH",
+            safe_message: "approved base SHA no longer matches".into(),
+        };
+        match super::outcome_for_reconcile_error(&validation) {
+            Err(code) => assert_eq!(code, "BASE_SHA_MISMATCH"),
+            Ok(_) => panic!("a validation failure must stay terminal"),
+        }
+    }
+
+    #[test]
     fn native_publication_requires_the_configured_repository() {
-        assert!(super::repository_matches_trusted("Owner/Site", "owner/site"));
-        assert!(!super::repository_matches_trusted("owner/other", "owner/site"));
+        assert!(super::repository_matches_trusted(
+            "Owner/Site",
+            "owner/site"
+        ));
+        assert!(!super::repository_matches_trusted(
+            "owner/other",
+            "owner/site"
+        ));
         assert!(!super::repository_matches_trusted("owner/site", ""));
     }
 
@@ -1056,6 +1346,13 @@ mod tests {
         assert!(!super::has_repo_scope("repository"));
     }
 
+    #[test]
+    fn publication_token_loading_never_reintroduces_a_plaintext_clone() {
+        let source = include_str!("github_broker.rs");
+        assert!(!source.contains(&["token_bytes", ".clone()"].concat()));
+        assert!(!source.contains(&["String", "::from_utf8(token"].concat()));
+    }
+
     struct FakeClock(AtomicU64);
     impl super::Clock for FakeClock {
         fn now(&self) -> u64 {
@@ -1065,7 +1362,7 @@ mod tests {
 
     struct FakeTransport {
         polls: Mutex<VecDeque<super::TokenPoll>>,
-        validated: Mutex<Vec<String>>,
+        validated: AtomicUsize,
     }
     impl super::GitHubAuthTransport for FakeTransport {
         fn request_device_code(&self, client_id: &str) -> Result<serde_json::Value, String> {
@@ -1088,27 +1385,51 @@ mod tests {
                 .ok_or_else(|| "unexpected poll".into())
         }
         fn validate_token(&self, token: &str) -> Result<String, String> {
-            self.validated.lock().unwrap().push(token.into());
+            assert!(!token.is_empty());
+            self.validated.fetch_add(1, Ordering::SeqCst);
             Ok("repo, workflow".into())
         }
     }
 
     #[derive(Default)]
-    struct FakeStore(Mutex<Option<Vec<u8>>>);
+    struct FakeStore {
+        token: Mutex<Option<Vec<u8>>>,
+        state: Mutex<Option<crate::secure_store::GithubAuthorizationState>>,
+    }
     impl super::GitHubTokenStore for FakeStore {
-        fn load(&self, _path: &std::path::Path) -> Result<Vec<u8>, String> {
-            self.0
+        fn load(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<crate::secure_store::SecretBytes, String> {
+            let bytes = self
+                .token
                 .lock()
                 .unwrap()
                 .clone()
-                .ok_or_else(|| "absent".into())
+                .ok_or_else(|| "absent".to_string())?;
+            crate::secure_store::SecretBytes::new(bytes)
         }
         fn store(&self, _path: &std::path::Path, token: &[u8]) -> Result<(), String> {
-            *self.0.lock().unwrap() = Some(token.to_vec());
+            *self.token.lock().unwrap() = Some(token.to_vec());
+            Ok(())
+        }
+        fn authorization_state(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<crate::secure_store::GithubAuthorizationState, String> {
+            self.state.lock().unwrap().ok_or_else(|| "absent".into())
+        }
+        fn store_authorization_state(
+            &self,
+            _path: &std::path::Path,
+            state: crate::secure_store::GithubAuthorizationState,
+        ) -> Result<(), String> {
+            *self.state.lock().unwrap() = Some(state);
             Ok(())
         }
         fn clear(&self, _path: &std::path::Path) -> Result<(), String> {
-            *self.0.lock().unwrap() = None;
+            *self.token.lock().unwrap() = None;
+            *self.state.lock().unwrap() = None;
             Ok(())
         }
     }
@@ -1119,9 +1440,11 @@ mod tests {
         let transport = Arc::new(FakeTransport {
             polls: Mutex::new(VecDeque::from([
                 super::TokenPoll::Pending,
-                super::TokenPoll::Authorized("native-token".into()),
+                super::TokenPoll::Authorized(
+                    crate::secure_store::SecretBytes::new(b"native-token".to_vec()).unwrap(),
+                ),
             ])),
-            validated: Mutex::new(Vec::new()),
+            validated: AtomicUsize::new(0),
         });
         let store = Arc::new(FakeStore::default());
         let broker = GitHubBroker::with_parts(transport.clone(), store.clone(), clock.clone());
@@ -1149,12 +1472,117 @@ mod tests {
             .unwrap();
         assert_eq!(authorized.status, "authorized");
         assert_eq!(
-            store.0.lock().unwrap().as_deref(),
+            store.token.lock().unwrap().as_deref(),
             Some(b"native-token".as_slice())
         );
         assert_eq!(
-            transport.validated.lock().unwrap().as_slice(),
-            ["native-token"]
+            *store.state.lock().unwrap(),
+            Some(crate::secure_store::GithubAuthorizationState::Validated)
         );
+        assert_eq!(transport.validated.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn authorization_state_is_restart_persistent_and_fail_closed() {
+        let store = Arc::new(FakeStore::default());
+        *store.token.lock().unwrap() = Some(b"native-token".to_vec());
+        let path = std::path::Path::new("ignored");
+        let broker = GitHubBroker::with_parts(
+            Arc::new(FakeTransport {
+                polls: Mutex::new(VecDeque::new()),
+                validated: AtomicUsize::new(0),
+            }),
+            store.clone(),
+            Arc::new(FakeClock(AtomicU64::new(100))),
+        );
+
+        assert!(
+            broker.publication_readiness(path).is_err(),
+            "missing state must fail closed"
+        );
+        assert_eq!(broker.status(Some(path)).status, "logged-out");
+        *store.state.lock().unwrap() =
+            Some(crate::secure_store::GithubAuthorizationState::Validated);
+        assert!(broker.publication_readiness(path).is_ok());
+        assert_eq!(broker.status(Some(path)).status, "authorized");
+
+        super::latch_reauthorization_required(store.as_ref(), path).unwrap();
+        let restarted = GitHubBroker::with_parts(
+            Arc::new(FakeTransport {
+                polls: Mutex::new(VecDeque::new()),
+                validated: AtomicUsize::new(0),
+            }),
+            store.clone(),
+            Arc::new(FakeClock(AtomicU64::new(200))),
+        );
+        assert!(restarted.publication_readiness(path).is_err());
+        assert_eq!(
+            restarted.status(Some(path)).status,
+            "reauthorization-required"
+        );
+        restarted.clear_authorization(path).unwrap();
+        assert!(store.token.lock().unwrap().is_none());
+        assert!(store.state.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn rejected_device_token_persists_reauthorization_state() {
+        struct RejectingTransport;
+        impl super::GitHubAuthTransport for RejectingTransport {
+            fn request_device_code(&self, _: &str) -> Result<serde_json::Value, String> {
+                Ok(json!({
+                    "device_code":"native-only-device-code",
+                    "user_code":"ABCD-EFGH",
+                    "verification_uri":"https://github.com/login/device",
+                    "expires_in":900,
+                    "interval":5
+                }))
+            }
+            fn poll_access_token(&self, _: &str, _: &str) -> Result<super::TokenPoll, String> {
+                Ok(super::TokenPoll::Authorized(
+                    crate::secure_store::SecretBytes::new(b"rejected-token".to_vec()).unwrap(),
+                ))
+            }
+            fn validate_token(&self, _: &str) -> Result<String, String> {
+                Err("GITHUB_REAUTHORIZATION_REQUIRED".into())
+            }
+        }
+        let store = Arc::new(FakeStore::default());
+        let clock = Arc::new(FakeClock(AtomicU64::new(100)));
+        let broker =
+            GitHubBroker::with_parts(Arc::new(RejectingTransport), store.clone(), clock.clone());
+        broker
+            .begin_device_authorization("Iv1.0123456789abcdef")
+            .unwrap();
+        clock.0.store(105, Ordering::SeqCst);
+        assert_eq!(
+            broker
+                .poll_device_authorization(std::path::Path::new("ignored"))
+                .unwrap_err(),
+            "GITHUB_REAUTHORIZATION_REQUIRED"
+        );
+        assert_eq!(
+            *store.state.lock().unwrap(),
+            Some(crate::secure_store::GithubAuthorizationState::ReauthorizationRequired)
+        );
+        assert!(broker
+            .publication_readiness(std::path::Path::new("ignored"))
+            .is_err());
+    }
+
+    #[test]
+    fn native_publication_rejects_missing_authorization_state_before_http() {
+        let store = FakeStore::default();
+        *store.token.lock().unwrap() = Some(b"native-token".to_vec());
+        let effects = super::NativePublicationEffects {
+            store: &store,
+            token_path: std::path::Path::new("ignored"),
+            trusted_repository: "owner/site",
+        };
+        let command = valid_claim()["value"].clone();
+        match effects.execute(&command) {
+            Err(error) => assert_eq!(error, "GITHUB_REAUTHORIZATION_REQUIRED"),
+            Ok(_) => panic!("publication must stop before constructing an HTTP adapter"),
+        }
     }
 }

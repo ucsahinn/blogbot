@@ -1,78 +1,96 @@
-# Örnek statik site GitHub Actions dağıtım sözleşmesi
+# Statik site GitHub Actions dağıtım sözleşmesi
 
-Bu belge örnek bir yayın workflow'u sözleşmesini açıklar. Yeni kullanıcılar bu
-sözleşmeyi kendi proje deposu, workflow adı ve hosting hedefine göre yapılandırır.
-Workflow'un repository'de bulunması GitHub environment, secret veya hosting
-hedefinin hazır olduğunu kanıtlamaz.
+Bu belge Blogbot masaüstü uygulamasının onaylanmış bir statik site revizyonunu
+GitHub üzerinden dağıtma sözleşmesini açıklar. Workflow dosyasının depoda
+bulunması GitHub environment, secret veya hosting hedefinin hazır olduğunu
+kanıtlamaz.
 
-Blogbot runtime'ı uzak hosting'e bağlanmaz. Hosting yalnız doğrulanmış statik
-site artifact'ını barındırır; Blogbot API'si, veritabanı, kuyruğu veya işçisi
-orada çalışmaz.
+Blogbot runtime'ı uzak hosting'e kurulmaz. Uzak sistem yalnız merge edilmiş
+statik siteyi barındırır; Blogbot API'si, veritabanı, kuyruğu veya işçisi orada
+çalışmaz.
 
-## Mevcut tetikleme modeli
+## Uygulamanın tetikleme sözleşmesi
 
-Workflow yalnız `workflow_dispatch` ile çalışır ve `production` environment
-kapısından geçer. Şu girdileri zorunlu tutar:
+Dağıtım ancak aşağıdaki yerel zincir tamamlandıktan sonra denenir:
 
-- `artifact_run_id`: site artifact'ını üreten başarılı Actions run kimliği;
-- `artifact_name`: projenin artifact adı;
-- `release_id`: 16–64 karakter küçük harf hexadecimal release kimliği;
-- `sha256`: beklenen 64 karakter SHA-256.
+1. İnsan onayı değişmez revizyon hashine bağlıdır.
+2. Yayın önizlemesi aynı revizyon ve dosya hashlerine bağlıdır.
+3. Pull request head SHA ve yapılandırılmış required check'ler yeniden doğrulanır.
+4. Pull request merge edilir ve kesin merge_sha alınır.
+5. Blogbot, onaylı yayın kimliği, revizyon ve merge_sha üzerinden 64 karakterlik hexadecimal intent_key üretir.
+6. blogbot/deploy-intents/<intent_key> ref'i kesin merge_sha üzerinde oluşturulur veya aynı SHA ile var olduğu doğrulanır.
+7. Yapılandırılmış workflow, bu intent ref'i üzerinde workflow_dispatch ile başlatılır.
+8. Kabul edilen dispatch blogbot/deploy-dispatched/<intent_key> ref'iyle işaretlenir.
 
-Pull request, push veya yerel Blogbot işlemi bu workflow'u mevcut haliyle
-kendiliğinden başlatmaz. Planlanan tek-tık yayın bağlantısı tamamlanana kadar
-otomatik ürün davranışı olarak belgelenmemelidir.
+Workflow'un zorunlu girdileri yalnız şunlardır:
+
+- intent_key: 64 karakter küçük harf hexadecimal dağıtım kimliği;
+- merge_sha: yayımlanacak kesin Git merge commit SHA'sı.
+
+Dispatch body'sinin sözleşmesi:
+
+~~~yaml
+ref: blogbot/deploy-intents/<intent_key>
+inputs:
+  intent_key: <intent_key>
+  merge_sha: <merge_sha>
+~~~
+
+Yerel ve native publisher aynı ref adlarını ve aynı iki input'u kullanır.
+Tekrar denemede Blogbot önce intent/dispatched marker'larını ve aynı intent
+branch + merge SHA için mevcut workflow run'ını kontrol eder. Bu nedenle yerel
+kayıt kaybolsa veya işlem dispatch sonrasında kesilse bile ikinci bir uzak
+etki oluşturulmaz. Bir marker farklı SHA gösteriyorsa işlem fail-closed durur.
+
+Workflow içeriği doğrudan merge_sha ile belirtilen merge sonucundan build
+etmelidir. Uygulamanın üretmediği artifact_run_id, artifact_name, release_id
+veya önceden hesaplanmış artifact sha256 alanları bu runtime sözleşmesinin
+parçası değildir. Artifact üreten ayrı bir workflow kullanılacaksa onun
+artifact kimliği ve bütünlük zinciri, bu merge-SHA sözleşmesinin ardından
+workflow'un kendi güvenlik sınırı içinde kurulmalıdır.
 
 ## Production environment secret'ları
 
-- `DEPLOY_HOST`: projenin hosting hostname veya sabit IP'si;
-- `DEPLOY_USER`: yalnız release helper çalıştırabilen deploy kullanıcısı;
-- `DEPLOY_ROOT`: hedef sistemdeki release dizini;
-- `DEPLOY_SSH_PRIVATE_KEY`: yalnız GitHub production environment içinde tutulan
-  SSH anahtarı;
-- `DEPLOY_SSH_KNOWN_HOSTS`: fingerprint'i önceden sabitlenmiş `known_hosts`
-  satırları.
+- DEPLOY_HOST: hosting hostname veya sabit IP;
+- DEPLOY_USER: yalnız release helper çalıştırabilen kullanıcı;
+- DEPLOY_ROOT: hedef sistemdeki versioned release dizini;
+- DEPLOY_SSH_PRIVATE_KEY: yalnız GitHub production environment içinde tutulan deploy anahtarı;
+- DEPLOY_SSH_KNOWN_HOSTS: önceden sabitlenmiş host fingerprint satırları.
 
 Bu değerler Blogbot.exe'ye, yerel engine'e, PR build job'ına veya repository
-dosyalarına verilmez.
+dosyalarına verilmez. Masaüstü uygulaması Hetzner deploy anahtarı saklamaz.
 
-## Workflow adımları
+## Workflow güvenlik adımları
 
-1. Belirtilen Actions run'ından tek bir `.tar.gz` artifact indirilir.
-2. `release_id`, `sha256`, artifact sayısı ve gerçek SHA-256 doğrulanır.
-3. SSH anahtarı ve `known_hosts` yalnız geçici runner dosyalarına, `umask 077`
-   ile yazılır.
-4. Artifact ile hedef hosting ortamının
-   kullanıcısına aktarılır.
-5. Uzak helper `--apply` ile versioned release'i doğrular ve atomik olarak
-   etkinleştirir.
-6. Geçici credential dosyaları `always()` adımında silinir.
+1. workflow_dispatch dışında tetikleyici kabul edilmez.
+2. intent_key ve merge_sha biçimleri doğrulanır.
+3. Checkout/build kesin merge_sha üzerinden yapılır; hareketli branch yeniden çözülmez.
+4. Üretilen statik site doğrulanır ve deployment tek bir production environment onayından geçer.
+5. SSH anahtarı ve known_hosts yalnız geçici runner dosyalarına en dar izinlerle yazılır.
+6. Versioned release uzak helper tarafından doğrulanır ve atomik etkinleştirilir.
+7. Geçici credential dosyaları always() adımında silinir.
 
-Workflow `contents: read` ve `actions: read` izinleriyle, production deploy için
-tek concurrency kilidiyle çalışır. Üçüncü taraf action tam commit SHA'sına
-sabitlenmiştir.
+Workflow asgari izinlerle ve production deploy için tek concurrency kilidiyle
+çalışmalıdır. Üçüncü taraf action'lar tam commit SHA'sına sabitlenmelidir.
 
-## Eksik production kanıtları
+## Yerel ve canlı kanıt sınırı
 
-Bu repository denetiminde aşağıdakiler canlı olarak doğrulanmamıştır:
+Repository testleri yalnız yerel sözleşmeyi ve idempotency davranışını kanıtlar:
 
-- GitHub `production` environment ve reviewer ayarı;
-- secret değerleri;
-- artifact üreten gerçek proje workflow'u;
-- hosting deploy kullanıcısı ve dizinleri;
-- staging sağlık/SEO probe'u ve rollback tatbikatı;
-- Blogbot publisher'ın bu workflow'u başlatan son kullanıcı akışı.
+~~~powershell
+node --test --experimental-transform-types tests/unit/github-effects.test.ts
+npm.cmd run native:test
+~~~
 
-İlk kurulum, secret yazımı, workflow dispatch, staging, production ve rollback
-ayrı açık onay gerektirir.
+Bu kontroller uzak dispatch veya deploy yapmaz. Aşağıdakiler ayrıca ve açık
+operatör onayıyla canlı doğrulanmalıdır:
 
-## Yerel doğrulama
+- GitHub production environment ve reviewer ayarı;
+- workflow dosyasının hedef depoda varlığı ve input uyumu;
+- required check adları;
+- environment secret'ları;
+- hosting kullanıcı/dizin izinleri;
+- staging sağlık/SEO probe'u ve rollback tatbikatı.
 
-YAML ve script davranışı repository testleri içinde kontrol edilir:
-
-```powershell
-npm.cmd run test:integration
-```
-
-Bu komut yerel sözleşmeyi test eder; uzak deploy yapmaz ve uzak sistem
-hazırlığını kanıtlamaz.
+İlk kurulum, credential yazımı, workflow dispatch, staging, production ve
+rollback ayrı açık onay gerektirir.

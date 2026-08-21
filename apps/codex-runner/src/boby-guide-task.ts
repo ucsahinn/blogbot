@@ -1,4 +1,4 @@
-import type { StructuredCodexTask } from "./structured-runner.ts";
+import { safeConversationSessionId, type StructuredCodexTask } from "./structured-runner.ts";
 
 export const BOBY_GUIDE_SYSTEM_PROMPT = `Sen Boby'sin: OPE'un Türkçe, yerel öncelikli editör rehberisin.
 Luna Low senin hızlı sohbet ve muhakeme profilindir. Her zaman Boby olarak konuş; altyapı, model, oturum veya entegrasyon adını kendiliğinden anlatma.
@@ -54,12 +54,13 @@ const outputSchema = {
 
 export function createBobyGuideTask(input: BobyGuideInput): StructuredCodexTask<BobyGuideOutput> {
   const boundedQuestion = input.question.trim().slice(0, 600);
+  const conversationSessionId = safeConversationSessionId(input.sessionId);
   if (!boundedQuestion) throw new Error("BOBY_QUESTION_REQUIRED");
   return {
     taskKind: "BOBY_GUIDE",
     persistSession: true,
-    ...(input.sessionId ? { conversationSessionId: input.sessionId.slice(0, 128) } : {}),
-    input: { system: `${BOBY_GUIDE_SYSTEM_PROMPT}\nOPE dÄ±ÅŸÄ±ndaki gÃ¼nlÃ¼k iÅŸler, genel sohbet, kiÅŸisel tavsiye, kodlama veya baÅŸka uygulama istekleri bu rolÃ¼n dÄ±ÅŸÄ±ndadÄ±r. BunlarÄ± kÄ±sa ve nazikÃ§e reddet; kullanÄ±cÄ±yÄ± yalnÄ±zca OPE iÃ§indeki kaynak, araÅŸtÄ±rma, taslak, inceleme, SEO, takvim, yayÄ±n, ayar, tanÄ±lama veya Boby kullanÄ±mÄ±na yÃ¶nlendir.`, question: boundedQuestion, activePage: input.activePage.slice(0, 64), runtimeState: input.runtimeState, safeWorkspaceSummary: input.safeWorkspaceSummary },
+    ...(conversationSessionId ? { conversationSessionId } : {}),
+    input: { system: `${BOBY_GUIDE_SYSTEM_PROMPT}\nOPE dışındaki günlük işler, genel sohbet, kişisel tavsiye, kodlama veya başka uygulama istekleri bu rolün dışındadır. Bunları kısa ve nazikçe reddet; kullanıcıyı yalnızca OPE içindeki kaynak, araştırma, taslak, inceleme, SEO, takvim, yayın, ayar, tanılama veya Boby kullanımına yönlendir.`, question: boundedQuestion, activePage: input.activePage.slice(0, 64), runtimeState: input.runtimeState, safeWorkspaceSummary: input.safeWorkspaceSummary },
     outputSchema,
     validateOutput(value): value is BobyGuideOutput {
       if (!value || typeof value !== "object" || Array.isArray(value)) return false;

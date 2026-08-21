@@ -30,7 +30,20 @@ export function nextSetupPrerequisite(
 
   for (const id of requiredIds) {
     const check = checks.find((candidate) => candidate.id === id);
-    if (check && check.state !== "READY") return check;
+    if (!check) {
+      const scope = ["github", "site-adapter", "deploy"].includes(id)
+        ? "PUBLISH"
+        : "WRITE";
+      return {
+        id,
+        state: "MISSING",
+        scope,
+        label: id,
+        detail: "Zorunlu kurulum denetimi raporlanmadı; hazır sayılmadı.",
+        userAction: "Kurulum durumunu yenileyin ve eksik bileşeni yeniden doğrulayın."
+      };
+    }
+    if (check.state !== "READY") return check;
   }
   return undefined;
 }

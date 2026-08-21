@@ -1,8 +1,43 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { createInvokeBridge } from "../src/bridge.ts";
 import { createDemoTransport } from "../src/demo-data.ts";
+
+test("demo revision media references match the immutable bytes served for that revision", async () => {
+  const bridge = createInvokeBridge(createDemoTransport());
+  const revision = await bridge.getReviewRevision("rev-demo-001");
+
+  assert.ok(revision.media.length > 0);
+  for (const asset of revision.media) {
+    assert.match(asset.sha256, /^[a-f0-9]{64}$/u);
+    assert.ok(Number.isSafeInteger(asset.byteSize) && asset.byteSize! > 0);
+    assert.match(asset.filename, /^[a-z0-9][a-z0-9._-]*\.png$/u);
+
+    const result = await bridge.readRevisionMedia({
+      revisionId: revision.id,
+      sha256: asset.sha256
+    });
+    const bytes = Buffer.from(result.contentBase64, "base64");
+
+    assert.equal(result.mimeType, "image/png");
+    assert.equal(bytes.subarray(12, 16).toString("ascii"), "IHDR");
+    assert.equal(bytes.readUInt32BE(16), asset.width);
+    assert.equal(bytes.readUInt32BE(20), asset.height);
+    assert.equal(bytes.byteLength, asset.byteSize);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), asset.sha256);
+  }
+
+  await assert.rejects(
+    bridge.readRevisionMedia({ revisionId: "rev-other", sha256: revision.media[0]!.sha256 }),
+    /Revizyon medyas/u
+  );
+  await assert.rejects(
+    bridge.readRevisionMedia({ revisionId: revision.id, sha256: "0".repeat(64) }),
+    /Revizyon medyas/u
+  );
+});
 
 test("demo transport exposes the canonical connector snapshot required at bootstrap", async () => {
   const bridge = createInvokeBridge(createDemoTransport());
@@ -229,7 +264,21 @@ test("demo transport supports the approval-bound local publication preview lifec
   await bridge.approveRevision({
     revisionId: revision.id,
     expectedHash: revision.revisionHash,
-    warningSetHash: "a".repeat(64)
+    warningSetHash: "a".repeat(64),
+    packageVersion: 3,
+    attestation: {
+      editorialReview: {
+        reviewer: "Demo Editor",
+        sourceRoles: [
+          { sourceId: "snap-fido", role: "primary" },
+          { sourceId: "snap-standard", role: "primary" },
+          { sourceId: "snap-google", role: "supporting" },
+          { sourceId: "snap-independent", role: "independent" }
+        ]
+      },
+      expertReview: null,
+      ethicsReview: null
+    }
   });
   const preview = await bridge.previewPublication({
     revisionId: revision.id,

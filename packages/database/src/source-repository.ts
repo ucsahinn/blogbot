@@ -5,6 +5,7 @@ import { PGlite } from "@electric-sql/pglite";
 
 import { canonicalJson } from "../../editorial/src/revision.ts";
 import {
+  isEncryptedEnvelopeV2,
   JsonProtector
 } from "./encrypted-json.ts";
 import type {
@@ -260,6 +261,16 @@ CREATE TABLE IF NOT EXISTS blogbot_encryption_migrations (
   version integer NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS blogbot_encryption_migration_progress (
+  scope text NOT NULL,
+  table_name text NOT NULL,
+  last_key text NOT NULL,
+  PRIMARY KEY (scope, table_name)
+);
+
+CREATE INDEX IF NOT EXISTS blogbot_source_entry_versions_expiry_idx
+  ON blogbot_source_entry_versions (captured_at, source_id, external_id, content_hash);
+
 CREATE TABLE IF NOT EXISTS blogbot_source_scan_requests (
   idempotency_key text PRIMARY KEY,
   request_fingerprint text NOT NULL
@@ -282,6 +293,12 @@ CREATE INDEX IF NOT EXISTS blogbot_source_scans_batch_idx
 // Keep an interactive PGlite read from waiting behind hundreds of individual
 // source-entry statements in a single scan transaction.
 const SOURCE_ENTRY_WRITE_BATCH_SIZE = 32;
+
+// Retention and the legacy migrations walk the whole version ledger, which on a
+// long-running workspace is far larger than anything that may sit in memory or
+// in one transaction at once.
+const SOURCE_ENTRY_PURGE_PAGE_SIZE = 200;
+const SOURCE_MIGRATION_PAGE_SIZE = 200;
 
 export class PGliteSourceRepository implements SourceRepository {
   private constructor(
@@ -683,41 +700,84 @@ export class PGliteSourceRepository implements SourceRepository {
       return entry;
   }
 
+  /**
+   * Retention over the append-only version ledger. The expiry predicate runs in
+   * SQL against the plaintext `captured_at` column and protection is derived
+   * from the three key columns alone, so a purge never opens an envelope: the
+   * previous shape loaded and decrypted every historical capture of every entry
+   * at once, blocking the single PGlite gate for the whole sweep.
+   */
   async purgeExpiredEntries(
     beforeIso: string,
     protectedSourceIds: readonly string[] = []
   ): Promise<number> {
-    const cutoff = Date.parse(beforeIso);
-    if (!Number.isFinite(cutoff)) throw new Error("INVALID_RETENTION_CUTOFF");
+    if (!Number.isFinite(Date.parse(beforeIso))) throw new Error("INVALID_RETENTION_CUTOFF");
     const protectedIds = new Set(protectedSourceIds);
-    const result = await this.database.query<{ source_id?: string; external_id?: string; content_hash?: string; value: unknown }>(
-      `SELECT source_id, external_id, content_hash, value FROM blogbot_source_entry_versions`
-    );
-    const expired: Array<[string, string, string]> = [];
-    for (const row of result.rows) {
-      const sourceId = row.source_id;
-      const externalId = row.external_id;
-      const contentHash = row.content_hash;
-      if (!sourceId || !externalId || !contentHash || protectedIds.has(sourceId)) continue;
-      const entry = this.protector.open<StoredSourceEntry>(
-        row.value,
-        sourceEntryVersionContext(sourceId, externalId, contentHash)
+    let purged = 0;
+    let cursor = { capturedAt: "-infinity", sourceId: "", externalId: "", contentHash: "" };
+    for (;;) {
+      const page = await this.database.query<{
+        source_id?: string;
+        external_id?: string;
+        content_hash?: string;
+        captured_at?: string | Date;
+      }>(
+        `SELECT source_id, external_id, content_hash, captured_at
+           FROM blogbot_source_entry_versions
+          WHERE captured_at < $1::timestamptz
+            AND (captured_at, source_id, external_id, content_hash)
+                > ($2::timestamptz, $3, $4, $5)
+          ORDER BY captured_at, source_id, external_id, content_hash
+          LIMIT $6`,
+        [
+          beforeIso,
+          cursor.capturedAt,
+          cursor.sourceId,
+          cursor.externalId,
+          cursor.contentHash,
+          SOURCE_ENTRY_PURGE_PAGE_SIZE
+        ]
       );
-      const captured = Date.parse(entry.capturedAt ?? "");
-      if (entry.versionId && protectedIds.has(entry.versionId)) continue;
-      if (Number.isFinite(captured) && captured < cutoff) expired.push([sourceId, externalId, contentHash]);
-    }
-    if (expired.length === 0) return 0;
-    await this.database.transaction(async (transaction) => {
-      for (const [sourceId, externalId, contentHash] of expired) {
-        await transaction.query(
-          `DELETE FROM blogbot_source_entry_versions
-            WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
-          [sourceId, externalId, contentHash]
-        );
+      if (page.rows.length === 0) break;
+      const last = page.rows[page.rows.length - 1]!;
+      const expired = page.rows.flatMap((row) => {
+        const { source_id: sourceId, external_id: externalId, content_hash: contentHash } = row;
+        if (!sourceId || !externalId || !contentHash) return [];
+        if (protectedIds.has(sourceId)) return [];
+        // The version id is a pure function of the three key columns, so an
+        // approved revision's cited evidence is recognised without decrypting.
+        if (protectedIds.has(sourceEntryVersionId(sourceId, externalId, contentHash))) return [];
+        return [[sourceId, externalId, contentHash] as const];
+      });
+      if (expired.length > 0) {
+        await this.database.transaction(async (transaction) => {
+          for (const [sourceId, externalId, contentHash] of expired) {
+            await transaction.query(
+              `DELETE FROM blogbot_source_entry_versions
+                WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
+              [sourceId, externalId, contentHash]
+            );
+          }
+          for (const [sourceId, externalId] of new Map(
+            expired.map(([sourceId, externalId]) => [JSON.stringify([sourceId, externalId]), [sourceId, externalId] as const])
+          ).values()) {
+            await repointLatestSourceEntry(transaction, sourceId, externalId);
+          }
+        });
+        purged += expired.length;
       }
-    });
-    return expired.length;
+      // The cursor advances past protected rows too, which still match the
+      // expiry predicate and would otherwise be re-read forever.
+      cursor = {
+        capturedAt: last.captured_at instanceof Date
+          ? last.captured_at.toISOString()
+          : String(last.captured_at),
+        sourceId: last.source_id ?? "",
+        externalId: last.external_id ?? "",
+        contentHash: last.content_hash ?? ""
+      };
+    }
+    return purged;
   }
 
   async getSourceCapabilities(sourceId: string): Promise<SourceCapabilities> {
@@ -998,18 +1058,22 @@ export class PGliteSourceRepository implements SourceRepository {
       if (scan.state === "SUCCEEDED" || scan.state === "REJECTED") {
         return scan;
       }
+      // completedAt has to be settled before the row is written: a retryable
+      // failure re-queues the scan and must not inherit a completion stamp from
+      // an earlier terminal attempt, and a terminal failure must persist the
+      // same completion the caller is told about. Writing first left the durable
+      // row disagreeing with the returned value forever.
       const failed: LocalSourceScan = {
         ...scan,
         state: error.retryable ? "QUEUED" : "FAILED",
         updatedAt: completedAt,
-        error
+        error,
+        ...(error.retryable ? {} : { completedAt })
       };
-      await this.writeScan(transaction, failed);
       if (error.retryable) {
         delete failed.completedAt;
-      } else {
-        failed.completedAt = completedAt;
       }
+      await this.writeScan(transaction, failed);
       return failed;
     });
   }
@@ -1170,39 +1234,67 @@ export class PGliteSourceRepository implements SourceRepository {
   }
 }
 
+/**
+ * Rewrites pre-v2 rows into identity-bound envelopes, or re-opens every sealed
+ * row for an operator-requested integrity pass.
+ *
+ * Each table is walked with a keyset cursor and committed page by page, and the
+ * last completed key is recorded beside the scope so an interrupted upgrade
+ * resumes instead of restarting: a workspace with months of captured feed
+ * entries cannot hold its whole decrypted ledger in one transaction, and a
+ * migration that dies at row zero on every launch never becomes ready.
+ */
 async function encryptLegacySourceRows(
   database: PGlite,
   protector: JsonProtector,
   verifyCompleted = false
 ): Promise<void> {
-  await database.transaction(async (transaction) => {
-    const migration = await transaction.query<{ version: number }>(
-      "SELECT version FROM blogbot_encryption_migrations WHERE scope = 'sources'"
+  const migration = await database.query<{ version: number }>(
+    "SELECT version FROM blogbot_encryption_migrations WHERE scope = 'sources'"
+  );
+  const appliedVersion = migration.rows[0]?.version;
+  if (appliedVersion !== undefined && appliedVersion !== 2) {
+    throw new Error(
+      `LOCAL_ENCRYPTION_MIGRATION_UNSUPPORTED: sources version ${appliedVersion}`
     );
-    const appliedVersion = migration.rows[0]?.version;
-    if (appliedVersion !== undefined && appliedVersion !== 2) {
-      throw new Error(
-        `LOCAL_ENCRYPTION_MIGRATION_UNSUPPORTED: sources version ${appliedVersion}`
-      );
-    }
-    // Normal startup trusts the completed migration sentinel. A full decrypt
-    // sweep remains available through verifyEncryptionIntegrity() for an
-    // operator-initiated diagnostics pass.
-    if (appliedVersion === 2 && !verifyCompleted) return;
-    const sources = await transaction.query<{ id: string; value: unknown }>(
-      "SELECT id, value FROM blogbot_sources"
+  }
+  // Normal startup trusts the completed migration sentinel. A full decrypt
+  // sweep remains available through verifyEncryptionIntegrity() for an
+  // operator-initiated diagnostics pass.
+  if (appliedVersion === 2 && !verifyCompleted) return;
+  const reseal = appliedVersion === undefined;
+
+  for (
+    let cursor = reseal ? await readSourceMigrationProgress(database, "blogbot_sources") : "";
+    ;
+  ) {
+    const sources = await database.query<{ id: string; value: unknown }>(
+      `SELECT id, value FROM blogbot_sources
+        WHERE id > $1 ORDER BY id LIMIT $2`,
+      [cursor, SOURCE_MIGRATION_PAGE_SIZE]
     );
-    for (const row of sources.rows) {
-      if (appliedVersion === 2) {
-        const source = protector.open<LocalSource>(
-          row.value,
-          sourceContext(row.id)
-        );
-        if (source.id !== row.id) {
-          throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+    if (sources.rows.length === 0) break;
+    const lastKey = sources.rows[sources.rows.length - 1]!.id;
+    await database.transaction(async (transaction) => {
+      for (const row of sources.rows) {
+        // Verifying a row an earlier attempt already sealed is strictly stronger
+        // than resealing it, and it stops a resumed migration from failing on
+        // its own committed work.
+        if (!reseal || isEncryptedEnvelopeV2(row.value)) {
+          const source = protector.open<LocalSource>(row.value, sourceContext(row.id));
+          if (source.id !== row.id) {
+            throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+          }
+          continue;
         }
-      } else {
-        const plaintext = protector.openLegacy<LocalSource>(row.value);
+        const plaintext = protector.openLegacy<LocalSource>(
+          row.value,
+          (candidate) =>
+            isLegacySourceRecord(candidate) &&
+            candidate.id === row.id &&
+            typeof candidate.url === "string" &&
+            typeof candidate.status === "string"
+        );
         await transaction.query(
           "UPDATE blogbot_sources SET value = $2::jsonb WHERE id = $1",
           [
@@ -1211,29 +1303,56 @@ async function encryptLegacySourceRows(
           ]
         );
       }
-    }
+      if (reseal) {
+        await writeSourceMigrationProgress(transaction, "blogbot_sources", lastKey);
+      }
+    });
+    cursor = lastKey;
+    if (reseal) reportSourceMigrationProgress("blogbot_sources", cursor);
+  }
 
-    const entries = await transaction.query<{
+  for (
+    let cursor = splitEntryKey(
+      reseal ? await readSourceMigrationProgress(database, "blogbot_source_entries") : ""
+    );
+    ;
+  ) {
+    const entries = await database.query<{
       source_id: string;
       external_id: string;
       value: unknown;
     }>(
-      "SELECT source_id, external_id, value FROM blogbot_source_entries"
+      `SELECT source_id, external_id, value FROM blogbot_source_entries
+        WHERE (source_id, external_id) > ($1, $2)
+        ORDER BY source_id, external_id
+        LIMIT $3`,
+      [cursor[0], cursor[1], SOURCE_MIGRATION_PAGE_SIZE]
     );
-    for (const row of entries.rows) {
-      if (appliedVersion === 2) {
-        const entry = protector.open<StoredSourceEntry>(
-          row.value,
-          sourceEntryContext(row.source_id, row.external_id)
-        );
-        if (
-          entry.sourceId !== row.source_id ||
-          entry.externalId !== row.external_id
-        ) {
-          throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+    if (entries.rows.length === 0) break;
+    const last = entries.rows[entries.rows.length - 1]!;
+    await database.transaction(async (transaction) => {
+      for (const row of entries.rows) {
+        if (!reseal || isEncryptedEnvelopeV2(row.value)) {
+          const entry = protector.open<StoredSourceEntry>(
+            row.value,
+            sourceEntryContext(row.source_id, row.external_id)
+          );
+          if (
+            entry.sourceId !== row.source_id ||
+            entry.externalId !== row.external_id
+          ) {
+            throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+          }
+          continue;
         }
-      } else {
-        const plaintext = protector.openLegacy<StoredSourceEntry>(row.value);
+        const plaintext = protector.openLegacy<StoredSourceEntry>(
+          row.value,
+          (candidate) =>
+            isLegacySourceRecord(candidate) &&
+            candidate.sourceId === row.source_id &&
+            candidate.externalId === row.external_id &&
+            typeof candidate.url === "string"
+        );
         await transaction.query(
           `UPDATE blogbot_source_entries
               SET value = $3::jsonb
@@ -1250,39 +1369,61 @@ async function encryptLegacySourceRows(
           ]
         );
       }
-    }
+      if (reseal) {
+        await writeSourceMigrationProgress(
+          transaction,
+          "blogbot_source_entries",
+          JSON.stringify([last.source_id, last.external_id])
+        );
+      }
+    });
+    cursor = [last.source_id, last.external_id];
+    if (reseal) reportSourceMigrationProgress("blogbot_source_entries", cursor.join("/"));
+  }
 
-    const idempotency = await transaction.query<{
+  for (
+    let cursor = reseal
+      ? await readSourceMigrationProgress(database, "blogbot_source_idempotency")
+      : "";
+    ;
+  ) {
+    const idempotency = await database.query<{
       idempotency_key: string;
       request_fingerprint: string;
       response_json: unknown;
     }>(
-      "SELECT idempotency_key, request_fingerprint, response_json FROM blogbot_source_idempotency"
+      `SELECT idempotency_key, request_fingerprint, response_json
+         FROM blogbot_source_idempotency
+        WHERE idempotency_key > $1
+        ORDER BY idempotency_key
+        LIMIT $2`,
+      [cursor, SOURCE_MIGRATION_PAGE_SIZE]
     );
-    for (const row of idempotency.rows) {
-      if (
-        appliedVersion === 2 &&
-        !/^[a-f0-9]{64}$/u.test(row.request_fingerprint)
-      ) {
-        throw new Error("LOCAL_IDEMPOTENCY_FINGERPRINT_INVALID");
-      }
-      const fingerprint = /^[a-f0-9]{64}$/u.test(row.request_fingerprint)
-        ? row.request_fingerprint
-        : createHash("sha256").update(row.request_fingerprint).digest("hex");
-      const needsReseal = appliedVersion !== 2;
-      if (appliedVersion === 2) {
-        protector.open<LocalSource>(
+    if (idempotency.rows.length === 0) break;
+    const lastKey = idempotency.rows[idempotency.rows.length - 1]!.idempotency_key;
+    await database.transaction(async (transaction) => {
+      for (const row of idempotency.rows) {
+        if (!reseal || isEncryptedEnvelopeV2(row.response_json)) {
+          if (!/^[a-f0-9]{64}$/u.test(row.request_fingerprint)) {
+            throw new Error("LOCAL_IDEMPOTENCY_FINGERPRINT_INVALID");
+          }
+          protector.open<LocalSource>(
+            row.response_json,
+            sourceIdempotencyContext(row.idempotency_key)
+          );
+          continue;
+        }
+        const fingerprint = /^[a-f0-9]{64}$/u.test(row.request_fingerprint)
+          ? row.request_fingerprint
+          : createHash("sha256").update(row.request_fingerprint).digest("hex");
+        const plaintext = protector.openLegacy<LocalSource>(
           row.response_json,
-          sourceIdempotencyContext(row.idempotency_key)
+          (candidate) =>
+            isLegacySourceRecord(candidate) &&
+            typeof candidate.id === "string" &&
+            typeof candidate.url === "string" &&
+            typeof candidate.version === "number"
         );
-      }
-      if (needsReseal) {
-        const responseJson = needsReseal
-          ? protector.seal(
-              protector.openLegacy<LocalSource>(row.response_json),
-              sourceIdempotencyContext(row.idempotency_key)
-            )
-          : row.response_json;
         await transaction.query(
           `UPDATE blogbot_source_idempotency
               SET request_fingerprint = $2,
@@ -1291,162 +1432,309 @@ async function encryptLegacySourceRows(
           [
             row.idempotency_key,
             fingerprint,
-            JSON.stringify(responseJson)
+            JSON.stringify(
+              protector.seal(
+                plaintext,
+                sourceIdempotencyContext(row.idempotency_key)
+              )
+            )
           ]
         );
       }
-    }
-
-    const scanRequests = await transaction.query<{
-      request_fingerprint: string;
-    }>(
-      "SELECT request_fingerprint FROM blogbot_source_scan_requests"
-    );
-    for (const row of scanRequests.rows) {
-      if (!/^[a-f0-9]{64}$/u.test(row.request_fingerprint)) {
-        throw new Error("LOCAL_IDEMPOTENCY_FINGERPRINT_INVALID");
+      if (reseal) {
+        await writeSourceMigrationProgress(
+          transaction,
+          "blogbot_source_idempotency",
+          lastKey
+        );
       }
-    }
+    });
+    cursor = lastKey;
+    if (reseal) reportSourceMigrationProgress("blogbot_source_idempotency", cursor);
+  }
 
-    const scans = await transaction.query<{
-      id: string;
-      value: unknown;
-    }>("SELECT id, value FROM blogbot_source_scans");
+  // A malformed fingerprint is a set-membership question, so it is answered by
+  // one aggregate instead of loading every scan request into memory.
+  const malformedFingerprints = await database.query<{ malformed: string | number }>(
+    `SELECT count(*) AS malformed FROM blogbot_source_scan_requests
+      WHERE request_fingerprint !~ '^[a-f0-9]{64}$'`
+  );
+  if (Number(malformedFingerprints.rows[0]?.malformed ?? 0) > 0) {
+    throw new Error("LOCAL_IDEMPOTENCY_FINGERPRINT_INVALID");
+  }
+
+  // Scan records were never written unsealed, so they are only ever verified.
+  for (let cursor = ""; ;) {
+    const scans = await database.query<{ id: string; value: unknown }>(
+      `SELECT id, value FROM blogbot_source_scans
+        WHERE id > $1 ORDER BY id LIMIT $2`,
+      [cursor, SOURCE_MIGRATION_PAGE_SIZE]
+    );
+    if (scans.rows.length === 0) break;
     for (const row of scans.rows) {
-      const scan = protector.open<LocalSourceScan>(
-        row.value,
-        sourceScanContext(row.id)
-      );
+      const scan = protector.open<LocalSourceScan>(row.value, sourceScanContext(row.id));
       if (scan.id !== row.id) {
         throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
       }
     }
+    cursor = scans.rows[scans.rows.length - 1]!.id;
+  }
 
-    if (appliedVersion === undefined) {
+  if (reseal) {
+    await database.transaction(async (transaction) => {
       await transaction.query(
         `INSERT INTO blogbot_encryption_migrations (scope, version)
          VALUES ('sources', 2)`
       );
-    }
-  });
+      await transaction.query(
+        "DELETE FROM blogbot_encryption_migration_progress WHERE scope = 'sources'"
+      );
+    });
+  }
+}
+
+/**
+ * A legacy row carries no authentication tag over its identity, so the reseal
+ * path has to decide on shape alone whether the value belongs to this row.
+ * Without it the migration would turn whatever JSON happens to sit in the column
+ * into data that passes every later authenticity check.
+ */
+function isLegacySourceRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The composite entry cursor is stored as JSON because a text column cannot
+ * hold a null separator and a feed-supplied external id may contain anything
+ * else.
+ */
+function splitEntryKey(lastKey: string): [string, string] {
+  if (lastKey === "") return ["", ""];
+  try {
+    const parsed: unknown = JSON.parse(lastKey);
+    return Array.isArray(parsed)
+      && typeof parsed[0] === "string"
+      && typeof parsed[1] === "string"
+      ? [parsed[0], parsed[1]]
+      : ["", ""];
+  } catch {
+    return ["", ""];
+  }
+}
+
+async function readSourceMigrationProgress(
+  database: Pick<PGlite, "query">,
+  tableName: string
+): Promise<string> {
+  const result = await database.query<{ last_key: string }>(
+    `SELECT last_key FROM blogbot_encryption_migration_progress
+      WHERE scope = 'sources' AND table_name = $1`,
+    [tableName]
+  );
+  return result.rows[0]?.last_key ?? "";
+}
+
+async function writeSourceMigrationProgress(
+  client: Pick<PGlite, "query">,
+  tableName: string,
+  lastKey: string
+): Promise<void> {
+  await client.query(
+    `INSERT INTO blogbot_encryption_migration_progress (scope, table_name, last_key)
+     VALUES ('sources', $1, $2)
+     ON CONFLICT (scope, table_name) DO UPDATE SET last_key = EXCLUDED.last_key`,
+    [tableName, lastKey]
+  );
+}
+
+/**
+ * The desktop cannot tell a migrating engine from a hung one, because open() has
+ * not resolved and no request is answered yet. The marker carries a table name
+ * and a digest of the last key only, never row contents.
+ */
+function reportSourceMigrationProgress(tableName: string, lastKey: string): void {
+  try {
+    process.stderr.write(
+      `[Blogbot] LOCAL_MIGRATION_PROGRESS ${tableName} ${createHash("sha256").update(lastKey).digest("hex").slice(0, 12)}\n`
+    );
+  } catch {
+    // Progress reporting must never fail a migration page.
+  }
 }
 
 /**
  * Converts the pre-v3 mutable `(source_id, external_id)` cache into an
- * append-only content-addressed ledger. The migration is atomic: a failed
- * conversion leaves the old rows untouched, and a completed conversion removes
- * the duplicate mutable cache so backup size does not silently double.
+ * append-only content-addressed ledger, and completes it by removing the
+ * duplicate mutable cache so backup size does not silently double.
+ *
+ * Conversion runs one page per transaction, and every page is self-consuming:
+ * the legacy rows it converted are deleted in the same transaction, so an
+ * interrupted upgrade resumes from what is left rather than restarting from row
+ * zero. The target insert is content-addressed and idempotent, so replaying a
+ * page that was already committed is a no-op. A single transaction over the
+ * whole ledger could never complete on a workspace with months of captures.
  */
 async function migrateSourceEntryVersions(
   database: PGlite,
   protector: JsonProtector
 ): Promise<void> {
-  await database.transaction(async (transaction) => {
-    const marker = await transaction.query<{ version: number }>(
-      "SELECT version FROM blogbot_source_schema_migrations WHERE scope = 'source_entry_versions'"
-    );
-    const appliedVersion = marker.rows[0]?.version;
-    if (appliedVersion !== undefined && appliedVersion !== 1 && appliedVersion !== 2) {
-      throw new Error(`LOCAL_SOURCE_SCHEMA_MIGRATION_UNSUPPORTED: source_entry_versions version ${appliedVersion}`);
-    }
-    if (appliedVersion === 2) return;
+  const marker = await database.query<{ version: number }>(
+    "SELECT version FROM blogbot_source_schema_migrations WHERE scope = 'source_entry_versions'"
+  );
+  const appliedVersion = marker.rows[0]?.version;
+  if (appliedVersion !== undefined && appliedVersion !== 1 && appliedVersion !== 2) {
+    throw new Error(`LOCAL_SOURCE_SCHEMA_MIGRATION_UNSUPPORTED: source_entry_versions version ${appliedVersion}`);
+  }
+  if (appliedVersion === 2) return;
 
-    if (appliedVersion === 1) {
-      const versions = await transaction.query<{
+  if (appliedVersion === 1) {
+    // `entry_url IS NULL` is itself the resume marker: a converted row no
+    // longer matches, so a page never has to be re-read.
+    for (;;) {
+      const versions = await database.query<{
         source_id: string;
         external_id: string;
         content_hash: string;
         value: unknown;
-      }>("SELECT source_id, external_id, content_hash, value FROM blogbot_source_entry_versions WHERE entry_url IS NULL");
-      for (const row of versions.rows) {
-        const entry = protector.open<StoredSourceEntry>(
-          row.value,
-          sourceEntryVersionContext(row.source_id, row.external_id, row.content_hash)
-        );
-        if (entry.sourceId !== row.source_id || entry.externalId !== row.external_id || entry.contentHash !== row.content_hash) {
-          throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
-        }
-        await transaction.query(
-          `UPDATE blogbot_source_entry_versions
-              SET entry_url = $4
-            WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
-          [row.source_id, row.external_id, row.content_hash, entry.url]
-        );
-      }
-      await transaction.query(
-        "UPDATE blogbot_source_schema_migrations SET version = 2 WHERE scope = 'source_entry_versions'"
+      }>(
+        `SELECT source_id, external_id, content_hash, value
+           FROM blogbot_source_entry_versions
+          WHERE entry_url IS NULL
+          ORDER BY source_id, external_id, content_hash
+          LIMIT $1`,
+        [SOURCE_MIGRATION_PAGE_SIZE]
       );
-      return;
+      if (versions.rows.length === 0) break;
+      await database.transaction(async (transaction) => {
+        for (const row of versions.rows) {
+          const entry = protector.open<StoredSourceEntry>(
+            row.value,
+            sourceEntryVersionContext(row.source_id, row.external_id, row.content_hash)
+          );
+          if (entry.sourceId !== row.source_id || entry.externalId !== row.external_id || entry.contentHash !== row.content_hash) {
+            throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+          }
+          await transaction.query(
+            `UPDATE blogbot_source_entry_versions
+                SET entry_url = $4
+              WHERE source_id = $1 AND external_id = $2 AND content_hash = $3`,
+            [row.source_id, row.external_id, row.content_hash, entry.url]
+          );
+        }
+      });
+      reportSourceMigrationProgress("blogbot_source_entry_versions", versions.rows.at(-1)?.content_hash ?? "");
     }
+    await database.query(
+      "UPDATE blogbot_source_schema_migrations SET version = 2 WHERE scope = 'source_entry_versions'"
+    );
+    return;
+  }
 
-    const entries = await transaction.query<{
+  for (;;) {
+    const entries = await database.query<{
       source_id: string;
       external_id: string;
       sort_at?: string;
       value: unknown;
-    }>("SELECT source_id, external_id, sort_at, value FROM blogbot_source_entries");
-    for (const row of entries.rows) {
-      const legacy = protector.open<StoredSourceEntry>(
-        row.value,
-        sourceEntryContext(row.source_id, row.external_id)
-      );
-      if (legacy.sourceId !== row.source_id || legacy.externalId !== row.external_id) {
-        throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
-      }
-      const contentHash = sourceEntryVersionContentHash(row.source_id, legacy);
-      const capturedAt = legacy.capturedAt && Number.isFinite(Date.parse(legacy.capturedAt))
-        ? legacy.capturedAt
-        : row.sort_at && Number.isFinite(Date.parse(row.sort_at))
-          ? row.sort_at
-          : new Date(0).toISOString();
-      const sortAt = normalizedEntrySortAt(legacy.publishedAt, capturedAt);
-      const stored: StoredSourceEntry = {
-        ...legacy,
-        sourceId: row.source_id,
-        capturedAt,
-        contentHash,
-        versionId: sourceEntryVersionId(row.source_id, row.external_id, contentHash)
-      };
-      await transaction.query(
-        `INSERT INTO blogbot_source_entry_versions (
-           source_id, external_id, content_hash, entry_url, sort_at, captured_at, value
-         ) VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::jsonb)
-         ON CONFLICT (source_id, external_id, content_hash) DO NOTHING`,
-        [
-          row.source_id,
-          row.external_id,
-          contentHash,
-          legacy.url,
-          sortAt,
-          capturedAt,
-          JSON.stringify(protector.seal(stored, sourceEntryVersionContext(row.source_id, row.external_id, contentHash)))
-        ]
-      );
-      await transaction.query(
-        `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (source_id, external_id)
-         DO UPDATE SET content_hash = EXCLUDED.content_hash`,
-        [row.source_id, row.external_id, contentHash]
-      );
-    }
-    if (entries.rows.length > 0) {
-      await transaction.query("DELETE FROM blogbot_source_entries");
-    }
-    await transaction.query(
-      "INSERT INTO blogbot_source_schema_migrations (scope, version) VALUES ('source_entry_versions', 2)"
+    }>(
+      `SELECT source_id, external_id, sort_at, value FROM blogbot_source_entries
+        ORDER BY source_id, external_id
+        LIMIT $1`,
+      [SOURCE_MIGRATION_PAGE_SIZE]
     );
-  });
+    if (entries.rows.length === 0) break;
+    await database.transaction(async (transaction) => {
+      for (const row of entries.rows) {
+        const legacy = protector.open<StoredSourceEntry>(
+          row.value,
+          sourceEntryContext(row.source_id, row.external_id)
+        );
+        if (legacy.sourceId !== row.source_id || legacy.externalId !== row.external_id) {
+          throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
+        }
+        const contentHash = sourceEntryVersionContentHash(row.source_id, legacy);
+        const capturedAt = legacy.capturedAt && Number.isFinite(Date.parse(legacy.capturedAt))
+          ? legacy.capturedAt
+          : row.sort_at && Number.isFinite(Date.parse(row.sort_at))
+            ? row.sort_at
+            : new Date(0).toISOString();
+        const sortAt = normalizedEntrySortAt(legacy.publishedAt, capturedAt);
+        const stored: StoredSourceEntry = {
+          ...legacy,
+          sourceId: row.source_id,
+          capturedAt,
+          contentHash,
+          versionId: sourceEntryVersionId(row.source_id, row.external_id, contentHash)
+        };
+        await transaction.query(
+          `INSERT INTO blogbot_source_entry_versions (
+             source_id, external_id, content_hash, entry_url, sort_at, captured_at, value
+           ) VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::jsonb)
+           ON CONFLICT (source_id, external_id, content_hash) DO NOTHING`,
+          [
+            row.source_id,
+            row.external_id,
+            contentHash,
+            legacy.url,
+            sortAt,
+            capturedAt,
+            JSON.stringify(protector.seal(stored, sourceEntryVersionContext(row.source_id, row.external_id, contentHash)))
+          ]
+        );
+        await transaction.query(
+          `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (source_id, external_id)
+           DO UPDATE SET content_hash = EXCLUDED.content_hash`,
+          [row.source_id, row.external_id, contentHash]
+        );
+        await transaction.query(
+          "DELETE FROM blogbot_source_entries WHERE source_id = $1 AND external_id = $2",
+          [row.source_id, row.external_id]
+        );
+      }
+    });
+    reportSourceMigrationProgress("blogbot_source_entries", entries.rows.at(-1)?.external_id ?? "");
+  }
+  await database.query(
+    "INSERT INTO blogbot_source_schema_migrations (scope, version) VALUES ('source_entry_versions', 2)"
+  );
 }
 
 async function verifySourceEntryVersions(database: PGlite, protector: JsonProtector): Promise<void> {
-  const entries = await database.query<{
+  // The version ledger is the largest table in the workspace, so an explicit
+  // integrity pass reads it in pages rather than materialising all of it.
+  for (let cursor: [string, string, string] = ["", "", ""]; ;) {
+    const entries = await database.query<{
+      source_id: string;
+      external_id: string;
+      content_hash: string;
+      value: unknown;
+    }>(
+      `SELECT source_id, external_id, content_hash, value
+         FROM blogbot_source_entry_versions
+        WHERE (source_id, external_id, content_hash) > ($1, $2, $3)
+        ORDER BY source_id, external_id, content_hash
+        LIMIT $4`,
+      [cursor[0], cursor[1], cursor[2], SOURCE_MIGRATION_PAGE_SIZE]
+    );
+    if (entries.rows.length === 0) break;
+    verifySourceEntryVersionPage(entries.rows, protector);
+    const last = entries.rows[entries.rows.length - 1]!;
+    cursor = [last.source_id, last.external_id, last.content_hash];
+  }
+}
+
+function verifySourceEntryVersionPage(
+  rows: ReadonlyArray<{
     source_id: string;
     external_id: string;
     content_hash: string;
     value: unknown;
-  }>("SELECT source_id, external_id, content_hash, value FROM blogbot_source_entry_versions");
-  for (const row of entries.rows) {
+  }>,
+  protector: JsonProtector
+): void {
+  for (const row of rows) {
     const entry = protector.open<StoredSourceEntry>(
       row.value,
       sourceEntryVersionContext(row.source_id, row.external_id, row.content_hash)
@@ -1459,6 +1747,38 @@ async function verifySourceEntryVersions(database: PGlite, protector: JsonProtec
       sourceEntryVersionContentHash(row.source_id, entry) !== row.content_hash
     ) throw new Error("LOCAL_DATA_IDENTITY_MISMATCH");
   }
+}
+
+/**
+ * The latest pointer has a composite foreign key onto the exact version triple
+ * with ON DELETE CASCADE, so deleting a newer version of an entry also destroys
+ * the (source_id, external_id) pointer — and every listing path is an inner join
+ * on that pointer. A retained older version, including evidence an approved
+ * revision cites, would survive in the ledger while being unreachable from
+ * listEntries, findEntryByUrl and the candidate projection. Re-point at the
+ * newest surviving version, and only when the pointer is actually gone: an
+ * intact pointer already names the most recent capture.
+ */
+async function repointLatestSourceEntry(
+  client: Pick<PGlite, "query">,
+  sourceId: string,
+  externalId: string
+): Promise<void> {
+  await client.query(
+    `INSERT INTO blogbot_source_entry_latest (source_id, external_id, content_hash)
+     SELECT versions.source_id, versions.external_id, versions.content_hash
+       FROM blogbot_source_entry_versions AS versions
+      WHERE versions.source_id = $1
+        AND versions.external_id = $2
+        AND NOT EXISTS (
+          SELECT 1 FROM blogbot_source_entry_latest AS latest
+           WHERE latest.source_id = $1 AND latest.external_id = $2
+        )
+      ORDER BY versions.sort_at DESC, versions.content_hash DESC
+      LIMIT 1
+     ON CONFLICT (source_id, external_id) DO NOTHING`,
+    [sourceId, externalId]
+  );
 }
 
 function sqlValuesPlaceholders(rowCount: number, columnCount: number): string {

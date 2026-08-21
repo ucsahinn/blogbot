@@ -2926,6 +2926,9 @@ strong {
 
 .review-topbar {
   display: flex;
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
   min-height: 91px;
   align-items: center;
   justify-content: space-between;
@@ -3028,6 +3031,9 @@ strong {
 
 .revision-integrity-bar {
   display: flex;
+  position: relative;
+  z-index: 0;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
@@ -3164,8 +3170,23 @@ strong {
 }
 
 .review-content-scroll {
+  min-height: 0;
   flex: 1;
   overflow: auto;
+}
+
+/* EditorialDesk already owns the viewport and its scroll container. Embedded
+   reviews must grow with their content instead of nesting another 100dvh
+   viewport that can leave mouse and touch actions behind the desk tabs. */
+.review-page-embedded .review-workspace {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+}
+
+.review-page-embedded .review-content-scroll {
+  flex: none;
+  overflow: visible;
 }
 
 .article-review-layout {

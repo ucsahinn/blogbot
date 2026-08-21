@@ -8,11 +8,20 @@ import {
   computeWarningSetHash,
   computeRevisionHash,
   evaluatePublishEligibility,
+  publicationSourcesFor,
   validateClaimEvidence,
+  validateRevisionPackageV3,
   type Approval,
+  type ApprovalV3,
   type ArticleRevision,
-  type HighRiskApproval
+  type HighRiskApproval,
+  type PublicationSourceV3,
+  type RevisionPackageV3
 } from "../../packages/editorial/src/revision.ts";
+import type {
+  EditorialApprovalAttestationV3,
+  EditorialAssessmentV3
+} from "../../packages/editorial/src/quality-gates.ts";
 
 function revision(overrides: Partial<ArticleRevision> = {}): ArticleRevision {
   const evidenceExcerpt = "Primary source confirms the event occurred.";
@@ -145,6 +154,122 @@ function approvalFor(value: ArticleRevision): Approval {
     deviceId: "device-1",
     approvedAt: "2026-07-29T10:00:00.000Z",
     warningSetHash: computeWarningSetHash(value.qualityGates ?? [])
+  };
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function v3Assessment(
+  overrides: Partial<EditorialAssessmentV3> = {}
+): EditorialAssessmentV3 {
+  return {
+    articleType: "news",
+    intentSatisfied: true,
+    titleIsHonest: true,
+    originalValuePresent: true,
+    allClaimsVerified: true,
+    sources: [
+      { sourceId: "source-1", cited: true, official: true, role: "primary" },
+      { sourceId: "source-2", cited: true, official: false, role: "independent" }
+    ],
+    singleOfficialSourceRationale: null,
+    authorTransparent: true,
+    aiDisclosureMatchesUsage: true,
+    isYmyl: false,
+    leadHasFiveWOneH: true,
+    unverifiedClaimsClearlyLabeled: true,
+    newsSchemaComplete: true,
+    sensitiveTopic: false,
+    clusterKey: null,
+    aboveFoldAnswersIntent: true,
+    headingHierarchyValid: true,
+    internalLinkCount: 1,
+    internalLinkOmissionRationale: null,
+    ...overrides
+  };
+}
+
+function v3Revision(
+  overrides: Record<string, unknown> = {}
+): RevisionPackageV3 {
+  const instruction = "Kaynaklardan özgün ve iki dilli bir haber hazırla.";
+  const secondSource = {
+    id: "source-2",
+    url: "https://example.net/independent",
+    title: "Independent report",
+    fetchedAt: "2026-07-29T09:05:00.000Z",
+    contentHash: "9".repeat(64),
+    trustStatus: "APPROVED" as const,
+    rightsStatus: "APPROVED" as const
+  };
+  return Object.assign(v2Revision({
+    qualityGates: v2Gates([{
+      id: "editorial-policy",
+      group: "editorial",
+      state: "PASS",
+      detail: "V3 editoryal politika değerlendirmesi onaya hazır.",
+      policyVersion: "3",
+      reasonCode: "CHECKED"
+    }]),
+    sources: [...revision().sources, secondSource]
+  }), {
+    packageVersion: 3 as const,
+    editorialContext: {
+      instruction,
+      instructionHash: sha256(instruction),
+      contentOrigin: "CODEX_ASSISTED" as const,
+      aiDisclosure: "GENERATED_WITH_AI" as const
+    },
+    editorialAssessment: v3Assessment(),
+    publicationSources: [
+      {
+        id: "source-1",
+        title: "Primary source",
+        url: "https://example.com/primary",
+        role: "primary" as const
+      },
+      {
+        id: "source-2",
+        title: "Independent report",
+        url: "https://example.net/independent",
+        role: "independent" as const
+      }
+    ],
+    deployWorkflow: "deploy.yml",
+    requiredChecks: ["build", "test / windows"],
+    ...overrides
+  }) as RevisionPackageV3;
+}
+
+function v3Attestation(
+  overrides: Partial<EditorialApprovalAttestationV3> = {}
+): EditorialApprovalAttestationV3 {
+  return {
+    editorialReview: {
+      reviewer: "Deniz Editör",
+      sourceRoles: [
+        { sourceId: "source-1", role: "primary" },
+        { sourceId: "source-2", role: "independent" }
+      ]
+    },
+    expertReview: null,
+    ethicsReview: null,
+    ...overrides
+  };
+}
+
+function approvalV3For(
+  value: RevisionPackageV3,
+  attestation = v3Attestation()
+): ApprovalV3 {
+  return {
+    ...approvalFor(value),
+    packageVersion: 3,
+    approvalType: "EDITORIAL",
+    attestation,
+    attestationHash: sha256(canonicalJson(attestation))
   };
 }
 
@@ -631,6 +756,74 @@ test("every V2 package field participates in exact-hash approval", () => {
   }
 });
 
+test("a package with no claims is never publishable on vacuous claim checks", () => {
+  const claimless = v2Revision({ claims: [] });
+
+  assert.deepEqual(
+    evaluatePublishEligibility(claimless, approvalFor(claimless), {
+      now: new Date("2026-07-30T09:05:00.000Z"),
+      publishingPaused: false
+    }),
+    { eligible: false, reason: "NEEDS_SOURCE" }
+  );
+});
+
+test("an own __proto__ key cannot collapse two revisions onto one hash", () => {
+  // JSON.parse produces `__proto__` as a genuine own key, so anything arriving
+  // over the NDJSON boundary can carry one.
+  assert.throws(
+    () => canonicalJson(JSON.parse('{"a":1,"__proto__":{"x":1}}')),
+    /Unsafe canonical JSON key/u
+  );
+  assert.equal(canonicalJson(JSON.parse('{"a":1}')), '{"a":1}');
+
+  const smuggled = v2Revision({
+    translationParity: JSON.parse(`{"status":"MATCHED","reportHash":"${"b".repeat(64)}","__proto__":{"leak":true}}`)
+  });
+  assert.throws(() => computeRevisionHash(smuggled), /Unsafe canonical JSON key/u);
+});
+
+test("an extra publication-target gate reports its own block, not a generic package failure", () => {
+  const validateRevisionPackageV2 = (
+    revisionDomain as unknown as {
+      validateRevisionPackageV2(value: ArticleRevision): boolean;
+    }
+  ).validateRevisionPackageV2;
+  const withTargetGate = v2Revision({
+    qualityGates: v2Gates([{
+      id: "publication-target",
+      group: "security",
+      state: "NOT_RUN",
+      detail: "Canlı hedefin tam depo ve temel SHA doğrulaması henüz çalıştırılmadı.",
+      policyVersion: "2",
+      reasonCode: "PUBLICATION_TARGET_UNVERIFIED"
+    }])
+  });
+
+  assert.equal(withTargetGate.qualityGates?.length, 7);
+  assert.equal(validateRevisionPackageV2(withTargetGate), true);
+  assert.deepEqual(
+    evaluatePublishEligibility(withTargetGate, approvalFor(withTargetGate), {
+      now: new Date("2026-07-30T09:05:00.000Z"),
+      publishingPaused: false
+    }),
+    { eligible: false, reason: "QUALITY_GATES_NOT_READY" }
+  );
+});
+
+test("the acceptable V1 warning allowlist holds gate ids only", () => {
+  const allowlist = (
+    revisionDomain as unknown as {
+      ACCEPTABLE_EDITORIAL_WARNING_IDS: ReadonlySet<string>;
+    }
+  ).ACCEPTABLE_EDITORIAL_WARNING_IDS;
+  const gateIds = new Set((v2Revision().qualityGates ?? []).map((gate) => gate.id));
+
+  for (const id of allowlist) {
+    assert.ok(gateIds.has(id), `${id} is compared against gate ids but is not one`);
+  }
+});
+
 test("stale high-risk approval is rejected independently", () => {
   const original = v2Revision({ riskLevel: "HIGH" });
   const editorialApproval = approvalFor(original);
@@ -657,4 +850,346 @@ test("stale high-risk approval is rejected independently", () => {
     ),
     { eligible: false, reason: "HIGH_RISK_APPROVAL_HASH_MISMATCH" }
   );
+});
+
+test("the V2 golden revision hash remains unchanged by the V3 contract", () => {
+  assert.equal(
+    computeRevisionHash(v2Revision()),
+    "9167f0538e7640e49130296f543ae8433191b56a3ec7c80a108f0087cedd9031"
+  );
+});
+
+test("a complete V3 package validates and every approval-bound V3 field changes its hash", () => {
+  const original = v3Revision();
+  const originalHash = computeRevisionHash(original);
+  const assessment = original.editorialAssessment;
+  const source = assessment.sources[0]!;
+  const publicationSource = original.publicationSources[0]!;
+  const mutations: ArticleRevision[] = [
+    v3Revision({ packageVersion: 2 }),
+    v3Revision({
+      editorialContext: { ...original.editorialContext, instruction: "Başka talimat" }
+    }),
+    v3Revision({
+      editorialContext: { ...original.editorialContext, instructionHash: "1".repeat(64) }
+    }),
+    v3Revision({
+      editorialContext: { ...original.editorialContext, contentOrigin: "HUMAN" }
+    }),
+    v3Revision({
+      editorialContext: { ...original.editorialContext, aiDisclosure: "UNDISCLOSED" }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, articleType: "analysis" }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, intentSatisfied: false }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, titleIsHonest: false }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, originalValuePresent: false }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, allClaimsVerified: false }
+    }),
+    v3Revision({
+      editorialAssessment: {
+        ...assessment,
+        sources: [{ ...source, cited: false }, ...assessment.sources.slice(1)]
+      }
+    }),
+    v3Revision({
+      editorialAssessment: {
+        ...assessment,
+        sources: [{ ...source, official: false }, ...assessment.sources.slice(1)]
+      }
+    }),
+    v3Revision({
+      editorialAssessment: {
+        ...assessment,
+        sources: [{ ...source, role: "supporting" }, ...assessment.sources.slice(1)]
+      }
+    }),
+    v3Revision({
+      editorialAssessment: {
+        ...assessment,
+        sources: [{ ...source, sourceId: "source-renamed" }, ...assessment.sources.slice(1)]
+      }
+    }),
+    v3Revision({
+      editorialAssessment: {
+        ...assessment,
+        singleOfficialSourceRationale: "Tek resmi kayıt."
+      }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, authorTransparent: false }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, aiDisclosureMatchesUsage: false }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, isYmyl: true }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, leadHasFiveWOneH: false }
+    }),
+    v3Revision({
+      editorialAssessment: {
+        ...assessment,
+        unverifiedClaimsClearlyLabeled: false
+      }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, newsSchemaComplete: false }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, sensitiveTopic: true }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, clusterKey: "kimlik-guvenligi" }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, aboveFoldAnswersIntent: false }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, headingHierarchyValid: false }
+    }),
+    v3Revision({
+      editorialAssessment: { ...assessment, internalLinkCount: 2 }
+    }),
+    v3Revision({
+      editorialAssessment: {
+        ...assessment,
+        internalLinkOmissionRationale: "İlgili yerel içerik henüz yok."
+      }
+    }),
+    v3Revision({
+      publicationSources: [
+        { ...publicationSource, id: "changed-id" },
+        ...original.publicationSources.slice(1)
+      ]
+    }),
+    v3Revision({
+      publicationSources: [
+        { ...publicationSource, title: "Changed title" },
+        ...original.publicationSources.slice(1)
+      ]
+    }),
+    v3Revision({
+      publicationSources: [
+        { ...publicationSource, url: "https://example.com/changed" },
+        ...original.publicationSources.slice(1)
+      ]
+    }),
+    v3Revision({
+      publicationSources: [
+        { ...publicationSource, role: "supporting" },
+        ...original.publicationSources.slice(1)
+      ]
+    }),
+    v3Revision({ deployWorkflow: "release.yml" }),
+    v3Revision({ requiredChecks: ["build", "lint", "test / windows"] })
+  ];
+
+  assert.equal(validateRevisionPackageV3(original), true);
+  for (const changed of mutations) {
+    assert.notEqual(computeRevisionHash(changed), originalHash);
+  }
+});
+
+test("incomplete and hybrid V3 packages fail closed", () => {
+  const complete = v3Revision();
+  const missingContext = v3Revision({ editorialContext: undefined });
+  const hybrid = v3Revision();
+  delete (hybrid as Partial<RevisionPackageV3>).packageVersion;
+
+  assert.equal(validateRevisionPackageV3(missingContext), false);
+  assert.equal(validateRevisionPackageV3(hybrid), false);
+  assert.deepEqual(
+    evaluatePublishEligibility(
+      hybrid,
+      approvalFor(hybrid),
+      {
+        now: new Date("2026-07-30T09:05:00.000Z"),
+        publishingPaused: false
+      }
+    ),
+    { eligible: false, reason: "REVISION_PACKAGE_INCOMPLETE" }
+  );
+  assert.equal(validateRevisionPackageV3(complete), true);
+});
+
+test("V3 validates exact cited-source projection and normalized deploy policy", () => {
+  const baseline = v3Revision();
+
+  assert.equal(
+    validateRevisionPackageV3(v3Revision({
+      publicationSources: baseline.publicationSources.map((source) =>
+        source.id === "source-1" ? { ...source, role: "supporting" } : source
+      )
+    })),
+    false
+  );
+  assert.equal(
+    validateRevisionPackageV3(v3Revision({
+      publicationSources: baseline.publicationSources.slice(0, 1)
+    })),
+    false
+  );
+  assert.equal(
+    validateRevisionPackageV3(v3Revision({
+      requiredChecks: ["test / windows", "build"]
+    })),
+    false
+  );
+  assert.equal(
+    validateRevisionPackageV3(v3Revision({
+      requiredChecks: ["build", " build "]
+    })),
+    false
+  );
+  assert.equal(
+    validateRevisionPackageV3(v3Revision({ deployWorkflow: "../deploy.yml" })),
+    false
+  );
+});
+
+test("publication source projection never exposes private evidence fields", () => {
+  const legacy = v2Revision({
+    sources: [
+      ...revision().sources,
+      {
+        id: "unused",
+        url: "https://example.com/unused",
+        title: "Unused source",
+        fetchedAt: "2026-07-29T09:10:00.000Z",
+        contentHash: "8".repeat(64),
+        evidenceExcerpt: "Private unused evidence",
+        evidenceExcerptHash: sha256("Private unused evidence"),
+        trustStatus: "APPROVED",
+        rightsStatus: "APPROVED"
+      }
+    ]
+  });
+
+  const projected: PublicationSourceV3[] = publicationSourcesFor(legacy);
+  assert.deepEqual(projected, [{
+    id: "source-1",
+    title: "Primary source",
+    url: "https://example.com/primary",
+    role: "supporting"
+  }]);
+  assert.equal(
+    JSON.stringify(projected).includes("evidence"),
+    false
+  );
+  assert.deepEqual(publicationSourcesFor(v3Revision()), v3Revision().publicationSources);
+});
+
+test("V3 exact-hash approval requires a complete matching editorial attestation", async (t) => {
+  const now = new Date("2026-07-30T09:05:00.000Z");
+  const cases: ReadonlyArray<readonly [string, RevisionPackageV3, EditorialApprovalAttestationV3]> = [
+    [
+      "named human reviewer",
+      v3Revision(),
+      v3Attestation({
+        editorialReview: {
+          reviewer: " ",
+          sourceRoles: v3Attestation().editorialReview!.sourceRoles
+        }
+      })
+    ],
+    [
+      "matching source-role attestation",
+      v3Revision(),
+      v3Attestation({
+        editorialReview: {
+          reviewer: "Deniz Editör",
+          sourceRoles: [{ sourceId: "source-1", role: "supporting" }]
+        }
+      })
+    ],
+    [
+      "complete expert review for YMYL",
+      v3Revision({
+        editorialAssessment: v3Assessment({ isYmyl: true })
+      }),
+      v3Attestation()
+    ],
+    [
+      "complete ethics review for a sensitive topic",
+      v3Revision({
+        editorialAssessment: v3Assessment({ sensitiveTopic: true })
+      }),
+      v3Attestation()
+    ]
+  ];
+
+  for (const [name, value, attestation] of cases) {
+    await t.test(name, () => {
+      assert.deepEqual(
+        evaluatePublishEligibility(value, approvalV3For(value, attestation), {
+          now,
+          publishingPaused: false
+        }),
+        { eligible: false, reason: "EDITORIAL_ATTESTATION_INVALID" }
+      );
+    });
+  }
+
+  const complete = v3Revision({
+    editorialAssessment: v3Assessment({ isYmyl: true, sensitiveTopic: true })
+  });
+  const completeAttestation = v3Attestation({
+    expertReview: {
+      reviewer: "Dr. Ada Uzman",
+      qualifications: "Siber güvenlik ve risk uzmanı",
+      reviewScope: "Yüksek etkili güvenlik iddiaları"
+    },
+    ethicsReview: {
+      reviewer: "Etik Editörü",
+      reviewScope: "Hassas kimlik verileri",
+      rationale: "Zarar riski giderildi ve kamu yararı doğrulandı."
+    }
+  });
+  assert.deepEqual(
+    evaluatePublishEligibility(complete, approvalV3For(complete, completeAttestation), {
+      now,
+      publishingPaused: false
+    }),
+    { eligible: true }
+  );
+});
+
+test("V3 rejects a stale attestation hash and deploy-policy mutations invalidate approval", () => {
+  const original = v3Revision();
+  const approval = approvalV3For(original);
+  const staleAttestationApproval = {
+    ...approval,
+    attestationHash: "0".repeat(64)
+  };
+
+  assert.deepEqual(
+    evaluatePublishEligibility(original, staleAttestationApproval, {
+      now: new Date("2026-07-30T09:05:00.000Z"),
+      publishingPaused: false
+    }),
+    { eligible: false, reason: "EDITORIAL_ATTESTATION_HASH_MISMATCH" }
+  );
+
+  for (const changed of [
+    v3Revision({ deployWorkflow: "release.yml" }),
+    v3Revision({ requiredChecks: ["build", "lint", "test / windows"] })
+  ]) {
+    assert.deepEqual(
+      evaluatePublishEligibility(changed, approval, {
+        now: new Date("2026-07-30T09:05:00.000Z"),
+        publishingPaused: false
+      }),
+      { eligible: false, reason: "APPROVAL_HASH_MISMATCH" }
+    );
+  }
 });
