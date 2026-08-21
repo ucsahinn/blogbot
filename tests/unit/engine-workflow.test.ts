@@ -169,11 +169,13 @@ test("a durable draft waiting for Codex is re-dispatched when the local runner b
 test("Boby guidance queues only a bounded local guidance request", async () => {
   const repository = new InMemoryBackendStore();
   const submitted: unknown[] = [];
+  const startedImmediately: unknown[] = [];
   const coordinator: CodexWorkerCoordinator = {
     async submit(input) {
       submitted.push(input);
       return { ...input, state: "QUEUED", version: 1 };
     },
+    startImmediately(input) { startedImmediately.push(input); },
     async recoverInterrupted() { return { recovered: false, snapshot: null }; },
     async process() { throw new Error("not used"); },
     async retryWaiting() { throw new Error("not used"); }
@@ -208,6 +210,11 @@ test("Boby guidance queues only a bounded local guidance request", async () => {
       sessionId: "boby-luna-thread-1",
       safeWorkspaceSummary: { draftCount: 2, reviewCount: 1, sourceCount: 3 }
     }
+  }]);
+  assert.deepEqual(startedImmediately, [{
+    jobId: "boby-guidance-1",
+    idempotencyKey: "boby:boby-guidance-1",
+    generation: 1
   }]);
   const job = await repository.getJob("boby-guidance-1");
   assert.equal(job.kind, "CODEX");

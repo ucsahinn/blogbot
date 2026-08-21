@@ -129,6 +129,9 @@ export interface CodexTaskResolverPort {
 
 export interface CodexWorkerCoordinator {
   submit(submission: CodexWorkSubmission): Promise<CodexJobSnapshot>;
+  /** Starts a durable interactive job immediately while its queue reservation remains the crash-safe fallback. */
+  startImmediately?(message: CodexQueueMessage): void;
+
   process(message: CodexQueueMessage): Promise<CodexJobSnapshot>;
   retryWaiting(message: CodexQueueMessage): Promise<CodexJobSnapshot>;
   recoverInterrupted(jobId: string): Promise<{
@@ -192,6 +195,12 @@ export function createCodexWorkerCoordinator(
         await queue.enqueueOnce(queueMessage(reservation.snapshot));
       }
       return reservation.snapshot;
+    },
+
+    startImmediately(message) {
+      // Boby must not sit behind long editorial generations. `claimQueued` makes this safe
+      // with the durable queue worker: whichever path claims first owns the execution.
+      void this.process(message).catch(() => undefined);
     },
 
     async process(message) {

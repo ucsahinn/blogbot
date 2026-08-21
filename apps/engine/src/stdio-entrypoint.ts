@@ -3195,7 +3195,7 @@ async function handleLocalWorkflowCommand(
       const metadata: Record<string, unknown> = isRecord((result as BackendJob).metadata)
         ? (result as BackendJob).metadata as Record<string, unknown>
         : {};
-      codex = await options.codexCoordinator.submit({
+      const bobyCodex = await options.codexCoordinator.submit({
         jobId: (result as BackendJob).id,
         idempotencyKey: `boby:${idempotencyKey}`,
         definitionId: "BOBY.GUIDE",
@@ -3208,6 +3208,12 @@ async function handleLocalWorkflowCommand(
             : {}),
           safeWorkspaceSummary: metadata.safeWorkspaceSummary
         }
+      });
+      codex = bobyCodex;
+      options.codexCoordinator.startImmediately?.({
+        jobId: bobyCodex.jobId,
+        idempotencyKey: bobyCodex.idempotencyKey,
+        generation: bobyCodex.version
       });
     }
     if (kind === "JOB.RETRY" && options.codexCoordinator) {

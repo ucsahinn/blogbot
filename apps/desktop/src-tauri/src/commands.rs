@@ -3897,8 +3897,11 @@ pub fn request_boby_guidance(
         .pointer("/snapshot/jobs")
         .and_then(Value::as_array)
         .and_then(|jobs| latest_boby_session_id(jobs));
-    let guidance_id = format!("boby-{}", stable_source_key(&format!("{question}:{active_page}:{runtime_state}:{version}")));
-    let key = stable_source_key(&format!("boby-guidance:{guidance_id}:{version}"));
+    // Each message must be its own durable job. Reusing a hash of the question
+    // can reconnect a new user message to an old interrupted WAITING_CODEX job,
+    // leaving Boby visibly stuck even though the local Codex runner is healthy.
+    let guidance_id = boby_guidance_request_token()?;
+    let key = stable_source_key(&format!("boby-guidance:{guidance_id}"));
     let response = engine_request(&bridge, json!({
         "version": 1,
         "id": key,
@@ -3930,6 +3933,17 @@ pub fn request_boby_guidance(
     }))
 }
 
+/// Boby chat is conversational, so duplicate text still represents a new turn.
+/// A time-plus-process-plus-sequence token avoids sharing a stale durable job.
+fn boby_guidance_request_token() -> Result<String, CommandError> {
+    static BOBY_GUIDANCE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CommandError::StateUnavailable)?
+        .as_nanos();
+    let sequence = BOBY_GUIDANCE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(format!("boby-{}-{nanos}-{sequence}", std::process::id()))
+}
 #[tauri::command]
 pub fn get_boby_guidance(
     guidance_id: String,
@@ -7852,7 +7866,7 @@ mod tests {
         authorize_native_confirmation, build_approval_command, build_approval_revoke_command,
         build_high_risk_approval_command,
         build_review_revision, build_revision_queue, build_source_scan_command,
-        boby_guidance_wait_reason, boby_role_state, bootstrap_boby_state, bootstrap_can_read_catalog, candidate_draft_payload, candidate_workflow_state, configured_site_origin,
+        boby_guidance_request_token, boby_guidance_wait_reason, boby_role_state, bootstrap_boby_state, bootstrap_can_read_catalog, candidate_draft_payload, candidate_workflow_state, configured_site_origin,
         dashboard_pipeline_counts, doctor_runtime_mode, editorial_operation_events,
         ensure_mutation_allowed, ensure_trusted_local_dev, github_preview_payload,
         has_publication_capability, is_local_path, is_path_within_grant, is_reparse_point,
@@ -7914,6 +7928,15 @@ mod tests {
         assert_eq!(bootstrap_boby_state(1, true, true), "BUSY");
     }
 
+    #[test]
+    fn boby_guidance_messages_always_receive_distinct_durable_handles() {
+        let first = boby_guidance_request_token().expect("first Boby handle");
+        let second = boby_guidance_request_token().expect("second Boby handle");
+        assert!(first.starts_with("boby-"));
+        assert!(second.starts_with("boby-"));
+        assert!(first.len() <= 128 && second.len() <= 128);
+        assert_ne!(first, second, "a repeated question must not inherit a stale Boby job");
+    }
     #[test]
     fn boby_waiting_states_expose_safe_editor_reasons() {
         assert_eq!(boby_guidance_wait_reason("WAITING_CODEX"), Some("Boby yerel sırada; bağlantı hazır olduğunda yanıtını sürdürecek."));

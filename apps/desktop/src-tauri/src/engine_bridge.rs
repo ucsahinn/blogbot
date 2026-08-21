@@ -1126,8 +1126,15 @@ fn can_advance_data_key_candidate(candidate_count: usize, fallback_attempts: usi
     candidate_count > fallback_attempts.saturating_add(1)
 }
 
+fn codex_command_candidates() -> [&'static str; 3] {
+    // The supported npm launcher is kept current by Codex updates. A stale
+    // standalone codex.exe can remain on PATH, so prefer the .cmd shim; the
+    // engine runner resolves it to Node without showing a console window.
+    ["codex.cmd", "codex.exe", "codex"]
+}
+
 fn discover_codex_command() -> Option<String> {
-    ["codex.exe", "codex.cmd", "codex"]
+    codex_command_candidates()
         .into_iter()
         .find(|candidate| {
             let mut probe = Command::new(candidate);
@@ -1300,7 +1307,7 @@ fn discover_engine_node_modules(app: &AppHandle) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        diagnostic_log_variants, rotate_diagnostic_log,
+        codex_command_candidates, diagnostic_log_variants, rotate_diagnostic_log,
         discover_engine_executable, has_pglite_assets, is_safe_read_retry,
         redact_diagnostic_for_persistence, response_timeout_for_request, serialize_bounded_request,
         can_advance_data_key_candidate, should_attempt_data_key_fallback,
@@ -1593,6 +1600,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn codex_discovery_prefers_the_current_npm_launcher() {
+        assert_eq!(
+            codex_command_candidates(),
+            ["codex.cmd", "codex.exe", "codex"],
+            "a stale standalone executable must not shadow the current Codex launcher"
+        );
+    }
     #[test]
     fn a_runner_installed_after_launch_is_rediscovered_and_forces_a_fresh_spawn() {
         let installed = Arc::new(Mutex::new(None::<String>));

@@ -95,6 +95,15 @@ test("native smoke distinguishes first engine boot from in-app route responsiven
   assert.match(smoke, /waitForVisibleHeading\(sessionId, "operations", MAX_INITIAL_BOOT_RENDER_MS\)/u);
   assert.match(smoke, /const MAX_ROUTE_RENDER_MS = 3_000;/u);
 });
+
+test("native smoke can explicitly verify a connected Luna reply without making it part of ordinary release smoke", async () => {
+  const smoke = await readFile(join(desktopRoot, "..", "..", "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(smoke, /BLOGBOT_VERIFY_BOBY_LIVE_REPLY === "1"/u);
+  assert.match(smoke, /verifyLiveBobyReply/u);
+  assert.match(smoke, /request_boby_guidance/u);
+  assert.match(smoke, /get_boby_guidance/u);
+});
 test("Tauri sync listener is disposed even when dynamic import resolves after unmount", async () => {
   const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
 

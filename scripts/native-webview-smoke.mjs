@@ -16,6 +16,7 @@ const skipProfileFinalRead = process.env.BLOGBOT_PROFILE_SKIP_FINAL_READ === "1"
 const retryBlockedActualProfile = process.env.BLOGBOT_PROFILE_RETRY_BLOCKED === "1";
 const rewriteFirstShortActualProfile = process.env.BLOGBOT_PROFILE_REWRITE_SHORT === "1";
 const testExistingProfileSources = process.env.BLOGBOT_PROFILE_TEST_SOURCES === "1";
+const verifyBobyLiveReply = process.env.BLOGBOT_VERIFY_BOBY_LIVE_REPLY === "1";
 const nativeSmokeRequestTimeoutMs = Number.parseInt(
   process.env.BLOGBOT_NATIVE_REQUEST_TIMEOUT_MS ?? "20000",
   10
@@ -420,6 +421,36 @@ async function verifyCodexRuntime(sessionId) {
   return codexRuntime.result;
 }
 
+async function verifyLiveBobyReply(sessionId) {
+  const question = "Yeni bir kaynaktan içerik üretmeye nereden başlamalıyım?";
+  const submitted = await invoke(sessionId, "request_boby_guidance", {
+    request: {
+      question,
+      activePage: "content",
+      runtimeState: "ONLINE",
+      safeWorkspaceSummary: { draftCount: 0, reviewCount: 0, sourceCount: 0 }
+    }
+  });
+  const guidanceId = submitted?.result?.id;
+  if (!submitted?.ok || typeof guidanceId !== "string" || !guidanceId.startsWith("boby-")) {
+    fail(`live Boby request was not accepted: ${JSON.stringify(submitted)}`);
+  }
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < 120_000) {
+    const guidance = await invoke(sessionId, "get_boby_guidance", { guidanceId });
+    if (!guidance?.ok) fail(`live Boby status read failed: ${JSON.stringify(guidance)}`);
+    const result = guidance.result;
+    if (result?.state === "SUCCEEDED" && typeof result.reply === "string" && result.reply.trim().length >= 20) {
+      if (/OPE'nin yerel editöründesin\. Konuyu bir cümleyle yaz/iu.test(result.reply)) {
+        fail("live Boby returned the retired canned local fallback.");
+      }
+      return { guidanceId, elapsedMs: Math.round(performance.now() - startedAt), replyLength: result.reply.trim().length };
+    }
+    if (result?.state === "FAILED") fail(`live Boby job failed: ${JSON.stringify(result)}`);
+    await wait(1_000);
+  }
+  fail("live Boby did not finish within 120 seconds.");
+}
 async function measureCatalogReadLatency(sessionId) {
   const startedAt = performance.now();
   const catalog = await invoke(sessionId, "list_sources");
@@ -1529,6 +1560,7 @@ async function main() {
         ? await verifyExistingProfileSources(sessionId)
         : undefined;
       const codexRuntime = await verifyCodexRuntime(sessionId);
+      const liveBobyReply = verifyBobyLiveReply ? await verifyLiveBobyReply(sessionId) : undefined;
       const initialProfile = await inspectExistingProfileState(sessionId, localEngine.result);
       const retryJourney = retryBlockedActualProfile
         ? await retryFirstBlockedActualDraft(sessionId)
@@ -1553,7 +1585,8 @@ async function main() {
         catalogRead,
         profileRoutePerformance,
         profileSourceChecks,
-        codexRuntime
+        codexRuntime,
+        liveBobyReply
       }, null, 2));
       return;
     }
