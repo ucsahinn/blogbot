@@ -26,6 +26,7 @@ const smokeFeedUrl = process.env.BLOGBOT_SMOKE_FEED_URL ?? "https://www.cshub.co
 // Navigation is a local render, not a network operation. A multi-second wait
 // means the user sees a frozen menu, so keep this gate deliberately stricter
 // than setup and engine-startup probes.
+const MAX_INITIAL_BOOT_RENDER_MS = 15_000;
 const MAX_ROUTE_RENDER_MS = 3_000;
 const ROUTE_RENDER_POLL_MS = 100;
 const routes = [
@@ -267,10 +268,10 @@ async function safeFatalDiagnostic(sessionId) {
   );
 }
 
-async function waitForVisibleHeading(sessionId, route) {
+async function waitForVisibleHeading(sessionId, route, timeoutMs = MAX_ROUTE_RENDER_MS) {
   const expected = expectedHeadings[route];
   const startedAt = performance.now();
-  while (performance.now() - startedAt < MAX_ROUTE_RENDER_MS) {
+  while (performance.now() - startedAt < timeoutMs) {
     const heading = await execute(
       sessionId,
       `window.location.hash = '#${route}'; return document.querySelector('h1')?.textContent?.trim() ?? '';`
@@ -515,7 +516,7 @@ async function clickCandidateResearchAction(sessionId, candidateTitle) {
 }
 
 async function verifyInitialEngineSurface(sessionId) {
-  await waitForVisibleHeading(sessionId, "operations");
+  await waitForVisibleHeading(sessionId, "operations", MAX_INITIAL_BOOT_RENDER_MS);
   await execute(sessionId, "document.getElementById('operations-tab-health')?.click(); return true;");
   const visible = await execute(sessionId, "return document.body?.innerText?.replace(/\\s+/g, ' ').trim() ?? ''; ");
   if (visible.includes("Yerel engine bağlantısı şu anda kullanılamıyor.")) {

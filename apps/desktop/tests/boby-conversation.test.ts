@@ -34,6 +34,7 @@ test("Boby panel uses the existing Luna conversation bridge when it is ready", a
   assert.match(assistant, /getBobyGuidance/u);
   assert.match(assistant, /suggestedActions/u);
   assert.match(assistant, /Merhaba, ben Boby/u);
-  assert.match(assistant, /localBobyReply/u);
+  assert.match(assistant, /persistPendingBobyGuidance/u);
+  assert.doesNotMatch(assistant, /localBobyReply/u);
   assert.doesNotMatch(assistant, /Yerel sırada/u);
 });

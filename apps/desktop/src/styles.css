@@ -5761,9 +5761,9 @@ strong {
   color: var(--ink-soft);
 }
 
-.slot-card-active {
-  grid-column: 1 / -1;
-  order: -1;
+.slot-picker {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: start;
 }
 
 .slot-time-field {

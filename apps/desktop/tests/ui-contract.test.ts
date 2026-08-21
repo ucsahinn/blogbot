@@ -32,7 +32,9 @@ test("Boby is a persistent local editor guide with a keyboard-accessible convers
   assert.match(assistant, /describeBobyAvailability/u);
   assert.match(assistant, /boby-availability/u);
   assert.match(assistant, /requestBobyGuidance|getBobyGuidance/u);
-  assert.match(assistant, /text: localBobyReply\(question, activePage\)/u);
+  assert.match(assistant, /persistPendingBobyGuidance/u);
+  assert.match(assistant, /restorePendingBobyGuidance/u);
+  assert.doesNotMatch(assistant, /localBobyReply/u);
   assert.doesNotMatch(assistant, /testCodexRuntime|startCodexLogin/u);
 });
 
@@ -224,8 +226,9 @@ test("compact desktop turns the editable weekly calendar into an operable grid i
   );
   assert.match(publishing, /activeSlotId/u);
   assert.doesNotMatch(publishing, /recommendBalancedSeoSlots/u);
-  assert.match(styles, /\.slot-card-active\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1[\s\S]*?order:\s*-1/u);
-  assert.match(publishing, /Takvimde bu slotu düzenle/u);
+  assert.match(styles, /\.slot-picker\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit, minmax\(240px, 1fr\)\)/u);
+  assert.match(publishing, /aria-label="Düzenlenecek haftalık slot"/u);
+  assert.doesNotMatch(publishing, /slot-card-active/u);
 });
 
 test("weekly cadence configures only future NEXT_SLOT drafts and treats legacy article assignments as non-binding", async () => {

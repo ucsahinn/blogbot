@@ -176,7 +176,7 @@ export function PublishingCenter({
       </div>
       <section className="hub-panel" role="tabpanel" id={`publishing-panel-${tab}`} aria-labelledby={`publishing-tab-${tab}`}>
         {tab === "calendar" ? (
-          <div className="week-grid">
+          <div className="week-grid slot-picker" role="group" aria-label="Düzenlenecek haftalık slot">
             {workspace.weeklySlots.map((slot) => {
               const actionReason = slotActionUnavailableReason(slot.id);
               const actionReasonId = `slot-action-unavailable-${slot.id}`;
@@ -201,7 +201,7 @@ export function PublishingCenter({
                 );
               }
               return (
-              <article aria-label={`${slotLabel(slot)} yayın slotu`} className={`slot-card slot-card-active ${getSlotDraft(slot).enabled ? "" : "is-disabled"}`} key={slot.id}>
+              <article aria-label={`${slotLabel(slot)} yayın slotu`} className={`slot-card ${getSlotDraft(slot).enabled ? "" : "is-disabled"}`} key={slot.id}>
                 <div><strong>{slotLabel(slot)}</strong><span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span></div>
                 <label className="slot-time-field">
                   <span>Yayın saati</span>

@@ -87,6 +87,14 @@ test("native startup projections are asynchronous commands so sidecar I/O cannot
   assert.match(commands, /#\[tauri::command\]\s*pub async fn get_connector_state/u);
 });
 
+
+test("native smoke distinguishes first engine boot from in-app route responsiveness", async () => {
+  const smoke = await readFile(join(desktopRoot, "..", "..", "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(smoke, /const MAX_INITIAL_BOOT_RENDER_MS = 15_000;/u);
+  assert.match(smoke, /waitForVisibleHeading\(sessionId, "operations", MAX_INITIAL_BOOT_RENDER_MS\)/u);
+  assert.match(smoke, /const MAX_ROUTE_RENDER_MS = 3_000;/u);
+});
 test("Tauri sync listener is disposed even when dynamic import resolves after unmount", async () => {
   const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
 
