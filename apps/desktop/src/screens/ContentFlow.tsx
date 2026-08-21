@@ -39,6 +39,14 @@ function candidateScoreLabel(score: number | undefined): string {
   return `${Math.max(0, Math.min(100, Math.round(score)))}%`;
 }
 
+function candidatePublicationLabel(value: string | null | undefined): string {
+  if (!value || !Number.isFinite(Date.parse(value))) return "Kaynak tarihi alınamadı";
+  return new Intl.DateTimeFormat("tr-TR", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(new Date(value));
+}
+
 export function ContentFlow({
   bridge,
   readOnly,
@@ -54,9 +62,15 @@ export function ContentFlow({
   onOpenOperations
 }: ContentFlowProps) {
   const [tab, setTab] = useState<ContentTab>(initialTab);
+  const [previousInitialTab, setPreviousInitialTab] = useState(initialTab);
+  if (initialTab !== previousInitialTab) {
+    setPreviousInitialTab(initialTab);
+    setTab(initialTab);
+  }
   const [query, setQuery] = useState("");
   const [busyId, setBusyId] = useState("");
   const [message, setMessage] = useState("");
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
 
   const candidates = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("tr-TR");
@@ -69,6 +83,26 @@ export function ContentFlow({
             .includes(normalized))
     );
   }, [query, workspace.candidates]);
+
+  const selectedCandidates = useMemo(
+    () => workspace.candidates.filter((candidate) => candidate.state !== "DISMISSED" && selectedIds.has(candidate.id)),
+    [selectedIds, workspace.candidates]
+  );
+
+  const toggleCandidateSelection = (candidateId: string, checked: boolean) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(candidateId);
+      else next.delete(candidateId);
+      return next;
+    });
+  };
+
+  const selectVisibleCandidates = () => {
+    setSelectedIds((current) => new Set([...current, ...candidates.map((candidate) => candidate.id)]));
+  };
+
+  const clearCandidateSelection = () => setSelectedIds(new Set());
 
   const candidateActionUnavailableReason = (
     candidate: CandidateView,
@@ -162,6 +196,54 @@ export function ContentFlow({
     }
   };
 
+  const mutateSelected = async (action: "promote" | "dismiss") => {
+    const targets = selectedCandidates.filter((candidate) =>
+      action === "dismiss"
+        ? candidate.state !== "DISMISSED"
+        : candidate.state !== "PROMOTED" && candidate.state !== "RESEARCH_QUEUED" && candidate.state !== "RESEARCH_FAILED"
+    );
+    if (!targets.length) {
+      setMessage(action === "promote" ? "Araştırmaya alınabilecek seçili aday yok." : "Kapatılabilecek seçili aday yok.");
+      return;
+    }
+    setBusyId("batch");
+    setMessage("");
+    const completed = new Set<string>();
+    const failed: string[] = [];
+    try {
+      // The bridge is deliberately serialized: a 50-item selection must not
+      // launch 50 simultaneous native/engine mutations or stale-version races.
+      for (const candidate of targets) {
+        try {
+          if (action === "promote") await bridge.promoteCandidate(candidate.id);
+          else await bridge.dismissCandidate(candidate.id);
+          completed.add(candidate.id);
+        } catch {
+          failed.push(candidate.title);
+        }
+      }
+      const nextWorkspace = await bridge.getEditorialWorkspace();
+      onWorkspaceChange(nextWorkspace);
+      try {
+        await onSourceCatalogChange();
+      } catch {
+        // The durable candidate action succeeded; only the optional dashboard
+        // summary refresh needs another attempt.
+      }
+      setSelectedIds((current) => new Set([...current].filter((id) => !completed.has(id))));
+      const actionLabel = action === "promote" ? "Araştırma kuyruğuna alındı" : "Akıştan kapatıldı";
+      setMessage(
+        failed.length
+          ? `${completed.size} aday ${actionLabel.toLocaleLowerCase("tr-TR")}. ${failed.length} aday değişmedi: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}.`
+          : `${completed.size} aday ${actionLabel.toLocaleLowerCase("tr-TR")}.`
+      );
+    } catch (reason) {
+      setMessage(userFacingBridgeError(reason, "Toplu işlem tamamlanamadı."));
+    } finally {
+      setBusyId("");
+    }
+  };
+
   return (
     <div className="page hub-page">
       <header className="page-header">
@@ -235,6 +317,13 @@ export function ContentFlow({
             </label>
             <span>{candidates.length} etkin aday</span>
           </div>
+          <div className="candidate-bulk-actions" aria-label="Seçili aday işlemleri">
+            <span>{selectedCandidates.length} aday seçildi</span>
+            <button className="button button-secondary" type="button" disabled={!candidates.length || Boolean(busyId)} onClick={selectVisibleCandidates}>Görünenleri seç</button>
+            <button className="button button-ghost" type="button" disabled={!selectedCandidates.length || Boolean(busyId)} onClick={clearCandidateSelection}>Seçimi temizle</button>
+            <button className="button button-secondary" type="button" disabled={readOnly || !selectedCandidates.length || Boolean(busyId)} onClick={() => void mutateSelected("dismiss")}>Seçilenleri kapat</button>
+            <button className="button button-primary" type="button" disabled={readOnly || !selectedCandidates.length || Boolean(busyId)} onClick={() => void mutateSelected("promote")}>Seçilenleri araştırmaya al</button>
+          </div>
           <div className="candidate-action-guidance" role="note">
             <strong>Araştırmaya almak yerel kuyruğu başlatır; hemen yayın yapmaz.</strong>
             <span>Yayın yalnızca hazır taslağı inceledikten sonra başlar; insan onayı olmadan hiçbir içerik gönderilmez.</span>
@@ -249,6 +338,15 @@ export function ContentFlow({
                 return (
                 <article className="candidate-card" key={candidate.id}>
                   <div className="candidate-meta">
+                    <label className="candidate-select">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(candidate.id)}
+                        disabled={readOnly || Boolean(busyId)}
+                        onChange={(event) => toggleCandidateSelection(candidate.id, event.target.checked)}
+                      />
+                      <span className="sr-only">{candidate.title} adayını seç</span>
+                    </label>
                     <span className={`state-pill state-${candidate.state.toLowerCase()}`}>
                       {candidateStateLabels[candidate.state]}
                     </span>
@@ -256,15 +354,10 @@ export function ContentFlow({
                   </div>
                   <h2>{candidate.title}</h2>
                   <p>{candidate.summary}</p>
-                  <dl className="signal-grid" aria-label={`${candidate.title} sıralama puanları`} style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
-                    <div><dt>Kaynak yeterliliği</dt><dd>{candidateScoreLabel(candidate.sourceSufficiencyScore)}</dd></div>
-                    <div><dt>Güncellik</dt><dd>{candidateScoreLabel(candidate.freshnessScore)}</dd></div>
-                    <div><dt>Özgünlük</dt><dd>{candidateScoreLabel(candidate.originalityScore)}</dd></div>
-                    <div><dt>Konu uyumu</dt><dd>{candidateScoreLabel(candidate.topicFitScore)}</dd></div>
-                  </dl>
                   <div className="candidate-source">
-                    <small>Genel sıralama: {candidateScoreLabel(candidate.rankingScore)}</small>{" · "}
-                    <small>{candidate.sourceCount} kaynak · Birincil kaynak: {candidate.primarySource}</small>
+                    <small>İnceleme önceliği: {candidateScoreLabel(candidate.rankingScore)}</small>{" · "}
+                    <small>{candidate.sourceCount} kaynak · {candidatePublicationLabel(candidate.publishedAt)}</small>{" · "}
+                    <small>Kaynak: {candidate.primarySource}</small>
                   </div>
                   {dismissReason || researchReason ? (
                     <div className="candidate-action-reasons">
@@ -276,7 +369,7 @@ export function ContentFlow({
                     <button
                       className="button button-secondary"
                       type="button"
-                      disabled={readOnly || busyId === candidate.id}
+                      disabled={readOnly || Boolean(busyId)}
                       aria-describedby={dismissReason ? `candidate-dismiss-unavailable-${candidate.id}` : undefined}
                       onClick={() => void mutate(candidate.id, "dismiss")}
                     >
@@ -290,7 +383,7 @@ export function ContentFlow({
                       <button
                         className="button button-primary"
                         type="button"
-                        disabled={busyId === candidate.id}
+                        disabled={Boolean(busyId)}
                         onClick={() => onOpenEditorial(
                           `${candidate.title} için araştırma işi zaten yerel kuyrukta. Durumunu Editoryal Masa’da takip edebilirsiniz.`,
                           `draft-candidate-${candidate.id}`,
@@ -303,7 +396,7 @@ export function ContentFlow({
                       <button
                         className="button button-primary"
                         type="button"
-                        disabled={readOnly || busyId === candidate.id}
+                        disabled={readOnly || Boolean(busyId)}
                         aria-describedby={researchReason ? `candidate-action-unavailable-${candidate.id}` : undefined}
                         onClick={() => void mutate(candidate.id, "promote")}
                       >

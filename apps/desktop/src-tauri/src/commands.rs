@@ -1687,6 +1687,15 @@ fn bootstrap_boby_state(
     boby_role_state(queue_depth, false, runner_ready, session_authenticated)
 }
 
+fn boby_guidance_wait_reason(status: &str) -> Option<&'static str> {
+    match status {
+        "WAITING_CODEX" => Some("Boby yerel sırada; bağlantı hazır olduğunda yanıtını sürdürecek."),
+        "RUNNING" => Some("Boby yanıtı hazırlıyor."),
+        "QUEUED" => Some("Boby isteği yerel sırada."),
+        _ => None,
+    }
+}
+
 fn latest_boby_session_id(jobs: &[Value]) -> Option<String> {
     jobs.iter()
         .enumerate()
@@ -3940,6 +3949,7 @@ pub fn get_boby_guidance(
     Ok(json!({
         "id": guidance_id,
         "state": status,
+        "waitReason": boby_guidance_wait_reason(status),
         "reply": job.pointer("/metadata/bobyReply").cloned(),
         "suggestedActions": job.pointer("/metadata/bobyActions").cloned().unwrap_or_else(|| json!([]))
     }))
@@ -6528,6 +6538,7 @@ pub fn get_editorial_workspace(
                 "articleType": candidate.get("articleType").cloned().unwrap_or(json!("news")),
                 "confidence": candidate.get("confidence").cloned().unwrap_or(json!(0)),
                 "duplicateScore": candidate.get("duplicateScore").cloned().unwrap_or(json!(0)),
+                "publishedAt": candidate.get("publishedAt").cloned().unwrap_or(Value::Null),
                 "discoveredAt": candidate.get("discoveredAt").cloned().unwrap_or(Value::Null),
                 "state": state
             })
@@ -7775,7 +7786,7 @@ mod tests {
         authorize_native_confirmation, build_approval_command, build_approval_revoke_command,
         build_high_risk_approval_command,
         build_review_revision, build_revision_queue, build_source_scan_command,
-        boby_role_state, bootstrap_boby_state, bootstrap_can_read_catalog, candidate_draft_payload, candidate_workflow_state, configured_site_origin,
+        boby_guidance_wait_reason, boby_role_state, bootstrap_boby_state, bootstrap_can_read_catalog, candidate_draft_payload, candidate_workflow_state, configured_site_origin,
         dashboard_pipeline_counts, doctor_runtime_mode, editorial_operation_events,
         ensure_mutation_allowed, ensure_trusted_local_dev, github_preview_payload,
         has_publication_capability, is_local_path, is_path_within_grant, is_reparse_point,
@@ -7835,6 +7846,14 @@ mod tests {
         assert_eq!(bootstrap_boby_state(0, true, false), "UNAVAILABLE");
         assert_eq!(bootstrap_boby_state(0, true, true), "READY");
         assert_eq!(bootstrap_boby_state(1, true, true), "BUSY");
+    }
+
+    #[test]
+    fn boby_waiting_states_expose_safe_editor_reasons() {
+        assert_eq!(boby_guidance_wait_reason("WAITING_CODEX"), Some("Boby yerel sırada; bağlantı hazır olduğunda yanıtını sürdürecek."));
+        assert_eq!(boby_guidance_wait_reason("RUNNING"), Some("Boby yanıtı hazırlıyor."));
+        assert_eq!(boby_guidance_wait_reason("QUEUED"), Some("Boby isteği yerel sırada."));
+        assert_eq!(boby_guidance_wait_reason("FAILED"), None);
     }
 
     #[test]

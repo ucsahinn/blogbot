@@ -652,8 +652,8 @@ export function createDemoTransport(): InvokeTransport {
       sourceSufficiencyScore: 45,
       freshnessScore: 85,
       originalityScore: 69,
-      topicFitScore: 65,
-      rankingScore: 66,
+      topicFitScore: 100,
+      rankingScore: 75,
       scoreReasons: ["Tek onaylı kaynak", "Son üç günde yayımlandı", "Orta düzey küme benzerliği", "Tek kaynakta açık yönlendirme"]
     },
     "candidate-cloud-routing": {
@@ -698,8 +698,8 @@ export function createDemoTransport(): InvokeTransport {
         sourceSufficiencyScore: 45,
         freshnessScore: 100,
         originalityScore: 95,
-        topicFitScore: 65,
-        rankingScore: 76,
+        topicFitScore: 100,
+        rankingScore: 85,
         scoreReasons: ["Tek onaylı kaynak", "Son 24 saatte yayımlandı", "Ayrı olay kümelerine düşük benzerlik", "Tek kaynakta açık yönlendirme"],
         discoveredAt: new Date().toISOString(),
         state: "NEW"

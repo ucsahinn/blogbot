@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import bobyAvatar from "../assets/boby-avatar-v3.webp";
-import { describeBobyAvailability, localBobyReply } from "../boby-conversation.ts";
+import { bobyGuidancePollDelay, describeBobyAvailability, localBobyReply, persistPendingBobyGuidance, resolveBobyGuidancePoll, restorePendingBobyGuidance, shouldUseLocalBobyShortcut } from "../boby-conversation.ts";
 import { userFacingBridgeError, type BlogbotBridge, type BobyGuidanceStatus } from "../bridge.ts";
 import { playFeedbackSound } from "../feedback-sounds.ts";
 import type { BootstrapSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
@@ -26,7 +26,8 @@ interface BobyReply {
 
 const BOBY_GUIDANCE_POLL_MS = 2_000;
 const BOBY_GUIDANCE_TIMEOUT_MS = 120_000;
-
+const BOBY_GUIDANCE_VISIBLE_WAIT_POLL_MS = 15_000;
+const BOBY_GUIDANCE_HIDDEN_WAIT_POLL_MS = 60_000;
 function pageGuidance(activePage: PageId, snapshot: BootstrapSnapshot, workspace: EditorialWorkspaceSnapshot): BobyReply {
   if (snapshot.runtime !== "ONLINE") {
     return {
@@ -84,10 +85,12 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
   const initialReply = useMemo(() => pageGuidance(activePage, snapshot, workspace), [activePage, snapshot, workspace]);
   const [messages, setMessages] = useState<BobyReply[]>([initialReply]);
   const [prompt, setPrompt] = useState("");
-  const [deliveryState, setDeliveryState] = useState<"idle" | "queued" | "failed">("idle");
+  const [deliveryState, setDeliveryState] = useState<"idle" | "queued" | "waiting" | "failed">("idle");
   const [checkingBobyRuntime, setCheckingBobyRuntime] = useState(false);
   const [bobyLoginPending, setBobyLoginPending] = useState(false);
-  const [pendingGuidanceId, setPendingGuidanceId] = useState<string | null>(null);
+  const [pendingGuidanceId, setPendingGuidanceId] = useState<string | null>(() => restorePendingBobyGuidance(window.sessionStorage));
+  const [waitingReason, setWaitingReason] = useState<string | null>(null);
+  const [guidancePollEpoch, setGuidancePollEpoch] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const availability = useMemo(
     () => describeBobyAvailability({ runtime: snapshot.runtime, codexState: snapshot.codex.state }),
@@ -105,9 +108,12 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
   const liveRuntime = liveStatus?.runtime ?? snapshot.runtime;
   const liveAvailability = liveStatus?.availability ?? availability;
   const canConnectBoby = liveRuntime === "ONLINE";
-  const visibleAvailability = deliveryState === "queued"
+  const effectiveDeliveryState = pendingGuidanceId && deliveryState === "idle" ? "queued" : deliveryState;
+  const visibleAvailability = effectiveDeliveryState === "queued"
     ? { tone: "attention" as const, label: "Boby düşünüyor · Luna Low", detail: "Yanıt hazır olduğunda bu sohbete eklenecek." }
-    : deliveryState === "failed"
+    : effectiveDeliveryState === "waiting"
+      ? { tone: "attention" as const, label: "Boby sırada · Luna Low", detail: waitingReason ?? "İstek yerel sırada güvenle bekliyor; hazır olduğunda bu konuşmaya eklenecek." }
+    : effectiveDeliveryState === "failed"
       ? { tone: "blocker" as const, label: "Boby yanıt veremedi", detail: "Yerel rehberlik açık. Ayrıntıyı Operasyonlar'da görebilirsin." }
       : bobyLoginPending
         ? { tone: "attention" as const, label: "Boby bağlantısı bekleniyor", detail: "Açılan güvenli giriş penceresini tamamla; sonra bu panelden durumu yenile." }
@@ -133,6 +139,10 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
       setCheckingBobyRuntime(false);
     }
   }, [bridge, snapshot.codex.state, snapshot.runtime]);
+
+  useEffect(() => {
+    persistPendingBobyGuidance(window.sessionStorage, pendingGuidanceId);
+  }, [pendingGuidanceId]);
 
   useEffect(() => {
     if (!open) return;
@@ -188,37 +198,52 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
     if (!open || !pendingGuidanceId) return;
     let cancelled = false;
     const startedAt = Date.now();
-    const appendTimeout = () => {
-      setPendingGuidanceId(null);
-      setDeliveryState("failed");
+    let boundedWaitShown = false;
+    let didReportReadFailure = false;
+    const appendBoundedWait = () => {
+      setDeliveryState("waiting");
+      setWaitingReason("Boby isteği yerel sırada güvenle bekliyor.");
       setMessages((current) => [...current, {
-        text: "Boby yanıtı zaman aşımına uğradı. Yerel rehberlik açık; ayrıntı için Operasyonlar'ı kontrol edebilirsin.",
+        text: "Boby isteği sürüyor. Yerel sırada güvenle bekliyor; paneli kapatsan da geri döndüğünde yanıtı burada izleyebilirsin.",
         origin: "system",
         action: { label: "Operasyonları aç", page: "operations" }
       }]);
     };
     const poll = async () => {
       while (!cancelled) {
-        await new Promise((resolve) => window.setTimeout(resolve, BOBY_GUIDANCE_POLL_MS));
+        const elapsedMs = Date.now() - startedAt;
+        const pollDelay = bobyGuidancePollDelay(
+          elapsedMs,
+          document.visibilityState === "visible",
+          BOBY_GUIDANCE_POLL_MS,
+          BOBY_GUIDANCE_VISIBLE_WAIT_POLL_MS,
+          BOBY_GUIDANCE_HIDDEN_WAIT_POLL_MS
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, pollDelay));
         if (cancelled) return;
-        if (Date.now() - startedAt >= BOBY_GUIDANCE_TIMEOUT_MS) {
-          appendTimeout();
-          return;
-        }
         try {
           const result: BobyGuidanceStatus = await bridge.getBobyGuidance(pendingGuidanceId);
           if (cancelled) return;
-          if (result.state === "SUCCEEDED" && result.reply) {
+          const resolution = resolveBobyGuidancePoll({
+            guidanceId: pendingGuidanceId,
+            elapsedMs: Date.now() - startedAt,
+            isDocumentVisible: document.visibilityState === "visible",
+            state: result.state,
+            ...(result.reply ? { reply: result.reply } : {})
+          });
+          if (resolution.kind === "deliver") {
             const action = result.suggestedActions?.map((item) => actionForBobyId(item.id)).find(Boolean);
             setPendingGuidanceId(null);
             setDeliveryState("idle");
-            setMessages((current) => [...current, { text: result.reply!, origin: "boby", ...(action ? { action } : {}) }]);
+            setWaitingReason(null);
+            setMessages((current) => [...current, { text: resolution.reply, origin: "boby", ...(action ? { action } : {}) }]);
             playFeedbackSound("boby-reply");
             return;
           }
-          if (result.state === "FAILED") {
+          if (resolution.kind === "failed") {
             setPendingGuidanceId(null);
             setDeliveryState("failed");
+            setWaitingReason(null);
             setMessages((current) => [...current, {
               text: "Boby yanıtı tamamlanamadı. Yerel rehberlik açık; ayrıntı için Operasyonlar'ı kontrol edebilirsin.",
               origin: "system",
@@ -226,22 +251,59 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
             }]);
             return;
           }
+          if (result.state === "WAITING_CODEX") {
+            setDeliveryState("waiting");
+            setWaitingReason(result.waitReason ?? "Boby isteği yerel sırada güvenle bekliyor.");
+          }
+          if (result.state === "QUEUED" || result.state === "RUNNING") {
+            if (!boundedWaitShown) setDeliveryState("queued");
+          }
+          if (Date.now() - startedAt >= BOBY_GUIDANCE_TIMEOUT_MS && !boundedWaitShown) {
+            appendBoundedWait();
+            boundedWaitShown = true;
+          }
         } catch {
           if (cancelled) return;
-          setPendingGuidanceId(null);
-          setDeliveryState("failed");
-          setMessages((current) => [...current, {
-            text: "Boby yanıt durumu okunamadı. Yerel rehberlik açık; ayrıntı için Operasyonlar'ı kontrol edebilirsin.",
-            origin: "system",
-            action: { label: "Operasyonları aç", page: "operations" }
-          }]);
-          return;
+          const resolution = resolveBobyGuidancePoll({
+            guidanceId: pendingGuidanceId,
+            elapsedMs: Date.now() - startedAt,
+            isDocumentVisible: document.visibilityState === "visible",
+            didReadFail: true
+          });
+          setDeliveryState("waiting");
+          setWaitingReason("Boby isteği kaydedildi; durumu şu an okunamadı.");
+          if (!didReportReadFailure) {
+            didReportReadFailure = true;
+            setMessages((current) => [...current, {
+              text: "Boby isteği kaydedildi; durumu şu an okunamadı. Aynı iş kısa süre sonra yeniden kontrol edilecek.",
+              origin: "system",
+              action: { label: "Operasyonları aç", page: "operations" }
+            }]);
+          }
+          if (resolution.kind === "continue") continue;
         }
       }
     };
     void poll();
     return () => { cancelled = true; };
-  }, [bridge, open, pendingGuidanceId]);
+  }, [bridge, guidancePollEpoch, open, pendingGuidanceId]);
+
+  const resumePendingBobyGuidance = () => {
+    if (!pendingGuidanceId) return;
+    setDeliveryState("queued");
+    setWaitingReason(null);
+    setGuidancePollEpoch((current) => current + 1);
+  };
+
+  const releasePendingBobyGuidance = () => {
+    setPendingGuidanceId(null);
+    setDeliveryState("idle");
+    setWaitingReason(null);
+    setMessages((current) => [...current, {
+      text: "Bekleyen eski Boby isteği bu panelden ayrıldı. Yeni sorunu güvenle yazabilirsin.",
+      origin: "system"
+    }]);
+  };
 
   const appendSystemFailure = (text: string) => {
     setDeliveryState("failed");
@@ -269,7 +331,7 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
   const respond = async (question: string) => {
     setMessages((current) => [...current, { text: `Sen: ${question}` }]);
     playFeedbackSound("boby-reply");
-    if (liveAvailability.tone === "blocker") {
+    if (liveAvailability.tone === "blocker" || shouldUseLocalBobyShortcut(question)) {
       setDeliveryState("idle");
       setMessages((current) => [...current, {
         text: localBobyReply(question, activePage),
@@ -278,6 +340,7 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
       return;
     }
     setDeliveryState("queued");
+    setWaitingReason(null);
     setMessages((current) => [...current, { text: "Boby düşünüyor; yanıtı burada hazırlıyorum.", origin: "system" }]);
     try {
       const queued = await bridge.requestBobyGuidance({
@@ -329,6 +392,12 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
           Yerel bileşeni kontrol et
         </button>
       ) : null}
+      {pendingGuidanceId && effectiveDeliveryState === "waiting" ? (
+        <div className="boby-prepare-actions">
+          <button type="button" className="boby-prepare" onClick={resumePendingBobyGuidance}>Yanıtı yeniden kontrol et</button>
+          <button type="button" className="button button-quiet" onClick={releasePendingBobyGuidance}>Yeni soru sor</button>
+        </div>
+      ) : null}
       <p id="boby-purpose" className="boby-purpose">Boby bu ekrandaki bir sonraki güvenli adımı açıklar. Konuşma bu panelde aynı yerde kalır.</p>
       <div className="boby-messages" aria-live="polite">
         {messages.map((message, index) => (
@@ -340,14 +409,14 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
         ))}
       </div>
       <div className="boby-quick-actions" aria-label="Boby hızlı yardımları">
-        <button type="button" disabled={deliveryState === "queued"} onClick={() => void respond("Kaynak nasıl eklenir?")}>Kaynak ekle</button>
-        <button type="button" disabled={deliveryState === "queued"} onClick={() => void respond("Taslak nasıl oluşturulur?")}>Taslak oluştur</button>
-        <button type="button" disabled={deliveryState === "queued"} onClick={() => void respond("Bu konu için post hazırla")}>Post hazırla</button>
-        <button type="button" disabled={deliveryState === "queued"} onClick={() => void respond("Yayın ve SEO nasıl ilerler?")}>Yayın ve SEO</button>
+        <button type="button" disabled={effectiveDeliveryState !== "idle"} onClick={() => void respond("Kaynak nasıl eklenir?")}>Kaynak ekle</button>
+        <button type="button" disabled={effectiveDeliveryState !== "idle"} onClick={() => void respond("Taslak nasıl oluşturulur?")}>Taslak oluştur</button>
+        <button type="button" disabled={effectiveDeliveryState !== "idle"} onClick={() => void respond("Bu konu için post hazırla")}>Post hazırla</button>
+        <button type="button" disabled={effectiveDeliveryState !== "idle"} onClick={() => void respond("Yayın ve SEO nasıl ilerler?")}>Yayın ve SEO</button>
       </div>
       <form className="boby-composer" onSubmit={(event) => { event.preventDefault(); const question = prompt.trim(); if (!question) return; void respond(question); setPrompt(""); }}>
         <label htmlFor="boby-question">Boby'ye sor</label>
-        <div><input ref={inputRef} id="boby-question" value={prompt} disabled={deliveryState === "queued"} onChange={(event) => setPrompt(event.target.value)} placeholder="Örn. taslağı nerede inceleyeceğim?" maxLength={320} /><button className="button button-primary" type="submit" disabled={deliveryState === "queued"}>Sor</button></div>
+        <div><input ref={inputRef} id="boby-question" value={prompt} disabled={effectiveDeliveryState !== "idle"} onChange={(event) => setPrompt(event.target.value)} placeholder="Örn. taslağı nerede inceleyeceğim?" maxLength={320} /><button className="button button-primary" type="submit" disabled={effectiveDeliveryState !== "idle"}>Sor</button></div>
       </form>
     </section>
   );

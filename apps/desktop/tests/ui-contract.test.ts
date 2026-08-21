@@ -44,7 +44,7 @@ test("Boby keeps one pending direct reply alive without a short false timeout", 
   assert.match(assistant, /if \(!open \|\| !pendingGuidanceId\) return;/u);
   assert.match(assistant, /BOBY_GUIDANCE_POLL_MS\s*=\s*2_000/u);
   assert.match(assistant, /BOBY_GUIDANCE_TIMEOUT_MS\s*=\s*120_000/u);
-  assert.match(assistant, /disabled=\{deliveryState === "queued"\}/u);
+  assert.match(assistant, /disabled=\{effectiveDeliveryState !== "idle"\}/u);
   assert.doesNotMatch(assistant, /attempt < 12/u);
 });
 
@@ -548,4 +548,84 @@ test("review approval is V3-only and collects a complete human declaration", asy
   assert.doesNotMatch(review, /evidenceExcerpt|evidenceAnchors/u);
   assert.match(bridge, /attestation: EditorialApprovalAttestationV3/u);
   assert.match(bridge, /REVISION_REVIEW_UPGRADE_REQUIRED/u);
+});
+
+test("review media uses bounded local thumbnails rather than dimension-only placeholders", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+
+  assert.match(review, /const \[mediaDataUrls, setMediaDataUrls\] = useState<Record<string, string>>\(\{\}\)/u);
+  assert.match(review, /readMedia: bridge\.readRevisionMedia/u);
+  assert.match(review, /<img\s+src=\{mediaDataUrls\[media\.sha256\]\}/u);
+  assert.doesNotMatch(review, /className="media-placeholder"/u);
+});
+
+test("one failed immutable media read keeps valid thumbnails visible and offers a retry path", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+
+  assert.match(review, /const \[mediaLoadErrors, setMediaLoadErrors\] = useState<Record<string, true>>\(\{\}\)/u);
+  assert.match(review, /loadRevisionMediaPreviews/u);
+  assert.match(review, /mediaPreviewRefreshNonce/u);
+  assert.match(review, /mediaLoadErrors\[media\.sha256\]/u);
+  assert.match(review, /Önizleme yüklenemedi/u);
+  assert.match(review, /Önizlemeyi tekrar dene/u);
+  assert.doesNotMatch(review, /Görseli yeniden hazırla/u);
+});
+
+test("content distinguishes missing, loading, and failed hero media without a false repair action", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+
+  assert.match(review, /heroMedia && heroLoadError/u);
+  assert.match(review, /Hero görseli yüklenemedi/u);
+  assert.match(review, /heroMedia && heroPreviewLoading/u);
+  assert.match(review, /Hero görseli yükleniyor/u);
+  assert.match(review, /!heroMedia && revision\.state === "REVIEW_REQUIRED"/u);
+  assert.match(review, /Bu görünümde yüklenmedi/u);
+});
+
+test("media preview selection is visible before reads settle and retry is single-flight", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+
+  assert.match(review, /const mediaPreviewSelection = useMemo\(\(\) => Object\.fromEntries\(selectMediaPreviewAssets\(revision\?\.media \?\? \[\]\)\.map/u);
+  assert.match(review, /const mediaPreviewLoadInFlight = useRef\(false\);/u);
+  assert.match(review, /if \(mediaPreviewLoadInFlight\.current\) return;/u);
+  assert.match(review, /disabled=\{mediaPreviewLoading\}/u);
+  assert.match(review, /const mediaPreviewLatestRequest = useRef/u);
+  assert.match(review, /if \(mediaPreviewLatestRequest\.current\) \{\s*void drainLatestPreviewRequest\(\);/u);
+  assert.match(review, /const retryMediaPreviews = \(\) =>/u);
+  assert.match(review, /onClick=\{retryMediaPreviews\}/u);
+});
+
+test("editorial route changes preserve the mounted desk while switching its visible tab", async () => {
+  const app = await readFile(source("App.tsx"), "utf8");
+  const desk = await readFile(source("screens", "EditorialDesk.tsx"), "utf8");
+
+  assert.doesNotMatch(app, /<EditorialDesk\s+key=\{activePage\}/u);
+  assert.match(desk, /const \[previousInitialTab, setPreviousInitialTab\] = useState\(initialTab\);/u);
+  assert.match(desk, /if \(initialTab !== previousInitialTab\) \{\s*setPreviousInitialTab\(initialTab\);\s*setTab\(initialTab\);\s*\}/u);
+});
+
+test("content routes preserve the mounted flow while switching its visible tab", async () => {
+  const app = await readFile(source("App.tsx"), "utf8");
+  const flow = await readFile(source("screens", "ContentFlow.tsx"), "utf8");
+
+  assert.doesNotMatch(app, /<ContentFlow\s+key=\{activePage\}/u);
+  assert.match(flow, /const \[previousInitialTab, setPreviousInitialTab\] = useState\(initialTab\);/u);
+  assert.match(flow, /if \(initialTab !== previousInitialTab\) \{\s*setPreviousInitialTab\(initialTab\);\s*setTab\(initialTab\);\s*\}/u);
+  assert.doesNotMatch(flow, /setQuery\(""\);[\s\S]*?setSelectedIds\(new Set\(\)\);/u);
+});
+
+test("editorial background reads pause outside the draft list and when the window is hidden", async () => {
+  const desk = await readFile(source("screens", "EditorialDesk.tsx"), "utf8");
+
+  assert.match(desk, /if \(tab !== "drafts" \|\| !activeDraftSignature\) return;/u);
+  assert.match(desk, /if \(document\.visibilityState !== "visible"\) return;/u);
+  assert.match(desk, /EDITORIAL_DRAFT_POLL_MS\s*=\s*20_000/u);
+});
+
+test("legacy review packages explain the user outcome and offer a direct new-copy action", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+
+  assert.match(review, /Onaylanamaz\./u);
+  assert.match(review, /Yeni inceleme kopyas/u);
+  assert.match(review, /revision-technical-record/u);
 });

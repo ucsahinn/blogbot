@@ -157,6 +157,15 @@ test("candidate ranking raises only topic fit when corroborating sources agree o
   assert.ok(agreed.rankingScore > unmapped.rankingScore);
 });
 
+test("candidate ranking treats one explicit route as complete instead of a misleading fixed partial score", () => {
+  const candidate = rankCandidateStories([rankingStory("single-explicit-route")], rankingNow)[0]!;
+
+  // Topic fit answers whether the story can be routed, not how many sources
+  // support it. Corroboration remains represented by source sufficiency.
+  assert.equal(candidate.topicFitScore, 100);
+  assert.notEqual(candidate.rankingScore, 65);
+});
+
 test("candidate ranking never treats missing date or topic mapping as a passing default", () => {
   const candidate = rankCandidateStories([rankingStory("unknown-signals", {
     discoveredAt: "1970-01-01T00:00:00.000Z",
@@ -413,7 +422,7 @@ test("candidate.list materializes persisted feed entries with source policy cont
   assert.equal(candidate.confidence, 85);
   assert.equal(candidate.sourceSufficiencyScore, 45);
   assert.equal(candidate.originalityScore, 50);
-  assert.equal(candidate.topicFitScore, 65);
+  assert.equal(candidate.topicFitScore, 100);
   assert.equal(typeof candidate.freshnessScore, "number");
   assert.equal(typeof candidate.rankingScore, "number");
   assert.equal((candidate.scoreReasons as string[]).length, 4);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { describeBobyAvailability, localBobyReply, shouldUseLocalBobyShortcut } from "../src/boby-conversation.ts";
+import { bobyGuidancePollDelay, describeBobyAvailability, localBobyReply, persistPendingBobyGuidance, resolveBobyGuidancePoll, restorePendingBobyGuidance, shouldUseLocalBobyShortcut } from "../src/boby-conversation.ts";
 
 test("Boby presents its Luna Low mind as ready without exposing a Codex integration step", () => {
   assert.deepEqual(describeBobyAvailability({ runtime: "ONLINE", codexState: "READY" }), {
@@ -10,6 +10,52 @@ test("Boby presents its Luna Low mind as ready without exposing a Codex integrat
     label: "Boby hazır · Luna Low",
     detail: "Sorunu yaz; Boby bağlamı anlayıp yanıtlasın."
   });
+});
+
+test("Boby keeps polling a durable request after the initial bounded wait", () => {
+  assert.equal(bobyGuidancePollDelay(119_999, true), 2_000);
+  assert.equal(bobyGuidancePollDelay(120_000, true), 15_000);
+  assert.equal(bobyGuidancePollDelay(120_000, false), 60_000);
+});
+
+test("Boby delivers a completed durable reply after the initial wait using the same guidance id", () => {
+  const guidanceId = "boby-after-wait";
+  const requestedIds: string[] = [];
+  const fakeBridge = {
+    getBobyGuidance(id: string) {
+      requestedIds.push(id);
+      return requestedIds.length === 1
+        ? { state: "WAITING_CODEX" as const }
+        : { state: "SUCCEEDED" as const, reply: "Hazır yanıt" };
+    }
+  };
+
+  const first = fakeBridge.getBobyGuidance(guidanceId);
+  const waiting = resolveBobyGuidancePoll({ guidanceId, elapsedMs: 120_000, isDocumentVisible: true, ...first });
+  assert.deepEqual(waiting, { kind: "continue", guidanceId, nextPollMs: 15_000 });
+
+  const second = fakeBridge.getBobyGuidance(guidanceId);
+  const delivered = resolveBobyGuidancePoll({ guidanceId, elapsedMs: 135_000, isDocumentVisible: true, ...second });
+  assert.deepEqual(delivered, { kind: "deliver", guidanceId, reply: "Hazır yanıt" });
+  assert.deepEqual(requestedIds, [guidanceId, guidanceId]);
+});
+
+test("Boby keeps the same guidance id recoverable after a transient read failure and restores it from session storage", () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+    removeItem: (key: string) => { values.delete(key); }
+  };
+  const guidanceId = "boby-recoverable";
+
+  persistPendingBobyGuidance(storage, guidanceId);
+  assert.equal(restorePendingBobyGuidance(storage), guidanceId);
+  assert.deepEqual(
+    resolveBobyGuidancePoll({ guidanceId, elapsedMs: 120_000, isDocumentVisible: false, didReadFail: true }),
+    { kind: "continue", guidanceId, nextPollMs: 60_000 }
+  );
+  assert.equal(restorePendingBobyGuidance(storage), guidanceId);
 });
 
 test("Boby exposes a human status instead of a technical Codex queue", () => {
@@ -45,7 +91,7 @@ test("offline Boby gives distinct app guidance instead of repeating one failure 
   assert.match(seo, /SEO/iu);
 });
 test("Boby does not intercept editorial requests with a generic local answer", () => {
-  assert.equal(shouldUseLocalBobyShortcut("naber"), false);
+  assert.equal(shouldUseLocalBobyShortcut("naber"), true);
   assert.equal(shouldUseLocalBobyShortcut("bu konu hakkında ne düşünüyorsun?"), false);
   assert.equal(shouldUseLocalBobyShortcut("kaynak nasıl eklenir?"), false);
   assert.equal(shouldUseLocalBobyShortcut("bu konu için post hazırla"), false);
@@ -68,7 +114,7 @@ test("Boby panel uses the Boby and Luna Low voice for its visible handoff", asyn
   assert.match(assistant, /Boby'yi bağla/u);
   assert.match(assistant, /liveRuntime === "ONLINE"/u);
   const quickActions = assistant.match(/<div className="boby-quick-actions"[^>]*>([\s\S]*?)<\/div>/u)?.[1] ?? "";
-  assert.equal((quickActions.match(/disabled=\{deliveryState === "queued"\}/gu) ?? []).length, 4);
+  assert.equal((quickActions.match(/disabled=\{effectiveDeliveryState !== "idle"\}/gu) ?? []).length, 4);
   assert.match(assistant, /Boby hazırlanıyor · Luna Low/u);
   assert.match(assistant, /setLiveStatus\(\{/u);
   assert.match(
@@ -76,6 +122,7 @@ test("Boby panel uses the Boby and Luna Low voice for its visible handoff", asyn
     /BOBY_GUIDANCE_TIMEOUT_MS\s*=\s*120_000/u,
     "Boby guidance polling must stop after a bounded wait instead of staying pending forever"
   );
-  assert.match(assistant, /Boby yanıtı zaman aşımına uğradı/u);
+  assert.match(assistant, /Boby iste\u{11f}i s\u{00fc}r\u{00fc}yor/u);
+  assert.doesNotMatch(assistant, /Boby yan\u{0131}t\u{0131} zaman a\u{015f}\u{0131}m\u{0131}na u\u{011f}rad\u{0131}/u);
   assert.doesNotMatch(assistant, /Codex'e ilettim/u);
 });

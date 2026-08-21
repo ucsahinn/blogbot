@@ -309,7 +309,6 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         ) : null}
         {activePage === "content" || activePage === "content-candidates" || activePage === "instant" ? (
           <ContentFlow
-            key={activePage}
             bridge={bridge}
             readOnly={readOnly}
             canTestSources={hasRuntimeCapability(snapshot.capabilities, "SOURCE.TEST")}
@@ -336,7 +335,6 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         ) : null}
         {activePage === "editorial" || activePage === "editorial-review" ? (
           <EditorialDesk
-            key={activePage}
             bridge={bridge}
             snapshot={snapshot}
             workspace={workspace}

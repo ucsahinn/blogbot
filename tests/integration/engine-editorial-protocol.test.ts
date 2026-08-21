@@ -10,6 +10,7 @@ import {
   createPersistentEngineProtocol as createProductionEngineProtocol,
   pruneSupersededRevisionMedia
 } from "../../apps/engine/src/stdio-entrypoint.ts";
+import type { ImageGenerationRequest } from "../../apps/engine/src/imagegen-provider.ts";
 import {
   computeRevisionHash,
   computeWarningSetHash,
@@ -403,9 +404,10 @@ test("a media repair backed by ImageGen records a different provenance and revis
   const generatedImage = await sharp({
     create: { width: 1536, height: 1024, channels: 3, background: "#2456a6" }
   }).png().toBuffer();
+  let imageRequest: ImageGenerationRequest | undefined;
   const runtime = await createPersistentEngineProtocol(join(root, "pgdata"), {
     startSourceWorker: false,
-    imageGenerator: { async generate() { return generatedImage; } }
+    imageGenerator: { async generate(request) { imageRequest = request; return generatedImage; } }
   });
   t.after(() => runtime.close());
   const original = revision({ id: "revision-media-imagegen", media: [] });
@@ -423,6 +425,9 @@ test("a media repair backed by ImageGen records a different provenance and revis
   assert.equal(mediaGate?.state, "PASS");
   assert.equal(mediaGate?.reasonCode, "IMAGEGEN_VISUAL");
   assert.ok(value.revision.media.every((asset) => asset.source === "IMAGEGEN"));
+  assert.equal(imageRequest?.summary, original.tr.description);
+  assert.deepEqual(imageRequest?.keyClaims, original.claims.map((claim) => claim.trText ?? claim.text));
+  assert.match(imageRequest?.visualIntent ?? "", /metinsiz/u);
   // The provenance is approval-bound: it sits inside the revision hash, so a
   // local fallback and an ImageGen visual can never share one approval.
   const asFallback = {

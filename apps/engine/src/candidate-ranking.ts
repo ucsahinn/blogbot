@@ -168,8 +168,11 @@ function topicFit(evidence: readonly CandidateRankingEvidence[]): {
   }
   if (mappingBySource.size === 1) {
     return {
-      score: 65,
-      reason: "Konu uyumu: tek kaynakta açık bölüm ve içerik türü eşlemesi var."
+      // Route completeness and source corroboration are deliberately separate
+      // signals. An explicit section/type pair is a complete routing decision;
+      // sourceSufficiency already lowers confidence for a single source.
+      score: 100,
+      reason: "Konu uyumu: açık bölüm ve içerik türü eşlemesi var."
     };
   }
 

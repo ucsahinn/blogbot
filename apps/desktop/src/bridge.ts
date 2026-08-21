@@ -110,6 +110,7 @@ export interface BobyGuidanceStatus {
   id: string;
   state: "QUEUED" | "RUNNING" | "WAITING_CODEX" | "SUCCEEDED" | "FAILED";
   reply?: string;
+  waitReason?: string;
   suggestedActions?: Array<{ id: string; label: string }>;
 }
 

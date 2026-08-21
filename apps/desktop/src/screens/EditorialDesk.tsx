@@ -6,6 +6,8 @@ import { draftStateLabel, sectionLabel } from "../app-model.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import { ReviewWorkspace } from "./ReviewWorkspace.tsx";
 
+const EDITORIAL_DRAFT_POLL_MS = 20_000;
+
 interface EditorialDeskProps {
   bridge: BlogbotBridge;
   snapshot: BootstrapSnapshot;
@@ -36,6 +38,11 @@ export function EditorialDesk({
   pendingDraftTitle
 }: EditorialDeskProps) {
   const [tab, setTab] = useState<"drafts" | "review">(initialTab);
+  const [previousInitialTab, setPreviousInitialTab] = useState(initialTab);
+  if (initialTab !== previousInitialTab) {
+    setPreviousInitialTab(initialTab);
+    setTab(initialTab);
+  }
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | undefined>();
   const [retryingDraftId, setRetryingDraftId] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
@@ -80,9 +87,10 @@ export function EditorialDesk({
   }, [bridge, draftIdToSync, onWorkspaceChange]);
 
   useEffect(() => {
-    if (!activeDraftSignature) return;
+    if (tab !== "drafts" || !activeDraftSignature) return;
     let cancelled = false;
     const refreshActiveDrafts = async () => {
+      if (document.visibilityState !== "visible") return;
       try {
         const nextWorkspace = await bridge.getEditorialWorkspace();
         if (cancelled) return;
@@ -102,12 +110,12 @@ export function EditorialDesk({
     // five seconds made a busy draft turn navigation into a stream of full
     // database reads. The engine now bounds and briefly caches that projection;
     // this calmer cadence keeps progress visible without competing with it.
-    const timer = window.setInterval(() => void refreshActiveDrafts(), 15_000);
+    const timer = window.setInterval(() => void refreshActiveDrafts(), EDITORIAL_DRAFT_POLL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeDraftSignature, bridge, onWorkspaceChange]);
+  }, [activeDraftSignature, bridge, onWorkspaceChange, tab]);
 
   const refreshDrafts = async () => {
     setRefreshing(true);

@@ -54,6 +54,22 @@ test("SVG intermediate escapes injected markup and contains no remote references
   assert.match(svg, /&lt;script/);
 });
 
+test("local fallback cover is a text-free visual and never stamps article data into pixels", () => {
+  const title = "Kent ulaşımında yeni düzenleme";
+  const svg = buildSafeCoverSvg({
+    title,
+    palette: ["#08131f", "#32d3a6"],
+    motifs: ["network", "shield"],
+    externalAssets: [],
+    depictsRealPerson: false,
+    depictsBrandLogo: false
+  }, { width: 1600, height: 900 });
+
+  assert.doesNotMatch(svg, /<text\b/iu);
+  assert.doesNotMatch(svg, new RegExp(title, "u"));
+  assert.doesNotMatch(svg, /NETWORK|SHIELD/u);
+});
+
 test("local renderer emits metadata-free WebP files for every required ratio", async (t) => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "blogbot-visuals-"));
   t.after(() => rm(outputDirectory, { recursive: true, force: true }));

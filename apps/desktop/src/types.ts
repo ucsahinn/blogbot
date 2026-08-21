@@ -465,6 +465,8 @@ export interface CandidateView {
   topicFitScore?: number;
   rankingScore?: number;
   scoreReasons?: string[];
+  /** Source publication time, when the feed supplied one. */
+  publishedAt?: string | null;
   discoveredAt: string;
   state: "NEW" | "NEEDS_SOURCE" | "ROUTING_REQUIRED" | "DISMISSED" | "PROMOTED" | "RESEARCH_QUEUED" | "RESEARCH_FAILED";
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   userFacingBridgeError,
@@ -34,6 +34,57 @@ interface ReviewWorkspaceProps {
 type ReviewTab = "content" | "claims" | "media" | "gates" | "diff";
 type Locale = "tr" | "en";
 type EditorialApprovalRequirement = "EDITORIAL_REVIEW" | "EXPERT_REVIEW" | "ETHICS_REVIEW";
+export const MAX_MEDIA_PREVIEW_LOADS = 4;
+const MEDIA_PREVIEW_CONCURRENCY = 2;
+export type MediaPreviewAsset = Pick<ReviewRevision["media"][number], "role" | "sha256" | "byteSize" | "contentBase64">;
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure selection is tested with deterministic bridge fakes.
+export function selectMediaPreviewAssets(media: MediaPreviewAsset[]): MediaPreviewAsset[] {
+  return [...media]
+    .sort((left, right) => Number(right.role === "hero") - Number(left.role === "hero"))
+    .filter((asset, index, items) => items.findIndex((candidate) => candidate.sha256 === asset.sha256) === index)
+    .slice(0, MAX_MEDIA_PREVIEW_LOADS);
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- pure preview reader is tested with deterministic bridge fakes.
+export async function loadRevisionMediaPreviews({
+  revisionId,
+  media,
+  readMedia
+}: {
+  revisionId: string;
+  media: MediaPreviewAsset[];
+  readMedia: (input: { revisionId: string; sha256: string }) => Promise<{ mimeType: string; contentBase64: string }>;
+}): Promise<{ urls: Record<string, string>; errors: Record<string, true>; selectedSha256: string[] }> {
+  const selected = selectMediaPreviewAssets(media);
+  const urls: Record<string, string> = {};
+  const errors: Record<string, true> = {};
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < selected.length) {
+      const asset = selected[nextIndex++];
+      if (!asset) continue;
+      try {
+        if (asset.contentBase64) {
+          urls[asset.sha256] = `data:image/webp;base64,${asset.contentBase64}`;
+          continue;
+        }
+        const byteSize = asset.byteSize;
+        if (typeof byteSize !== "number" || !Number.isSafeInteger(byteSize) || byteSize < 1 || !/^[a-f0-9]{64}$/iu.test(asset.sha256)) {
+          errors[asset.sha256] = true;
+          continue;
+        }
+        const loaded = await readMedia({ revisionId, sha256: asset.sha256 });
+        urls[asset.sha256] = `data:${loaded.mimeType};base64,${loaded.contentBase64}`;
+      } catch {
+        errors[asset.sha256] = true;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(MEDIA_PREVIEW_CONCURRENCY, selected.length) }, worker));
+  return { urls, errors, selectedSha256: selected.map((asset) => asset.sha256) };
+}
+
 type ReviewRevisionV3 = ReviewRevision & {
   packageVersion: 3;
   publicationSources: NonNullable<ReviewRevision["publicationSources"]>;
@@ -222,7 +273,18 @@ export function ReviewWorkspace({
   const [query, setQuery] = useState("");
   const [queueFilter, setQueueFilter] = useState<"pending" | "approved">("pending");
   const [revision, setRevision] = useState<ReviewRevision | null>(null);
-  const [heroDataUrl, setHeroDataUrl] = useState<string | null>(null);
+  const [mediaDataUrls, setMediaDataUrls] = useState<Record<string, string>>({});
+  const [mediaLoadErrors, setMediaLoadErrors] = useState<Record<string, true>>({});
+  const [mediaPreviewRefreshNonce, setMediaPreviewRefreshNonce] = useState(0);
+  const [mediaPreviewLoading, setMediaPreviewLoading] = useState(false);
+  const mediaPreviewLoadInFlight = useRef(false);
+  const mediaPreviewRequestId = useRef(0);
+  const mediaPreviewLatestRequest = useRef<{
+    id: number;
+    revisionId: string;
+    media: MediaPreviewAsset[];
+    readMedia: BlogbotBridge["readRevisionMedia"];
+  } | null>(null);
   const [locale, setLocale] = useState<Locale>("tr");
   const [tab, setTab] = useState<ReviewTab>("content");
   const [loading, setLoading] = useState(snapshot.queue.length > 0);
@@ -293,21 +355,42 @@ export function ReviewWorkspace({
   }, [bridge, selectedId]);
 
   useEffect(() => {
-    const hero = revision?.media.find((media) => media.role === "hero");
-    let alive = true;
-    const loadHero = async (): Promise<string | null> => {
-      if (!hero) return null;
-      if (hero.contentBase64) return `data:image/webp;base64,${hero.contentBase64}`;
-      if (!Number.isSafeInteger(hero.byteSize) || hero.byteSize! < 1 || !/^[a-f0-9]{64}$/iu.test(hero.sha256)) return null;
-      const asset = await bridge.readRevisionMedia({ revisionId: revision!.id, sha256: hero.sha256 });
-      return `data:${asset.mimeType};base64,${asset.contentBase64}`;
+    mediaPreviewLatestRequest.current = {
+      id: ++mediaPreviewRequestId.current,
+      revisionId: revision?.id ?? "",
+      media: selectMediaPreviewAssets(revision?.media ?? []),
+      readMedia: bridge.readRevisionMedia
     };
-    void loadHero().then(
-      (dataUrl) => { if (alive) setHeroDataUrl(dataUrl); },
-      () => { if (alive) setHeroDataUrl(null); }
-    );
-    return () => { alive = false; };
-  }, [bridge, revision]);
+    const drainLatestPreviewRequest = async (): Promise<void> => {
+      if (mediaPreviewLoadInFlight.current) return;
+      const request = mediaPreviewLatestRequest.current;
+      if (!request) return;
+      mediaPreviewLatestRequest.current = null;
+      mediaPreviewLoadInFlight.current = true;
+      setMediaPreviewLoading(true);
+      setMediaLoadErrors({});
+      try {
+        const { urls, errors } = await loadRevisionMediaPreviews(request);
+        if (request.id === mediaPreviewRequestId.current) {
+          setMediaDataUrls(urls);
+          setMediaLoadErrors(errors);
+        }
+      } finally {
+        mediaPreviewLoadInFlight.current = false;
+        if (mediaPreviewLatestRequest.current) {
+          void drainLatestPreviewRequest();
+        } else {
+          setMediaPreviewLoading(false);
+        }
+      }
+    };
+    void Promise.resolve().then(drainLatestPreviewRequest);
+  }, [bridge, revision, mediaPreviewRefreshNonce]);
+
+  const retryMediaPreviews = () => {
+    if (mediaPreviewLoadInFlight.current) return;
+    setMediaPreviewRefreshNonce((value) => value + 1);
+  };
 
   const summary = useMemo(
     () => gateSummary(revision?.gates ?? []),
@@ -329,6 +412,10 @@ export function ReviewWorkspace({
   const activeContent = revision?.[locale];
   const previousContent = revision?.previous[locale];
   const heroMedia = revision?.media.find((media) => media.role === "hero");
+  const heroDataUrl = heroMedia ? mediaDataUrls[heroMedia.sha256] ?? null : null;
+  const heroLoadError = Boolean(heroMedia && mediaLoadErrors[heroMedia.sha256]);
+  const mediaPreviewSelection = useMemo(() => Object.fromEntries(selectMediaPreviewAssets(revision?.media ?? []).map((asset) => [asset.sha256, true])), [revision]);
+  const heroPreviewLoading = Boolean(heroMedia && !heroDataUrl && !heroLoadError && mediaPreviewSelection[heroMedia.sha256]);
   const v3Revision = asReviewRevisionV3(revision);
   const requiresExpertReview = Boolean(v3Revision?.approvalRequirements.includes("EXPERT_REVIEW"));
   const requiresEthicsReview = Boolean(v3Revision?.approvalRequirements.includes("ETHICS_REVIEW"));
@@ -958,21 +1045,24 @@ export function ReviewWorkspace({
               </section>
             ) : null}
 
-            <div className="revision-integrity-bar">
-              <div>
-                <span className="integrity-icon" aria-hidden="true">
-                  ⌁
-                </span>
-                <span>
-                  <strong>Değişmez revizyon</strong>
-                  Onay bu hash’e, iki dile, kanıtlara, medyaya ve takvime
-                  bağlanır.
-                </span>
-              </div>
+          <div className="revision-integrity-bar">
+            <div>
+              <span className="integrity-icon" aria-hidden="true">
+                ⌁
+              </span>
+              <span>
+                  <strong>Onay kaydı</strong>
+                  Bu onay, metin, kaynaklar, görseller, plan ve iki dil sürümü için geçerlidir.
+                  Bir şey değişirse yeniden inceleme gerekir.
+              </span>
+            </div>
+            <details className="revision-technical-record">
+              <summary>Teknik kayıt</summary>
               <code title={revision.revisionHash}>
                 sha256:{revision.revisionHash.slice(0, 16)}…
               </code>
-            </div>
+            </details>
+          </div>
 
             {notice ? <div className="inline-notice review-notice" role="status" aria-live="polite">{notice}</div> : null}
             {acceptedWarnings.length > 0 && !hasUnacceptableWarning && revision.state !== "APPROVED" ? (
@@ -989,7 +1079,16 @@ export function ReviewWorkspace({
             ) : null}
             {revision.state !== "APPROVED" && !v3Revision ? (
               <div id="review-v3-upgrade-required" className="inline-notice review-notice is-warning" role="status">
-                Bu kayıt eski inceleme paketi (V2) olduğu için yalnızca okunabilir. İnsan inceleme beyanı içeren yeni bir V3 revizyonu oluşturun; mevcut içerik sessizce onaylanamaz.
+                <strong>Bu içerik eski kurallarla hazırlanmış. Onaylanamaz.</strong>
+                <span>İstediğiniz değişikliği yazın; sistem güncel inceleme kopyasını hazırlasın. Eski içerik olduğu gibi korunur.</span>
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  disabled={readOnly || requestingEdit}
+                  onClick={() => setEditRequestOpen(true)}
+                >
+                  Yeni inceleme kopyası oluştur
+                </button>
               </div>
             ) : null}
             {revision.state !== "APPROVED" && v3Revision ? (
@@ -1144,17 +1243,28 @@ export function ReviewWorkspace({
                               />
                               <figcaption>{heroMedia.filename} · {heroMedia.width} × {heroMedia.height} · {heroMedia.sha256.slice(0, 16)}…</figcaption>
                             </figure>
-                          ) : (
+                          ) : heroMedia && heroLoadError ? (
+                            <div className="article-no-media" role="status" aria-live="polite">
+                              <strong>Hero görseli yüklenemedi.</strong>
+                              <button type="button" className="secondary-button" onClick={retryMediaPreviews} disabled={mediaPreviewLoading}>
+                                Önizlemeyi tekrar dene
+                              </button>
+                            </div>
+                          ) : heroMedia && heroPreviewLoading ? (
+                            <div className="article-no-media" role="status" aria-live="polite">
+                              <strong>Hero görseli yükleniyor.</strong>
+                            </div>
+                          ) : !heroMedia ? (
                             <div className="article-no-media" role="note" aria-label="Hero medya durumu">
                               <strong>Bu taslakta hero medya yok.</strong>
                               <span>Metin değişmeden, onaylanmamış yeni bir revizyona içerikle uyumlu üç görsel oranı ekleyebilirsiniz.</span>
-                              {revision.state === "REVIEW_REQUIRED" && !readOnly ? (
+                              {!heroMedia && revision.state === "REVIEW_REQUIRED" && !readOnly ? (
                                 <button type="button" className="secondary-button" onClick={() => void repairMedia()} disabled={repairingMedia}>
                                   {repairingMedia ? "Görsel paketi hazırlanıyor…" : "Görseli hazırla"}
                                 </button>
                               ) : null}
                             </div>
-                          )}
+                          ) : null}
                           <div className="markdown-preview">
                             {content.bodyMarkdown.split("\n\n").map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
                           </div>
@@ -1315,9 +1425,19 @@ export function ReviewWorkspace({
                   <div className="media-grid">
                     {revision.media.map((media) => (
                       <article className="media-card" key={media.id}>
-                        <div className="media-placeholder">
-                          <span>{media.role === "hero" ? "HERO" : "İÇ GÖRSEL"}</span>
-                          <strong>{media.width} × {media.height}</strong>
+                        <div className="media-thumbnail" style={{ aspectRatio: `${media.width} / ${media.height}`, overflow: "hidden" }}>
+                          {mediaDataUrls[media.sha256] ? (
+                            <img
+                              src={mediaDataUrls[media.sha256]}
+                              width={media.width}
+                              height={media.height}
+                              loading="lazy"
+                              alt={locale === "tr" ? media.altTr : media.altEn}
+                              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                            />
+                          ) : (
+                            <span>{mediaLoadErrors[media.sha256] ? "Önizleme yüklenemedi" : mediaPreviewSelection[media.sha256] ? "Önizleme hazırlanıyor" : "Bu görünümde yüklenmedi"}</span>
+                          )}
                         </div>
                         <div className="media-card-body">
                           <h3>{media.filename}</h3>
@@ -1330,6 +1450,11 @@ export function ReviewWorkspace({
                             <p><span>TR</span>{media.altTr}</p>
                             <p><span>EN</span>{media.altEn}</p>
                           </div>
+                          {mediaLoadErrors[media.sha256] ? (
+                            <button type="button" className="text-button" onClick={retryMediaPreviews} disabled={mediaPreviewLoading}>
+                              Önizlemeyi tekrar dene
+                            </button>
+                          ) : null}
                         </div>
                       </article>
                     ))}

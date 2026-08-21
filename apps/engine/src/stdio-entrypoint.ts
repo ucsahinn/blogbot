@@ -1595,6 +1595,11 @@ export function createEngineProtocol(
             const sourceUrl = String(entry.url).slice(0, 320);
             if (sourceUrl && !sourceUrls.includes(sourceUrl) && sourceUrls.length < 12) sourceUrls.push(sourceUrl);
             candidate.sourceUrls = sourceUrls;
+            const existingPublishedAt = typeof candidate.publishedAt === "string" ? Date.parse(candidate.publishedAt) : Number.NaN;
+            const entryPublishedAt = entry.publishedAt ? Date.parse(entry.publishedAt) : Number.NaN;
+            if (Number.isFinite(entryPublishedAt) && (!Number.isFinite(existingPublishedAt) || entryPublishedAt > existingPublishedAt)) {
+              candidate.publishedAt = entry.publishedAt;
+            }
             candidate.duplicateScore = Math.min(100, Number(candidate.duplicateScore ?? 0) + 35);
             candidate.confidence = Math.max(Number(candidate.confidence ?? 0), source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? 85 : 60);
             existing.evidence.push(rankingEvidence);
@@ -1611,6 +1616,7 @@ export function createEngineProtocol(
               articleType: source.defaultArticleType ?? "news",
               confidence: source.trustStatus === "APPROVED" && source.rightsStatus === "APPROVED" ? 85 : 60,
               duplicateScore: 0,
+              publishedAt: entry.publishedAt ?? null,
               discoveredAt: entry.publishedAt ?? new Date(0).toISOString(),
               sourceId: source.id,
               sourceUrl: String(entry.url).slice(0, 320),
@@ -3491,7 +3497,10 @@ async function createMediaRepairSuccessor(
         title: revision.tr.title,
         articleType: revision.articleType,
         section: revision.section,
-        sourceTitles: revision.sources.map((source) => source.title)
+        sourceTitles: revision.sources.map((source) => source.title),
+        summary: revision.tr.description,
+        keyClaims: revision.claims.map((claim) => claim.trText ?? claim.text),
+        visualIntent: `Makalenin ana konusunu ${revision.section} bölümüne uygun, metinsiz ve gerçekçi editoryal bir sahneyle anlat; başlık için boş alan bırakma.`
       });
       artifacts = await renderGeneratedImageVariants(
         generated,

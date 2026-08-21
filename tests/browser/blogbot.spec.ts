@@ -1091,20 +1091,19 @@ test("candidate triage explains that drafting is local and publication follows r
   await expect(page.getByText("Yayın yalnızca hazır taslağı inceledikten sonra başlar; insan onayı olmadan hiçbir içerik gönderilmez.")).toBeVisible();
 });
 
-test("candidate triage visibly compares all four measured ranking dimensions", async ({ page }) => {
+test("candidate triage presents a simple priority, source date, and accessible bulk selection", async ({ page }) => {
   await page.goto("#content-candidates");
   const candidate = page.locator(".candidate-card").filter({
     has: page.getByRole("heading", { name: "Resmî kurum yeni bir duyuru yayımladı" })
   });
 
-  await expect(candidate.getByText("Kaynak yeterliliği", { exact: true })).toBeVisible();
-  await expect(candidate.getByText("Güncellik", { exact: true })).toBeVisible();
-  await expect(candidate.getByText("Özgünlük", { exact: true })).toBeVisible();
-  await expect(candidate.getByText("Konu uyumu", { exact: true })).toBeVisible();
-  await expect(candidate.getByText("100%", { exact: true })).toHaveCount(2);
-  await expect(candidate.getByText("85%", { exact: true })).toBeVisible();
-  await expect(candidate.getByText("82%", { exact: true })).toBeVisible();
-  await expect(candidate.getByText("Genel sıralama: 92%", { exact: true })).toBeVisible();
+  await expect(candidate.getByText("İnceleme önceliği: 92%", { exact: true })).toBeVisible();
+  await expect(candidate.getByText(/3 kaynak/u)).toBeVisible();
+  await expect(candidate.getByRole("checkbox", { name: /adayını seç/u })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Görünenleri seç" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Seçimi temizle" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Seçilenleri araştırmaya al" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Seçilenleri kapat" })).toBeVisible();
 });
 
 test("section and article-type labels avoid mechanical duplication", async ({ page }) => {

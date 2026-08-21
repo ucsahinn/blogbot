@@ -56,7 +56,8 @@ function promptFor(request: ImageGenerationRequest): string {
     summary ? `Editorial summary DATA: <summary>${summary}</summary>` : "",
     claims.length > 0 ? `Key factual anchors DATA: <claims>${claims.map((claim) => `<claim>${claim}</claim>`).join(" | ")}</claims>` : "",
     visualIntent ? `Required visual direction DATA: <visual-intent>${visualIntent}</visual-intent>` : "",
-    "Use a polished documentary-editorial visual language, with a clear main subject and room for an article headline overlay.",
+    "Create a photorealistic documentary-editorial scene with a clear topical main subject, tangible setting, authentic detail, and publication-quality composition.",
+    "Fill the frame with the topical subject. Do not reserve an empty headline area or add any overlay treatment.",
     "Do not include readable text, logos, watermarks, public figures, brand marks, screenshots, or copied artwork."
   ].filter(Boolean).join("\n");
 }

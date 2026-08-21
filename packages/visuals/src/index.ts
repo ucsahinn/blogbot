@@ -111,23 +111,6 @@ export function planRasterVariants(baseName: string): RasterVariant[] {
   ];
 }
 
-function escapeXml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-function safeDisplayText(value: string): string {
-  return value
-    .replace(/https?:\/\/[^\s"'<>]+/gi, "[link removed]")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
-}
-
 export function buildSafeCoverSvg(
   direction: ArtDirection,
   size: { width: number; height: number }
@@ -146,10 +129,6 @@ export function buildSafeCoverSvg(
   }
 
   const [background = "#08131f", accent = "#32d3a6"] = direction.palette;
-  const title = escapeXml(safeDisplayText(direction.title));
-  const motifLabel = escapeXml(direction.motifs.join(" · ").toUpperCase());
-  const titleY = Math.round(size.height * 0.58);
-
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="0 0 ${size.width} ${size.height}">`,
     "<defs>",
@@ -160,8 +139,10 @@ export function buildSafeCoverSvg(
     '<rect width="100%" height="100%" fill="url(#grid)"/>',
     `<circle cx="${Math.round(size.width * 0.79)}" cy="${Math.round(size.height * 0.28)}" r="${Math.round(size.height * 0.18)}" fill="none" stroke="${accent}" stroke-width="3" stroke-opacity=".85"/>`,
     `<path d="M ${Math.round(size.width * 0.08)} ${Math.round(size.height * 0.33)} H ${Math.round(size.width * 0.62)}" stroke="${accent}" stroke-width="6"/>`,
-    `<text x="${Math.round(size.width * 0.08)}" y="${Math.round(size.height * 0.25)}" fill="${accent}" font-family="Segoe UI, Arial, sans-serif" font-size="${Math.max(18, Math.round(size.height * 0.035))}" letter-spacing="4">${motifLabel}</text>`,
-    `<text x="${Math.round(size.width * 0.08)}" y="${titleY}" fill="#f4f8fb" font-family="Segoe UI, Arial, sans-serif" font-size="${Math.max(34, Math.round(size.height * 0.075))}" font-weight="700">${title}</text>`,
+    `<path d="M ${Math.round(size.width * 0.08)} ${Math.round(size.height * 0.67)} C ${Math.round(size.width * 0.28)} ${Math.round(size.height * 0.49)}, ${Math.round(size.width * 0.49)} ${Math.round(size.height * 0.84)}, ${Math.round(size.width * 0.72)} ${Math.round(size.height * 0.58)}" fill="none" stroke="${accent}" stroke-width="10" stroke-linecap="round" stroke-opacity=".78"/>`,
+    `<circle cx="${Math.round(size.width * 0.26)}" cy="${Math.round(size.height * 0.67)}" r="${Math.max(9, Math.round(size.height * 0.018))}" fill="${accent}"/>`,
+    `<circle cx="${Math.round(size.width * 0.51)}" cy="${Math.round(size.height * 0.76)}" r="${Math.max(9, Math.round(size.height * 0.018))}" fill="${accent}"/>`,
+    `<circle cx="${Math.round(size.width * 0.72)}" cy="${Math.round(size.height * 0.58)}" r="${Math.max(9, Math.round(size.height * 0.018))}" fill="${accent}"/>`,
     "</svg>"
   ].join("");
 }

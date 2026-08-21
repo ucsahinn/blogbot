@@ -3068,6 +3068,32 @@ strong {
   font-size: 12px;
 }
 
+.revision-technical-record {
+  flex: 0 0 auto;
+}
+
+.revision-technical-record summary {
+  cursor: pointer;
+  color: #3a665d;
+  font-weight: 700;
+}
+
+.revision-technical-record code {
+  display: block;
+  margin-top: 5px;
+}
+
+.review-notice.is-warning {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.review-notice.is-warning > span {
+  flex: 1 1 320px;
+}
+
 .review-notice {
   margin: 0;
   border-width: 0 0 1px;

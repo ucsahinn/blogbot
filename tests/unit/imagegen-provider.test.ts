@@ -56,6 +56,9 @@ test("ImageGen uses the article's editorial brief instead of guessing from a tit
   assert.match(body.prompt ?? "", /Karar 1 Eylül'de yürürlüğe girecek/u);
   assert.match(body.prompt ?? "", /şehir içi aktarma akışını/u);
   assert.match(body.prompt ?? "", /Do not include readable text, logos, watermarks/u);
+  assert.match(body.prompt ?? "", /photorealistic documentary-editorial scene/u);
+  assert.match(body.prompt ?? "", /Fill the frame with the topical subject/u);
+  assert.doesNotMatch(body.prompt ?? "", /room for an article headline overlay/u);
 });
 
 test("ImageGen remains disabled until the host explicitly supplies a local environment key", () => {
