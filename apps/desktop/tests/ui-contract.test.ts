@@ -329,6 +329,12 @@ test("operations diagnostics keeps raw engine records off the live screen", asyn
   assert.doesNotMatch(operations, /getEngineDiagnostics|engineDiagnostics|engine-diagnostics|<pre>/u);
   assert.doesNotMatch(operations, /diagnosticExportPath|Son paket:/u);
 });
+test("Operations renders the safe action detail without exposing internal correlation identifiers", async () => {
+  const operations = await readFile(source("screens", "Operations.tsx"), "utf8");
+
+  assert.match(operations, /<p className="event-detail">\{event\.detail\}<\/p>/u);
+  assert.doesNotMatch(operations, /<code>\{event\.correlationId\}<\/code>/u);
+});
 test("local materialization never reuses a publication preview from another revision", async () => {
   const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
 

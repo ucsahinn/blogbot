@@ -1133,11 +1133,10 @@ async function verifyVisibleDiagnosticsExportJourney(sessionId) {
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const result = await execute(sessionId, `return (() => ({
       status: document.querySelector('[role="status"]')?.textContent?.trim() ?? '',
-      path: document.querySelector('.diagnostic-export-path')?.textContent?.trim() ?? '',
       summary: document.querySelector('[aria-label="Tanılama özeti"]')?.textContent?.trim() ?? ''
     }))();`);
-    if (result?.status.includes('Tanılama paketi hazırlandı') && result.path && !/token|password|authorization|bearer|private.?key/iu.test(`${result.path}\n${result.summary}`)) {
-      return { exported: true, path: result.path };
+    if (result?.status.includes('Tanılama paketi hazırlandı') && result.summary && !/token|password|authorization|bearer|private.?key/iu.test(result.summary)) {
+      return { exported: true, redactedSummary: true };
     }
     if (attempt === 59) fail(`visible diagnostics export did not produce a redacted package result: ${JSON.stringify(result)}`);
     await new Promise((resolveWait) => setTimeout(resolveWait, 150));

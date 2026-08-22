@@ -629,6 +629,13 @@ test("verify and release reject RustSec vulnerabilities in the Windows desktop l
   }
 });
 
+test("native diagnostics smoke accepts the redacted handoff without requiring a local path", async () => {
+  const smokeScript = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(smokeScript, /result\?\.status\.includes\('Tanılama paketi hazırlandı'\) && result\.summary/u);
+  assert.doesNotMatch(smokeScript, /result\.path &&/u);
+  assert.doesNotMatch(smokeScript, /diagnostic-export-path/u);
+});
 test("native smoke fails a slow route instead of tolerating a minute-long frozen menu", async () => {
   const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
 

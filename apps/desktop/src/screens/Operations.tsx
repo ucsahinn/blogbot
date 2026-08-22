@@ -496,6 +496,7 @@ export function Operations({
                 <span className={`event-marker state-${event.state.toLowerCase()}`} />
                 <span>
                   <strong>{event.title}</strong>
+                  <p className="event-detail">{event.detail}</p>
                   <small className={`log-level log-level-${(event.level ?? "INFO").toLowerCase()}`}>
                     {event.level === "ERROR" ? "Hata" : event.level === "WARN" ? "Uyarı" : event.level === "DEBUG" ? "Tanılama" : "Bilgi"}
                   </small>

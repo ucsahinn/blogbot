@@ -3982,6 +3982,13 @@ strong {
   line-height: 1.4;
 }
 
+.event-detail {
+  margin: 4px 0 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .schedule-row small,
 .event-row small {
   margin-top: 3px;
