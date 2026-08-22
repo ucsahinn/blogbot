@@ -34,6 +34,9 @@ export function persistPendingBobyGuidance(storage: BobySessionStorage, guidance
   }
 }
 
+export function isBobyRunnerUnavailable(state: "QUEUED" | "RUNNING" | "WAITING_CODEX" | "SUCCEEDED" | "FAILED"): boolean {
+  return state === "WAITING_CODEX";
+}
 export type BobyGuidancePollResolution =
   | { kind: "deliver"; guidanceId: string; reply: string }
   | { kind: "failed"; guidanceId: string }

@@ -11,6 +11,12 @@ test("Boby presents live Luna replies without exposing durable queue terminology
   assert.match(assistant, /Boby düşünüyor/u);
   assert.doesNotMatch(assistant, /Yerel sırada|WAITING_CODEX/u);
 });
+test("Boby stops immediately when the local answer runner is unavailable", async () => {
+  const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");
+
+  assert.match(assistant, /isBobyRunnerUnavailable\(result\.state\)/u);
+  assert.match(assistant, /Boby şu an yanıt altyapısına ulaşamıyor/u);
+});
 test("Boby clears a stale unanswered request instead of polling forever", async () => {
   const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");
 

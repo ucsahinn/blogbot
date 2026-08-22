@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import bobyAvatar from "../assets/boby-avatar-v3.webp";
-import { bobyGuidancePollDelay, describeBobyAvailability, persistPendingBobyGuidance, restorePendingBobyGuidance } from "../boby-conversation.ts";
+import { bobyGuidancePollDelay, describeBobyAvailability, isBobyRunnerUnavailable, persistPendingBobyGuidance, restorePendingBobyGuidance } from "../boby-conversation.ts";
 import { playFeedbackSound } from "../feedback-sounds.ts";
 import type { BlogbotBridge } from "../bridge.ts";
 import type { BootstrapSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
@@ -77,6 +77,10 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
             return page ? [{ label: action.label, page }] : [];
           });
           finish({ text: result.reply, actions, origin: "boby" });
+          return;
+        }
+        if (isBobyRunnerUnavailable(result.state)) {
+          finish({ text: "Boby şu an yanıt altyapısına ulaşamıyor. Birkaç saniye sonra yeniden deneyebilirsin.", origin: "system" });
           return;
         }
         if (result.state === "FAILED") {

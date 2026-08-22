@@ -205,6 +205,12 @@ export async function runStructuredCodexTask<T>(
         : "Codex çalıştırması tamamlanamadı";
       throw new CodexRunnerError("PROCESS_FAILED", detail);
     }
+    if (event.item?.type === "error") {
+      const detail = typeof event.item.text === "string" && event.item.text.trim()
+        ? event.item.text.trim().slice(0, 500)
+        : "Codex çalıştırması tamamlanamadı";
+      throw new CodexRunnerError("PROCESS_FAILED", detail);
+    }
     const waitingReason =
       waitingReasons[event.type as keyof typeof waitingReasons];
     if (waitingReason) {

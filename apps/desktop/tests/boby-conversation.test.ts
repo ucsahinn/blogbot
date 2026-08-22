@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { bobyGuidancePollDelay, describeBobyAvailability } from "../src/boby-conversation.ts";
+import { bobyGuidancePollDelay, describeBobyAvailability, isBobyRunnerUnavailable } from "../src/boby-conversation.ts";
 
 test("Boby is ready as an immediate local guide in every runtime state", () => {
   for (const input of [
@@ -24,6 +24,10 @@ test("Boby has no retained canned local reply path", async () => {
   assert.doesNotMatch(conversation, /localBobyReply/u);
   assert.doesNotMatch(conversation, /shouldUseLocalBobyShortcut/u);
   assert.doesNotMatch(conversation, /OPE'nin yerel editöründesin/u);
+});
+test("Boby exposes a waiting runner as unavailable instead of a live reply", () => {
+  assert.equal(isBobyRunnerUnavailable("WAITING_CODEX"), true);
+  assert.equal(isBobyRunnerUnavailable("RUNNING"), false);
 });
 test("Boby checks a newly accepted reply quickly before backing off", () => {
   assert.equal(bobyGuidancePollDelay(0, true), 350);

@@ -1247,9 +1247,10 @@ test("offline engine health has direct recovery and redacted diagnostics actions
   await expect(page.getByRole("button", { name: "Yerel durumu yeniden dene" })).toBeVisible();
   await page.getByRole("button", { name: "Tanılama ve günlükleri aç" }).click();
   await expect(page.getByRole("button", { name: "Tanılama paketi oluştur" })).toBeVisible();
-  await page.getByText("Engine hata günlüğü", { exact: true }).click();
-  await expect(page.getByText("engine.stderr.log", { exact: false })).toBeVisible();
+  await expect(page.getByText("Engine hata günlüğü", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("engine.stderr.log", { exact: false })).toHaveCount(0);
   await expect(page.getByText(/Bu özet sır, anahtar, kaynak metni veya kullanıcı verisi içermez/u)).toBeVisible();
+  await expect(page.getByText("Günlük ayrıntıları yalnızca oluşturulan yerel tanı paketinde bulunur.", { exact: true })).toBeVisible();
 });
 
 test("offline runtime can still create a redacted diagnostics package", async ({ page }) => {
@@ -1328,7 +1329,7 @@ test("instant-create happy path queues a review-only job", async ({ page }) => {
   await expect(page.getByRole("combobox", { name: "İçerik türü" })).toBeDisabled();
   await page.getByRole("button", { name: "Araştırmayı başlat" }).click();
   await expect(page.getByRole("heading", { name: "İş güvenli kuyruğa alındı." })).toBeVisible();
-  await expect(page.getByText("İş kimliği")).toBeVisible();
+  await expect(page.getByText("İş kimliği")).toHaveCount(0);
   await page.getByRole("button", { name: "Editoryal Masada gör" }).click();
   await expect(page.getByRole("heading", { name: "Taslak, iki dil ve kanıt paketi aynı masada." })).toBeVisible();
   const queuedDraft = page.getByRole("button", { name: /Seçilen kanıtları karşılaştır ve özgün bir analiz hazırla/u });

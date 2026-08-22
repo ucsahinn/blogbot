@@ -189,7 +189,7 @@ test("focus indicators use an opaque semantic color with sufficient contrast", a
 
   assert.match(styles, /--ink-faint:\s*#405056/u);
   assert.match(styles, /--accent:\s*#a93618/u);
-  assert.match(styles, /\.workspace small\s*\{[\s\S]*?font-size:\s*12px !important/u);
+  assert.match(styles, /\.workspace small\s*\{[\s\S]*?font-size:\s*13px !important/u);
   assert.match(styles, /button:focus-visible[\s\S]*?outline:\s*3px solid var\(--blue\)/u);
   assert.match(styles, /\.field input:focus-visible[\s\S]*?outline:\s*3px solid var\(--blue\)/u);
 });
@@ -587,6 +587,17 @@ test("an available desktop update replaces the About control with one install ac
   assert.match(shell, /const aboutControlLabel = updateAvailable \? `\$\{pendingUpdate\.version\} indir ve kur` : "Hakkında";/u);
   assert.match(shell, /onClick=\{updateAvailable \? \(\) => void installPendingUpdate\(\) : \(\) => setAboutOpen\(\(open\) => !open\)\}/u);
   assert.doesNotMatch(shell, /about-update-badge/u);
+});
+test("shared desktop shell preserves readable dense workspace space", async () => {
+  const styles = await readFile(source("styles.css"), "utf8");
+
+  assert.match(styles, /grid-template-columns:\s*240px minmax\(0, 1fr\)/u);
+  assert.match(styles, /\.workspace small\s*\{[^}]*font-size:\s*13px/u);
+});
+test("a queued draft card never forces a permanent progress cursor", async () => {
+  const styles = await readFile(source("styles.css"), "utf8");
+
+  assert.doesNotMatch(styles, /\.pending-draft-card\s*\{[^}]*cursor:\s*progress/u);
 });
 test("review media uses bounded local thumbnails rather than dimension-only placeholders", async () => {
   const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");

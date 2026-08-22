@@ -163,9 +163,15 @@ async function runCodexCliProbe(
   }
 }
 
-function versionIsSupported(output: string): boolean {
+/**
+ * A version banner is advisory: the executable capability probes below are the
+ * actual compatibility contract. Some supported Windows launchers print a
+ * branded banner instead of `codex-cli x.y.z`; rejecting them before checking
+ * the flags strands otherwise healthy Boby and editorial jobs.
+ */
+export function versionIsSupported(output: string): boolean {
   const match = /(?:^|\s)codex-cli\s+(\d+)\.(\d+)\.(\d+)(?:[-+\s]|$)/u.exec(output.trim());
-  if (!match) return false;
+  if (!match) return true;
   const actual = match.slice(1, 4).map(Number);
   for (let index = 0; index < MINIMUM_CODEX_CLI_VERSION.length; index += 1) {
     const left = actual[index] ?? 0;
