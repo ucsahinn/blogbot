@@ -21,6 +21,7 @@ const RELEASE_PATH_PREFIX: &str = "/ucsahinn/blogbot/releases/download/";
 const MAX_MANIFEST_JSON_BYTES: usize = 64 * 1024;
 const MAX_GITHUB_RELEASE_JSON_BYTES: usize = 1024 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
+const UPDATE_DOWNLOAD_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpdateJsonResource {
@@ -526,6 +527,7 @@ pub async fn install_unsigned_update(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .read_timeout(UPDATE_DOWNLOAD_IDLE_TIMEOUT)
         .build()
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_CLIENT_UNAVAILABLE".into()))?;
     let mut response = client

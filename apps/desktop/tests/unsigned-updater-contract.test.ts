@@ -39,3 +39,10 @@ test("release notes never become PowerShell source in the release workflow", asy
   assert.match(workflow, /--notes-file release-notes\.txt/u);
   assert.doesNotMatch(workflow, /--notes\s+"\$\{\{\s*inputs\.notes/u);
 });
+
+test("a stalled installer body fails instead of leaving the desktop in a permanent downloading state", async () => {
+  const updater = await readFile(join(desktopRoot, "src-tauri", "src", "unsigned_updater.rs"), "utf8");
+
+  assert.match(updater, /const UPDATE_DOWNLOAD_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs\(30\);/u);
+  assert.match(updater, /\.read_timeout\(UPDATE_DOWNLOAD_IDLE_TIMEOUT\)/u);
+});

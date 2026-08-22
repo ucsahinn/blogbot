@@ -155,9 +155,8 @@ test("OPE uses its product logo while Boby keeps the dedicated assistant avatar"
 
 test("about control exposes the verified project identity and GitHub source", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
-
-  assert.match(shell, /"OPE hakkında, yeni sürüm hazır"/u);
-  assert.match(shell, /aria-expanded=\{aboutOpen\}/u);
+  assert.match(shell, /aria-expanded=\{updateAvailable \? undefined : aboutOpen\}/u);
+  assert.match(shell, /const aboutControlAriaLabel = updateAvailable/u);
   assert.match(shell, /https:\/\/github\.com\/ucsahinn\/blogbot/u);
   assert.match(shell, /target="_blank"/u);
   assert.match(shell, /rel="noreferrer"/u);
@@ -578,10 +577,17 @@ test("about checks for updates in the background and marks an available version 
 
   assert.match(shell, /const UPDATE_CHECK_DELAY_MS\s*=\s*1_500/u);
   assert.match(shell, /window\.setTimeout\(\(\) => \{\s*void checkForUpdate\(\);\s*\}, UPDATE_CHECK_DELAY_MS\)/u);
-  assert.match(shell, /Yeni sürüm hazır/u);
-  assert.match(shell, /"OPE hakkında, yeni sürüm hazır"/u);
+  assert.match(shell, /const aboutControlLabel = updateAvailable/u);
+  assert.doesNotMatch(shell, /about-update-badge/u);
 });
 
+test("an available desktop update replaces the About control with one install action", async () => {
+  const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
+
+  assert.match(shell, /const aboutControlLabel = updateAvailable \? `\$\{pendingUpdate\.version\} indir ve kur` : "Hakkında";/u);
+  assert.match(shell, /onClick=\{updateAvailable \? \(\) => void installPendingUpdate\(\) : \(\) => setAboutOpen\(\(open\) => !open\)\}/u);
+  assert.doesNotMatch(shell, /about-update-badge/u);
+});
 test("review media uses bounded local thumbnails rather than dimension-only placeholders", async () => {
   const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
 

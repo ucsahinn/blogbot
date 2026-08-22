@@ -1783,7 +1783,6 @@ strong {
 }
 
 .about-card strong { color: var(--ink); }
-.about-update-badge { margin-left: auto; padding: 2px 6px; border-radius: 999px; color: #124f43; background: color-mix(in srgb, var(--teal) 20%, white); font-size: 10px; font-weight: 800; white-space: nowrap; }
 .about-card a { width: fit-content; color: var(--blue); font-weight: 700; }
 .about-project-link { width: fit-content; padding: 0; border: 0; color: var(--blue); background: transparent; font: inherit; font-weight: 700; text-align: left; cursor: pointer; }
 .about-project-link:hover { color: var(--accent-dark); text-decoration: underline; }

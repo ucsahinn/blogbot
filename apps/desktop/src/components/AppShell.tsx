@@ -198,6 +198,10 @@ export function AppShell({
     (page === "content" && ["content-candidates", "instant"].includes(activePage)) ||
     (page === "editorial" && activePage === "editorial-review");
   const updateAvailable = updatePhase === "available" && pendingUpdate !== null;
+  const aboutControlLabel = updateAvailable ? `${pendingUpdate.version} indir ve kur` : "Hakkında";
+  const aboutControlAriaLabel = updateAvailable
+    ? `OPE ${pendingUpdate.version} güncellemesini indir ve kur`
+    : "OPE hakkında";
 
   return (
     <div className="app-shell">
@@ -240,7 +244,7 @@ export function AppShell({
           </button>
           <button type="button" aria-label="Kurulum ve önkoşullar" onClick={onOpenSetup}>
             <span aria-hidden="true">◇</span>
-          </button>          <button type="button" aria-label={updateAvailable ? "OPE hakkında, yeni sürüm hazır" : "OPE hakkında"} aria-expanded={aboutOpen} onClick={() => setAboutOpen((open) => !open)}>
+          </button>          <button type="button" aria-label={aboutControlAriaLabel} aria-expanded={updateAvailable ? undefined : aboutOpen} onClick={updateAvailable ? () => void installPendingUpdate() : () => setAboutOpen((open) => !open)}>
             <span aria-hidden="true">i</span>
           </button>
         </nav>
@@ -266,14 +270,13 @@ export function AppShell({
           <button
             className="about-toggle"
             type="button"
-            aria-label={updateAvailable ? "OPE hakkında, yeni sürüm hazır" : "OPE hakkında"}
-            aria-expanded={aboutOpen}
+            aria-label={aboutControlAriaLabel}
+            aria-expanded={updateAvailable ? undefined : aboutOpen}
             aria-controls="blogbot-about-card"
-            onClick={() => setAboutOpen((open) => !open)}
+            onClick={updateAvailable ? () => void installPendingUpdate() : () => setAboutOpen((open) => !open)}
           >
             <span aria-hidden="true">i</span>
-            Hakkında
-            {updateAvailable ? <span className="about-update-badge">Yeni sürüm hazır</span> : null}
+            {aboutControlLabel}
           </button>
           {aboutOpen ? (
             <div className="about-card" id="blogbot-about-card">
