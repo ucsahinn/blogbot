@@ -39,6 +39,7 @@ export interface CodexEvent {
 export interface StructuredCodexPort {
   run(request: {
     model: string;
+    reasoningEffort?: "low";
     input: unknown;
     outputSchema: Record<string, unknown>;
     conversationSessionId?: string;
@@ -56,6 +57,7 @@ export interface StructuredCodexTask<T> {
   paidFallbackRequested?: boolean;
   roleModels?: CodexRoleModels;
   /** A conversational task may persist and resume its own isolated Codex thread. */
+  reasoningEffort?: "low";
   persistSession?: boolean;
   conversationSessionId?: string;
 }
@@ -101,7 +103,7 @@ export function safeConversationSessionId(value: unknown): string | undefined {
 export function buildCodexExecArgs(
   model: string,
   outputSchemaPath: string,
-  options: { conversationSessionId?: string; persistSession?: boolean } = {}
+  options: { conversationSessionId?: string; persistSession?: boolean; reasoningEffort?: "low" } = {}
 ): string[] {
   const conversationSessionId = options.persistSession === true
     ? safeConversationSessionId(options.conversationSessionId)
@@ -111,6 +113,7 @@ export function buildCodexExecArgs(
     ...(!options.persistSession ? ["--ephemeral"] : []),
     "--sandbox",
     "read-only",
+    ...(options.reasoningEffort ? ["-c", `model_reasoning_effort="${options.reasoningEffort}"`] : []),
     ...(conversationSessionId ? ["resume", conversationSessionId] : []),
     "--strict-config",
     "--ignore-user-config",
@@ -193,7 +196,8 @@ export async function runStructuredCodexTask<T>(
     input: task.input,
     outputSchema: task.outputSchema,
     ...(requestedConversationSessionId ? { conversationSessionId: requestedConversationSessionId } : {}),
-    ...(task.persistSession !== undefined ? { persistSession: task.persistSession } : {})
+    ...(task.persistSession !== undefined ? { persistSession: task.persistSession } : {}),
+    ...(task.reasoningEffort ? { reasoningEffort: task.reasoningEffort } : {}),
   })) {
     if (event.type === "thread.started") {
       const threadId = safeConversationSessionId(event.thread_id ?? event.threadId);

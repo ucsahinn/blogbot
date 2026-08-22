@@ -8,7 +8,7 @@ test("Boby presents live Luna replies without exposing durable queue terminology
   assert.match(assistant, /const respond = async \(question: string\)/u);
   assert.match(assistant, /requestBobyGuidance/u);
   assert.match(assistant, /getBobyGuidance/u);
-  assert.match(assistant, /Boby düşünüyor/u);
+  assert.match(assistant, /Boby yanıtını hazırlıyor/u);
   assert.doesNotMatch(assistant, /Yerel sırada|WAITING_CODEX/u);
 });
 test("Boby stops immediately when the local answer runner is unavailable", async () => {

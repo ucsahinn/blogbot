@@ -17,6 +17,12 @@ const retryBlockedActualProfile = process.env.BLOGBOT_PROFILE_RETRY_BLOCKED === 
 const rewriteFirstShortActualProfile = process.env.BLOGBOT_PROFILE_REWRITE_SHORT === "1";
 const testExistingProfileSources = process.env.BLOGBOT_PROFILE_TEST_SOURCES === "1";
 const verifyBobyLiveReply = process.env.BLOGBOT_VERIFY_BOBY_LIVE_REPLY === "1";
+const verifyUpdaterLiveCheck = process.env.BLOGBOT_VERIFY_UPDATER_LIVE_CHECK === "1";
+const liveBobyReplyTimeoutMs = Number.parseInt(
+  process.env.BLOGBOT_LIVE_BOBY_TIMEOUT_MS ?? "120000",
+  10
+);
+
 const nativeSmokeRequestTimeoutMs = Number.parseInt(
   process.env.BLOGBOT_NATIVE_REQUEST_TIMEOUT_MS ?? "20000",
   10
@@ -28,6 +34,7 @@ const smokeFeedUrl = process.env.BLOGBOT_SMOKE_FEED_URL ?? "https://www.cshub.co
 // means the user sees a frozen menu, so keep this gate deliberately stricter
 // than setup and engine-startup probes.
 const MAX_INITIAL_BOOT_RENDER_MS = 15_000;
+const MAX_ENGINE_RECOVERY_RENDER_MS = 15_000;
 const MAX_ROUTE_RENDER_MS = 3_000;
 const ROUTE_RENDER_POLL_MS = 100;
 const routes = [
@@ -423,6 +430,12 @@ async function verifyCodexRuntime(sessionId) {
 
 async function verifyLiveBobyReply(sessionId) {
   const question = "Yeni bir kaynaktan içerik üretmeye nereden başlamalıyım?";
+  if (
+    !Number.isSafeInteger(liveBobyReplyTimeoutMs)
+    || liveBobyReplyTimeoutMs < 10_000
+    || liveBobyReplyTimeoutMs > 120_000
+  ) fail("BLOGBOT_LIVE_BOBY_TIMEOUT_MS must be an integer from 10000 to 120000.");
+
   const submitted = await invoke(sessionId, "request_boby_guidance", {
     request: {
       question,
@@ -433,24 +446,45 @@ async function verifyLiveBobyReply(sessionId) {
   });
   const guidanceId = submitted?.result?.id;
   if (!submitted?.ok || typeof guidanceId !== "string" || !guidanceId.startsWith("boby-")) {
-    fail(`live Boby request was not accepted: ${JSON.stringify(submitted)}`);
+    fail(`live Boby request was not accepted: ok=${submitted?.ok === true}.`);
   }
   const startedAt = performance.now();
-  while (performance.now() - startedAt < 120_000) {
+  while (performance.now() - startedAt < liveBobyReplyTimeoutMs) {
     const guidance = await invoke(sessionId, "get_boby_guidance", { guidanceId });
-    if (!guidance?.ok) fail(`live Boby status read failed: ${JSON.stringify(guidance)}`);
+    if (!guidance?.ok) fail(`live Boby status read failed: ok=${guidance?.ok === true}.`);
     const result = guidance.result;
     if (result?.state === "SUCCEEDED" && typeof result.reply === "string" && result.reply.trim().length >= 20) {
       if (/OPE'nin yerel editöründesin\. Konuyu bir cümleyle yaz/iu.test(result.reply)) {
         fail("live Boby returned the retired canned local fallback.");
       }
-      return { guidanceId, elapsedMs: Math.round(performance.now() - startedAt), replyLength: result.reply.trim().length };
+      return { elapsedMs: Math.round(performance.now() - startedAt), replyLength: result.reply.trim().length };
     }
-    if (result?.state === "FAILED") fail(`live Boby job failed: ${JSON.stringify(result)}`);
+    if (result?.state === "FAILED") fail(`live Boby job failed: state=FAILED; diagnosticCode=${typeof result?.diagnosticCode === "string" ? result.diagnosticCode : "UNAVAILABLE"}.`);
     await wait(1_000);
   }
-  fail("live Boby did not finish within 120 seconds.");
+  const finalGuidance = await invoke(sessionId, "get_boby_guidance", { guidanceId });
+  const safeLiveBobyState = {
+    state: typeof finalGuidance.result?.state === "string" ? finalGuidance.result.state : "UNAVAILABLE",
+    waitReason: typeof finalGuidance.result?.waitReason === "string" ? finalGuidance.result.waitReason : "UNAVAILABLE",
+    diagnosticCode: typeof finalGuidance.result?.diagnosticCode === "string" ? finalGuidance.result.diagnosticCode : "UNAVAILABLE",
+    suggestedActionCount: Array.isArray(finalGuidance.result?.suggestedActions) ? finalGuidance.result.suggestedActions.length : 0
+  };
+  fail(`live Boby did not finish within ${liveBobyReplyTimeoutMs}ms; safe state=${JSON.stringify(safeLiveBobyState)}.`);
 }
+async function verifyLiveUpdaterCheck(sessionId) {
+  const response = await invoke(sessionId, "check_unsigned_update");
+  if (!response?.ok) fail(`live updater check failed: ok=${response?.ok === true}.`);
+  const result = response.result;
+  if (!result || !["upToDate", "localBuildNewer", "updateAvailable"].includes(result.kind)) {
+    fail(`live updater check returned an unsupported kind: ${typeof result?.kind === "string" ? result.kind : "UNAVAILABLE"}.`);
+  }
+  const latestVersion = result.kind === "updateAvailable" ? result.update?.version : result.latestVersion;
+  if (typeof latestVersion !== "string" || latestVersion.trim().length === 0) {
+    fail("live updater check did not return a version.");
+  }
+  return { kind: result.kind, latestVersion };
+}
+
 async function measureCatalogReadLatency(sessionId) {
   const startedAt = performance.now();
   const catalog = await invoke(sessionId, "list_sources");
@@ -556,6 +590,19 @@ async function verifyInitialEngineSurface(sessionId) {
   if (!visible.includes("Paketlenmiş sidecar stdio üzerinden çalışıyor.")) {
     fail(`the first rendered Operations health view did not show the ready engine detail: ${JSON.stringify(visible.slice(0, 700))}`);
   }
+}
+
+async function waitForRecoveredDraft(sessionId, draftId) {
+  const startedAt = performance.now();
+  let lastEngineState = "UNKNOWN";
+  while (performance.now() - startedAt < MAX_ENGINE_RECOVERY_RENDER_MS) {
+    const workspace = await invoke(sessionId, "get_editorial_workspace");
+    const draft = workspace?.result?.drafts?.find((item) => item?.id === draftId);
+    if (workspace?.ok && draft) return { workspace, draft };
+    lastEngineState = workspace?.result?.systemHealth?.find((item) => item?.id === "engine")?.state ?? "UNKNOWN";
+    await wait(250);
+  }
+  fail(`candidate draft did not recover after a native application restart within ${MAX_ENGINE_RECOVERY_RENDER_MS}ms; engine state=${lastEngineState}.`);
 }
 
 async function verifyCandidateJourney(sessionId, source) {
@@ -1572,6 +1619,7 @@ async function main() {
         : undefined;
       const codexRuntime = await verifyCodexRuntime(sessionId);
       const liveBobyReply = verifyBobyLiveReply ? await verifyLiveBobyReply(sessionId) : undefined;
+      const liveUpdaterCheck = verifyUpdaterLiveCheck ? await verifyLiveUpdaterCheck(sessionId) : undefined;
       const initialProfile = await inspectExistingProfileState(sessionId, localEngine.result);
       const retryJourney = retryBlockedActualProfile
         ? await retryFirstBlockedActualDraft(sessionId)
@@ -1597,11 +1645,14 @@ async function main() {
         profileRoutePerformance,
         profileSourceChecks,
         codexRuntime,
-        liveBobyReply
+        liveBobyReply,
+        liveUpdaterCheck
       }, null, 2));
       return;
     }
     const singleSourceAddressCheckJourney = await verifySingleSourceAddressCheckJourney(sessionId);
+    const liveBobyReply = verifyBobyLiveReply ? await verifyLiveBobyReply(sessionId) : undefined;
+    const liveUpdaterCheck = verifyUpdaterLiveCheck ? await verifyLiveUpdaterCheck(sessionId) : undefined;
     const candidateJourney = await verifyCandidateJourney(sessionId, singleSourceAddressCheckJourney.source);
     await request(`/session/${sessionId}`, { method: "DELETE" });
     sessionId = undefined;
@@ -1609,13 +1660,7 @@ async function main() {
     sessionId = await createNativeSession();
     await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
     await waitForTauriBridge(sessionId);
-    const recoveredWorkspace = await invoke(sessionId, "get_editorial_workspace");
-    const recoveredDraft = recoveredWorkspace?.result?.drafts?.find(
-      (draft) => draft?.id === candidateJourney.draftId
-    );
-    if (!recoveredWorkspace?.ok || !recoveredDraft) {
-      fail(`candidate draft did not recover after a native application restart: ${JSON.stringify(recoveredWorkspace)}`);
-    }
+    const { draft: recoveredDraft } = await waitForRecoveredDraft(sessionId, candidateJourney.draftId);
     await execute(sessionId, "window.location.hash = '#editorial'; return true;");
     await waitForVisibleHeading(sessionId, "editorial");
     await refreshEditorialInventory(sessionId, recoveredDraft.titleTr);
@@ -1644,7 +1689,7 @@ async function main() {
     ) {
       fail(`expected the Turkish publishing heading at #publishing, got ${JSON.stringify(publishingHeading)}.`);
     }
-    console.log(JSON.stringify({ status: "PASS", title: title.value, localEngine: localEngine.result, nativeReadCommands, catalogRead, singleSourceAddressCheckJourney, candidateJourney, instantCreateJourney, preferencesAndScheduleJourney, visibleSettingsSaveJourney, visibleWeeklyScheduleJourney, operationsJourney, visibleCandidateJournalJourney, visibleOperationsPauseJourney, visibleDiagnosticsExportJourney, visibleReviewEmptyJourney, setupGuideJourney, primaryNavigationJourney, routes: evidence }, null, 2));
+    console.log(JSON.stringify({ status: "PASS", title: title.value, localEngine: localEngine.result, liveBobyReply, liveUpdaterCheck, nativeReadCommands, catalogRead, singleSourceAddressCheckJourney, candidateJourney, instantCreateJourney, preferencesAndScheduleJourney, visibleSettingsSaveJourney, visibleWeeklyScheduleJourney, operationsJourney, visibleCandidateJournalJourney, visibleOperationsPauseJourney, visibleDiagnosticsExportJourney, visibleReviewEmptyJourney, setupGuideJourney, primaryNavigationJourney, routes: evidence }, null, 2));
   } catch (error) {
     const detail = driverOutput.trim();
     if (!detail) throw error;

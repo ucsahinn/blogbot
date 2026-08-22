@@ -46,6 +46,8 @@ const healthStateIcons = {
   NOT_CONFIGURED: "–"
 } as const;
 
+const MAX_INITIAL_OPERATION_JOBS = 50;
+
 function formatObservedTime(value: string): string {
   const timestamp = Date.parse(value);
   return Number.isNaN(timestamp) ? "Ölçülmedi" : new Date(timestamp).toLocaleString("tr-TR");
@@ -78,6 +80,7 @@ export function OperationsHub(props: OperationsHubProps) {
   const [refreshing, setRefreshing] = useState(false);
   const [automationBusy, setAutomationBusy] = useState(false);
   const [diagnosticsRequested, setDiagnosticsRequested] = useState(false);
+  const [showAllJobs, setShowAllJobs] = useState(false);
   const engineOffline = props.workspace.systemHealth.some(
     (item) => item.id === "engine" && item.state === "OFFLINE"
   );
@@ -89,6 +92,14 @@ export function OperationsHub(props: OperationsHubProps) {
     : automationBusy
       ? "Devam eden otomasyon işlemi tamamlanana kadar bu kontrol kullanılamaz."
       : undefined;
+  const visibleActiveDrafts = showAllJobs ? activeDrafts : activeDrafts.slice(0, MAX_INITIAL_OPERATION_JOBS);
+  const visibleFailures = showAllJobs
+    ? props.workspace.failures
+    : props.workspace.failures.slice(0, Math.max(0, MAX_INITIAL_OPERATION_JOBS - visibleActiveDrafts.length));
+  const hiddenJobCount = Math.max(
+    0,
+    activeDrafts.length + props.workspace.failures.length - visibleActiveDrafts.length - visibleFailures.length
+  );
   const refreshUnavailableReason = refreshing
     ? "Yerel durum yenileniyor; işlem tamamlanana kadar yeniden yenileme yapılamaz."
     : automationBusy
@@ -233,7 +244,7 @@ export function OperationsHub(props: OperationsHubProps) {
         <section className="hub-panel" role="tabpanel" id={`operations-panel-${tab}`} aria-labelledby={`operations-tab-${tab}`}>
           {tab === "jobs" ? (
             <div className="data-list">
-              {activeDrafts.map((draft) => (
+              {visibleActiveDrafts.map((draft) => (
                 <article className="failure-row active-job-row" key={draft.id} aria-label="Devam eden taslak işi">
                   <div>
                     <span className="state-pill state-drafting">Taslak hazırlanıyor</span>
@@ -264,7 +275,7 @@ export function OperationsHub(props: OperationsHubProps) {
                   </div>
                 </article>
               ))}
-              {props.workspace.failures.map((failure) => {
+              {visibleFailures.map((failure) => {
                 const unavailableReason = retryUnavailableReason(failure, props.readOnly, busyId);
                 const unavailableReasonId = `retry-unavailable-${failure.id}`;
                 return (
@@ -282,6 +293,11 @@ export function OperationsHub(props: OperationsHubProps) {
                   </article>
                 );
               })}
+              {hiddenJobCount > 0 ? (
+                <button className="button button-secondary" type="button" onClick={() => setShowAllJobs(true)}>
+                  Tüm {hiddenJobCount} işi göster
+                </button>
+              ) : null}
               {props.workspace.failures.length === 0 && activeDrafts.length === 0 ? (
                 <div className="empty-state"><strong>Müdahale bekleyen iş yok.</strong><span>Yeni bir hata oluşursa nedeni, deneme sayısı ve güvenli sonraki adım burada görünür.</span></div>
               ) : null}

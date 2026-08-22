@@ -652,6 +652,56 @@ test("native smoke fails a slow route instead of tolerating a minute-long frozen
   assert.match(smoke, /test_codex_runtime/u);
 });
 
+test("live Boby smoke reports a safe terminal status when the reply deadline expires", async () => {
+  const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(smoke, /const liveBobyReplyTimeoutMs = Number\.parseInt\(\s*process\.env\.BLOGBOT_LIVE_BOBY_TIMEOUT_MS \?\? "120000"/u);
+  assert.match(smoke, /BLOGBOT_LIVE_BOBY_TIMEOUT_MS must be an integer from 10000 to 120000\./u);
+  assert.match(smoke, /performance\.now\(\) - startedAt < liveBobyReplyTimeoutMs/u);
+  assert.match(smoke, /live Boby did not finish within \$\{liveBobyReplyTimeoutMs\}ms; safe state=/u);
+  assert.match(smoke, /const safeLiveBobyState = \{/u);
+  assert.match(smoke, /state: typeof finalGuidance\.result\?\.state === "string"/u);
+  assert.match(smoke, /waitReason: typeof finalGuidance\.result\?\.waitReason === "string"/u);
+  assert.match(smoke, /const safeLiveBobyState = \{[^}]*diagnosticCode: typeof finalGuidance\.result\?\.diagnosticCode === "string"/u);
+  assert.doesNotMatch(smoke, /const safeLiveBobyState = \{[^}]*diagnosticDetail/u);
+  assert.match(smoke, /suggestedActionCount: Array\.isArray\(finalGuidance\.result\?\.suggestedActions\)/u);
+  assert.doesNotMatch(smoke, /safeLiveBobyState[^\n]*reply/u);
+  assert.doesNotMatch(smoke, /safeLiveBobyState[^\n]*guidanceId/u);
+  assert.doesNotMatch(smoke, /live Boby request was not accepted: \$\{JSON\.stringify\(submitted\)\}/u);
+  assert.doesNotMatch(smoke, /live Boby status read failed: \$\{JSON\.stringify\(guidance\)\}/u);
+  assert.doesNotMatch(smoke, /live Boby job failed: \$\{JSON\.stringify\(result\)\}/u);
+  assert.doesNotMatch(smoke, /return \{ guidanceId,/u);
+
+});
+
+test("optional live updater smoke exposes only a safe read-only check summary", async () => {
+  const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(smoke, /const verifyUpdaterLiveCheck = process\.env\.BLOGBOT_VERIFY_UPDATER_LIVE_CHECK === "1";/u);
+  assert.match(smoke, /async function verifyLiveUpdaterCheck\(sessionId\)/u);
+  assert.match(smoke, /"check_unsigned_update"/u);
+  assert.match(smoke, /live updater check failed: ok=\$\{response\?\.ok === true\}\./u);
+  assert.match(smoke, /latestVersion/u);
+  assert.doesNotMatch(smoke, /liveUpdaterCheck[^\n]*\.url/u);
+  assert.doesNotMatch(smoke, /liveUpdaterCheck[^\n]*\.sha256/u);
+  assert.doesNotMatch(smoke, /liveUpdaterCheck[^\n]*\.notes/u);
+});
+test("native restart smoke waits for a non-blocking engine to recover its durable draft", async () => {
+  const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(smoke, /const MAX_ENGINE_RECOVERY_RENDER_MS = 15_000;/u);
+  assert.match(smoke, /async function waitForRecoveredDraft\(sessionId, draftId\)/u);
+  assert.match(smoke, /performance\.now\(\) - startedAt < MAX_ENGINE_RECOVERY_RENDER_MS/u);
+  assert.match(smoke, /await waitForRecoveredDraft\(sessionId, candidateJourney\.draftId\)/u);
+});
+
+test("live Boby smoke runs for both actual and fresh temporary profiles", async () => {
+  const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(smoke, /const liveBobyReply = verifyBobyLiveReply \? await verifyLiveBobyReply\(sessionId\) : undefined;/u);
+  assert.match(smoke, /singleSourceAddressCheckJourney = await verifySingleSourceAddressCheckJourney\(sessionId\);\s+const liveBobyReply = verifyBobyLiveReply \? await verifyLiveBobyReply\(sessionId\) : undefined;/u);
+  assert.match(smoke, /localEngine: localEngine\.result,[\s\S]*liveBobyReply,[\s\S]*singleSourceAddressCheckJourney/u);
+});
 test("desktop preflight verifies clean-machine installer inputs without building an installer", { skip: process.platform !== "win32" }, async () => {
   const result = await runDesktopPreflight();
   assert.equal(result.ok, true, result.checks.filter((check) => check.status === "FAIL").map((check) => check.detail).join("; "));
@@ -661,6 +711,20 @@ test("desktop preflight verifies clean-machine installer inputs without building
   assert.ok(result.checks.some((check) => check.id === "bundled-engine-sidecar"));
 });
 
+test("desktop hotfix package advances beyond the published 0.1.49 updater version", async () => {
+  const manifests = await Promise.all([
+    readFile(join(repositoryRoot, "apps", "desktop", "package.json"), "utf8"),
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "Cargo.toml"), "utf8"),
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8")
+  ]);
+  const versions = [
+    JSON.parse(manifests[0]).version,
+    /^\s*\[package\][\s\S]*?^\s*version\s*=\s*"([^"]+)"/mu.exec(manifests[1])?.[1],
+    JSON.parse(manifests[2]).version
+  ].map(String);
+
+  assert.deepEqual(versions, ["0.1.50", "0.1.50", "0.1.50"]);
+});
 test("release version stays identical across every packaged desktop manifest", async () => {
   const [desktopManifestRaw, cargoManifestRaw, tauriConfigRaw] = await Promise.all([
     readFile(join(repositoryRoot, "apps", "desktop", "package.json"), "utf8"),

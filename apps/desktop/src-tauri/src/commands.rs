@@ -1689,9 +1689,9 @@ fn bootstrap_boby_state(
 
 fn boby_guidance_wait_reason(status: &str) -> Option<&'static str> {
     match status {
-        "WAITING_CODEX" => Some("Boby yerel sırada; bağlantı hazır olduğunda yanıtını sürdürecek."),
+        "WAITING_CODEX" => Some("Boby bağlantıyı hazırlıyor; hazır olduğunda yanıtını gösterecek."),
         "RUNNING" => Some("Boby yanıtı hazırlıyor."),
-        "QUEUED" => Some("Boby isteği yerel sırada."),
+        "QUEUED" => Some("Boby isteğini hazırlıyor."),
         _ => None,
     }
 }
@@ -1717,6 +1717,21 @@ fn latest_boby_session_id(jobs: &[Value]) -> Option<String> {
         })
         .max_by_key(|(timestamp, index, _)| (*timestamp, *index))
         .map(|(_, _, session_id)| session_id)
+}
+
+fn boby_guidance_diagnostic_code(job: &Value) -> Option<&'static str> {
+    match job.pointer("/metadata/codexDiagnosticCode").and_then(Value::as_str) {
+        Some("CODEX_PROTOCOL_REJECTED") => Some("CODEX_PROTOCOL_REJECTED"),
+        Some("CODEX_OUTPUT_INVALID") => Some("CODEX_OUTPUT_INVALID"),
+        Some("CODEX_OUTPUT_MISSING") => Some("CODEX_OUTPUT_MISSING"),
+        Some("CODEX_CLI_INVALID_EVENT") => Some("CODEX_CLI_INVALID_EVENT"),
+        Some("CODEX_CLI_INVALID_FINAL_OUTPUT") => Some("CODEX_CLI_INVALID_FINAL_OUTPUT"),
+        Some("CODEX_CLI_UNSUPPORTED") => Some("CODEX_CLI_UNSUPPORTED"),
+        Some("CODEX_SESSION_RETENTION_FAILED") => Some("CODEX_SESSION_RETENTION_FAILED"),
+        Some("CODEX_PROCESS_FAILED") => Some("CODEX_PROCESS_FAILED"),
+        Some("CODEX_UNKNOWN_FAILURE") => Some("CODEX_UNKNOWN_FAILURE"),
+        _ => None,
+    }
 }
 
 fn bootstrap_can_read_catalog(runtime: RuntimeMode) -> bool {
@@ -3954,6 +3969,7 @@ pub fn get_boby_guidance(
         "id": guidance_id,
         "state": status,
         "waitReason": boby_guidance_wait_reason(status),
+        "diagnosticCode": boby_guidance_diagnostic_code(job),
         "reply": job.pointer("/metadata/bobyReply").cloned(),
         "suggestedActions": job.pointer("/metadata/bobyActions").cloned().unwrap_or_else(|| json!([]))
     }))
@@ -7936,10 +7952,22 @@ mod tests {
     }
     #[test]
     fn boby_waiting_states_expose_safe_editor_reasons() {
-        assert_eq!(boby_guidance_wait_reason("WAITING_CODEX"), Some("Boby yerel sırada; bağlantı hazır olduğunda yanıtını sürdürecek."));
+        assert_eq!(boby_guidance_wait_reason("WAITING_CODEX"), Some("Boby bağlantıyı hazırlıyor; hazır olduğunda yanıtını gösterecek."));
         assert_eq!(boby_guidance_wait_reason("RUNNING"), Some("Boby yanıtı hazırlıyor."));
-        assert_eq!(boby_guidance_wait_reason("QUEUED"), Some("Boby isteği yerel sırada."));
+        assert_eq!(boby_guidance_wait_reason("QUEUED"), Some("Boby isteğini hazırlıyor."));
         assert_eq!(boby_guidance_wait_reason("FAILED"), None);
+    }
+
+    #[test]
+    fn boby_diagnostic_code_is_allowlisted() {
+        assert_eq!(
+            super::boby_guidance_diagnostic_code(&json!({ "metadata": { "codexDiagnosticCode": "CODEX_PROCESS_FAILED" } })),
+            Some("CODEX_PROCESS_FAILED")
+        );
+        assert_eq!(
+            super::boby_guidance_diagnostic_code(&json!({ "metadata": { "codexDiagnosticCode": "untrusted-detail" } })),
+            None
+        );
     }
 
     #[test]

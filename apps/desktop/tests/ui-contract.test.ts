@@ -322,6 +322,19 @@ test("Codex operations distinguishes measured local work from unavailable token 
   assert.match(operations, /Sadece kalıcı yerel iş kaydından türetilen veriler gösterilir/u);
 });
 
+test("Operations bounds initial job rendering so a large local history cannot stall navigation", async () => {
+  const operations = await readFile(source("screens", "OperationsHub.tsx"), "utf8");
+
+  assert.match(operations, /const MAX_INITIAL_OPERATION_JOBS = 50;/u);
+  assert.match(operations, /const \[showAllJobs, setShowAllJobs\] = useState\(false\);/u);
+  assert.match(operations, /const visibleActiveDrafts = showAllJobs \? activeDrafts : activeDrafts\.slice\(0, MAX_INITIAL_OPERATION_JOBS\);/u);
+  assert.match(operations, /const visibleFailures = showAllJobs\s*\? props\.workspace\.failures\s*:\s*props\.workspace\.failures\.slice\(0, Math\.max\(0, MAX_INITIAL_OPERATION_JOBS - visibleActiveDrafts\.length\)\);/u);
+  assert.match(operations, /const hiddenJobCount = Math\.max\(\s*0,\s*activeDrafts\.length \+ props\.workspace\.failures\.length - visibleActiveDrafts\.length - visibleFailures\.length\s*\);/u);
+  assert.match(operations, /Tüm \{hiddenJobCount\} işi göster/u);
+  assert.match(operations, /visibleActiveDrafts\.map/u);
+  assert.match(operations, /visibleFailures\.map/u);
+});
+
 test("operations diagnostics keeps raw engine records off the live screen", async () => {
   const operations = await readFile(source("screens", "Operations.tsx"), "utf8");
 

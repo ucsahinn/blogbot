@@ -577,7 +577,8 @@ export function createCodexCliPort(
 
       const execArgs = buildCodexExecArgs(request.model, schemaPath, {
         ...(retainedConversationSessionId ? { conversationSessionId: retainedConversationSessionId } : {}),
-        ...(request.persistSession !== undefined ? { persistSession: request.persistSession } : {})
+        ...(request.persistSession !== undefined ? { persistSession: request.persistSession } : {}),
+        ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
       });
       execArgs.splice(
         execArgs.length - 1,

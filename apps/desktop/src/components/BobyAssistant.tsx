@@ -102,7 +102,7 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
   const respond = async (question: string) => {
     if (responding || pendingGuidanceId) return;
     setResponding(true);
-    setMessages((current) => [...current, { text: "Sen: " + question }, { text: "Boby düşünüyor…", origin: "system", kind: "pending" }]);
+    setMessages((current) => [...current, { text: "Sen: " + question }, { text: "Boby yanıtını hazırlıyor…", origin: "system", kind: "pending" }]);
     try {
       const guidance = await bridge.requestBobyGuidance({
         question,

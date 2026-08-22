@@ -89,8 +89,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           $bundle = Join-Path 'apps/desktop/src-tauri/target/release/bundle/nsis' "OPE_$($env:RELEASE_VERSION)_x64-setup.exe"
+          $msi = Join-Path 'apps/desktop/src-tauri/target/release/bundle/msi' "OPE_$($env:RELEASE_VERSION)_x64_en-US.msi"
           if (-not (Test-Path -LiteralPath $bundle -PathType Leaf)) { throw "UPDATER_ARCHIVE_MISSING" }
+          if (-not (Test-Path -LiteralPath $msi -PathType Leaf)) { throw "MSI_ARCHIVE_MISSING" }
           $bundle = (Resolve-Path -LiteralPath $bundle).Path
+          $msi = (Resolve-Path -LiteralPath $msi).Path
           $sha256 = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
           $manifest = [ordered]@{
             version = $env:RELEASE_VERSION
@@ -105,6 +108,7 @@ jobs:
           }
           $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath latest.json -Encoding utf8NoBOM
           "archive=$bundle" >> $env:GITHUB_OUTPUT
+          "msi=$msi" >> $env:GITHUB_OUTPUT
       - name: Publish unsigned release
         shell: pwsh
         env:
@@ -112,6 +116,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_NOTES: ${{ inputs.notes }}
           UPDATER_ARCHIVE: ${{ steps.manifest.outputs.archive }}
+          MSI_ARCHIVE: ${{ steps.manifest.outputs.msi }}
         run: |
           Set-Content -LiteralPath release-notes.txt -Value $env:RELEASE_NOTES -Encoding utf8NoBOM
-          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE latest.json --target "${{ github.sha }}" --title "OPE $env:RELEASE_VERSION" --notes-file release-notes.txt
+          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE $env:MSI_ARCHIVE latest.json --target "${{ github.sha }}" --title "OPE $env:RELEASE_VERSION" --notes-file release-notes.txt
