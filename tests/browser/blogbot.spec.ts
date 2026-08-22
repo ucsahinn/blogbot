@@ -1259,19 +1259,20 @@ test("offline runtime can still create a redacted diagnostics package", async ({
   await page.getByRole("button", { name: "Tanılama paketi oluştur" }).click();
 
   await expect(page.getByRole("status")).toContainText("Tanılama paketi hazırlandı");
-  await expect(page.getByText("Son paket:", { exact: false })).toBeVisible();
+  await expect(page.getByText("Son paket:", { exact: false })).toHaveCount(0);
   await expect(page.getByLabel("Tanılama özeti")).toContainText("Salt okunur kurtarma modu");
   await expect(page.getByLabel("Tanılama özeti")).not.toContainText("OFFLINE_READ_ONLY");
 });
 
-test("diagnostics export confirms the redacted bundle location", async ({ page }) => {
+test("diagnostics export confirms a redacted local handoff", async ({ page }) => {
   await page.goto("#operations");
   await page.getByRole("tab", { name: "İş günlüğü" }).click();
   await page.getByRole("button", { name: "Tanılama özeti" }).click();
   await page.getByRole("button", { name: "Tanılama paketi oluştur" }).click();
 
   await expect(page.getByRole("status")).toContainText("Tanılama paketi hazırlandı");
-  await expect(page.getByText("Son paket:", { exact: false })).toContainText("blogbot-diagnostics-demo.json");
+  await expect(page.getByText("Son paket:", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Günlük ayrıntıları yalnızca oluşturulan yerel tanı paketinde bulunur.", { exact: true })).toBeVisible();
   await expect(page.getByText(/Bu özet sır, anahtar, kaynak metni veya kullanıcı verisi içermez/u)).toBeVisible();
 });
 
@@ -1284,17 +1285,14 @@ test("operations read failure does not leave the activity screen falsely loading
   await expect(page.getByText("Operasyon günlüğü yükleniyor…")).toHaveCount(0);
 });
 
-test("diagnostics distinguishes an unreadable engine log from a log that simply has no entries", async ({ page }) => {
+test("diagnostics keeps raw engine log records off the live screen", async ({ page }) => {
   await page.goto("?state=engine-diagnostics-failure#operations");
   await page.getByRole("tab", { name: /İş günlüğü/u }).click();
   await page.getByRole("button", { name: "Tanılama özeti" }).click();
-  const engineLog = page.locator("details.engine-diagnostics");
-  await engineLog.locator("summary").click();
 
-  await expect(engineLog.getByText("Engine hata günlüğü şu anda okunamadı.")).toBeVisible();
-  await expect(engineLog.getByText("Henüz günlük oluşmadı.")).toHaveCount(0);
+  await expect(page.locator("details.engine-diagnostics")).toHaveCount(0);
+  await expect(page.getByText("Günlük ayrıntıları yalnızca oluşturulan yerel tanı paketinde bulunur.", { exact: true })).toBeVisible();
 });
-
 test("saving a source refreshes the dashboard source count without manual refresh", async ({ page }) => {
   await page.goto("#content");
   await page.getByRole("textbox", { name: "Kaynak adresi" }).fill("https://fresh.example.org/feed.xml");
@@ -1398,7 +1396,8 @@ test("a failed revision selection never leaves the previous revision visible", a
 
   await expect(page.getByText("Revizyon açılamadı.")).toBeVisible();
   await expect(page.getByRole("heading", { name: previousTitle, level: 2 })).toHaveCount(0);
-  await expect(page.getByText("Revizyon gösterilemiyor.")).toBeVisible();
+  await expect(page.getByText("Revizyon şu an açılamadı.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Revizyonu yeniden yükle" })).toBeVisible();
 });
 
 test("requesting a revision edit refreshes the durable draft inventory and returns to it", async ({ page }) => {

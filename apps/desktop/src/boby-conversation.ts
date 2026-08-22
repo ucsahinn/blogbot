@@ -61,11 +61,12 @@ export function resolveBobyGuidancePoll(input: {
 export function bobyGuidancePollDelay(
   elapsedMs: number,
   isDocumentVisible: boolean,
-  initialPollMs = 2_000,
+  initialPollMs = 350,
   visibleWaitPollMs = 15_000,
   hiddenWaitPollMs = 60_000
 ): number {
-  if (elapsedMs < 120_000) return initialPollMs;
+  if (elapsedMs < 5_000) return initialPollMs;
+  if (elapsedMs < 120_000) return 2_000;
   return isDocumentVisible ? visibleWaitPollMs : hiddenWaitPollMs;
 }
 
@@ -77,6 +78,6 @@ export function describeBobyAvailability(input: {
   return {
     tone: "ready",
     label: "Boby hazır",
-    detail: "Sorunu yaz; Boby bu ekrandaki sonraki adımı hemen açıklar."
+    detail: "Luna Low ile yanıtlar; yalnızca soruna odaklanır ve ek kullanım başlatmaz."
   };
 }

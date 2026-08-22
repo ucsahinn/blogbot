@@ -11,10 +11,11 @@ test("Boby presents live Luna replies without exposing durable queue terminology
   assert.match(assistant, /Boby düşünüyor/u);
   assert.doesNotMatch(assistant, /Yerel sırada|WAITING_CODEX/u);
 });
-test("Boby keeps a live Luna answer pending instead of replacing it with a canned answer after a fixed timeout", async () => {
+test("Boby clears a stale unanswered request instead of polling forever", async () => {
   const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");
 
-  assert.doesNotMatch(assistant, /attempt < 40/u);
+  assert.match(assistant, /BOBY_REPLY_TIMEOUT_MS/u);
+  assert.match(assistant, /Boby bu yanıtı zamanında tamamlayamadı/u);
   assert.match(assistant, /persistPendingBobyGuidance/u);
   assert.match(assistant, /restorePendingBobyGuidance/u);
 });

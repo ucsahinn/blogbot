@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
+import { formatOperationTimestamp } from "../operation-timestamp.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, OperationsSnapshot } from "../types.ts";
 
 interface OperationsProps {
@@ -50,10 +51,7 @@ export function Operations({
   const [operationsLoadFailed, setOperationsLoadFailed] = useState(false);
   const [busyTarget, setBusyTarget] = useState("");
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  const [engineDiagnostics, setEngineDiagnostics] = useState<{ path: string | null; lines: string[] }>({ path: null, lines: [] });
-  const [engineDiagnosticsError, setEngineDiagnosticsError] = useState("");
   const [diagnosticExportBusy, setDiagnosticExportBusy] = useState(false);
-  const [diagnosticExportPath, setDiagnosticExportPath] = useState("");
   const [logFilter, setLogFilter] = useState<"all" | "errors" | "changes" | "debug">("all");
   const [selectedDate, setSelectedDate] = useState(() =>
     getOperationWeek().find(([, , value]) => value === localDateKey(new Date()))?.[2]
@@ -95,25 +93,6 @@ export function Operations({
     };
   }, [bridge]);
 
-  useEffect(() => {
-    if (!diagnosticsVisible) return;
-    let alive = true;
-    void bridge.getEngineDiagnostics()
-      .then((value) => {
-        if (!alive) return;
-        setEngineDiagnostics(value);
-        setEngineDiagnosticsError("");
-      })
-      .catch(() => {
-        if (!alive) return;
-        setEngineDiagnostics({ path: null, lines: [] });
-        setEngineDiagnosticsError("Engine hata günlüğü şu anda okunamadı.");
-      });
-    return () => {
-      alive = false;
-    };
-  }, [bridge, diagnosticsVisible]);
-
   const refreshOperations = async () => {
     setBusyTarget("logs");
     setOperationsLoadFailed(false);
@@ -133,10 +112,9 @@ export function Operations({
     setDiagnosticExportBusy(true);
     setNotice("");
     try {
-      const result = await bridge.exportDiagnostics();
-      setDiagnosticExportPath(result.path);
+      await bridge.exportDiagnostics();
       setDiagnosticsOpen(true);
-      setNotice(`Tanılama paketi hazırlandı ve klasörü açıldı (${result.bytes} bayt).`);
+      setNotice("Tanılama paketi hazırlandı ve yerel klasörde açıldı.");
     } catch (reason) {
       setNotice(userFacingBridgeError(reason, "Tanılama paketi oluşturulamadı."));
     } finally {
@@ -490,16 +468,7 @@ export function Operations({
                 <div><dt>Yayın bekleyenleri</dt><dd>{operations?.publisher.outboxPending ?? 0} bekleyen</dd></div>
               </dl>
               <small>Bu özet sır, anahtar, kaynak metni veya kullanıcı verisi içermez.</small>
-              {diagnosticExportPath ? <small className="diagnostic-export-path">Son paket: {diagnosticExportPath}</small> : null}
-              <details className="engine-diagnostics">
-                <summary>Engine hata günlüğü</summary>
-                {engineDiagnosticsError ? (
-                  <small role="alert">{engineDiagnosticsError}</small>
-                ) : (
-                  <small>{engineDiagnostics.path ?? "Henüz günlük oluşmadı."}</small>
-                )}
-                <pre>{engineDiagnosticsError ? "Günlük içeriği güvenli biçimde gösterilemiyor." : engineDiagnostics.lines.join("\n") || "Kayıt yok."}</pre>
-              </details>
+              <small>Günlük ayrıntıları yalnızca oluşturulan yerel tanı paketinde bulunur.</small>
             </div>
           ) : null}
           <div className="log-toolbar" aria-label="Günlük filtresi">
@@ -520,18 +489,16 @@ export function Operations({
           <div className="event-list" aria-live="polite">
             {visibleEvents.map((event) => (
               <div className="event-row" key={event.id}>
-                <time>{event.at}</time>
+                {(() => {
+                  const timestamp = formatOperationTimestamp(event.at);
+                  return <time dateTime={timestamp.dateTime}>{timestamp.label}</time>;
+                })()}
                 <span className={`event-marker state-${event.state.toLowerCase()}`} />
                 <span>
                   <strong>{event.title}</strong>
                   <small className={`log-level log-level-${(event.level ?? "INFO").toLowerCase()}`}>
                     {event.level === "ERROR" ? "Hata" : event.level === "WARN" ? "Uyarı" : event.level === "DEBUG" ? "Tanılama" : "Bilgi"}
                   </small>
-                  <details className="event-technical-detail">
-                    <summary>Teknik ayrıntı</summary>
-                    <small>{event.detail}</small>
-                    <code>{event.correlationId}</code>
-                  </details>
                 </span>
                 <em className={`event-state state-${event.state.toLowerCase()}`}>
                   {eventStateLabel[event.state]}

@@ -159,10 +159,6 @@ export function InstantCreate({
           <p className="section-kicker">{feedback.kicker}</p>
           <h1>{feedback.title}</h1>
           <p>{feedback.detail}</p>
-          <div className="created-job-id">
-            <span>İş kimliği</span>
-            <code>{submission.id}</code>
-          </div>
           {workspaceSyncError ? <p className="form-message" role="status" aria-live="polite">{workspaceSyncError}</p> : null}
           <div className="success-actions">
             <button

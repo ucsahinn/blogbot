@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
@@ -78,6 +78,16 @@ export function ContentFlow({
     failed: number;
   } | null>(null);
 
+  useEffect(() => {
+    if (tab !== "candidates") return;
+    let cancelled = false;
+    void bridge.getEditorialWorkspace({ includeCandidates: true }).then((nextWorkspace) => {
+      if (!cancelled) onWorkspaceChange(nextWorkspace);
+    }).catch(() => {
+      // The candidate tab keeps its current local snapshot and exposes its own retry actions.
+    });
+    return () => { cancelled = true; };
+  }, [bridge, onWorkspaceChange, tab]);
   const candidates = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("tr-TR");
     return workspace.candidates.filter(

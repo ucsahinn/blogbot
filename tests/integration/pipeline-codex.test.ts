@@ -738,6 +738,23 @@ test("rejects forbidden nested item events from real JSONL-shaped streams", asyn
   );
 });
 
+test("turns a Codex error event into a terminal runner failure instead of treating it as protocol drift", async () => {
+  await assert.rejects(
+    runStructuredCodexTask(
+      {
+        taskKind: "RESEARCH",
+        input: {},
+        outputSchema: { type: "object" },
+        validateOutput: (_value): _value is Record<string, never> => true
+      },
+      createMockStructuredCodexPort([{ type: "error", message: "invalid output schema" }])
+    ),
+    (error: unknown) =>
+      error instanceof CodexRunnerError &&
+      error.code === "PROCESS_FAILED" &&
+      error.message.includes("invalid output schema")
+  );
+});
 test("rejects unknown lifecycle events instead of silently accepting protocol drift", async () => {
   await assert.rejects(
     runStructuredCodexTask(

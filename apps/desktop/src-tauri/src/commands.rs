@@ -2372,17 +2372,7 @@ pub async fn get_bootstrap_snapshot(
                 .map(Vec::len)
         })
         .unwrap_or(0);
-        let candidates = engine_request(
-            &bridge,
-            json!({
-                "version": 1,
-                "id": format!("desktop-bootstrap-candidate-list-{}", std::process::id()),
-                "kind": "candidate.list"
-            }),
-        )
-        .ok()
-        .and_then(|result| result.get("candidates").and_then(Value::as_array).cloned())
-        .unwrap_or_default();
+        let candidates = Vec::new();
         let editorial_mutations = read_engine_local_state(&bridge, "desktop.editorial")
             .and_then(|value| value.get("mutations").and_then(Value::as_array).cloned())
             .unwrap_or_default();
@@ -6381,6 +6371,7 @@ fn codex_role_state_for_usage(
 pub async fn get_editorial_workspace(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
+    include_candidates: Option<bool>,
 ) -> Result<Value, CommandError> {
     let runtime = *read_lock(&state.runtime)?;
     // Do not probe a sidecar after Doctor has already put this desktop into an
@@ -6436,7 +6427,7 @@ pub async fn get_editorial_workspace(
                 "titleTr": item.get("title").cloned().unwrap_or(Value::Null),
                 "titleEn": item.get("title").cloned().unwrap_or(Value::Null),
                 "section": item.get("section").cloned().unwrap_or(json!("haberler")),
-                "completion": if item.get("state").and_then(Value::as_str) == Some("APPROVED") { 1.0 } else { 0.65 },
+                "completion": Value::Null,
                 "blockers": item.get("blockers").cloned().unwrap_or(json!(0)),
                 "updatedAt": item.get("updatedAt").cloned().unwrap_or(Value::Null),
                 "scheduledAt": item.get("scheduledAt").cloned().unwrap_or(Value::Null),
@@ -6507,7 +6498,7 @@ pub async fn get_editorial_workspace(
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
     let checked_at = generated_at.clone();
-    let candidate_values = if workspace_can_read_engine(runtime) {
+    let candidate_values = if include_candidates.unwrap_or(false) && workspace_can_read_engine(runtime) {
         engine_request(
             &bridge,
             json!({

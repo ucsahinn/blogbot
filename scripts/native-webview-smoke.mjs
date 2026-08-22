@@ -583,7 +583,11 @@ async function verifyCandidateJourney(sessionId, source) {
   let beforePromotion;
   let candidate;
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    beforePromotion = await invoke(sessionId, "get_editorial_workspace");
+    // Candidate projection is deliberately opt-in in the desktop bridge: the
+    // normal workspace must not start an expensive candidate listing while the
+    // editor is working elsewhere. This smoke is explicitly exercising the
+    // candidate route, so request that projection just as Content Flow does.
+    beforePromotion = await invoke(sessionId, "get_editorial_workspace", { includeCandidates: true });
     candidate = beforePromotion?.result?.candidates?.find(
       (item) => item?.sourceId === sourceId && item?.state === "NEW"
     );
@@ -1251,7 +1255,7 @@ async function verifyPrimaryNavigationJourney(sessionId) {
  */
 async function inspectExistingProfileState(sessionId, localEngine) {
   const [workspaceResponse, operationsResponse, diagnosticsResponse] = await Promise.all([
-    invoke(sessionId, "get_editorial_workspace"),
+    invoke(sessionId, "get_editorial_workspace", { includeCandidates: true }),
     invoke(sessionId, "get_operations"),
     invoke(sessionId, "get_engine_diagnostics")
   ]);
@@ -1263,7 +1267,14 @@ async function inspectExistingProfileState(sessionId, localEngine) {
       value,
       (items ?? []).filter((item) => String(item?.[field] ?? "UNKNOWN") === value).length
     ])
-  );
+  );  const candidateRankingScores = (workspaceResponse.result?.candidates ?? [])
+    .map((candidate) => candidate?.rankingScore)
+    .filter((score) => typeof score === "number" && Number.isFinite(score));
+  const candidateRankingSummary = {
+    listed: candidateRankingScores.length,
+    distinctScores: new Set(candidateRankingScores).size,
+    allScoresIdentical: candidateRankingScores.length > 1 && new Set(candidateRankingScores).size === 1
+  };
   const diagnosticCodes = [...new Set((diagnosticsResponse?.result?.lines ?? []).flatMap((line) =>
     typeof line === "string"
       ? line.match(/(?:ENGINE|CODEX|QUEUE|BRIDGE)_[A-Z_]+/g) ?? []
@@ -1338,6 +1349,7 @@ async function inspectExistingProfileState(sessionId, localEngine) {
     mode: "actual-profile-read-only",
     localEngineReady: localEngine?.ready === true,
     candidateStates: countBy(workspaceResponse.result?.candidates, "state"),
+    candidateRankingSummary,
     draftStates: countBy(workspaceResponse.result?.drafts, "state"),
     failureCount: Array.isArray(workspaceResponse.result?.failures) ? workspaceResponse.result.failures.length : 0,
     codexRoles: countBy(workspaceResponse.result?.codexRoles, "state"),

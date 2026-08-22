@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { describeBobyAvailability } from "../src/boby-conversation.ts";
+import { bobyGuidancePollDelay, describeBobyAvailability } from "../src/boby-conversation.ts";
 
 test("Boby is ready as an immediate local guide in every runtime state", () => {
   for (const input of [
@@ -13,7 +13,7 @@ test("Boby is ready as an immediate local guide in every runtime state", () => {
     assert.deepEqual(describeBobyAvailability(input), {
       tone: "ready",
       label: "Boby hazır",
-      detail: "Sorunu yaz; Boby bu ekrandaki sonraki adımı hemen açıklar."
+      detail: "Luna Low ile yanıtlar; yalnızca soruna odaklanır ve ek kullanım başlatmaz."
     });
   }
 });
@@ -24,6 +24,12 @@ test("Boby has no retained canned local reply path", async () => {
   assert.doesNotMatch(conversation, /localBobyReply/u);
   assert.doesNotMatch(conversation, /shouldUseLocalBobyShortcut/u);
   assert.doesNotMatch(conversation, /OPE'nin yerel editöründesin/u);
+});
+test("Boby checks a newly accepted reply quickly before backing off", () => {
+  assert.equal(bobyGuidancePollDelay(0, true), 350);
+  assert.equal(bobyGuidancePollDelay(5_000, true), 2_000);
+  assert.equal(bobyGuidancePollDelay(120_000, true), 15_000);
+  assert.equal(bobyGuidancePollDelay(120_000, false), 60_000);
 });
 test("Boby panel uses the existing Luna conversation bridge when it is ready", async () => {
   const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");

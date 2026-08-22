@@ -11,7 +11,8 @@ export type CodexRunnerErrorCode =
   | "DENIED_EVENT"
   | "INVALID_OUTPUT"
   | "MISSING_OUTPUT"
-  | "PAID_FALLBACK_DISABLED";
+  | "PAID_FALLBACK_DISABLED"
+  | "PROCESS_FAILED";
 
 export class CodexRunnerError extends Error {
   constructor(
@@ -28,6 +29,7 @@ export interface CodexEvent {
   thread_id?: string;
   threadId?: string;
   output?: unknown;
+  message?: string;
   item?: {
     type?: string;
     text?: string;
@@ -196,6 +198,12 @@ export async function runStructuredCodexTask<T>(
     if (event.type === "thread.started") {
       const threadId = safeConversationSessionId(event.thread_id ?? event.threadId);
       if (threadId) conversationSessionId = threadId;
+    }
+    if (event.type === "error") {
+      const detail = typeof event.message === "string" && event.message.trim()
+        ? event.message.trim().slice(0, 500)
+        : "Codex çalıştırması tamamlanamadı";
+      throw new CodexRunnerError("PROCESS_FAILED", detail);
     }
     const waitingReason =
       waitingReasons[event.type as keyof typeof waitingReasons];

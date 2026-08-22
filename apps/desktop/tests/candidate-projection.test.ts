@@ -9,4 +9,5 @@ test("native workspace preserves measured candidate ranking details for Content 
   assert.match(candidateProjection, /"rankingScore": candidate\.get\("rankingScore"\)/u);
   assert.match(candidateProjection, /"scoreReasons": candidate\.get\("scoreReasons"\)/u);
   assert.match(candidateProjection, /"freshnessScore": candidate\.get\("freshnessScore"\)/u);
+  assert.doesNotMatch(candidateProjection, /0\.65/u, "review rows must not invent a 65% progress value");
 });

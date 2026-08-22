@@ -7147,3 +7147,19 @@ strong {
 h1, h2, h3 { text-wrap: balance; }
 .article-meta, .status-strip, .setup-overview { font-variant-numeric: tabular-nums; }
 .article-hero-media img { display: block; width: 100%; height: auto; }
+/* The focused guide has a vertical reading order. A generic dense-layout rule
+   used to reintroduce three outer columns here, squeezing step cards into an
+   unreadable strip. Keep only the three cards inside their dedicated rail. */
+.guided-setup.guided-setup-panel {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.guided-setup-panel > .guided-progress-shell {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 760px) {
+  .guided-setup.guided-setup-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

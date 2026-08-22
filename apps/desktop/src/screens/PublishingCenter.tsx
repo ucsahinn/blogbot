@@ -292,7 +292,7 @@ export function PublishingCenter({
             {workspace.scheduled.map((item) => (
               <article className="data-row" key={item.id}>
                 <div><strong>{item.title}</strong><small>{sectionLabel(item.section)} · {new Date(item.scheduledAt).toLocaleString("tr-TR")}</small></div>
-                <code>{item.targetPath}</code>
+                <span className="muted">Yerel hedef hazır</span>
                 <span className={`state-pill state-${item.state.toLowerCase()}`}>{siteMode === "PUBLISH" ? publicationStateLabel[item.state] : publicationStateLabel[item.state].replace("Yayın", "Çıktı")} · {ciStateLabel[item.ciState]}</span>
               </article>
             ))}

@@ -164,7 +164,7 @@ export interface BlogbotBridge {
   sendTestNotification(): Promise<{ shown: boolean }>;
   requestBobyGuidance(request: BobyGuidanceRequest): Promise<Pick<BobyGuidanceStatus, "id" | "state">>;
   getBobyGuidance(guidanceId: string): Promise<BobyGuidanceStatus>;
-  getEditorialWorkspace(): Promise<EditorialWorkspaceSnapshot>;
+  getEditorialWorkspace(options?: { includeCandidates?: boolean }): Promise<EditorialWorkspaceSnapshot>;
   promoteCandidate(candidateId: string): Promise<{
     ok: true;
     state: "RESEARCH_QUEUED";
@@ -450,7 +450,7 @@ export function createInvokeBridge(
     sendTestNotification: () => mutate("send_test_notification"),
     requestBobyGuidance: (request) => mutate("request_boby_guidance", { request }),
     getBobyGuidance: (guidanceId) => read("get_boby_guidance", { guidanceId }),
-    getEditorialWorkspace: () => read("get_editorial_workspace"),
+    getEditorialWorkspace: (options) => read("get_editorial_workspace", options?.includeCandidates ? { includeCandidates: true } : undefined),
     promoteCandidate: (candidateId) =>
       mutate("promote_candidate", { candidateId }),
     dismissCandidate: (candidateId) =>
@@ -523,6 +523,7 @@ type CoalescedSnapshot =
   | "prerequisites"
   | "connectors"
   | "workspace"
+  | "workspaceCandidates"
   | "operations"
   | "diagnostics";
 
@@ -625,7 +626,9 @@ export function createCoalescingBridge(
     getBootstrapSnapshot: () => share("bootstrap", () => bridge.getBootstrapSnapshot()),
     getPrerequisiteStatus: () => share("prerequisites", () => bridge.getPrerequisiteStatus()),
     getConnectorState: () => share("connectors", () => bridge.getConnectorState()),
-    getEditorialWorkspace: () => share("workspace", () => bridge.getEditorialWorkspace()),
+    getEditorialWorkspace: (options) => options?.includeCandidates
+      ? share("workspaceCandidates", () => bridge.getEditorialWorkspace({ includeCandidates: true }))
+      : share("workspace", () => bridge.getEditorialWorkspace()),
     getOperations: () => share("operations", () => bridge.getOperations()),
     getEngineDiagnostics: () => share("diagnostics", () => bridge.getEngineDiagnostics())
   };

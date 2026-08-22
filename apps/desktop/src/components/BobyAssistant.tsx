@@ -25,6 +25,8 @@ interface BobyReply {
   kind?: "pending";
 }
 
+const BOBY_REPLY_TIMEOUT_MS = 45_000;
+
 const bobyActionPages: Record<string, PageId> = {
   OPEN_DASHBOARD: "dashboard",
   OPEN_CONTENT: "content",
@@ -62,6 +64,10 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
       playFeedbackSound("boby-reply");
     };
     const poll = async () => {
+      if (Date.now() - startedAt >= BOBY_REPLY_TIMEOUT_MS) {
+        finish({ text: "Boby bu yanıtı zamanında tamamlayamadı. Aynı soruyu yeniden gönderebilirsin.", origin: "system" });
+        return;
+      }
       try {
         const result = await bridge.getBobyGuidance(pendingGuidanceId);
         if (cancelled) return;

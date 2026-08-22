@@ -288,6 +288,7 @@ export function ReviewWorkspace({
   const [locale, setLocale] = useState<Locale>("tr");
   const [tab, setTab] = useState<ReviewTab>("content");
   const [loading, setLoading] = useState(snapshot.queue.length > 0);
+  const [revisionLoadNonce, setRevisionLoadNonce] = useState(0);
   const [approving, setApproving] = useState(false);
   const [approvingHighRisk, setApprovingHighRisk] = useState(false);
   const [reauthenticated, setReauthenticated] = useState(false);
@@ -352,7 +353,7 @@ export function ReviewWorkspace({
     return () => {
       alive = false;
     };
-  }, [bridge, selectedId]);
+  }, [bridge, revisionLoadNonce, selectedId]);
 
   useEffect(() => {
     mediaPreviewLatestRequest.current = {
@@ -474,6 +475,13 @@ export function ReviewWorkspace({
 
   const actionBusy = approving || approvingHighRisk || requestingEdit || requestingComprehensiveRewrite || repairingMedia || enqueueingPublication || previewingPublication || materializingLocal;
 
+  const retrySelectedRevision = () => {
+    if (!selectedId || loading || actionBusy) return;
+    setLoading(true);
+    setNotice("");
+    setRevision(null);
+    setRevisionLoadNonce((value) => value + 1);
+  };
   const selectRevision = (revisionId: string) => {
     if (actionBusy) return;
     setLoading(true);
@@ -547,8 +555,8 @@ export function ReviewWorkspace({
       }
       setNotice(
         result.state === "APPROVED"
-          ? `Revizyon onaylandı · ${result.revisionHash.slice(0, 12)}…${refreshNotice}`
-          : `Editoryal onay kaydedildi; yüksek risk ikinci onayı bekleniyor · ${result.revisionHash.slice(0, 12)}…${refreshNotice}`
+          ? `Revizyon onaylandı${refreshNotice}`
+          : `Editoryal onay kaydedildi; yüksek risk ikinci onayı bekleniyor${refreshNotice}`
       );
     } catch (reason) {
       setNotice(
@@ -565,7 +573,7 @@ export function ReviewWorkspace({
     setNotice("");
     try {
       const acceptedWarningSetHash = await warningSetHash(revision.gates);
-      const result = await bridge.approveHighRiskRevision({
+      await bridge.approveHighRiskRevision({
         revisionId: revision.id,
         expectedHash: revision.revisionHash,
         warningSetHash: acceptedWarningSetHash,
@@ -574,9 +582,9 @@ export function ReviewWorkspace({
       setRevision((current) => current ? { ...current, highRiskApproved: true, state: "APPROVED" } : current);
       try {
         await onRevisionApproved?.();
-        setNotice(`Yüksek risk onayı kaydedildi · ${result.revisionHash.slice(0, 12)}…`);
+        setNotice(`Yüksek risk onayı kaydedildi.`);
       } catch {
-        setNotice(`Yüksek risk onayı kaydedildi · ${result.revisionHash.slice(0, 12)}… İnceleme kuyruğu görünümü henüz yenilenemedi; sayfayı yenileyin veya Editoryal Masa'dan yeniden deneyin.`);
+        setNotice(`Yüksek risk onayı kaydedildi. İnceleme kuyruğu görünümü henüz yenilenemedi; sayfayı yenileyin veya Editoryal Masa'dan yeniden deneyin.`);
       }
     } catch (reason) {
       setNotice(userFacingBridgeError(reason, "Yüksek risk onayı kaydedilemedi."));
@@ -590,7 +598,7 @@ export function ReviewWorkspace({
     setRevoking(true);
     setNotice("");
     try {
-      const result = await bridge.revokeApproval({
+      await bridge.revokeApproval({
         revisionId: revision.id,
         expectedHash: revision.revisionHash,
         reason: revokeReason.trim()
@@ -606,9 +614,9 @@ export function ReviewWorkspace({
       setLastPreview(null);
       try {
         await onRevisionApproved?.();
-        setNotice(`Revizyon onayı geri çekildi · ${result.revisionHash.slice(0, 12)}…`);
+        setNotice(`Revizyon onayı geri çekildi.`);
       } catch {
-        setNotice(`Revizyon onayı geri çekildi · ${result.revisionHash.slice(0, 12)}… İnceleme kuyruğu henüz yenilenemedi; sayfayı yenileyin.`);
+        setNotice(`Revizyon onayı geri çekildi. İnceleme kuyruğu henüz yenilenemedi; sayfayı yenileyin.`);
       }
     } catch (reason) {
       setNotice(userFacingBridgeError(reason, "Onay geri çekilemedi."));
@@ -878,9 +886,10 @@ export function ReviewWorkspace({
             <span>İçerik Akışı'ndan bir işi araştırmaya alın.</span>
           </div>
         ) : !revision || !activeContent || !previousContent ? (
-          <div className="review-loading" role="alert">
-            <strong>Revizyon gösterilemiyor.</strong>
-            {notice}
+          <div className="review-loading review-load-failure" role="alert">
+            <strong>Revizyon şu an açılamadı.</strong>
+            <span>{notice || "Yerel revizyon paketi yeniden okunamadı."}</span>
+            <button className="button button-secondary" type="button" disabled={loading || actionBusy} onClick={retrySelectedRevision}>Revizyonu yeniden yükle</button>
           </div>
         ) : (
           <>
@@ -1056,12 +1065,6 @@ export function ReviewWorkspace({
                   Bir şey değişirse yeniden inceleme gerekir.
               </span>
             </div>
-            <details className="revision-technical-record">
-              <summary>Teknik kayıt</summary>
-              <code title={revision.revisionHash}>
-                sha256:{revision.revisionHash.slice(0, 16)}…
-              </code>
-            </details>
           </div>
 
             {notice ? <div className="inline-notice review-notice" role="status" aria-live="polite">{notice}</div> : null}
@@ -1395,10 +1398,6 @@ export function ReviewWorkspace({
                           </span>
                           <span className="snapshot-meta">
                             {source.primary ? <em>Birincil</em> : null}
-                            <details className="snapshot-integrity">
-                              <summary>Teknik kayıt</summary>
-                              <code>{source.contentHash}</code>
-                            </details>
                           </span>
                         </div>
                       ))}

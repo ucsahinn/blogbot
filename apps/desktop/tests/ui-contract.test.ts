@@ -84,6 +84,12 @@ test("first-start wizard is a non-blocking three-step flow with one semantic sta
   assert.doesNotMatch(setup, /setAutostartEnabled/u);
 });
 
+test("focused setup guide keeps its step rail above the task content instead of reviving the legacy three-column layout", async () => {
+  const styles = await readFile(source("styles.css"), "utf8");
+
+  assert.match(styles, /\.guided-setup\.guided-setup-panel\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/su);
+  assert.match(styles, /\.guided-setup-panel\s*>\s*\.guided-progress-shell\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/su);
+});
 test("background synchronization exposes failures without creating an unhandled rejection", async () => {
   const app = await readFile(source("App.tsx"), "utf8");
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
@@ -317,22 +323,13 @@ test("Codex operations distinguishes measured local work from unavailable token 
   assert.match(operations, /Sadece kalıcı yerel iş kaydından türetilen veriler gösterilir/u);
 });
 
-test("operations diagnostics ignores a late engine-log response after the panel is closed", async () => {
+test("operations diagnostics keeps raw engine records off the live screen", async () => {
   const operations = await readFile(source("screens", "Operations.tsx"), "utf8");
 
-  assert.match(
-    operations,
-    /if \(!diagnosticsVisible\) return;\s*let alive = true;[\s\S]*?if \(!alive\) return;\s*setEngineDiagnostics\(value\);\s*setEngineDiagnosticsError\(""\);/u,
-    "diagnostic success must not update an unmounted Operations screen"
-  );
-  assert.match(
-    operations,
-    /\.catch\(\(\) => \{\s*if \(!alive\) return;/u,
-    "diagnostic failures must not overwrite a newer panel state"
-  );
-  assert.match(operations, /return \(\) => \{\s*alive = false;\s*\};/u);
+  assert.match(operations, /Günlük ayrıntıları yalnızca oluşturulan yerel tanı paketinde bulunur\./u);
+  assert.doesNotMatch(operations, /getEngineDiagnostics|engineDiagnostics|engine-diagnostics|<pre>/u);
+  assert.doesNotMatch(operations, /diagnosticExportPath|Son paket:/u);
 });
-
 test("local materialization never reuses a publication preview from another revision", async () => {
   const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
 
@@ -550,16 +547,32 @@ test("review approval is V3-only and collects a complete human declaration", asy
   assert.match(bridge, /REVISION_REVIEW_UPGRADE_REQUIRED/u);
 });
 
-test("review keeps source and publication checks understandable while technical hashes stay optional", async () => {
+test("review explains approval without exposing a technical revision record", async () => {
   const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
 
   assert.match(review, /\{ id: "claims", label: "Kaynak kontrolü" \}/u);
   assert.match(review, /\{ id: "gates", label: "Yayın kontrolü" \}/u);
-  assert.match(review, /<details className="snapshot-integrity">/u);
-  assert.match(review, /<summary>Teknik kayıt<\/summary>/u);
+  assert.doesNotMatch(review, /snapshot-integrity/u);
+  assert.match(review, /<strong>Onay kaydı<\/strong>/u);
+  assert.doesNotMatch(review, /revision-technical-record/u);
+  assert.doesNotMatch(review, /sha256:\{revision\.revisionHash\.slice/u);
   assert.doesNotMatch(review, /label: "İddialar ve kaynaklar"/u);
 });
 
+test("live workspace feedback never renders opaque internal identifiers", async () => {
+  const [review, instant, operations, publishing] = await Promise.all([
+    readFile(source("screens", "ReviewWorkspace.tsx"), "utf8"),
+    readFile(source("screens", "InstantCreate.tsx"), "utf8"),
+    readFile(source("screens", "Operations.tsx"), "utf8"),
+    readFile(source("screens", "PublishingCenter.tsx"), "utf8")
+  ]);
+
+  assert.doesNotMatch(review, /result\.revisionHash\.slice/u);
+  assert.doesNotMatch(review, /source\.contentHash/u);
+  assert.doesNotMatch(instant, /<code>\{submission\.id\}<\/code>/u);
+  assert.doesNotMatch(operations, /<code>\{event\.correlationId\}<\/code>/u);
+  assert.doesNotMatch(publishing, /<code>\{item\.targetPath\}<\/code>/u);
+});
 test("about checks for updates in the background and marks an available version before opening", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
 
@@ -641,10 +654,17 @@ test("editorial background reads pause outside the draft list and when the windo
   assert.match(desk, /EDITORIAL_DRAFT_POLL_MS\s*=\s*20_000/u);
 });
 
+test("review load failures keep the selected revision actionable", async () => {
+  const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
+
+  assert.match(review, /const \[revisionLoadNonce, setRevisionLoadNonce\] = useState\(0\)/u);
+  assert.match(review, /setRevisionLoadNonce\(\(value\) => value \+ 1\)/u);
+  assert.match(review, /Revizyonu yeniden yükle/u);
+});
 test("legacy review packages explain the user outcome and offer a direct new-copy action", async () => {
   const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
 
   assert.match(review, /Onaylanamaz\./u);
   assert.match(review, /Yeni inceleme kopyas/u);
-  assert.match(review, /revision-technical-record/u);
+  assert.doesNotMatch(review, /revision-technical-record/u);
 });

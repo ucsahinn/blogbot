@@ -383,6 +383,11 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
     "native smoke must bind each real IPC read to an explicit response key contract"
   );
   assert.match(smokeScript, /missingKeys/u);
+  assert.match(
+    smokeScript,
+    /candidateRankingSummary/u,
+    "actual-profile native smoke must report only aggregate candidate-score diversity"
+  );
   assert.match(smokeScript, /unexpectedKeys/u);
   assert.match(
     smokeScript,
@@ -390,6 +395,10 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
     "native smoke must exercise a real candidate-to-editorial state transition, not only read commands"
   );
   assert.match(
+    smokeScript,
+    /get_editorial_workspace", \{ includeCandidates: true \}/u,
+    "native smoke must explicitly request the opt-in candidate projection before asserting candidate results"
+  );  assert.match(
     smokeScript,
     /clickCandidateResearchAction/u,
     "native smoke must click the visible candidate research action instead of promoting a candidate through the bridge alone"
