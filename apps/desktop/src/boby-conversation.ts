@@ -40,7 +40,8 @@ export function isBobyRunnerUnavailable(state: "QUEUED" | "RUNNING" | "WAITING_C
 export type BobyGuidancePollResolution =
   | { kind: "deliver"; guidanceId: string; reply: string }
   | { kind: "failed"; guidanceId: string }
-  | { kind: "continue"; guidanceId: string; nextPollMs: number };
+  | { kind: "continue"; guidanceId: string; nextPollMs: number }
+  | { kind: "expired"; guidanceId: string };
 
 export function resolveBobyGuidancePoll(input: {
   guidanceId: string;
@@ -54,6 +55,9 @@ export function resolveBobyGuidancePoll(input: {
     return { kind: "deliver", guidanceId: input.guidanceId, reply: input.reply };
   }
   if (input.state === "FAILED") return { kind: "failed", guidanceId: input.guidanceId };
+  if (input.elapsedMs >= 5 * 60_000 + 30_000) {
+    return { kind: "expired", guidanceId: input.guidanceId };
+  }
   return {
     kind: "continue",
     guidanceId: input.guidanceId,

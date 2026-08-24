@@ -724,7 +724,8 @@ strong {
   background: var(--sidebar);
   color: #e7eeee;
   border-right: 1px solid #061115;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .brand-lockup {
@@ -7166,5 +7167,161 @@ h1, h2, h3 { text-wrap: balance; }
 @media (max-width: 760px) {
   .guided-setup.guided-setup-panel {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* v0.1.51 release polish: keep the workstation dense, calm, and overlap-free. */
+.sidebar .boby-launcher {
+  position: static;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  width: 100%;
+  min-height: 48px;
+  margin-top: 10px;
+  padding: 7px 9px;
+  border-color: var(--sidebar-line);
+  border-radius: 10px;
+  background: transparent;
+  color: #dbe6e7;
+  box-shadow: none;
+  text-align: left;
+}
+
+.sidebar .boby-launcher > span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.sidebar .boby-launcher small {
+  color: #91a6aa;
+}
+
+.sidebar .boby-launcher:hover {
+  background: var(--sidebar-soft);
+  box-shadow: none;
+  transform: none;
+}
+
+.sidebar .about-toggle {
+  border-color: var(--sidebar-line);
+  background: transparent;
+  color: #b6c4c6;
+}
+
+.sidebar .about-toggle:hover {
+  border-color: #4a6268;
+  background: var(--sidebar-soft);
+  color: #f5f8f6;
+}
+
+.sidebar .about-toggle.has-update {
+  border-color: color-mix(in srgb, var(--accent) 72%, #f5f8f6);
+  background: var(--accent);
+  color: #fffaf6;
+}
+
+.operation-group-title {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.progress-ring.progress-indeterminate {
+  animation: none;
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--teal) 45%, var(--line));
+  color: var(--teal);
+  letter-spacing: 0;
+}
+
+.candidate-action-guidance {
+  max-width: none;
+}
+
+.week-day-groups.slot-picker {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+}
+
+.week-day-groups .slot-summary strong,
+.week-day-groups .slot-summary small {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.settings-actions {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px 14px;
+  padding: 14px 16px;
+}
+
+.settings-action-primary {
+  padding: 0;
+  border: 0;
+}
+
+.settings-action-notification {
+  padding: 0;
+  border: 0;
+}
+
+.settings-actions > small,
+.settings-page .form-message {
+  grid-column: 1 / -1;
+}
+
+.guided-setup-panel > div:nth-child(2) {
+  min-height: 0;
+}
+
+@media (min-width: 921px) {
+  .page {
+    padding-top: 26px;
+  }
+
+  .page-header {
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+
+  .page-header h1 {
+    font-size: 32px;
+  }
+
+  .page-header p:not(.section-kicker) {
+    font-size: 15px;
+    line-height: 1.45;
+  }
+}
+
+@media (max-width: 1050px) {
+  .guided-setup-panel > .guided-progress-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 920px) {
+  .sidebar .boby-launcher {
+    margin-top: 0;
+    grid-template-columns: 32px;
+    width: 48px;
+    padding-inline: 7px;
+  }
+
+  .sidebar .boby-launcher > span {
+    display: none;
+  }
+
+  .settings-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-actions > small,
+  .settings-page .form-message {
+    grid-column: 1;
   }
 }

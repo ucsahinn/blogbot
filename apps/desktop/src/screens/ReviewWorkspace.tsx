@@ -869,7 +869,7 @@ export function ReviewWorkspace({
               onSelect={() => selectRevision(item.id)}
             />
           ))}
-          {!visibleQueue.length ? <div className="queue-empty"><strong>Bu görünümde revizyon yok.</strong><span>Filtreyi veya aramayı değiştirin.</span></div> : null}
+          {!visibleQueue.length && snapshot.queue.length > 0 ? <div className="queue-empty"><strong>Bu görünümde revizyon yok.</strong><span>Filtreyi veya aramayı değiştirin.</span></div> : null}
         </div>
         <footer>
           <span className="status-dot status-online" aria-hidden="true" />

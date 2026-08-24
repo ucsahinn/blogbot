@@ -20,7 +20,8 @@ test("Boby stops immediately when the local answer runner is unavailable", async
 test("Boby clears a stale unanswered request instead of polling forever", async () => {
   const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");
 
-  assert.match(assistant, /BOBY_REPLY_TIMEOUT_MS/u);
+  assert.match(assistant, /resolveBobyGuidancePoll/u);
+  assert.doesNotMatch(assistant, /BOBY_REPLY_TIMEOUT_MS/u);
   assert.match(assistant, /Boby bu yanıtı zamanında tamamlayamadı/u);
   assert.match(assistant, /persistPendingBobyGuidance/u);
   assert.match(assistant, /restorePendingBobyGuidance/u);

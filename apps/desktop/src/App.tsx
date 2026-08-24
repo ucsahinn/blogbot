@@ -271,7 +271,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   // mutation callers observe the failure and preserve the accepted result.
   const refreshWorkspaceForMutation = async () => {
     const nextSnapshot = await bridge.getBootstrapSnapshot();
-    const nextWorkspace = await bridge.getEditorialWorkspace();
+    const nextWorkspace = await bridge.getEditorialWorkspace({ includeCandidates: true });
     const nextConnectorState = nextSnapshot.runtime === "ONLINE"
       ? await bridge.getConnectorState()
       : fallbackConnectorState;

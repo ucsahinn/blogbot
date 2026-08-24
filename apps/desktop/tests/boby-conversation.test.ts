@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { bobyGuidancePollDelay, describeBobyAvailability, isBobyRunnerUnavailable } from "../src/boby-conversation.ts";
+import { bobyGuidancePollDelay, describeBobyAvailability, isBobyRunnerUnavailable, resolveBobyGuidancePoll } from "../src/boby-conversation.ts";
 
 test("Boby is ready as an immediate local guide in every runtime state", () => {
   for (const input of [
@@ -34,6 +34,21 @@ test("Boby checks a newly accepted reply quickly before backing off", () => {
   assert.equal(bobyGuidancePollDelay(5_000, true), 2_000);
   assert.equal(bobyGuidancePollDelay(120_000, true), 15_000);
   assert.equal(bobyGuidancePollDelay(120_000, false), 60_000);
+});
+test("Boby keeps a pending reply through the runner deadline before abandoning a stale request", () => {
+  const guidanceId = "boby-late-reply";
+  assert.deepEqual(resolveBobyGuidancePoll({
+    guidanceId,
+    elapsedMs: 30_000,
+    isDocumentVisible: true,
+    state: "RUNNING"
+  }), { kind: "continue", guidanceId, nextPollMs: 2_000 });
+  assert.deepEqual(resolveBobyGuidancePoll({
+    guidanceId,
+    elapsedMs: 330_001,
+    isDocumentVisible: true,
+    state: "RUNNING"
+  }), { kind: "expired", guidanceId });
 });
 test("Boby panel uses the existing Luna conversation bridge when it is ready", async () => {
   const assistant = await readFile(new URL("../src/components/BobyAssistant.tsx", import.meta.url), "utf8");

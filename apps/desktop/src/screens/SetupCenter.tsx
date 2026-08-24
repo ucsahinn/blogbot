@@ -930,11 +930,6 @@ export function SetupCenter({
               <strong>{nextSetupTask ? nextSetupTask.check.label : "OPE kullanıma hazır"}</strong>
               <span>{nextSetupTask ? nextSetupTask.check.detail : `${summary.ready}/${summary.total} kontrol hazır. Hazır olmayan özellikler güvenle kapalı kalır.`}</span>
             </div>
-            {nextSetupTask ? (
-              <button className="button button-primary" type="button" onClick={() => { setSelectedTask(nextSetupTask.task.id); setGuidedStep(0); }}>
-                {nextSetupTask.task.action}
-              </button>
-            ) : null}
           </div>
           <div className="setup-task-hub-heading">
             <p className="section-kicker">KISA VE ODAKLI KURULUM</p>

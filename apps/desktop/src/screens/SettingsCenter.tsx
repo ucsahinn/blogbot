@@ -155,13 +155,13 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
         <div className="settings-actions">
           <div className="settings-action-primary">
             <button className="button button-primary" type="button" disabled={Boolean(saveUnavailableReason)} title={saveUnavailableReason || undefined} aria-describedby={saveUnavailableReason ? "settings-save-unavailable" : undefined} onClick={() => void save()}>{busy ? "Kaydediliyor…" : "Ayarları kaydet"}</button>
-            {saveUnavailableReason ? <small id="settings-save-unavailable" className="action-unavailable-reason">{saveUnavailableReason}</small> : null}
+            {saveUnavailableReason && (readOnly || busy || dirty) ? <small id="settings-save-unavailable" className="action-unavailable-reason">{saveUnavailableReason}</small> : null}
           </div>
           <div className="settings-action-secondary">
           <button className="button button-secondary" type="button" disabled={Boolean(cancelUnavailableReason)} title={cancelUnavailableReason || undefined} aria-describedby={cancelUnavailableReason ? "settings-cancel-unavailable" : undefined} onClick={() => { setForm(workspace.preferences); setMessage("Kaydedilmemiş değişiklikler geri alındı."); }}>Değişiklikleri iptal et</button>
           <button className="button button-secondary" type="button" disabled={Boolean(defaultsUnavailableReason)} title={defaultsUnavailableReason || undefined} aria-describedby={defaultsUnavailableReason ? "settings-defaults-unavailable" : undefined} onClick={() => { setForm(defaultPreferences); setMessage("Varsayılanlar forma yüklendi; kalıcı olması için kaydedin."); }}>Varsayılana dön</button>
-          {cancelUnavailableReason ? <small id="settings-cancel-unavailable" className="action-unavailable-reason">{cancelUnavailableReason}</small> : null}
-          {defaultsUnavailableReason ? <small id="settings-defaults-unavailable" className="action-unavailable-reason">{defaultsUnavailableReason}</small> : null}
+          {cancelUnavailableReason && (readOnly || busy) ? <small id="settings-cancel-unavailable" className="action-unavailable-reason">{cancelUnavailableReason}</small> : null}
+          {defaultsUnavailableReason && (readOnly || busy) ? <small id="settings-defaults-unavailable" className="action-unavailable-reason">{defaultsUnavailableReason}</small> : null}
           </div>
           <div className="settings-action-notification">
             <button className="button button-secondary" type="button" disabled={Boolean(notificationUnavailableReason)} title={notificationUnavailableReason || undefined} aria-describedby={notificationUnavailableReason ? "settings-notification-unavailable" : undefined} onClick={() => void testNotification()}>Test bildirimi gönder</button>

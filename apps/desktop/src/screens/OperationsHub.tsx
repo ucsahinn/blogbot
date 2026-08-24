@@ -221,7 +221,7 @@ export function OperationsHub(props: OperationsHubProps) {
       </aside>
       <div className="workspace-tabs" role="tablist" aria-label="Operasyon bölümleri" onKeyDown={handleTabListKeyDown}>
         {([
-          ["jobs", `Hatalar · ${props.workspace.failures.filter((item) => item.state === "ACTION_REQUIRED").length}`],
+          ["jobs", `İşler · ${activeDrafts.length + props.workspace.failures.filter((item) => item.state === "ACTION_REQUIRED").length}`],
           ["codex", "Codex kullanım ve limit"],
           ["health", "Yerel sistem ve bağlantılar"],
           ["activity", "İş günlüğü"]
@@ -244,6 +244,7 @@ export function OperationsHub(props: OperationsHubProps) {
         <section className="hub-panel" role="tabpanel" id={`operations-panel-${tab}`} aria-labelledby={`operations-tab-${tab}`}>
           {tab === "jobs" ? (
             <div className="data-list">
+              {visibleActiveDrafts.length > 0 ? <h2 className="operation-group-title">Devam eden</h2> : null}
               {visibleActiveDrafts.map((draft) => (
                 <article className="failure-row active-job-row" key={draft.id} aria-label="Devam eden taslak işi">
                   <div>
@@ -256,25 +257,26 @@ export function OperationsHub(props: OperationsHubProps) {
                     <button className="button button-primary" type="button" onClick={props.onOpenEditorial}>
                       Editoryal Masa’da aç
                     </button>
-                    {draft.blockers > 0 || draft.state === "DRAFTING" ? (
+                    {draft.blockers > 0 ? (
                       <button
                         className="button button-secondary"
                         type="button"
                         disabled={props.readOnly || busyId === draft.id}
-                        aria-describedby={props.readOnly ? "active-draft-retry-unavailable" : undefined}
+                        aria-describedby={props.readOnly ? "blocked-draft-retry-unavailable" : undefined}
                         onClick={() => void retry(draft.id)}
                       >
                         {busyId === draft.id ? "Kuyruğa alınıyor" : "Tekrar dene"}
                       </button>
                     ) : null}
-                    {(draft.blockers > 0 || draft.state === "DRAFTING") && props.readOnly ? (
-                      <small id="active-draft-retry-unavailable" className="action-unavailable-reason">
-                        Yerel çalışma alanı yeniden bağlanana kadar iş yeniden başlatılamaz.
+                    {draft.blockers > 0 && props.readOnly ? (
+                      <small id="blocked-draft-retry-unavailable" className="action-unavailable-reason">
+                        Yerel çalışma alanı yeniden bağlanana kadar bu bloklu iş yeniden başlatılamaz.
                       </small>
                     ) : null}
                   </div>
                 </article>
               ))}
+              {visibleFailures.length > 0 ? <h2 className="operation-group-title">Müdahale gereken</h2> : null}
               {visibleFailures.map((failure) => {
                 const unavailableReason = retryUnavailableReason(failure, props.readOnly, busyId);
                 const unavailableReasonId = `retry-unavailable-${failure.id}`;
@@ -299,7 +301,7 @@ export function OperationsHub(props: OperationsHubProps) {
                 </button>
               ) : null}
               {props.workspace.failures.length === 0 && activeDrafts.length === 0 ? (
-                <div className="empty-state"><strong>Müdahale bekleyen iş yok.</strong><span>Yeni bir hata oluşursa nedeni, deneme sayısı ve güvenli sonraki adım burada görünür.</span></div>
+                <div className="empty-state"><strong>Aktif veya müdahale bekleyen iş yok.</strong><span>Yeni bir iş başladığında ya da güvenli bir müdahale gerektiğinde burada görünür.</span></div>
               ) : null}
             </div>
           ) : null}

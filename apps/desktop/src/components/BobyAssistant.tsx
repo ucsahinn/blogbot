@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import bobyAvatar from "../assets/boby-avatar-v3.webp";
-import { bobyGuidancePollDelay, describeBobyAvailability, isBobyRunnerUnavailable, persistPendingBobyGuidance, restorePendingBobyGuidance } from "../boby-conversation.ts";
+import { bobyGuidancePollDelay, describeBobyAvailability, isBobyRunnerUnavailable, persistPendingBobyGuidance, resolveBobyGuidancePoll, restorePendingBobyGuidance } from "../boby-conversation.ts";
 import { playFeedbackSound } from "../feedback-sounds.ts";
 import type { BlogbotBridge } from "../bridge.ts";
 import type { BootstrapSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
@@ -24,8 +24,6 @@ interface BobyReply {
   origin?: "boby" | "system";
   kind?: "pending";
 }
-
-const BOBY_REPLY_TIMEOUT_MS = 45_000;
 
 const bobyActionPages: Record<string, PageId> = {
   OPEN_DASHBOARD: "dashboard",
@@ -64,10 +62,11 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
       playFeedbackSound("boby-reply");
     };
     const poll = async () => {
-      if (Date.now() - startedAt >= BOBY_REPLY_TIMEOUT_MS) {
-        finish({ text: "Boby bu yanıtı zamanında tamamlayamadı. Aynı soruyu yeniden gönderebilirsin.", origin: "system" });
-        return;
-      }
+      const pollResolution = resolveBobyGuidancePoll({
+        guidanceId: pendingGuidanceId,
+        elapsedMs: Date.now() - startedAt,
+        isDocumentVisible: document.visibilityState === "visible"
+      });
       try {
         const result = await bridge.getBobyGuidance(pendingGuidanceId);
         if (cancelled) return;
@@ -89,6 +88,10 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
         }
       } catch {
         // A transient bridge read must not replace a live Luna answer with a canned menu response.
+      }
+      if (pollResolution.kind === "expired") {
+        finish({ text: "Boby bu yanıtı zamanında tamamlayamadı. Aynı soruyu yeniden gönderebilirsin.", origin: "system" });
+        return;
       }
       timer = window.setTimeout(() => void poll(), bobyGuidancePollDelay(Date.now() - startedAt, document.visibilityState === "visible"));
     };

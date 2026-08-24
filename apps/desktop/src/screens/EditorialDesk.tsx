@@ -261,7 +261,7 @@ export function EditorialDesk({
           <div className="draft-list">
             {hasPendingDraft ? (
               <article className="draft-row pending-draft-card" aria-label="Araştırma kuyruğundaki taslak" aria-busy="true">
-                <span className="progress-ring progress-indeterminate" aria-hidden="true">…</span>
+                <span className="progress-ring progress-indeterminate" aria-hidden="true">•</span>
                 <span className="draft-copy">
                   <strong>{pendingDraftTitle ?? "Araştırma taslağı hazırlanıyor"}</strong>
                   <small>İngilizce yerelleştirme araştırma tamamlanınca hazırlanacak</small>
@@ -270,7 +270,7 @@ export function EditorialDesk({
                   <span>İlerleme ölçümü henüz yok; işin durumunu Operasyonlar'dan takip edin.</span>
                 </span>
                 <span className="state-pill state-drafting">Araştırma kuyruğunda</span>
-                <span aria-hidden="true">…</span>
+                <span className="draft-next-action">Takip ediliyor</span>
               </article>
             ) : null}
             {workspace.drafts.map((draft) => {
@@ -290,7 +290,7 @@ export function EditorialDesk({
               >
                 {draft.completion === null ? (
                   <span className="progress-ring progress-indeterminate" aria-label="İlerleme yüzdesi henüz ölçülmedi">
-                    …
+                    •
                   </span>
                 ) : (
                   <span className={`progress-ring progress-${Math.round(draft.completion / 10) * 10}`} aria-label={`Yüzde ${draft.completion} tamamlandı`}>
@@ -299,7 +299,7 @@ export function EditorialDesk({
                 )}
                 <span className="draft-copy">
                   <strong>{draft.titleTr}</strong>
-                  <small>{draft.titleEn}</small>
+                  <small>{draft.titleEn === "Research is being prepared" ? "İngilizce başlık araştırmadan sonra hazırlanacak" : draft.titleEn}</small>
                   <span>{sectionLabel(draft.section)} · {draft.blockers ? `${draft.blockers} engel` : "engel yok"}</span>
                   <span id={`draft-detail-${draft.id}`}>{draft.detail}</span>
                 </span>

@@ -3486,6 +3486,17 @@ fn dashboard_pipeline_counts(
     (discovered, researching)
 }
 
+fn downgrade_invalid_v3_review_projection(projected: &mut Value) {
+    projected["state"] = json!("REVIEW_REQUIRED");
+    projected["editorialApproved"] = json!(false);
+    projected["highRiskApproved"] = json!(false);
+    if let Some(object) = projected.as_object_mut() {
+        object.remove("packageVersion");
+        object.remove("publicationSources");
+        object.remove("approvalRequirements");
+    }
+}
+
 fn build_review_revision(item: &Value) -> Result<Value, CommandError> {
     build_review_revision_with_predecessor(item, None)
 }
@@ -3667,12 +3678,15 @@ fn build_review_revision_with_predecessor(
     match revision.get("packageVersion") {
         None | Some(Value::Null) => {}
         Some(version) if version.as_u64() == Some(3) => {
-            let public_sources = revision
+            let Some(public_sources) = revision
                 .get("publicationSources")
-                .and_then(Value::as_array)
-                .ok_or_else(|| CommandError::EngineUnavailable("V3_PUBLICATION_SOURCES_MISSING".into()))?;
+                .and_then(Value::as_array) else {
+                    downgrade_invalid_v3_review_projection(&mut projected);
+                    return Ok(projected);
+                };
             if public_sources.is_empty() {
-                return Err(CommandError::EngineUnavailable("V3_PUBLICATION_SOURCES_MISSING".into()));
+                downgrade_invalid_v3_review_projection(&mut projected);
+                return Ok(projected);
             }
             let mut projected_sources = Vec::with_capacity(public_sources.len());
             let mut source_ids = std::collections::HashSet::new();
@@ -3691,7 +3705,8 @@ fn build_review_revision_with_predecessor(
                     || !matches!(role, "primary" | "independent" | "supporting")
                     || !source_ids.insert(id.to_string())
                 {
-                    return Err(CommandError::EngineUnavailable("V3_PUBLICATION_SOURCE_INVALID".into()));
+                    downgrade_invalid_v3_review_projection(&mut projected);
+                    return Ok(projected);
                 }
                 // Rebuild from the four public fields. Evidence excerpts,
                 // anchors, capture ids and hashes remain engine-owned.
@@ -3702,18 +3717,24 @@ fn build_review_revision_with_predecessor(
                     "role": role
                 }));
             }
-            let assessment = revision
+            let Some(assessment) = revision
                 .get("editorialAssessment")
-                .and_then(Value::as_object)
-                .ok_or_else(|| CommandError::EngineUnavailable("V3_EDITORIAL_ASSESSMENT_MISSING".into()))?;
-            let is_ymyl = assessment
+                .and_then(Value::as_object) else {
+                    downgrade_invalid_v3_review_projection(&mut projected);
+                    return Ok(projected);
+                };
+            let Some(is_ymyl) = assessment
                 .get("isYmyl")
-                .and_then(Value::as_bool)
-                .ok_or_else(|| CommandError::EngineUnavailable("V3_EDITORIAL_ASSESSMENT_INVALID".into()))?;
-            let sensitive_topic = assessment
+                .and_then(Value::as_bool) else {
+                    downgrade_invalid_v3_review_projection(&mut projected);
+                    return Ok(projected);
+                };
+            let Some(sensitive_topic) = assessment
                 .get("sensitiveTopic")
-                .and_then(Value::as_bool)
-                .ok_or_else(|| CommandError::EngineUnavailable("V3_EDITORIAL_ASSESSMENT_INVALID".into()))?;
+                .and_then(Value::as_bool) else {
+                    downgrade_invalid_v3_review_projection(&mut projected);
+                    return Ok(projected);
+                };
             let mut requirements = vec![json!("EDITORIAL_REVIEW")];
             if is_ymyl {
                 requirements.push(json!("EXPERT_REVIEW"));
@@ -3725,7 +3746,7 @@ fn build_review_revision_with_predecessor(
             projected["publicationSources"] = Value::Array(projected_sources);
             projected["approvalRequirements"] = Value::Array(requirements);
         }
-        Some(_) => return Err(CommandError::EngineUnavailable("REVISION_PACKAGE_VERSION_INVALID".into())),
+        Some(_) => downgrade_invalid_v3_review_projection(&mut projected),
     }
 
     Ok(projected)
@@ -6292,6 +6313,19 @@ fn candidate_workflow_state(
     mutations: &[Value],
     jobs: &[Value],
 ) -> &'static str {
+    // Closing a candidate only removes it from the discovery inbox; it does
+    // not delete an already-created draft job. Therefore the latest explicit
+    // dismiss must win over that job's durable workflow state. A later promote
+    // mutation still re-opens the candidate and continues through the job
+    // projection below.
+    if mutations.iter().rev().find(|mutation| {
+        mutation.get("candidateId").and_then(Value::as_str) == Some(candidate_id)
+    }).is_some_and(|mutation| {
+        mutation.get("kind").and_then(Value::as_str) == Some("CANDIDATE.DISMISS")
+    }) {
+        return "DISMISSED";
+    }
+
     if let Some(job) = jobs.iter().rev().find(|job| {
         job.get("kind").and_then(Value::as_str) == Some("DRAFT")
             && job.pointer("/metadata/candidateId").and_then(Value::as_str) == Some(candidate_id)
@@ -8524,6 +8558,33 @@ mod tests {
             "PROMOTED"
         );
     }
+    #[test]
+    fn dismissing_a_candidate_hides_it_even_when_its_draft_job_still_exists() {
+        let mutations = [
+            json!({
+                "kind": "CANDIDATE.PROMOTE",
+                "candidateId": "candidate-closed",
+                "state": "RESEARCH_QUEUED"
+            }),
+            json!({
+                "kind": "CANDIDATE.DISMISS",
+                "candidateId": "candidate-closed",
+                "state": "DISMISSED"
+            }),
+        ];
+        let jobs = [json!({
+            "id": "draft-candidate-closed",
+            "kind": "DRAFT",
+            "state": "QUEUED",
+            "metadata": { "candidateId": "candidate-closed" }
+        })];
+
+        assert_eq!(
+            candidate_workflow_state("candidate-closed", &mutations, &jobs),
+            "DISMISSED"
+        );
+    }
+
 
     #[test]
     fn codex_usage_projects_only_observed_local_draft_activity() {
@@ -9491,6 +9552,54 @@ mod tests {
         assert!(review.get("editorialAssessment").is_none());
         assert!(review.get("editorialApproval").is_none());
     }
+
+    #[test]
+    fn invalid_legacy_v3_source_stays_reviewable_but_cannot_be_approved_or_published() {
+        let materialization = json!({
+            "revision": {
+                "id": "revision-legacy-v3",
+                "packageVersion": 3,
+                "translationKey": "article-legacy-v3",
+                "section": "haberler",
+                "articleType": "news",
+                "author": "Yerel Editorya",
+                "tags": [],
+                "scheduledAt": "2026-08-20T12:00:00.000Z",
+                "adapterVersion": "astro-generic@1",
+                "riskLevel": "STANDARD",
+                "tr": { "title": "TR", "description": "TR", "slug": "tr", "bodyMarkdown": "TR" },
+                "en": { "title": "EN", "description": "EN", "slug": "en", "bodyMarkdown": "EN" },
+                "claims": [],
+                "sources": [],
+                "publicationSources": [{
+                    "id": "source-1",
+                    "title": "Legacy source",
+                    "url": "https://example.com/report",
+                    "role": "official"
+                }],
+                "editorialAssessment": { "isYmyl": false, "sensitiveTopic": false },
+                "qualityGates": [],
+                "media": []
+            },
+            "revisionHash": "a".repeat(64),
+            "editorialApproval": {
+                "revisionId": "revision-legacy-v3",
+                "revisionHash": "a".repeat(64)
+            },
+            "highRiskApproval": null
+        });
+
+        let review = build_review_revision(&materialization)
+            .expect("legacy content remains available for a replacement request");
+        assert_eq!(review["state"], "REVIEW_REQUIRED");
+        assert_eq!(review["editorialApproved"], false);
+        assert_eq!(review["highRiskApproved"], false);
+        assert_eq!(review["tr"]["title"], "TR");
+        assert!(review.get("packageVersion").is_none());
+        assert!(review.get("publicationSources").is_none());
+        assert!(review.get("approvalRequirements").is_none());
+    }
+
     #[test]
     fn diagnostics_bundle_never_carries_article_titles_or_headlines() {
         let title = "X Bankası'nda doğrulanmamış sızıntı iddiası";

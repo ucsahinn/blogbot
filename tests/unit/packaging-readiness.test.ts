@@ -711,7 +711,7 @@ test("desktop preflight verifies clean-machine installer inputs without building
   assert.ok(result.checks.some((check) => check.id === "bundled-engine-sidecar"));
 });
 
-test("desktop hotfix package advances beyond the published 0.1.49 updater version", async () => {
+test("desktop hotfix package advances beyond the published 0.1.50 updater version", async () => {
   const manifests = await Promise.all([
     readFile(join(repositoryRoot, "apps", "desktop", "package.json"), "utf8"),
     readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "Cargo.toml"), "utf8"),
@@ -723,7 +723,7 @@ test("desktop hotfix package advances beyond the published 0.1.49 updater versio
     JSON.parse(manifests[2]).version
   ].map(String);
 
-  assert.deepEqual(versions, ["0.1.50", "0.1.50", "0.1.50"]);
+  assert.deepEqual(versions, ["0.1.51", "0.1.51", "0.1.51"]);
 });
 test("release version stays identical across every packaged desktop manifest", async () => {
   const [desktopManifestRaw, cargoManifestRaw, tauriConfigRaw] = await Promise.all([

@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "blogbot"
-version = "0.1.50"
+version = "0.1.51"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",

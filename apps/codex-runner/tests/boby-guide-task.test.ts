@@ -11,8 +11,8 @@ test("Boby guide uses the fast logical role and a closed action schema", () => {
   assert.equal(selection.model, "gpt-5.6-luna");
   const task = createBobyGuideTask({ question: "Taslagi nerede incelerim?", activePage: "content", runtimeState: "ONLINE", sessionId: "019fae00-0000-7000-8000-000000000001", safeWorkspaceSummary: { draftCount: 1, reviewCount: 0, sourceCount: 2 } });
   assert.equal(task.taskKind, "BOBY_GUIDE");
-  assert.equal(task.persistSession, true);
-  assert.equal(task.conversationSessionId, "019fae00-0000-7000-8000-000000000001");
+  assert.equal(task.persistSession, false);
+  assert.equal(task.conversationSessionId, undefined);
   assert.match(BOBY_GUIDE_SYSTEM_PROMPT, /Luna Low/u);
   assert.match(BOBY_GUIDE_SYSTEM_PROMPT, /Boby olarak konuş/u);
   assert.doesNotMatch(BOBY_GUIDE_SYSTEM_PROMPT, /Codex'e bağlandım/u);
@@ -27,21 +27,18 @@ test("Boby's fast role passes the configured Luna model to Codex", () => {
   assert.equal(args[args.indexOf("--model") + 1], "gpt-5.6-luna");
 });
 
-test("Boby starts a durable Luna Low thread then resumes the same local session", () => {
-  const started = buildCodexExecArgs("default", "C:/safe/output.schema.json", { persistSession: true });
-  const resumed = buildCodexExecArgs("default", "C:/safe/output.schema.json", {
-    persistSession: true,
+test("Boby uses a fresh ephemeral Luna Low turn even when an old session id exists", () => {
+  const args = buildCodexExecArgs("default", "C:/safe/output.schema.json", {
+    persistSession: false,
     conversationSessionId: "019fae00-0000-7000-8000-000000000001"
   });
 
-  assert.deepEqual(started.slice(0, 3), ["exec", "--sandbox", "read-only"]);
-  assert.equal(started.includes("--ephemeral"), false);
-  assert.deepEqual(resumed.slice(0, 5), ["exec", "--sandbox", "read-only", "resume", "019fae00-0000-7000-8000-000000000001"]);
-  assert.equal(resumed.includes("--ephemeral"), false);
+  assert.deepEqual(args.slice(0, 4), ["exec", "--ephemeral", "--sandbox", "read-only"]);
+  assert.equal(args.includes("resume"), false);
 });
 
-test("Boby never forwards a session name or path-like value as an app-owned Codex thread", () => {
-  for (const sessionId of ["boby-luna-thread-1", "../thread", "-override", "019fae00-0000-7000-8000-00000000000z"]) {
+test("Boby never forwards any previous app-owned Codex thread", () => {
+  for (const sessionId of ["boby-luna-thread-1", "../thread", "-override", "019fae00-0000-7000-8000-00000000000z", "019fae00-0000-7000-8000-000000000001"]) {
     const task = createBobyGuideTask({
       question: "Taslağı nerede incelerim?",
       activePage: "content",

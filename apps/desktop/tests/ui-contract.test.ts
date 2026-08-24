@@ -146,8 +146,8 @@ test("OPE uses its product logo while Boby keeps the dedicated assistant avatar"
   assert.match(shell, /<strong>OPE<\/strong>/u);
   assert.equal(
     [...shell.matchAll(/src=\{bobyAvatar\}/gu)].length,
-    2,
-    "operator presence and the floating Boby launcher keep the assistant avatar; the sidebar uses OPE logo"
+    1,
+    "the sidebar Boby launcher keeps the assistant avatar while the product brand uses the OPE logo"
   );
   assert.match(assistant, /import bobyAvatar from "\.\.\/assets\/boby-avatar-v3\.webp"/u);
   assert.match(assistant, /src=\{bobyAvatar\}/u);

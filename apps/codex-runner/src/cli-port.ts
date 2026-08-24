@@ -16,6 +16,7 @@ const MAX_STDERR_BYTES = 64_000;
 const MAX_NON_JSON_STDOUT_BYTES = 4_000;
 const STALE_TASK_DIRECTORY_MS = 60 * 60 * 1_000;
 const CODEX_SESSION_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1_000;
+const CODEX_SESSION_MAX_REUSE_BYTES = 96 * 1024;
 const CODEX_SESSION_MAX_COUNT = 32;
 const CODEX_SESSION_MAX_SCAN_ENTRIES = 512;
 const CODEX_SESSION_MAX_DIRECTORY_DEPTH = 8;
@@ -362,6 +363,7 @@ async function pruneStaleTaskDirectories(codexHome: string): Promise<void> {
 interface CodexSessionRecord {
   path: string;
   modifiedAt: number;
+  size: number;
 }
 
 async function collectCodexSessionRecords(
@@ -403,9 +405,23 @@ async function collectCodexSessionRecords(
     }
     if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
     const info = await stat(path);
-    records.push({ path, modifiedAt: info.mtimeMs });
+    records.push({ path, modifiedAt: info.mtimeMs, size: info.size });
   }
   return records;
+}
+
+export function codexSessionRecordIsReusable(
+  record: { path: string; modifiedAt: number; size: number },
+  requestedSessionId: string | undefined,
+  now = Date.now()
+): boolean {
+  const normalizedId = requestedSessionId?.toLowerCase();
+  return Boolean(
+    normalizedId
+    && record.modifiedAt >= now - CODEX_SESSION_MAX_AGE_MS
+    && record.size <= CODEX_SESSION_MAX_REUSE_BYTES
+    && basename(record.path).toLowerCase().includes(normalizedId)
+  );
 }
 
 async function reusableAppOwnedCodexSession(
@@ -416,7 +432,8 @@ async function reusableAppOwnedCodexSession(
   try {
     const sessionRoot = resolve(codexHome, "sessions");
     const records = await collectCodexSessionRecords(sessionRoot);
-    const cutoff = Date.now() - CODEX_SESSION_MAX_AGE_MS;
+    const now = Date.now();
+    const cutoff = now - CODEX_SESSION_MAX_AGE_MS;
     const normalizedId = requestedSessionId?.toLowerCase();
     const recent = records
       .filter((record) => record.modifiedAt >= cutoff)
@@ -424,17 +441,22 @@ async function reusableAppOwnedCodexSession(
         right.modifiedAt - left.modifiedAt || left.path.localeCompare(right.path)
       );
     const reusable = normalizedId
-      ? recent.slice(0, CODEX_SESSION_MAX_COUNT).some((record) =>
-          record.modifiedAt >= cutoff && basename(record.path).toLowerCase().includes(normalizedId)
-        )
+      ? recent.slice(0, CODEX_SESSION_MAX_COUNT).some((record) => codexSessionRecordIsReusable(record, normalizedId, now))
       : false;
     const keepCount = createsPersistentSession && !reusable
       ? CODEX_SESSION_MAX_COUNT - 1
       : CODEX_SESSION_MAX_COUNT;
-    const expiredOrExcess = [
+    const oversizedRequested = normalizedId
+      ? recent.filter((record) =>
+          record.size > CODEX_SESSION_MAX_REUSE_BYTES
+          && basename(record.path).toLowerCase().includes(normalizedId)
+        )
+      : [];
+    const expiredOrExcess = new Map([
       ...records.filter((record) => record.modifiedAt < cutoff),
+      ...oversizedRequested,
       ...recent.slice(keepCount)
-    ];
+    ].map((record) => [record.path, record])).values();
     for (const record of expiredOrExcess) {
       const relativePath = relative(sessionRoot, resolve(record.path));
       if (relativePath.startsWith("..") || isAbsolute(relativePath)) {

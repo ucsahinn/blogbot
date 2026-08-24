@@ -1,8 +1,9 @@
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
+import { verifyVisibleActionMatrix } from "./native-visible-action-matrix.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const tauriDriverPath = process.env.BLOGBOT_TAURI_DRIVER;
@@ -14,6 +15,16 @@ const keepSmokeDataRoot = process.env.BLOGBOT_NATIVE_KEEP_TEMP === "1";
 const profileObserveMs = Number.parseInt(process.env.BLOGBOT_PROFILE_OBSERVE_MS ?? "0", 10);
 const skipProfileFinalRead = process.env.BLOGBOT_PROFILE_SKIP_FINAL_READ === "1";
 const retryBlockedActualProfile = process.env.BLOGBOT_PROFILE_RETRY_BLOCKED === "1";
+const screenshotDirectory = process.env.BLOGBOT_NATIVE_SCREENSHOT_DIR
+  ? resolve(repositoryRoot, process.env.BLOGBOT_NATIVE_SCREENSHOT_DIR)
+  : undefined;
+const requestedWindowWidth = process.env.BLOGBOT_NATIVE_WINDOW_WIDTH
+  ? Number.parseInt(process.env.BLOGBOT_NATIVE_WINDOW_WIDTH, 10)
+  : undefined;
+const requestedWindowHeight = process.env.BLOGBOT_NATIVE_WINDOW_HEIGHT
+  ? Number.parseInt(process.env.BLOGBOT_NATIVE_WINDOW_HEIGHT, 10)
+  : undefined;
+
 const rewriteFirstShortActualProfile = process.env.BLOGBOT_PROFILE_REWRITE_SHORT === "1";
 const testExistingProfileSources = process.env.BLOGBOT_PROFILE_TEST_SOURCES === "1";
 const verifyBobyLiveReply = process.env.BLOGBOT_VERIFY_BOBY_LIVE_REPLY === "1";
@@ -167,6 +178,45 @@ async function request(path, options) {
     fail(`${path} returned ${response.status}: ${JSON.stringify(payload)}`);
   }
   return payload;
+}
+
+async function setRequestedWindowRect(sessionId) {
+  if (requestedWindowWidth === undefined && requestedWindowHeight === undefined) return;
+  if (
+    (requestedWindowWidth !== undefined && (!Number.isSafeInteger(requestedWindowWidth) || requestedWindowWidth < 640 || requestedWindowWidth > 3840))
+    || (requestedWindowHeight !== undefined && (!Number.isSafeInteger(requestedWindowHeight) || requestedWindowHeight < 480 || requestedWindowHeight > 2160))
+  ) {
+    fail("BLOGBOT_NATIVE_WINDOW_WIDTH/HEIGHT must describe a supported desktop window.");
+  }
+  const current = await request(`/session/${sessionId}/window/rect`);
+  const width = requestedWindowWidth ?? current?.value?.width;
+  const height = requestedWindowHeight ?? current?.value?.height;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) {
+    fail("native driver did not expose a usable window rectangle.");
+  }
+  await request(`/session/${sessionId}/window/rect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      x: Number.isSafeInteger(current?.value?.x) ? current.value.x : 0,
+      y: Number.isSafeInteger(current?.value?.y) ? current.value.y : 0,
+      width,
+      height
+    })
+  });
+}
+
+async function captureRouteScreenshot(sessionId, route) {
+  if (!screenshotDirectory || inspectExistingProfile) return undefined;
+  const response = await request(`/session/${sessionId}/screenshot`);
+  const encoded = response?.value;
+  if (typeof encoded !== "string" || encoded.length === 0) {
+    fail(`native screenshot for ${route} was empty.`);
+  }
+  await mkdir(screenshotDirectory, { recursive: true });
+  const fileName = `${route.replace(/[^a-z0-9-]+/giu, "-")}.png`;
+  await writeFile(resolve(screenshotDirectory, fileName), Buffer.from(encoded, "base64"));
+  return fileName;
 }
 
 async function waitForDriver() {
@@ -1569,6 +1619,7 @@ async function main() {
   try {
     await waitForDriver();
     sessionId = await createNativeSession();
+    await setRequestedWindowRect(sessionId);
     await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
 
     // The Tauri native driver intermittently reports an empty WebView title
@@ -1658,12 +1709,20 @@ async function main() {
     sessionId = undefined;
     await new Promise((resolveWait) => setTimeout(resolveWait, 700));
     sessionId = await createNativeSession();
+    await setRequestedWindowRect(sessionId);
     await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
     await waitForTauriBridge(sessionId);
     const { draft: recoveredDraft } = await waitForRecoveredDraft(sessionId, candidateJourney.draftId);
     await execute(sessionId, "window.location.hash = '#editorial'; return true;");
     await waitForVisibleHeading(sessionId, "editorial");
     await refreshEditorialInventory(sessionId, recoveredDraft.titleTr);
+    const visibleActionMatrixJourney = await verifyVisibleActionMatrix({
+      execute,
+      fail,
+      sessionId,
+      wait,
+      waitForVisibleHeading
+    });
     const preferencesAndScheduleJourney = await verifyPreferencesAndScheduleJourney(sessionId);
     const visibleSettingsSaveJourney = await verifyVisibleSettingsSaveJourney(sessionId);
     const visibleWeeklyScheduleJourney = await verifyVisibleWeeklyScheduleJourney(sessionId);
@@ -1677,9 +1736,12 @@ async function main() {
     const primaryNavigationJourney = await verifyPrimaryNavigationJourney(sessionId);
 
     const evidence = [];
+    const screenshotFiles = [];
     for (const route of routes) {
       const { heading, routeRenderMs } = await waitForVisibleHeading(sessionId, route);
       evidence.push({ route, heading, routeRenderMs });
+      const screenshot = await captureRouteScreenshot(sessionId, route);
+      if (screenshot) screenshotFiles.push(screenshot);
     }
 
     const publishingHeading = evidence.find((entry) => entry.route === "publishing")?.heading;
@@ -1689,7 +1751,7 @@ async function main() {
     ) {
       fail(`expected the Turkish publishing heading at #publishing, got ${JSON.stringify(publishingHeading)}.`);
     }
-    console.log(JSON.stringify({ status: "PASS", title: title.value, localEngine: localEngine.result, liveBobyReply, liveUpdaterCheck, nativeReadCommands, catalogRead, singleSourceAddressCheckJourney, candidateJourney, instantCreateJourney, preferencesAndScheduleJourney, visibleSettingsSaveJourney, visibleWeeklyScheduleJourney, operationsJourney, visibleCandidateJournalJourney, visibleOperationsPauseJourney, visibleDiagnosticsExportJourney, visibleReviewEmptyJourney, setupGuideJourney, primaryNavigationJourney, routes: evidence }, null, 2));
+    console.log(JSON.stringify({ status: "PASS", title: title.value, localEngine: localEngine.result, liveBobyReply, liveUpdaterCheck, nativeReadCommands, catalogRead, singleSourceAddressCheckJourney, candidateJourney, visibleActionMatrixJourney, instantCreateJourney, preferencesAndScheduleJourney, visibleSettingsSaveJourney, visibleWeeklyScheduleJourney, operationsJourney, visibleCandidateJournalJourney, visibleOperationsPauseJourney, visibleDiagnosticsExportJourney, visibleReviewEmptyJourney, setupGuideJourney, primaryNavigationJourney, screenshotFiles, routes: evidence }, null, 2));
   } catch (error) {
     const detail = driverOutput.trim();
     if (!detail) throw error;

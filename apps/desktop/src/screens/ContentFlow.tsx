@@ -159,13 +159,13 @@ export function ContentFlow({
           : `draft-candidate-${candidateId}`;
         let nextWorkspace: EditorialWorkspaceSnapshot;
         try {
-          nextWorkspace = await bridge.getEditorialWorkspace();
+          nextWorkspace = await bridge.getEditorialWorkspace({ includeCandidates: true });
           // The engine persists the durable job before this action resolves.
           // A short bounded read retry avoids navigating to a stale Editorial
           // Desk snapshot while still refusing to show a false success state.
           for (let attempt = 0; attempt < 4 && !nextWorkspace.drafts.some((draft) => draft.id === expectedDraftId); attempt += 1) {
             await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
-            nextWorkspace = await bridge.getEditorialWorkspace();
+            nextWorkspace = await bridge.getEditorialWorkspace({ includeCandidates: true });
           }
         } catch {
           // The command response is the durable acceptance boundary. Never
@@ -195,7 +195,7 @@ export function ContentFlow({
       }
       await bridge.dismissCandidate(candidateId);
       try {
-        onWorkspaceChange(await bridge.getEditorialWorkspace());
+        onWorkspaceChange(await bridge.getEditorialWorkspace({ includeCandidates: true }));
         try {
           await onSourceCatalogChange();
           setMessage("Aday bu akıştan kapatıldı.");
@@ -241,7 +241,7 @@ export function ContentFlow({
         }
       setBatchProgress({ completed: completed.size + failed.length, total: targets.length, currentTitle: candidate.title, failed: failed.length });
       }
-      const nextWorkspace = await bridge.getEditorialWorkspace();
+      const nextWorkspace = await bridge.getEditorialWorkspace({ includeCandidates: true });
       onWorkspaceChange(nextWorkspace);
       try {
         await onSourceCatalogChange();

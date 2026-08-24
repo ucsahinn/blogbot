@@ -238,6 +238,14 @@ export function AppShell({
           ))}
         </nav>
 
+        <button type="button" className="boby-launcher" aria-label="Editör Boby'yi aç" onClick={onOpenBoby}>
+          <img src={bobyAvatar} alt="" width="32" height="32" />
+          <span>
+            <strong>Editör Boby</strong>
+            <small>Doğrudan yardım iste</small>
+          </span>
+        </button>
+
         <nav className="mobile-utility-nav" aria-label="İkincil menü">
           <button type="button" aria-label="Ayarlar" onClick={onOpenSettings}>
             <span aria-hidden="true">⚙</span>
@@ -268,7 +276,7 @@ export function AppShell({
         {diagnosticMessage ? <small className="sidebar-feedback" role="status" aria-live="polite">{diagnosticMessage}</small> : null}
         <section className="about-control" aria-label="OPE bilgileri">
           <button
-            className="about-toggle"
+            className={`about-toggle${updateAvailable ? " has-update" : ""}`}
             type="button"
             aria-label={aboutControlAriaLabel}
             aria-expanded={updateAvailable ? undefined : aboutOpen}
@@ -340,20 +348,9 @@ export function AppShell({
           </small>
         </div>
 
-        <div className="operator-card">
-          <img className="operator-avatar" src={bobyAvatar} alt="" width="38" height="38" />
-          <span>
-            <strong>Editör çalışma alanı</strong>
-            <small>İnsan onayı zorunlu</small>
-          </span>
-        </div>
       </aside>
 
       <main className="workspace" id="main-workspace" tabIndex={-1}>{children}</main>
-      <button type="button" className="boby-launcher" aria-label="Editör Boby'yi aç" onClick={onOpenBoby}>
-        <img src={bobyAvatar} alt="" width="32" height="32" />
-        <strong>Editör Boby</strong>
-      </button>
       {syncError ? (
         <div className="sync-error-banner" role="status" aria-live="polite">
           <strong>Yerel görünüm güncellenemedi.</strong>
