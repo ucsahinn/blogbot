@@ -177,6 +177,37 @@ test("route transitions move focus to the main workspace", async ({ page }) => {
   await expect(page.getByRole("main")).toBeFocused();
 });
 
+
+test("desktop route transitions open the next workspace at the top", async ({ page }) => {
+  await page.setViewportSize({ width: 960, height: 680 });
+  await page.goto("#dashboard");
+  const workspace = page.locator("#main-workspace");
+
+  await workspace.evaluate((element) => { element.scrollTop = 600; });
+  expect(await workspace.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+
+  await page.getByRole("navigation", { name: "Ana menü" })
+    .getByRole("button", { name: "İçerik Akışı" })
+    .click();
+
+  await expect(page).toHaveURL(/#content$/u);
+  await expect.poll(() => workspace.evaluate((element) => element.scrollTop)).toBe(0);
+});
+
+test("mobile route transitions reset the document scroll position", async ({ page }) => {
+  await page.setViewportSize({ width: 650, height: 740 });
+  await page.goto("#dashboard");
+
+  await page.evaluate(() => { window.scrollTo(0, 600); });
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  await page.getByRole("navigation", { name: "Ana menü" })
+    .getByRole("button", { name: "İçerik Akışı" })
+    .click();
+
+  await expect(page).toHaveURL(/#content$/u);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+});
 test("operational workspace copy follows the 14px body type floor", async ({ page }) => {
   for (const route of ["#dashboard", "#content", "#instant", "#setup", "#publishing"]) {
     await page.goto(route);

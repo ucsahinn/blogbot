@@ -60,3 +60,14 @@ test("native screenshot acceptance can exercise the supported compact desktop si
   assert.match(styles, /@media \(max-width: 1050px\)[\s\S]*?\.guided-setup-panel > \.guided-progress-shell\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/u);
   assert.match(styles, /\.sidebar\s*\{[^}]*overflow-y:\s*auto;/su);
 });
+
+test("native acceptance asks Boby through the visible composer", () => {
+  assert.match(nativeSmoke, /async function verifyVisibleBobyConversationJourney/u);
+  assert.match(nativeSmoke, /document\.querySelector\('\.boby-launcher'\)/u);
+  assert.match(nativeSmoke, /document\.getElementById\('boby-question'\)/u);
+  assert.match(nativeSmoke, /bobyUiJourney/u);
+});
+
+test("native restart recovery uses the engine-recovery budget", () => {
+  assert.match(nativeSmoke, /window\.location\.reload\(\); return true;[\s\S]*?waitForVisibleHeading\(sessionId, "editorial", MAX_ENGINE_RECOVERY_RENDER_MS\)/u);
+});

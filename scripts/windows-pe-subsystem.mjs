@@ -37,14 +37,8 @@ export function readWindowsPeSubsystem(image) {
   return image.readUInt16LE(requiredSubsystemOffset(image));
 }
 
-/**
- * Node SEA copies node.exe, which is a console-subsystem executable. A local
- * stdio sidecar has no user-facing console contract, so changing only its PE
- * subsystem prevents Windows from creating a conhost/Command Prompt surface.
- */
-export function setWindowsGuiSubsystem(image) {
-  const offset = requiredSubsystemOffset(image);
-  if (image.readUInt16LE(offset) === WINDOWS_GUI_SUBSYSTEM) return false;
-  image.writeUInt16LE(WINDOWS_GUI_SUBSYSTEM, offset);
-  return true;
+export function assertWindowsConsoleSubsystem(image) {
+  if (readWindowsPeSubsystem(image) !== WINDOWS_CONSOLE_SUBSYSTEM) {
+    throw new Error("PE_SUBSYSTEM_NOT_CONSOLE");
+  }
 }

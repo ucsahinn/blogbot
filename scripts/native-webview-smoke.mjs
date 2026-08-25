@@ -521,6 +521,86 @@ async function verifyLiveBobyReply(sessionId) {
   };
   fail(`live Boby did not finish within ${liveBobyReplyTimeoutMs}ms; safe state=${JSON.stringify(safeLiveBobyState)}.`);
 }
+
+async function verifyVisibleBobyConversationJourney(sessionId) {
+  await execute(sessionId, "window.location.hash = '#dashboard'; return true;");
+  await waitForVisibleHeading(sessionId, "dashboard");
+  const opened = await execute(sessionId, `return (() => {
+    const launcher = document.querySelector('.boby-launcher');
+    if (!(launcher instanceof HTMLButtonElement)) return false;
+    launcher.click();
+    return true;
+  })();`);
+  if (!opened) fail("visible Boby launcher was not available.");
+  await wait(150);
+
+  const typed = await execute(sessionId, `return (() => {
+    const input = document.getElementById('boby-question');
+    if (!(input instanceof HTMLInputElement) || input.disabled) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    if (!setter) return false;
+    setter.call(input, 'Bu ekranda bir sonraki guvenli adim nedir?');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })();`);
+  if (!typed) fail("visible Boby composer did not accept a question.");
+  await wait(100);
+
+  const submitted = await execute(sessionId, `return (() => {
+    const form = document.querySelector('.boby-composer');
+    const button = form?.querySelector('button[type="submit"]');
+    if (!(form instanceof HTMLFormElement) || !(button instanceof HTMLButtonElement) || button.disabled) return false;
+    form.requestSubmit(button);
+    return true;
+  })();`);
+  if (!submitted) fail("visible Boby composer did not submit the question.");
+
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < liveBobyReplyTimeoutMs) {
+    const state = await execute(sessionId, `return (() => ({
+      dialogVisible: document.querySelector('.boby-panel') !== null,
+      userMessages: document.querySelectorAll('.boby-message-user').length,
+      directReplyLengths: [...document.querySelectorAll('.boby-message-boby p')]
+        .map((item) => item.textContent?.trim().length ?? 0),
+      systemReplies: document.querySelectorAll('.boby-message-system:not(:has(+ *))').length,
+      submitDisabled: document.querySelector('.boby-composer button[type="submit"]')?.disabled === true
+    }))();`);
+    const replyLength = Math.max(0, ...(state?.directReplyLengths ?? []));
+    if (state?.dialogVisible && state?.userMessages === 1 && replyLength >= 20) {
+      const closeClicked = await execute(sessionId, `return (() => {
+        const close = document.querySelector('.boby-close');
+        if (!(close instanceof HTMLButtonElement)) return false;
+        close.click();
+        return true;
+      })();`);
+      if (!closeClicked) fail("visible Boby panel close control was unavailable.");
+      await wait(100);
+      const closed = await execute(sessionId, "return document.querySelector('.boby-panel') === null;");
+      if (!closed) fail("visible Boby panel did not close after its reply.");
+      const reopened = await execute(sessionId, `return (() => {
+        const launcher = document.querySelector('.boby-launcher');
+        if (!(launcher instanceof HTMLButtonElement)) return false;
+        launcher.click();
+        return true;
+      })();`);
+      if (!reopened) fail("visible Boby launcher was unavailable after closing the panel.");
+      await wait(100);
+      const conversationRestored = await execute(sessionId, "return document.querySelectorAll('.boby-message-user').length === 1 && document.querySelectorAll('.boby-message-boby p').length >= 1;");
+      if (!conversationRestored) fail("visible Boby conversation did not remain in the panel after reopening.");
+      return {
+        elapsedMs: Math.round(performance.now() - startedAt),
+        replyLength,
+        conversationRestored,
+        directReply: true
+      };
+    }
+    if (state?.systemReplies > 0 && state?.submitDisabled !== true) {
+      fail("visible Boby conversation ended without a direct Boby reply.");
+    }
+    await wait(500);
+  }
+  fail(`visible Boby did not finish within ${liveBobyReplyTimeoutMs}ms.`);
+}
 async function verifyLiveUpdaterCheck(sessionId) {
   const response = await invoke(sessionId, "check_unsigned_update");
   if (!response?.ok) fail(`live updater check failed: ok=${response?.ok === true}.`);
@@ -700,7 +780,7 @@ async function verifyCandidateJourney(sessionId, source) {
   // practical failure mode where a user refreshes or reopens the desktop app
   // before the Editorial Desk has rendered its inventory.
   await execute(sessionId, "window.location.reload(); return true;");
-  await waitForVisibleHeading(sessionId, "editorial");
+  await waitForVisibleHeading(sessionId, "editorial", MAX_ENGINE_RECOVERY_RENDER_MS);
 
   let workspace;
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -1678,6 +1758,7 @@ async function main() {
       const comprehensiveRewriteJourney = rewriteFirstShortActualProfile
         ? await rewriteFirstShortActualDraft(sessionId)
         : undefined;
+      const bobyUiJourney = verifyBobyLiveReply ? await verifyVisibleBobyConversationJourney(sessionId) : undefined;
       if (profileObserveMs > 0) await wait(profileObserveMs);
       const finalProfile = profileObserveMs > 0 && !skipProfileFinalRead
         ? await inspectExistingProfileState(sessionId, localEngine.result)
@@ -1697,6 +1778,7 @@ async function main() {
         profileSourceChecks,
         codexRuntime,
         liveBobyReply,
+        bobyUiJourney,
         liveUpdaterCheck
       }, null, 2));
       return;
@@ -1712,6 +1794,7 @@ async function main() {
     await setRequestedWindowRect(sessionId);
     await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
     await waitForTauriBridge(sessionId);
+    const bobyUiJourney = verifyBobyLiveReply ? await verifyVisibleBobyConversationJourney(sessionId) : undefined;
     const { draft: recoveredDraft } = await waitForRecoveredDraft(sessionId, candidateJourney.draftId);
     await execute(sessionId, "window.location.hash = '#editorial'; return true;");
     await waitForVisibleHeading(sessionId, "editorial");
@@ -1739,7 +1822,37 @@ async function main() {
     const screenshotFiles = [];
     for (const route of routes) {
       const { heading, routeRenderMs } = await waitForVisibleHeading(sessionId, route);
-      evidence.push({ route, heading, routeRenderMs });
+      await wait(150);
+      const scrollPosition = await execute(
+        sessionId,
+        `return {
+          workspaceY: document.getElementById('main-workspace')?.scrollTop ?? -1,
+          workspaceX: document.getElementById('main-workspace')?.scrollLeft ?? -1,
+          windowY: window.scrollY,
+          windowX: window.scrollX
+        };`
+      );
+      if (scrollPosition?.workspaceY > 1 || scrollPosition?.workspaceX > 1 || scrollPosition?.windowY > 1 || scrollPosition?.windowX > 1) {
+        fail(`route #${route} retained a previous scroll position.`);
+      }
+      const routeLayout = await execute(
+        sessionId,
+        `return (() => {
+          const sidebar = document.querySelector('.sidebar')?.getBoundingClientRect();
+          const heading = document.querySelector('h1')?.getBoundingClientRect();
+          return {
+            viewportWidth: window.innerWidth,
+            sidebarLeft: sidebar?.left ?? -1,
+            sidebarRight: sidebar?.right ?? -1,
+            headingTop: heading?.top ?? -1,
+            headingLeft: heading?.left ?? -1
+          };
+        })();`
+      );
+      if (routeLayout?.sidebarLeft < -1 || routeLayout?.sidebarRight > routeLayout?.viewportWidth + 1 || routeLayout?.headingTop < -1 || routeLayout?.headingLeft < -1) {
+        fail(`route #${route} rendered outside the native viewport.`);
+      }
+      evidence.push({ route, heading, routeRenderMs, scrollPosition, routeLayout });
       const screenshot = await captureRouteScreenshot(sessionId, route);
       if (screenshot) screenshotFiles.push(screenshot);
     }
@@ -1751,7 +1864,7 @@ async function main() {
     ) {
       fail(`expected the Turkish publishing heading at #publishing, got ${JSON.stringify(publishingHeading)}.`);
     }
-    console.log(JSON.stringify({ status: "PASS", title: title.value, localEngine: localEngine.result, liveBobyReply, liveUpdaterCheck, nativeReadCommands, catalogRead, singleSourceAddressCheckJourney, candidateJourney, visibleActionMatrixJourney, instantCreateJourney, preferencesAndScheduleJourney, visibleSettingsSaveJourney, visibleWeeklyScheduleJourney, operationsJourney, visibleCandidateJournalJourney, visibleOperationsPauseJourney, visibleDiagnosticsExportJourney, visibleReviewEmptyJourney, setupGuideJourney, primaryNavigationJourney, screenshotFiles, routes: evidence }, null, 2));
+    console.log(JSON.stringify({ status: "PASS", title: title.value, localEngine: localEngine.result, liveBobyReply, bobyUiJourney, liveUpdaterCheck, nativeReadCommands, catalogRead, singleSourceAddressCheckJourney, candidateJourney, visibleActionMatrixJourney, instantCreateJourney, preferencesAndScheduleJourney, visibleSettingsSaveJourney, visibleWeeklyScheduleJourney, operationsJourney, visibleCandidateJournalJourney, visibleOperationsPauseJourney, visibleDiagnosticsExportJourney, visibleReviewEmptyJourney, setupGuideJourney, primaryNavigationJourney, screenshotFiles, routes: evidence }, null, 2));
   } catch (error) {
     const detail = driverOutput.trim();
     if (!detail) throw error;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 
 import desktopPackage from "../../package.json" with { type: "json" };
 
@@ -182,8 +182,10 @@ export function AppShell({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onNavigate, onOpenSettings]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const workspace = document.getElementById("main-workspace");
+    workspace?.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     workspace?.focus({ preventScroll: true });
   }, [activePage]);
 

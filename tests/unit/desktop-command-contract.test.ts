@@ -82,7 +82,6 @@ test("stopping the local dev server never depends on a healthy engine runtime", 
   );
   const command = /pub fn stop_local_dev\(([\s\S]*?)\r?\n\}/u.exec(nativeSource);
   assert.ok(command, "commands.rs must declare stop_local_dev");
-
   // Terminating a child this process owns needs no engine at all, and a degraded
   // runtime is exactly when the user needs the dev server stopped. The guard used
   // to leave the npm tree running with no way to stop it.
@@ -90,4 +89,23 @@ test("stopping the local dev server never depends on a healthy engine runtime", 
     !command[1]!.includes("ensure_mutation_allowed"),
     "stop_local_dev must not require mutation-allowed runtime"
   );
+});
+
+test("synchronous native commands never run on the WebView UI command path", async () => {
+  const nativeSource = await readFile(
+    join(repositoryRoot, "apps", "desktop", "src-tauri", "src", "commands.rs"),
+    "utf8"
+  );
+  const blockingCommands = [
+    ...nativeSource.matchAll(/#\[tauri::command\]\s+pub fn ([a-z0-9_]+)/gu)
+  ].map((match) => match[1]);
+
+  assert.deepEqual(
+    blockingCommands,
+    [],
+    "sync Tauri commands must use #[tauri::command(async)] so engine, filesystem, "
+      + "network, and Windows confirmation work runs on Tauri's thread pool"
+  );
+  assert.match(nativeSource, /fn run_folder_picker_on_sta<[\s\S]*?CoInitializeEx\(None, COINIT_APARTMENTTHREADED\)[\s\S]*?CoUninitialize\(\)/u);
+  assert.match(nativeSource, /pub fn pick_local_folder\([\s\S]*?run_folder_picker_on_sta\(\|\|/u);
 });

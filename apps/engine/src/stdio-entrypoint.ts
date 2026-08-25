@@ -4561,6 +4561,7 @@ export async function createPersistentEngineProtocol(
     publicationOutboxWorker?.stop();
     publicationScheduler?.stop();
     await queue.stop();
+    await sourceTransport.close?.().catch(() => undefined);
     await repository.close();
     throw error;
   }
@@ -4642,7 +4643,11 @@ export async function createPersistentEngineProtocol(
       sourceScanScheduler.stop();
         await queue.stop();
       } finally {
-        await repository.close();
+        try {
+          await sourceTransport.close?.();
+        } finally {
+          await repository.close();
+        }
       }
     }
   };

@@ -293,7 +293,7 @@ fn is_http_url(value: &str) -> bool {
     value.starts_with("https://")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_project_page() -> Result<Value, CommandError> {
     // A WebView hyperlink cannot reliably create an external browser window
     // under this app's restrictive capability set. Keep the target fixed and
@@ -667,7 +667,7 @@ fn apply_automation_settings(
     Ok(response)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn test_local_engine(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -696,7 +696,7 @@ pub fn test_local_engine(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn recover_local_workspace(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -757,54 +757,94 @@ pub fn recover_local_workspace(
 /// Opens the operating system's folder picker. No arbitrary filesystem path
 /// is accepted from the WebView: the returned value is produced by the native
 /// dialog and is validated before it is handed to the UI.
-#[tauri::command]
+#[cfg(windows)]
+fn run_folder_picker_on_sta<T, F>(task: F) -> Result<T, CommandError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CommandError> + Send + 'static,
+{
+    let worker = std::thread::Builder::new()
+        .name("blogbot-folder-picker".into())
+        .spawn(move || {
+            use windows::Win32::System::Com::{
+                CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+            };
+
+            // SAFETY: this dedicated worker has not initialized COM yet. The
+            // matching guard keeps the apartment alive for the complete shell
+            // dialog call and balances every successful initialization.
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+                .ok()
+                .map_err(|_| CommandError::StateUnavailable)?;
+            struct ComApartmentGuard;
+            impl Drop for ComApartmentGuard {
+                fn drop(&mut self) {
+                    // SAFETY: the guard is created only after CoInitializeEx
+                    // succeeds and is dropped on that same dedicated thread.
+                    unsafe { CoUninitialize() };
+                }
+            }
+            let _apartment = ComApartmentGuard;
+            task()
+        })
+        .map_err(|_| CommandError::StateUnavailable)?;
+    worker.join().map_err(|_| CommandError::StateUnavailable)?
+}
+
+#[tauri::command(async)]
 pub fn pick_local_folder(
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Option<String>, CommandError> {
     #[cfg(windows)]
     {
-        use windows::core::{PCWSTR, PWSTR};
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::System::Com::CoTaskMemFree;
-        use windows::Win32::UI::Shell::{
-            SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS,
-            BROWSEINFOW,
-        };
+        let selected = run_folder_picker_on_sta(|| {
+            use windows::core::{PCWSTR, PWSTR};
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::System::Com::CoTaskMemFree;
+            use windows::Win32::UI::Shell::{
+                SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE,
+                BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+            };
 
-        let title: Vec<u16> = "OPE için bir proje klasörü seçin"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let mut display_name = [0u16; 260];
-        let info = BROWSEINFOW {
-            hwndOwner: HWND(std::ptr::null_mut()),
-            pszDisplayName: PWSTR(display_name.as_mut_ptr()),
-            lpszTitle: PCWSTR(title.as_ptr()),
-            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
-            ..Default::default()
-        };
-        // SAFETY: `info` points to stack-owned, NUL-terminated buffers that
-        // remain alive for the duration of the synchronous native call.
-        let pidl = unsafe { SHBrowseForFolderW(&info) };
-        if pidl.is_null() {
+            let title: Vec<u16> = "OPE için bir proje klasörü seçin"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut display_name = [0u16; 260];
+            let info = BROWSEINFOW {
+                hwndOwner: HWND(std::ptr::null_mut()),
+                pszDisplayName: PWSTR(display_name.as_mut_ptr()),
+                lpszTitle: PCWSTR(title.as_ptr()),
+                ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+                ..Default::default()
+            };
+            // SAFETY: `info` points to stack-owned, NUL-terminated buffers that
+            // remain alive for the duration of the synchronous native call.
+            let pidl = unsafe { SHBrowseForFolderW(&info) };
+            if pidl.is_null() {
+                return Ok(None);
+            }
+            let mut path = [0u16; 260];
+            // SAFETY: `pidl` is owned by the shell and `path` is a writable
+            // MAX_PATH buffer as required by SHGetPathFromIDListW.
+            let found = unsafe { SHGetPathFromIDListW(pidl, &mut path).as_bool() };
+            // SAFETY: shell allocates the PIDL with the task allocator.
+            unsafe { CoTaskMemFree(Some(pidl.cast())) };
+            if !found {
+                return Err(CommandError::InvalidInput(
+                    "seçilen klasörün yolu okunamadı".into(),
+                ));
+            }
+            let end = path
+                .iter()
+                .position(|value| *value == 0)
+                .unwrap_or(path.len());
+            let selected = String::from_utf16_lossy(&path[..end]);
+            Ok(Some(selected))
+        })?;
+        let Some(selected) = selected else {
             return Ok(None);
-        }
-        let mut path = [0u16; 260];
-        // SAFETY: `pidl` is owned by the shell and `path` is a writable
-        // MAX_PATH buffer as required by SHGetPathFromIDListW.
-        let found = unsafe { SHGetPathFromIDListW(pidl, &mut path).as_bool() };
-        // SAFETY: shell allocates the PIDL with the task allocator.
-        unsafe { CoTaskMemFree(Some(pidl.cast())) };
-        if !found {
-            return Err(CommandError::InvalidInput(
-                "seçilen klasörün yolu okunamadı".into(),
-            ));
-        }
-        let end = path
-            .iter()
-            .position(|value| *value == 0)
-            .unwrap_or(path.len());
-        let selected = String::from_utf16_lossy(&path[..end]);
+        };
         validate_folder_selection(&selected)?;
         let granted = register_folder_grant(&state, &selected)?;
         Ok(Some(granted.to_string_lossy().into_owned()))
@@ -822,7 +862,7 @@ pub fn pick_local_folder(
 /// remote), so it may only ever inspect a folder the user picked through the
 /// native dialog. Without the grant check the WebView could probe any path on
 /// disk and read back the project's configured GitHub remote.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn test_setup_connector(
     connector: String,
     config: Value,
@@ -1123,7 +1163,7 @@ fn github_client_id(bridge: &EngineBridge) -> Result<String, CommandError> {
     crate::github_broker::validate_client_id(client_id).map_err(CommandError::InvalidInput)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn github_device_flow_start(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -1137,7 +1177,7 @@ pub fn github_device_flow_start(
     serde_json::to_value(result).map_err(|_| CommandError::StateUnavailable)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn github_device_flow_poll(
     state: tauri::State<'_, DesktopState>,
     app: tauri::AppHandle,
@@ -1150,7 +1190,7 @@ pub fn github_device_flow_poll(
     serde_json::to_value(result).map_err(|_| CommandError::StateUnavailable)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn github_device_flow_clear(
     state: tauri::State<'_, DesktopState>,
     app: tauri::AppHandle,
@@ -1163,7 +1203,7 @@ pub fn github_device_flow_clear(
     serde_json::to_value(result).map_err(|_| CommandError::StateUnavailable)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn github_device_flow_status(
     state: tauri::State<'_, DesktopState>,
     app: tauri::AppHandle,
@@ -1176,7 +1216,7 @@ pub fn github_device_flow_status(
     .map_err(|_| CommandError::StateUnavailable)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn github_validate_repository(
     owner: String,
     repository: String,
@@ -1262,7 +1302,7 @@ fn github_base_sha_capture_result(repository: &str, branch: &str, base_sha: &str
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn github_capture_base_sha(
     owner: String,
     repository: String,
@@ -1315,7 +1355,7 @@ pub fn github_capture_base_sha(
     Ok(github_base_sha_capture_result(&slug, &branch, &base_sha))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn github_preview_pull_request(
     repository: String,
     workflow: String,
@@ -1542,7 +1582,7 @@ fn local_dev_environment() -> Vec<(OsString, OsString)> {
     local_dev_environment_with(|name| std::env::var_os(name))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn local_dev_status(state: tauri::State<'_, DesktopState>) -> Result<Value, CommandError> {
     let mut process = write_lock(&state.local_dev_process)?;
     let running = match process.as_mut() {
@@ -1559,7 +1599,7 @@ pub fn local_dev_status(state: tauri::State<'_, DesktopState>) -> Result<Value, 
     Ok(json!({ "running": running, "supported": true }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_local_dev(
     path: String,
     trusted_project: bool,
@@ -1611,7 +1651,7 @@ pub fn start_local_dev(
 /// Terminating a child this process owns needs no engine, and a degraded runtime
 /// is exactly when the user needs the dev server stopped. Requiring
 /// mutation-allowed here left the npm tree running with no way to stop it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_local_dev(state: tauri::State<'_, DesktopState>) -> Result<Value, CommandError> {
     stop_local_dev_process(&state.local_dev_process)?;
     Ok(json!({ "running": false }))
@@ -1738,7 +1778,7 @@ fn bootstrap_can_read_catalog(runtime: RuntimeMode) -> bool {
     matches!(runtime, RuntimeMode::Online)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn test_codex_runtime(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -1788,7 +1828,7 @@ pub fn test_codex_runtime(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_codex_login(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -1819,7 +1859,7 @@ pub fn start_codex_login(
 /// Persist only validated, non-secret setup fields in the encrypted engine
 /// local-state store. Authentication tokens, passwords and private keys are
 /// rejected by `test_setup_connector` before this command can write anything.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_setup_connector(
     connector: String,
     mut config: Value,
@@ -1929,7 +1969,7 @@ fn safe_legacy_site_connector(value: &Value) -> Option<Value> {
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn verify_local_integrity(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
@@ -2672,7 +2712,7 @@ fn backup_prerequisite_check(backup_configured: bool, verification: Option<&Valu
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_prerequisite_status(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -2846,7 +2886,7 @@ pub fn get_prerequisite_status(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_sources(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -2900,7 +2940,7 @@ pub fn list_sources(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn review_source(
     source_id: String,
     expected_version: u64,
@@ -2954,7 +2994,7 @@ pub fn review_source(
     Ok(json!({ "source": source }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn test_source(
     url: String,
     bridge: tauri::State<'_, EngineBridge>,
@@ -3121,7 +3161,7 @@ fn scan_sources(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_source(
     source_id: String,
     state: tauri::State<'_, DesktopState>,
@@ -3130,7 +3170,7 @@ pub fn scan_source(
     scan_sources(Some(&source_id), &state, &bridge)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_all_sources(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -3138,7 +3178,7 @@ pub fn scan_all_sources(
     scan_sources(None, &state, &bridge)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_source_scan_status(
     operation_id: String,
     bridge: tauri::State<'_, EngineBridge>,
@@ -3190,7 +3230,7 @@ pub fn get_source_scan_status(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_opml(
     input: String,
     _state: tauri::State<'_, DesktopState>,
@@ -3204,7 +3244,7 @@ pub fn preview_opml(
     Ok(json!({ "urls": urls, "count": urls.len(), "writes": false }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_sources(
     sources: Vec<Value>,
     state: tauri::State<'_, DesktopState>,
@@ -3752,7 +3792,7 @@ fn build_review_revision_with_predecessor(
     Ok(projected)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_instant_draft(
     request: Value,
     state: tauri::State<'_, DesktopState>,
@@ -3891,7 +3931,7 @@ pub fn create_instant_draft(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn request_boby_guidance(
     request: Value,
     state: tauri::State<'_, DesktopState>,
@@ -3970,7 +4010,7 @@ fn boby_guidance_request_token() -> Result<String, CommandError> {
     let sequence = BOBY_GUIDANCE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(format!("boby-{}-{nanos}-{sequence}", std::process::id()))
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_boby_guidance(
     guidance_id: String,
     bridge: tauri::State<'_, EngineBridge>,
@@ -3996,7 +4036,7 @@ pub fn get_boby_guidance(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_review_revision(
     revision_id: String,
     bridge: tauri::State<'_, EngineBridge>,
@@ -4020,7 +4060,7 @@ pub fn get_review_revision(
 /// Reads one engine-owned image only for the active review surface. The bytes
 /// are verified before they cross into the WebView and are never persisted in
 /// the publication preview state.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_revision_media(
     revision_id: String,
     sha256: String,
@@ -4087,7 +4127,7 @@ pub fn read_revision_media(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn repair_revision_media(
     revision_id: String,
     state: tauri::State<'_, DesktopState>,
@@ -4568,7 +4608,7 @@ where
     build(read_version()?)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn approve_revision(
     revision_id: String,
     expected_hash: String,
@@ -4667,7 +4707,7 @@ pub fn approve_revision(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn revoke_revision_approval(
     revision_id: String,
     expected_hash: String,
@@ -4744,7 +4784,7 @@ where
     verifier(expected_hash)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn approve_high_risk_revision(
     request: HighRiskApprovalRequest,
     state: tauri::State<'_, DesktopState>,
@@ -5345,7 +5385,7 @@ fn rollback_preview_bundle(applied: &[(PathBuf, Option<PathBuf>)]) {
 
 /// Writes only the exact, already approved preview bundle into the user's
 /// selected local project. The WebView never supplies file contents or paths.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn materialize_local_preview(
     revision_id: String,
     revision_hash: String,
@@ -5539,7 +5579,7 @@ pub fn materialize_local_preview(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_publication(
     revision_id: String,
     revision_hash: String,
@@ -5663,7 +5703,7 @@ pub fn preview_publication(
     Ok(value)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_operations(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -5833,7 +5873,7 @@ fn operations_for_runtime(runtime: RuntimeMode) -> Option<Value> {
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_engine_diagnostics(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
@@ -6033,7 +6073,7 @@ fn diagnostic_operations_projection(operations: &Value) -> Value {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_diagnostics(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -6981,7 +7021,7 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
     drafts
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn promote_candidate(
     candidate_id: String,
     state: tauri::State<'_, DesktopState>,
@@ -7065,7 +7105,7 @@ pub fn promote_candidate(
     Ok(json!({ "ok": true, "state": "RESEARCH_QUEUED", "job": job }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dismiss_candidate(
     candidate_id: String,
     state: tauri::State<'_, DesktopState>,
@@ -7087,7 +7127,7 @@ pub fn dismiss_candidate(
     Ok(json!({ "ok": true, "state": "DISMISSED" }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hide_drafts(
     draft_ids: Vec<String>,
     state: tauri::State<'_, DesktopState>,
@@ -7122,7 +7162,7 @@ pub fn hide_drafts(
     Ok(json!({ "ok": true, "hidden": ids.len() }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_hidden_drafts(
     state: tauri::State<'_, DesktopState>,
     bridge: tauri::State<'_, EngineBridge>,
@@ -7137,7 +7177,7 @@ pub fn restore_hidden_drafts(
     Ok(json!({ "ok": true, "restored": restored }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn retry_job(
     job_id: String,
     state: tauri::State<'_, DesktopState>,
@@ -7213,7 +7253,7 @@ fn revision_edit_payload(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn request_revision_edit(
     revision_id: String,
     instruction: String,
@@ -7290,7 +7330,7 @@ pub fn request_revision_edit(
     Ok(json!({ "ok": true, "state": "RESEARCH_QUEUED", "job": job }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_schedule_slot(
     slot_id: String,
     enabled: bool,
@@ -7378,7 +7418,7 @@ pub fn update_schedule_slot(
     Ok(json!({ "ok": true, "slotId": slot_id, "enabled": enabled, "time": time }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_desktop_preferences(
     preferences: Value,
     state: tauri::State<'_, DesktopState>,
@@ -7400,7 +7440,7 @@ pub fn save_desktop_preferences(
     Ok(json!({ "ok": true, "preferences": preferences }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn complete_onboarding(
     settings: OnboardingSettings,
     state: tauri::State<'_, DesktopState>,
@@ -7470,7 +7510,7 @@ pub fn complete_onboarding(
     Ok(json!({ "completed": true }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_runtime_pause(
     target: String,
     paused: bool,
@@ -7528,7 +7568,7 @@ fn notifications_enabled(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn send_test_notification(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
@@ -7561,7 +7601,7 @@ pub fn send_test_notification(
     Ok(json!({ "shown": true }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn autostart_status(app: tauri::AppHandle) -> Result<Value, CommandError> {
     let enabled = app
         .autolaunch()
@@ -7570,7 +7610,7 @@ pub fn autostart_status(app: tauri::AppHandle) -> Result<Value, CommandError> {
     Ok(json!({ "enabled": enabled }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_autostart(enabled: bool, app: tauri::AppHandle) -> Result<Value, CommandError> {
     let manager = app.autolaunch();
     if enabled {
@@ -7585,7 +7625,7 @@ pub fn set_autostart(enabled: bool, app: tauri::AppHandle) -> Result<Value, Comm
     Ok(json!({ "enabled": enabled }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn backup_create(
     source_directory: String,
     relative_paths: Vec<String>,
@@ -7623,7 +7663,7 @@ pub fn backup_create(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn backup_verify(
     archive_path: String,
     recovery_key: String,
@@ -7720,7 +7760,7 @@ fn record_backup_check(
     });
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn backup_restore_preview(
     archive_path: String,
     target_directory: String,
@@ -7760,7 +7800,7 @@ pub fn backup_restore_preview(
     Ok(response)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn backup_restore_apply(
     archive_path: String,
     target_directory: String,
@@ -7800,7 +7840,7 @@ fn valid_automatic_backup_name(value: &str) -> bool {
         })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn automatic_backup_list(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
@@ -7815,7 +7855,7 @@ pub fn automatic_backup_list(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn automatic_backup_verify(
     backup_name: String,
     bridge: tauri::State<'_, EngineBridge>,
@@ -7836,7 +7876,7 @@ pub fn automatic_backup_verify(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn automatic_backup_restore_preview(
     backup_name: String,
     bridge: tauri::State<'_, EngineBridge>,
@@ -7882,7 +7922,7 @@ fn automatic_backup_restore_request(
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn automatic_backup_restore_apply(
     backup_name: String,
     confirm_replace_local_data: bool,
@@ -9009,6 +9049,28 @@ mod tests {
         assert!(validate_folder_selection("https://example.com/site").is_err());
         assert!(validate_folder_selection(r"C:relative\site").is_err());
         assert!(validate_folder_selection("C:\\unsafe\"quote").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_folder_picker_worker_owns_an_sta_com_apartment() {
+        let sta_available = super::run_folder_picker_on_sta(|| {
+            use windows::Win32::System::Com::{
+                CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+            };
+
+            // A second STA initialization succeeds only when the worker is
+            // already in the required apartment. Balance its S_FALSE count.
+            let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            let available = initialized.is_ok();
+            if available {
+                unsafe { CoUninitialize() };
+            }
+            Ok(available)
+        })
+        .expect("folder picker worker");
+
+        assert!(sta_available);
     }
 
     #[test]

@@ -41,6 +41,7 @@ export interface FetchResponse {
 export interface FetchTransport {
   resolve(hostname: string): Promise<string[]>;
   request(plan: FetchRequestPlan): Promise<FetchResponse>;
+  close?(): Promise<void>;
 }
 
 export interface FetchSourceOptions {

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 
-import { setWindowsGuiSubsystem } from "./windows-pe-subsystem.mjs";
+import { assertWindowsConsoleSubsystem } from "./windows-pe-subsystem.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const work = join(root, "build", "engine-sidecar");
@@ -123,11 +123,9 @@ await run(process.execPath, ["--experimental-sea-config", fetcherConfig]);
 await copyFile(process.execPath, fetcherExecutable);
 await run(process.execPath, [join(root, "node_modules", "postject", "dist", "cli.js"), fetcherExecutable, "NODE_SEA_BLOB", fetcherBlob, "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"]);
 const fetcherSidecarImage = await readFile(fetcherExecutable);
-if (setWindowsGuiSubsystem(fetcherSidecarImage)) await writeFile(fetcherExecutable, fetcherSidecarImage);
+assertWindowsConsoleSubsystem(fetcherSidecarImage);
 const sidecarImage = await readFile(executable);
-if (setWindowsGuiSubsystem(sidecarImage)) {
-  await writeFile(executable, sidecarImage);
-}
+assertWindowsConsoleSubsystem(sidecarImage);
 
 for (const asset of ["pglite.wasm", "initdb.wasm", "pglite.data"]) {
   await copyFile(

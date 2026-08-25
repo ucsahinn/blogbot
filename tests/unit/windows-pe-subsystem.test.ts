@@ -3,9 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  WINDOWS_GUI_SUBSYSTEM,
-  readWindowsPeSubsystem,
-  setWindowsGuiSubsystem
+  WINDOWS_CONSOLE_SUBSYSTEM,
+  assertWindowsConsoleSubsystem,
+  readWindowsPeSubsystem
 } from "../../scripts/windows-pe-subsystem.mjs";
 
 function minimalPortableExecutable(subsystem = 3): Buffer {
@@ -19,18 +19,17 @@ function minimalPortableExecutable(subsystem = 3): Buffer {
   return image;
 }
 
-test("packaged Windows sidecars are converted from console to GUI subsystem", () => {
+test("packaged Windows sidecars retain the console subsystem for no-window launches", () => {
   const image = minimalPortableExecutable();
 
-  assert.equal(readWindowsPeSubsystem(image), 3);
-  assert.equal(setWindowsGuiSubsystem(image), true);
-  assert.equal(readWindowsPeSubsystem(image), WINDOWS_GUI_SUBSYSTEM);
-  assert.equal(setWindowsGuiSubsystem(image), false);
+  assert.equal(readWindowsPeSubsystem(image), WINDOWS_CONSOLE_SUBSYSTEM);
+  assert.doesNotThrow(() => assertWindowsConsoleSubsystem(image));
+  assert.throws(() => assertWindowsConsoleSubsystem(minimalPortableExecutable(2)), /PE_SUBSYSTEM_NOT_CONSOLE/u);
 });
 
 test("PE subsystem helpers reject malformed input instead of patching arbitrary bytes", () => {
   assert.throws(() => readWindowsPeSubsystem(Buffer.from("not a PE")), /PE_/u);
-  assert.throws(() => setWindowsGuiSubsystem(Buffer.from("not a PE")), /PE_/u);
+  assert.throws(() => assertWindowsConsoleSubsystem(Buffer.from("not a PE")), /PE_/u);
 });
 
 test("desktop entrypoint opts out of the Windows console subsystem", async () => {
@@ -43,4 +42,15 @@ test("desktop entrypoint opts out of the Windows console subsystem", async () =>
     source,
     /cfg_attr\(windows,\s*windows_subsystem\s*=\s*"windows"\)/u
   );
+});
+
+test("sidecar build never converts helpers into feedback-cursor GUI processes", async () => {
+  const build = await readFile(
+    new URL("../../scripts/build-engine-sidecar.mjs", import.meta.url),
+    "utf8"
+  );
+
+  assert.doesNotMatch(build, /setWindowsGuiSubsystem/u);
+  assert.match(build, /assertWindowsConsoleSubsystem\(fetcherSidecarImage\)/u);
+  assert.match(build, /assertWindowsConsoleSubsystem\(sidecarImage\)/u);
 });
