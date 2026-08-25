@@ -162,6 +162,32 @@ test("Windows installer declares one stable per-user upgrade identity for in-pla
   assert.match(config.bundle?.windows?.wix?.upgradeCode ?? "", /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu);
 });
 
+test("NSIS installer automatically treats an older OPE install as a passive in-place update", async () => {
+  const config = JSON.parse(
+    await readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8")
+  ) as {
+    bundle?: { windows?: { nsis?: { template?: string } } };
+  };
+  const templatePath = config.bundle?.windows?.nsis?.template;
+
+  assert.equal(templatePath, "windows/installer.nsi");
+  const installer = await readFile(
+    join(repositoryRoot, "apps", "desktop", "src-tauri", templatePath),
+    "utf8"
+  );
+  assert.match(
+    installer,
+    /ReadRegStr \$R0 SHCTX "\$\{UNINSTKEY\}" "DisplayVersion"[\s\S]*nsis_tauri_utils::SemverCompare "\$\{VERSION\}" \$R0[\s\S]*StrCpy \$UpdateMode 1[\s\S]*StrCpy \$PassiveMode 1/u,
+    "an installer launched by an older updater must detect and enter upgrade mode itself"
+  );
+  assert.match(
+    installer,
+    /\$UpdateMode <> 1[\s\S]*ReadRegStr \$R0 SHCTX/u,
+    "explicit command-line update mode must remain authoritative"
+  );
+  assert.match(installer, /\{\{version\}\}/u, "the vendored template must retain Tauri placeholders");
+});
+
 test("desktop package icons are generated from the OPE logo rather than a letter mark", async () => {
   const iconScript = await readFile(join(repositoryRoot, "scripts", "generate-desktop-icons.ts"), "utf8");
 
@@ -723,7 +749,7 @@ test("desktop release package advances beyond the published 0.1.51 updater versi
     JSON.parse(manifests[2]).version
   ].map(String);
 
-  assert.deepEqual(versions, ["0.1.52", "0.1.52", "0.1.52"]);
+  assert.deepEqual(versions, ["0.1.53", "0.1.53", "0.1.53"]);
 });
 test("release version stays identical across every packaged desktop manifest", async () => {
   const [desktopManifestRaw, cargoManifestRaw, tauriConfigRaw] = await Promise.all([

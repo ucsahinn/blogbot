@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OPE",
-    "version": "0.1.52",
+  "version": "0.1.53",
   "identifier": "app.blogbot.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -58,7 +58,8 @@
         "type": "embedBootstrapper"
       },
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "template": "windows/installer.nsi"
       },
       "wix": {
         "upgradeCode": "9dbe23f1-0eea-4a63-b194-43ff2d786b79"
