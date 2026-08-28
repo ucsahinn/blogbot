@@ -3231,7 +3231,7 @@ async function handleLocalWorkflowCommand(
       const recovery = await options.codexCoordinator.recoverInterrupted(
         codexRecoveryJobId(retriedJob ?? await repository.getJob(jobId))
       );
-      if (!recovery.recovered && retriedJob?.state === "WAITING_CODEX") {
+      if (!recovery.recovered && retriedJob && retryableCodexState && requiresCodexExecutor) {
         // Nothing was requeued on the runner side, so the QUEUED row written
         // above is a job no worker will claim. Put the original stop condition
         // back instead of reporting a recovery that did not happen.

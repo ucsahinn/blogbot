@@ -45,8 +45,10 @@ test("fetcher transport respawns only after an unexpected sidecar exit", { timeo
     const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
     for await (const line of input) {
       const request = JSON.parse(line);
-      process.stdout.write(JSON.stringify({ id: request.id, ok: true, addresses: ["203.0.113.8"] }) + "\\n");
-      process.exit(0);
+      process.stdout.write(
+        JSON.stringify({ id: request.id, ok: true, addresses: ["203.0.113.8"] }) + "\\n",
+        () => process.exit(0)
+      );
     }
   `, "utf8");
   let spawnCount = 0;

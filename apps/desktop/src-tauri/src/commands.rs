@@ -5703,6 +5703,13 @@ pub fn preview_publication(
     Ok(value)
 }
 
+fn operations_job_is_visible_work(job: &Value) -> bool {
+    matches!(
+        job.get("state").and_then(Value::as_str),
+        Some("QUEUED" | "RUNNING" | "RETRY_SCHEDULED" | "WAITING_CODEX")
+    ) && job.pointer("/metadata/purpose").and_then(Value::as_str) != Some("BOBY_GUIDANCE")
+}
+
 #[tauri::command(async)]
 pub fn get_operations(
     state: tauri::State<'_, DesktopState>,
@@ -5782,12 +5789,7 @@ pub fn get_operations(
     events.truncate(30);
     let queue_depth = jobs
         .iter()
-        .filter(|job| {
-            matches!(
-                job.get("state").and_then(Value::as_str),
-                Some("QUEUED" | "RUNNING" | "RETRY_SCHEDULED" | "WAITING_CODEX")
-            )
-        })
+        .filter(|job| operations_job_is_visible_work(job))
         .count();
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5795,12 +5797,7 @@ pub fn get_operations(
         .as_millis() as i128;
     let oldest_job_minutes = jobs
         .iter()
-        .filter(|job| {
-            matches!(
-                job.get("state").and_then(Value::as_str),
-                Some("QUEUED" | "RUNNING" | "RETRY_SCHEDULED" | "WAITING_CODEX")
-            )
-        })
+        .filter(|job| operations_job_is_visible_work(job))
         .filter_map(|job| {
             job.pointer("/metadata/lastQueuedAtUnixMs")
                 .or_else(|| job.pointer("/metadata/createdAtUnixMs"))
@@ -6895,12 +6892,19 @@ fn candidate_draft_payload(candidate_id: &str, candidate: &Value) -> Result<Valu
 }
 
 fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Value> {
+    let now_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     for job in jobs {
         if job.get("kind").and_then(Value::as_str) != Some("DRAFT") {
             continue;
         }
         let job_state = job.get("state").and_then(Value::as_str).unwrap_or_default();
-        if !matches!(job_state, "QUEUED" | "RUNNING" | "WAITING_CODEX") {
+        if !matches!(
+            job_state,
+            "QUEUED" | "RUNNING" | "WAITING_CODEX" | "RETRY_SCHEDULED"
+        ) {
             continue;
         }
         let id = match job
@@ -6911,12 +6915,6 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
             Some(value) => value,
             None => continue,
         };
-        if drafts
-            .iter()
-            .any(|draft| draft.get("id").and_then(Value::as_str) == Some(id))
-        {
-            continue;
-        }
         let metadata = job.get("metadata").and_then(Value::as_object);
         let title = metadata
             .and_then(|value| value.get("candidateTitle"))
@@ -6950,6 +6948,15 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
         let wait_reason = metadata
             .and_then(|value| value.get("codexWaitReason"))
             .and_then(Value::as_str);
+        let retry_overdue = job_state == "RETRY_SCHEDULED"
+            && metadata
+                .and_then(|value| {
+                    value
+                        .get("finalReviewRetryAtUnixMs")
+                        .or_else(|| value.get("codexRetryAtUnixMs"))
+                })
+                .and_then(Value::as_u64)
+                .is_some_and(|retry_at| retry_at <= now_unix_ms);
         let waiting_detail = match metadata
             .and_then(|value| value.get("codexWaitReason"))
             .and_then(Value::as_str) {
@@ -6973,10 +6980,18 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
             Some("FINAL_REVIEW") => {
                 "Taslak, kaynak ve iki dil için son kalite incelemesinden geçiyor."
             }
+            Some("FINAL_REVIEW_RETRYING") => {
+                "Son kalite incelemesi geçici bir hatadan sonra otomatik yeniden denenecek."
+            }
             _ => "Kaynaklar araştırılıyor ve taslak hazırlanıyor.",
         };
         let (blockers, detail) = match job_state {
             "RUNNING" => (0, running_detail),
+            "RETRY_SCHEDULED" if retry_overdue => (
+                1,
+                "Son kalite incelemesi için planlanan tekrar zamanı geçti. İş kaybolmadı; yeniden denemek için düğmeyi kullanın.",
+            ),
+            "RETRY_SCHEDULED" => (0, running_detail),
             "QUEUED" if recovered_after_restart => (0, "Uygulama yeniden açıldığında iş güvenle yerel kuyruğa alındı."),
             "QUEUED" if retrying_codex => (0, "Yazı üretimi kesintiye uğradı; iş kaybolmadı ve güvenli yerel kuyrukta yeniden deneniyor."),
             "QUEUED" => (0, "Araştırma güvenli yerel kuyruğa alındı."),
@@ -6984,6 +6999,12 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
         };
         let (execution_state, next_action, reason_code) = match job_state {
             "RUNNING" => ("RUNNING", "NONE", Value::Null),
+            "RETRY_SCHEDULED" if retry_overdue => {
+                ("FAILED", "RETRY", json!("RETRY_OVERDUE"))
+            }
+            "RETRY_SCHEDULED" => {
+                ("RETRY_SCHEDULED", "NONE", json!("EXECUTION_FAILED"))
+            }
             "QUEUED" if retrying_codex => ("RETRY_SCHEDULED", "NONE", json!("EXECUTION_FAILED")),
             "QUEUED" => ("QUEUED", "NONE", Value::Null),
             _ => match wait_reason {
@@ -7001,6 +7022,20 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
                 _ => ("WAITING", "CONNECT_CODEX", json!("CODEX_UNAVAILABLE")),
             },
         };
+        if let Some(draft) = drafts
+            .iter_mut()
+            .find(|draft| draft.get("id").and_then(Value::as_str) == Some(id))
+        {
+            draft["completion"] = Value::Null;
+            draft["blockers"] = json!(blockers);
+            draft["state"] = json!("DRAFTING");
+            draft["reviewable"] = json!(false);
+            draft["detail"] = json!(detail);
+            draft["executionState"] = json!(execution_state);
+            draft["nextAction"] = json!(next_action);
+            draft["reasonCode"] = reason_code;
+            continue;
+        }
         drafts.push(json!({
             "id": id,
             "titleTr": title,
@@ -7966,7 +8001,9 @@ mod tests {
         revision_edit_payload, scheduled_operation_items, valid_github_segment,
         valid_github_workflow, valid_hhmm, valid_recovery_key, valid_schedule_slot,
         valid_site_work_mode, validate_folder_selection, validate_local_dev_project,
-        connector_state_for_runtime, operations_for_runtime, prerequisite_can_read_engine, workspace_can_read_engine, workspace_engine_state, write_lock, CommandError, DesktopState, RuntimeMode,
+        connector_state_for_runtime, operations_for_runtime, operations_job_is_visible_work,
+        prerequisite_can_read_engine, workspace_can_read_engine, workspace_engine_state, write_lock,
+        CommandError, DesktopState, RuntimeMode,
     };
 
     #[cfg(windows)]
@@ -8099,6 +8136,20 @@ mod tests {
         assert_eq!(snapshot.pointer("/publisher/state").and_then(Value::as_str), Some("BLOCKED"));
         assert_eq!(snapshot.get("events").and_then(Value::as_array).map(Vec::len), Some(0));
         assert!(operations_for_runtime(RuntimeMode::Online).is_none());
+    }
+
+    #[test]
+    fn conversational_boby_jobs_do_not_inflate_the_editorial_worker_queue() {
+        assert!(!operations_job_is_visible_work(&json!({
+            "kind": "CODEX",
+            "state": "RETRY_SCHEDULED",
+            "metadata": { "purpose": "BOBY_GUIDANCE" }
+        })));
+        assert!(operations_job_is_visible_work(&json!({
+            "kind": "DRAFT",
+            "state": "RETRY_SCHEDULED",
+            "metadata": { "progressStage": "FINAL_REVIEW_RETRYING" }
+        })));
     }
 
     #[test]
@@ -8768,6 +8819,96 @@ mod tests {
         assert_eq!(drafts[0]["executionState"], "RETRY_SCHEDULED");
         assert_eq!(drafts[0]["nextAction"], "NONE");
         assert_eq!(drafts[0]["reviewable"], false);
+    }
+
+    #[test]
+    fn scheduled_final_review_retry_stays_visible_on_the_editorial_desk() {
+        let drafts = append_pending_draft_jobs(
+            Vec::new(),
+            &[json!({
+                "id": "draft-final-review-retry-1",
+                "kind": "DRAFT",
+                "state": "RETRY_SCHEDULED",
+                "metadata": {
+                    "candidateTitle": "Son kalite yeniden denemesi",
+                    "section": "analiz",
+                    "progressStage": "FINAL_REVIEW_RETRYING",
+                    "finalReviewRetryReason": "EXECUTION_FAILED",
+                    "finalReviewRetryAtUnixMs": u64::MAX
+                }
+            })],
+        );
+
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0]["id"], "draft-final-review-retry-1");
+        assert_eq!(drafts[0]["state"], "DRAFTING");
+        assert_eq!(drafts[0]["reviewable"], false);
+        assert_eq!(drafts[0]["executionState"], "RETRY_SCHEDULED");
+        assert_eq!(drafts[0]["nextAction"], "NONE");
+        assert_eq!(
+            drafts[0]["detail"],
+            "Son kalite incelemesi geçici bir hatadan sonra otomatik yeniden denenecek."
+        );
+    }
+
+    #[test]
+    fn overdue_final_review_retry_offers_a_visible_recovery_action() {
+        let drafts = append_pending_draft_jobs(
+            Vec::new(),
+            &[json!({
+                "id": "draft-final-review-overdue-1",
+                "kind": "DRAFT",
+                "state": "RETRY_SCHEDULED",
+                "metadata": {
+                    "candidateTitle": "Gecikmiş son kalite incelemesi",
+                    "section": "analiz",
+                    "progressStage": "FINAL_REVIEW_RETRYING",
+                    "finalReviewRetryReason": "EXECUTION_FAILED",
+                    "finalReviewRetryAtUnixMs": 1
+                }
+            })],
+        );
+
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0]["executionState"], "FAILED");
+        assert_eq!(drafts[0]["nextAction"], "RETRY");
+        assert_eq!(drafts[0]["reasonCode"], "RETRY_OVERDUE");
+        assert_eq!(drafts[0]["blockers"], 1);
+        assert_eq!(
+            drafts[0]["detail"],
+            "Son kalite incelemesi için planlanan tekrar zamanı geçti. İş kaybolmadı; yeniden denemek için düğmeyi kullanın."
+        );
+    }
+
+    #[test]
+    fn materialized_revision_keeps_its_pending_final_review_status_visible() {
+        let drafts = append_pending_draft_jobs(
+            vec![json!({
+                "id": "draft-final-review-collision-1",
+                "state": "REVIEW_REQUIRED",
+                "reviewable": true,
+                "blockers": 0,
+                "detail": "Ready for review"
+            })],
+            &[json!({
+                "id": "draft-final-review-collision-1",
+                "kind": "DRAFT",
+                "state": "RETRY_SCHEDULED",
+                "metadata": {
+                    "progressStage": "FINAL_REVIEW_RETRYING",
+                    "finalReviewRetryReason": "EXECUTION_FAILED",
+                    "finalReviewRetryAtUnixMs": 1
+                }
+            })],
+        );
+
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0]["state"], "DRAFTING");
+        assert_eq!(drafts[0]["reviewable"], false);
+        assert_eq!(drafts[0]["executionState"], "FAILED");
+        assert_eq!(drafts[0]["nextAction"], "RETRY");
+        assert_eq!(drafts[0]["reasonCode"], "RETRY_OVERDUE");
+        assert_eq!(drafts[0]["blockers"], 1);
     }
 
     #[test]

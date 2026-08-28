@@ -15,6 +15,7 @@ const keepSmokeDataRoot = process.env.BLOGBOT_NATIVE_KEEP_TEMP === "1";
 const profileObserveMs = Number.parseInt(process.env.BLOGBOT_PROFILE_OBSERVE_MS ?? "0", 10);
 const skipProfileFinalRead = process.env.BLOGBOT_PROFILE_SKIP_FINAL_READ === "1";
 const retryBlockedActualProfile = process.env.BLOGBOT_PROFILE_RETRY_BLOCKED === "1";
+const restoreHiddenActualProfile = process.env.BLOGBOT_PROFILE_RESTORE_HIDDEN === "1";
 const screenshotDirectory = process.env.BLOGBOT_NATIVE_SCREENSHOT_DIR
   ? resolve(repositoryRoot, process.env.BLOGBOT_NATIVE_SCREENSHOT_DIR)
   : undefined;
@@ -1527,11 +1528,20 @@ async function inspectExistingProfileState(sessionId, localEngine) {
     candidateStates: countBy(workspaceResponse.result?.candidates, "state"),
     candidateRankingSummary,
     draftStates: countBy(workspaceResponse.result?.drafts, "state"),
+    hiddenDraftCount: workspaceResponse.result?.hiddenDraftCount ?? 0,
     failureCount: Array.isArray(workspaceResponse.result?.failures) ? workspaceResponse.result.failures.length : 0,
     codexRoles: countBy(workspaceResponse.result?.codexRoles, "state"),
     activeDrafts: (workspaceResponse.result?.drafts ?? [])
       .filter((draft) => draft?.reviewable === false)
-      .map((draft) => ({ id: draft?.id, state: draft?.state, blockers: draft?.blockers, detail: draft?.detail })),
+      .map((draft) => ({
+        id: draft?.id,
+        state: draft?.state,
+        executionState: draft?.executionState,
+        nextAction: draft?.nextAction,
+        reasonCode: draft?.reasonCode,
+        blockers: draft?.blockers,
+        detail: draft?.detail
+      })),
     runtimeHealth: (workspaceResponse.result?.systemHealth ?? []).map((item) => ({
       component: item?.id,
       state: item?.state
@@ -1626,6 +1636,40 @@ async function retryFirstBlockedActualDraft(sessionId) {
     await wait(150);
   }
   fail("actual blocked-draft retry did not acknowledge queueing in the visible UI.");
+}
+
+async function restoreHiddenActualDrafts(sessionId) {
+  await execute(sessionId, "window.location.hash = '#editorial'; return true;");
+  await waitForVisibleHeading(sessionId, "editorial");
+  const before = await invoke(sessionId, "get_editorial_workspace");
+  const hiddenBefore = before?.result?.hiddenDraftCount ?? 0;
+  if (!before?.ok || hiddenBefore < 1) {
+    fail(`actual profile had no hidden editorial rows to restore: hiddenDraftCount=${hiddenBefore}.`);
+  }
+  const clicked = await execute(sessionId, `return (() => {
+    const button = [...document.querySelectorAll('button')].find((item) =>
+      item.textContent?.trim().startsWith('Gizlenen taslaklar') && !item.disabled
+    );
+    if (!button) return false;
+    button.click();
+    return true;
+  })();`);
+  if (!clicked) fail("the visible restore-hidden-drafts action was unavailable.");
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const workspace = await invoke(sessionId, "get_editorial_workspace");
+    const drafts = workspace?.result?.drafts ?? [];
+    const activeDrafts = drafts.filter((draft) => draft?.reviewable === false);
+    if (workspace?.ok && workspace.result?.hiddenDraftCount === 0 && activeDrafts.length > 0) {
+      return {
+        restored: hiddenBefore,
+        visibleDrafts: drafts.length,
+        visibleActiveDrafts: activeDrafts.length,
+        visibleRetryActions: activeDrafts.filter((draft) => draft?.nextAction === "RETRY").length
+      };
+    }
+    await wait(150);
+  }
+  fail("restored editorial rows did not become visible within 9 seconds.");
 }
 
 async function rewriteFirstShortActualDraft(sessionId) {
@@ -1752,6 +1796,9 @@ async function main() {
       const liveBobyReply = verifyBobyLiveReply ? await verifyLiveBobyReply(sessionId) : undefined;
       const liveUpdaterCheck = verifyUpdaterLiveCheck ? await verifyLiveUpdaterCheck(sessionId) : undefined;
       const initialProfile = await inspectExistingProfileState(sessionId, localEngine.result);
+      const restoreHiddenJourney = restoreHiddenActualProfile
+        ? await restoreHiddenActualDrafts(sessionId)
+        : undefined;
       const retryJourney = retryBlockedActualProfile
         ? await retryFirstBlockedActualDraft(sessionId)
         : undefined;
@@ -1760,7 +1807,7 @@ async function main() {
         : undefined;
       const bobyUiJourney = verifyBobyLiveReply ? await verifyVisibleBobyConversationJourney(sessionId) : undefined;
       if (profileObserveMs > 0) await wait(profileObserveMs);
-      const finalProfile = profileObserveMs > 0 && !skipProfileFinalRead
+      const finalProfile = (profileObserveMs > 0 || restoreHiddenActualProfile) && !skipProfileFinalRead
         ? await inspectExistingProfileState(sessionId, localEngine.result)
         : initialProfile;
       console.log(JSON.stringify({
@@ -1770,6 +1817,7 @@ async function main() {
         finalProfile,
         skippedFinalRead: skipProfileFinalRead,
         observedForMs: profileObserveMs,
+        restoreHiddenJourney,
         retryJourney,
         comprehensiveRewriteJourney,
         nativeReadCommands,

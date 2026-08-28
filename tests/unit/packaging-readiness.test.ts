@@ -737,7 +737,7 @@ test("desktop preflight verifies clean-machine installer inputs without building
   assert.ok(result.checks.some((check) => check.id === "bundled-engine-sidecar"));
 });
 
-test("desktop release package advances beyond the published 0.1.51 updater version", async () => {
+test("desktop release package is pinned to the planned 0.1.54 version", async () => {
   const manifests = await Promise.all([
     readFile(join(repositoryRoot, "apps", "desktop", "package.json"), "utf8"),
     readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "Cargo.toml"), "utf8"),
@@ -749,7 +749,7 @@ test("desktop release package advances beyond the published 0.1.51 updater versi
     JSON.parse(manifests[2]).version
   ].map(String);
 
-  assert.deepEqual(versions, ["0.1.53", "0.1.53", "0.1.53"]);
+  assert.deepEqual(versions, ["0.1.54", "0.1.54", "0.1.54"]);
 });
 test("release version stays identical across every packaged desktop manifest", async () => {
   const [desktopManifestRaw, cargoManifestRaw, tauriConfigRaw] = await Promise.all([

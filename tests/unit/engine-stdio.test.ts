@@ -1168,6 +1168,49 @@ test("job.retry restores the original stop condition when the durable Codex reco
   assert.equal(job.lastError, "CODEX_OUTPUT_MISSING");
 });
 
+test("job.retry restores every terminal Codex stop when its durable record cannot be requeued", async () => {
+  for (const state of ["RETRY_SCHEDULED", "FAILED", "DEAD_LETTER"] as const) {
+    const repository = new InMemoryBackendStore();
+    const before = {
+      id: `draft-unrecoverable-${state.toLowerCase()}`,
+      kind: "DRAFT",
+      state,
+      attempts: 2,
+      lastError: "CODEX_JOB_RETRYING",
+      metadata: {
+        progressStage: "FINAL_REVIEW_RETRY_SCHEDULED",
+        nextAttemptAtUnixMs: Date.now() - 60_000
+      }
+    } as const;
+    await repository.createJob(before);
+    const codexCoordinator = {
+      async submit() { throw new Error("not used"); },
+      async process() { throw new Error("not used"); },
+      async retryWaiting() { throw new Error("not used"); },
+      async recoverInterrupted() { return { recovered: false, snapshot: null }; }
+    } satisfies CodexWorkerCoordinator;
+    const handle = createEngineProtocol(repository, "memory", { codexCoordinator });
+
+    const response = await handle({
+      version: 1,
+      id: `retry-unrecoverable-${state.toLowerCase()}`,
+      kind: "command",
+      command: {
+        version: 1,
+        requestId: `retry-unrecoverable-${state.toLowerCase()}`,
+        idempotencyKey: `retry-unrecoverable-${state.toLowerCase()}`,
+        expectedVersion: await repository.getVersion(),
+        kind: "JOB.RETRY",
+        payload: { jobId: before.id }
+      }
+    });
+
+    assert.equal(response.ok, false, `${state}: ${JSON.stringify(response)}`);
+    assert.equal((response.result as { error: { code: string } }).error.code, "CODEX_RECOVERY_UNAVAILABLE", state);
+    assert.deepEqual(await repository.getJob(before.id), before, state);
+  }
+});
+
 test("an interrupted Boby guidance job becomes retryable instead of staying RUNNING forever", async () => {
   const repository = new InMemoryBackendStore();
   await repository.createJob({
@@ -1177,11 +1220,15 @@ test("an interrupted Boby guidance job becomes retryable instead of staying RUNN
     attempts: 1,
     metadata: { purpose: "BOBY_GUIDANCE", question: "Sonraki adım ne?" }
   });
+  let recoveryCalls = 0;
   const coordinator = {
     async submit() { throw new Error("not used"); },
     async process() { throw new Error("not used"); },
     async retryWaiting() { throw new Error("not used"); },
-    async recoverInterrupted() { return { recovered: false, snapshot: null }; }
+    async recoverInterrupted() {
+      recoveryCalls += 1;
+      return { recovered: recoveryCalls > 1, snapshot: null };
+    }
   } satisfies CodexWorkerCoordinator;
 
   await recoverWaitingDraftJobs(repository, coordinator);

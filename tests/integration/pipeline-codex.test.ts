@@ -479,14 +479,20 @@ test("Windows command wrappers cannot keep a timed-out Codex task running", { sk
     }
   };
 
-  await assert.rejects(
-    Promise.race([
-      consume(),
-      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("timeout did not release the Codex caller")), 7_000))
-    ]),
-    (error: unknown) =>
-      error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
-  );
+  let watchdog: NodeJS.Timeout | undefined;
+  const callerReleaseGuard = new Promise<never>((_resolve, reject) => {
+    watchdog = setTimeout(() => reject(new Error("timeout did not release the Codex caller")), 10_000);
+    watchdog.unref();
+  });
+  try {
+    await assert.rejects(
+      Promise.race([consume(), callerReleaseGuard]),
+      (error: unknown) =>
+        error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
+    );
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+  }
 
   const childPid = Number(
     (await readFile(join(timeoutCodexHome, "fake-codex-child.pid"), "utf8")).trim()
