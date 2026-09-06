@@ -2076,6 +2076,11 @@ test("reduced motion leaves route content stable without running animations", as
   await page.getByRole("button", { name: "İçerik Akışı" }).click();
   await expect(page.getByRole("heading", { name: "Kaynaklardan yayın fikrine tek çalışma alanı" })).toBeVisible();
 
+  // Reduced-motion CSS uses a 0.01ms duration so animation completion events
+  // still fire. The browser may expose it as running until the next frame.
+  await expect.poll(() => page.evaluate(() =>
+    document.getAnimations().filter((animation) => animation.playState === "running").length
+  ), { timeout: 1_000 }).toBe(0);
   const motion = await page.evaluate(() => ({
     mediaMatches: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
     running: document.getAnimations().filter((animation) => animation.playState === "running").length,
