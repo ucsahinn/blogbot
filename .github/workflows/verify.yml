@@ -27,6 +27,8 @@ jobs:
       - run: npm ci
       - name: Exercise Windows release scripts before packaging
         run: node --test --experimental-transform-types --test-name-pattern="release payload verifier accepts|release signs|explicit unsigned payload|release payload verification preserves" tests/unit/packaging-readiness.test.ts tests/unit/release-scripts.test.ts
+      - name: Exercise migration recovery with Windows temporary paths
+        run: node --test --experimental-transform-types tests/integration/legacy-migration-crash.test.ts
 
   node:
     runs-on: ubuntu-latest

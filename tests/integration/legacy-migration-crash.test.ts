@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { cp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -93,19 +94,22 @@ interface Terminal {
 
 function startPhase(root: OwnedTempRoot, phase: string, directory: string) {
   const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+  // Windows TEMP may use an 8.3 alias (RUNNER~1). Send canonical paths so
+  // the child's realpath safety checks do not mistake that alias for a link.
+  const rootPath = realpathSync(root.path);
   const child = spawn(process.execPath, [
     "--experimental-transform-types",
     fileURLToPath(new URL("../fixtures/legacy-migration-crash-child.ts", import.meta.url)),
-    root.path, phase, directory
+    rootPath, phase, directory
   ], {
-    cwd: root.path, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    cwd: rootPath, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
     env: {
       SystemRoot: systemRoot, WINDIR: systemRoot,
       PATH: dirname(process.execPath) + ";" + join(systemRoot, "System32"),
-      TEMP: root.path, TMP: root.path, USERPROFILE: root.path,
-      LOCALAPPDATA: root.path, APPDATA: root.path,
-      CODEX_HOME: join(root.path, "empty-codex-home"),
-      BLOGBOT_MIGRATION_TEST_PARENT_TMP: tmpdir(),
+      TEMP: rootPath, TMP: rootPath, USERPROFILE: rootPath,
+      LOCALAPPDATA: rootPath, APPDATA: rootPath,
+      CODEX_HOME: join(rootPath, "empty-codex-home"),
+      BLOGBOT_MIGRATION_TEST_PARENT_TMP: realpathSync(tmpdir()),
       BLOGBOT_DATA_KEY_HEX: "77".repeat(32), NODE_ENV: "test"
     }
   });
