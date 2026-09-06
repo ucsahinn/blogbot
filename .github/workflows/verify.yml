@@ -45,15 +45,20 @@ jobs:
               const localdata = join(fixture, 'AppData', 'Local');
               await mkdir(appdata, { recursive: true });
               await mkdir(localdata, { recursive: true });
-              for (const [name, environment] of [
-                ['inherited-environment', undefined],
-                ['minimal-measured-startup', base]
-              ]) {
+              const pick = names => Object.fromEntries(names.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
+              const cases = [
+                ['module-path', { PSModulePath: join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules') }],
+                ['module-cache', { PSModuleAnalysisCachePath: join(localdata, 'ModuleAnalysisCache') }],
+                ['windows-directories', pick(['SystemDrive', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'ProgramData', 'PUBLIC'])],
+                ['processor', pick(['PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'NUMBER_OF_PROCESSORS', 'OS'])],
+                ['identity', pick(['USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'LOGONSERVER'])]
+              ];
+              await Promise.all(cases.map(async ([name, extra]) => {
                 const started = Date.now();
                 await new Promise(resolve => {
                   const child = execFile(join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
                   ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "Write-Output 'SHELL_READY'"],
-                  { cwd: fixture, env: environment, timeout: 60000, windowsHide: true },
+                  { cwd: fixture, env: { ...base, ...extra }, timeout: 45000, windowsHide: true },
                   (error, stdout) => {
                     console.log(JSON.stringify({ name, elapsedMs: Date.now() - started,
                       ready: stdout.trim() === 'SHELL_READY', code: error?.code ?? 0,
@@ -62,7 +67,7 @@ jobs:
                   });
                   child.stdin.end();
                 });
-              }
+              }));
             } finally {
               await rm(fixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
             }
