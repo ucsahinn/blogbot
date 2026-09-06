@@ -80,7 +80,11 @@ const dateCoercingJsonCmdlet = `
 function ConvertFrom-Json {
   param([Parameter(ValueFromPipeline = $true)][string]$InputObject, [string]$DateKind)
   process {
-    $parsed = Microsoft.PowerShell.Utility\\ConvertFrom-Json -InputObject $InputObject
+    $arguments = @{ InputObject = $InputObject }
+    if ((Get-Command Microsoft.PowerShell.Utility\\ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+      $arguments.DateKind = 'String'
+    }
+    $parsed = Microsoft.PowerShell.Utility\\ConvertFrom-Json @arguments
     if ($DateKind -ne 'String') {
       foreach ($field in @('notes', 'pub_date')) {
         $property = $parsed.psobject.Properties[$field]
