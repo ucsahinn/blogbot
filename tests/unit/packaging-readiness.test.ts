@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { windowsShellEnvironment } from "../helpers/windows-shell-environment.ts";
 import { promisify } from "node:util";
 
 import { createInvokeBridge } from "../../apps/desktop/src/bridge.ts";
@@ -1156,11 +1157,7 @@ test("release payload verifier accepts legal dot-prefixed repositories but rejec
   const fixtureRoot = await mkdtemp(join(tmpdir(), "blogbot-release-verifier-"));
   const verifier = join(repositoryRoot, "scripts", "verify-release-payload.ps1");
   const safeEnvironment = (repository: string) => ({
-    SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
-    WINDIR: process.env.WINDIR ?? "C:\\Windows",
-    PATH: process.env.PATH ?? "",
-    TEMP: tmpdir(),
-    TMP: tmpdir(),
+    ...windowsShellEnvironment(),
     RELEASE_VERSION: "0.1.55",
     RELEASE_NOTES: "Synthetic local verifier fixture",
     REPOSITORY: repository,

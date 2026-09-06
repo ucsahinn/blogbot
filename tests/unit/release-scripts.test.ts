@@ -7,20 +7,16 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { windowsShellEnvironment } from "../helpers/windows-shell-environment.ts";
 
 const execFile = promisify(execFileCallback);
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const quotePs = (value: string) => `'${value.replaceAll("'", "''")}'`;
-const safeEnvironment = {
-  SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
-  WINDIR: process.env.WINDIR ?? "C:\\Windows",
-  TEMP: tmpdir(),
-  TMP: tmpdir()
-};
+const safeEnvironment = windowsShellEnvironment();
 
 async function runPowerShell(script: string, cwd: string, env: Record<string, string> = {}) {
-  return await execFile(join(safeEnvironment.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe"), [
+  return await execFile(join(String(safeEnvironment.SystemRoot), "System32/WindowsPowerShell/v1.0/powershell.exe"), [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand",
     Buffer.from(`$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n${script}`, "utf16le").toString("base64")
   ], { cwd, env: { ...safeEnvironment, ...env }, timeout: 15_000, windowsHide: true }).catch((error: { stderr?: string; code?: string | number }) => {
