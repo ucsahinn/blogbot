@@ -8,7 +8,7 @@ test("Windows shell fixtures retain OS startup context without inheriting applic
     USERPROFILE: "C:\\Users\\fixture", HOMEDRIVE: "C:", HOMEPATH: "\\Users\\fixture",
     APPDATA: "C:\\Users\\fixture\\AppData\\Roaming", LOCALAPPDATA: "C:\\Users\\fixture\\AppData\\Local",
     ComSpec: "C:\\Windows\\System32\\cmd.exe", PATH: "C:\\Windows\\System32", PATHEXT: ".EXE;.CMD",
-    PSModulePath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules",
+    PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules",
     GH_TOKEN: "synthetic-must-not-pass", OPE_WINDOWS_CERTIFICATE_PASSWORD: "synthetic-must-not-pass",
     OPE_UPDATE_SIGNER_SHA256: "synthetic-must-not-pass", NODE_OPTIONS: "synthetic-must-not-pass",
     ARBITRARY_APPLICATION_SETTING: "synthetic-must-not-pass"
