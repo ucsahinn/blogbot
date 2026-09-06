@@ -20,7 +20,10 @@ async function runPowerShell(script: string, cwd: string, env: Record<string, st
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand",
     Buffer.from(`$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n${script}`, "utf16le").toString("base64")
   ], { cwd, env: { ...safeEnvironment, ...env }, timeout: 15_000, windowsHide: true }).catch((error: { stderr?: string; code?: string | number }) => {
-    throw new Error(error.stderr?.match(/(?:RELEASE|STANDALONE|AUTHENTICODE)_[A-Z0-9_]+/u)?.[0] ?? `POWERSHELL_FIXTURE_FAILED: ${error.code}`);
+    const stderr = error.stderr?.replaceAll(/_x000[DA]_/gu, "\n") ?? "";
+    const errorId = stderr.match(/FullyQualifiedErrorId\s*:\s*([A-Za-z0-9_.,-]+)/u)?.[1] ?? "UNKNOWN_ERROR_ID";
+    throw new Error(stderr.match(/(?:RELEASE|STANDALONE|AUTHENTICODE)_[A-Z0-9_]+/u)?.[0]
+      ?? `POWERSHELL_FIXTURE_FAILED: ${error.code}; ${errorId}`);
   });
 }
 
