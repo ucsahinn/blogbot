@@ -47,11 +47,13 @@ jobs:
               await mkdir(localdata, { recursive: true });
               for (const [name, extra] of [
                 ['minimal', {}],
-                ['isolated-profile', { USERPROFILE: fixture, APPDATA: appdata, LOCALAPPDATA: localdata }],
-                ['system-shell', { ComSpec: join(system, 'System32', 'cmd.exe'), PATH: join(system, 'System32') }]
+                ['closed-stdin', {}],
+                ['complete-isolated-environment', { USERPROFILE: fixture, APPDATA: appdata, LOCALAPPDATA: localdata,
+                  ComSpec: join(system, 'System32', 'cmd.exe'), PATH: join(system, 'System32') }]
               ]) {
                 const started = Date.now();
-                await new Promise(resolve => execFile(join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+                await new Promise(resolve => {
+                  const child = execFile(join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
                   ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "Write-Output 'SHELL_READY'"],
                   { cwd: fixture, env: { ...base, ...extra }, timeout: 15000, windowsHide: true },
                   (error, stdout) => {
@@ -59,7 +61,9 @@ jobs:
                       ready: stdout.trim() === 'SHELL_READY', code: error?.code ?? 0,
                       killed: error?.killed ?? false, signal: error?.signal ?? null }));
                     resolve();
-                  }));
+                  });
+                  if (name === 'closed-stdin') child.stdin.end();
+                });
               }
             } finally {
               await rm(fixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
