@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { windowsShellEnvironment } from "../helpers/windows-shell-environment.ts";
+import { windowsShellEnvironment, windowsShellExecutable } from "../helpers/windows-shell-environment.ts";
 import { promisify } from "node:util";
 
 import { createInvokeBridge } from "../../apps/desktop/src/bridge.ts";
@@ -1166,7 +1166,7 @@ test("release payload verifier accepts legal dot-prefixed repositories but rejec
   });
   const runVerifier = async (repository: string) => {
     try {
-      await execFile("powershell.exe", [
+      await execFile(windowsShellExecutable(), [
         "-NoLogo",
         "-NoProfile",
         "-NonInteractive",

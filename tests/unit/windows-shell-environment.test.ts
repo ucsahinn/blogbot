@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { windowsShellEnvironment } from "../helpers/windows-shell-environment.ts";
+import { windowsShellEnvironment, windowsShellExecutable } from "../helpers/windows-shell-environment.ts";
 
 test("Windows shell fixtures retain OS startup context without inheriting application credentials", () => {
   const environment = windowsShellEnvironment({
@@ -17,8 +17,12 @@ test("Windows shell fixtures retain OS startup context without inheriting applic
   assert.equal(environment.HOMEDRIVE, "C:");
   assert.equal(environment.HOMEPATH, "\\Users\\fixture");
   assert.equal(environment.PATH, "C:\\Windows\\System32");
-  assert.equal(environment.PSModulePath, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules");
+  assert.equal(environment.PSModulePath, "C:\\Program Files\\PowerShell\\7\\Modules");
   assert.equal(environment.ComSpec, "C:\\Windows\\System32\\cmd.exe");
-  assert.equal(environment.PSModuleAnalysisCachePath, "NUL");
   assert.equal(Object.values(environment).includes("synthetic-must-not-pass"), false);
+});
+
+test("release fixtures prefer the workflow PowerShell runtime with a Windows inbox fallback", () => {
+  assert.equal(windowsShellExecutable({}, () => true), "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+  assert.equal(windowsShellExecutable({}, () => false), "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
 });
