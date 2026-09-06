@@ -538,6 +538,11 @@ const connectorConfig: PublisherConnectorConfigInput = {
 
 test("validates user-entered generic connector config without accepting credentials", () => {
   assert.deepEqual(validatePublisherConnectorConfig(connectorConfig), connectorConfig);
+  const dotPrefixedRepository = {
+    ...connectorConfig,
+    github: { ...connectorConfig.github, repository: "owner/.github" }
+  };
+  assert.deepEqual(validatePublisherConnectorConfig(dotPrefixedRepository), dotPrefixedRepository);
   assert.throws(
     () => validatePublisherConnectorConfig({ ...connectorConfig, github: { ...connectorConfig.github, token: ["not", "accepted"].join("-") } } as never),
     (error: unknown) => error instanceof ConnectorConfigError && error.code === "CREDENTIALS_NOT_ALLOWED"
@@ -546,6 +551,38 @@ test("validates user-entered generic connector config without accepting credenti
     () => validatePublisherConnectorConfig({ ...connectorConfig, github: { repository: "bad", baseBranch: "main" } }),
     (error: unknown) => error instanceof ConnectorConfigError && error.code === "INVALID_REPOSITORY"
   );
+  for (const repository of ["owner/.", "owner/..", "owner/site/extra"]) {
+    assert.throws(
+      () => validatePublisherConnectorConfig({
+        ...connectorConfig,
+        github: { ...connectorConfig.github, repository }
+      }),
+      (error: unknown) => error instanceof ConnectorConfigError && error.code === "INVALID_REPOSITORY"
+    );
+  }
+});
+
+test("publisher connector rejects base branches the native publication layer cannot use", () => {
+  assert.deepEqual(
+    validatePublisherConnectorConfig({
+      ...connectorConfig,
+      github: { ...connectorConfig.github, baseBranch: "release/v1.2.3" }
+    }).github.baseBranch,
+    "release/v1.2.3"
+  );
+  for (const baseBranch of [
+    "/main", "main/", "main//next", "main..next", "main:next", ".hidden", "feature/.hidden",
+    "feature.lock", "feature/x.lock", "feature.", "-main", "m".repeat(201)
+  ]) {
+    assert.throws(
+      () => validatePublisherConnectorConfig({
+        ...connectorConfig,
+        github: { ...connectorConfig.github, baseBranch }
+      }),
+      (error: unknown) => error instanceof ConnectorConfigError && error.code === "INVALID_BRANCH",
+      baseBranch
+    );
+  }
 });
 
 test("requires a generic site connector instead of accepting legacy connector fields", () => {

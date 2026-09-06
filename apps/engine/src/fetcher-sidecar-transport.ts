@@ -35,6 +35,8 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+class FetcherProcessError extends FetchBoundaryError {}
+
 /**
  * Executes network parsing in one reusable, isolated process with no engine
  * data key, PGlite location, Codex configuration, or inherited user
@@ -127,28 +129,28 @@ export function createFetcherSidecarTransport(
     child.once("error", () => {
       retireChild(
         child,
-        new FetchBoundaryError("HTTP_STATUS", "fetcher sidecar could not start"),
+        new FetcherProcessError("HTTP_STATUS", "fetcher sidecar could not start"),
         false
       );
     });
     child.once("exit", () => {
       retireChild(
         child,
-        new FetchBoundaryError("HTTP_STATUS", "fetcher sidecar stopped before responding"),
+        new FetcherProcessError("HTTP_STATUS", "fetcher sidecar stopped before responding"),
         false
       );
     });
     child.stdin?.on("error", () => {
       retireChild(
         child,
-        new FetchBoundaryError("HTTP_STATUS", "fetcher sidecar input closed unexpectedly"),
+        new FetcherProcessError("HTTP_STATUS", "fetcher sidecar input closed unexpectedly"),
         true
       );
     });
     return child;
   };
 
-  const invokeFetcher = (
+  const invokeFetcherAttempt = (
     request: Record<string, unknown>,
     timeoutMs: number
   ): Promise<Record<string, unknown>> => {
@@ -167,7 +169,7 @@ export function createFetcherSidecarTransport(
       if (!child.stdin?.writable) {
         retireChild(
           child,
-          new FetchBoundaryError("HTTP_STATUS", "fetcher sidecar input is unavailable"),
+          new FetcherProcessError("HTTP_STATUS", "fetcher sidecar input is unavailable"),
           true
         );
         return;
@@ -176,7 +178,7 @@ export function createFetcherSidecarTransport(
         if (error) {
           retireChild(
             child,
-            new FetchBoundaryError("HTTP_STATUS", "fetcher sidecar request could not be sent"),
+            new FetcherProcessError("HTTP_STATUS", "fetcher sidecar request could not be sent"),
             true
           );
         }
@@ -184,16 +186,33 @@ export function createFetcherSidecarTransport(
     });
   };
 
+  const invokeFetcherWithProcessRecovery = async (
+    request: Record<string, unknown>,
+    timeoutMs: number
+  ): Promise<Record<string, unknown>> => {
+    const deadlineAtMs = Date.now() + timeoutMs;
+    try {
+      return await invokeFetcherAttempt(request, timeoutMs);
+    } catch (error) {
+      if (!(error instanceof FetcherProcessError) || closed) throw error;
+      const remainingMs = deadlineAtMs - Date.now();
+      if (remainingMs <= 0) {
+        throw new FetchBoundaryError("TIMEOUT", "fetcher sidecar request timed out during process recovery");
+      }
+      return invokeFetcherAttempt(request, remainingMs);
+    }
+  };
+
   return {
     async resolve(hostname) {
-      const parsed = await invokeFetcher({ kind: "resolve", hostname }, 8_000);
+      const parsed = await invokeFetcherWithProcessRecovery({ kind: "resolve", hostname }, 8_000);
       if (!Array.isArray(parsed.addresses) || !parsed.addresses.every((value) => typeof value === "string")) {
         throw new FetchBoundaryError("HTTP_STATUS", "fetcher sidecar returned invalid DNS data");
       }
       return parsed.addresses;
     },
     async request(plan) {
-      const parsed = await invokeFetcher(
+      const parsed = await invokeFetcherAttempt(
         { kind: "request", plan },
         Math.max(1, (plan.deadlineAtMs ?? Date.now() + plan.timeoutMs) - Date.now())
       );

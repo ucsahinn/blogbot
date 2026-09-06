@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -9,6 +9,7 @@ import {
   resolveCodexRole,
   type CodexTaskKind
 } from "../../apps/codex-runner/src/role-policy.ts";
+import { createBobyGuideTask } from "../../apps/codex-runner/src/boby-guide-task.ts";
 import {
   buildCodexExecArgs,
   CodexRunnerError,
@@ -24,8 +25,10 @@ import {
 } from "../../apps/codex-runner/src/cli-port.ts";
 import { createMockStructuredCodexPort } from "../../apps/codex-runner/src/mock-port.ts";
 import { createDraftCodexTaskResolver } from "../../apps/engine/src/codex-draft.ts";
+import { createOwnedTempRoot } from "../helpers/owned-temp-root.ts";
 
 const isolatedCodexHome = join(tmpdir(), "blogbot-isolated-codex-home");
+test.after(() => rm(isolatedCodexHome, { recursive: true, force: true }));
 
 const expectedRoles: ReadonlyArray<
   readonly [CodexTaskKind, "FAST" | "DEFAULT" | "DEEP_REVIEW", string]
@@ -215,7 +218,9 @@ test("Codex CLI port uses an isolated cwd, allowlisted environment, and final ou
       fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url))
     ],
     codexHome: isolatedCodexHome,
-    timeoutMs: 5_000,
+    // This test validates process isolation and output handling, not timing.
+    // Keep its fake child bounded without coupling it to unrelated suite load.
+    timeoutMs: 30_000,
     onSpawn: (observation) => seen.push(observation)
   });
 
@@ -251,14 +256,15 @@ test("Codex CLI port uses an isolated cwd, allowlisted environment, and final ou
   );
 });
 
-test("Codex CLI 0.147 runs when all required capabilities are present", async () => {
+test("Codex CLI 0.147 runs when all required capabilities are present", async (t) => {
+  const { path: codexHome } = await createOwnedTempRoot(t, "blogbot-codex-legacy-compatible-version-");
   const port = createCodexCliPort({
     command: process.execPath,
     commandPrefixArgs: [
       fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
       "--unsupported-version"
     ],
-    codexHome: await mkdtemp(join(tmpdir(), "blogbot-codex-legacy-compatible-version-")),
+    codexHome,
     timeoutMs: 5_000
   });
   const events = [];
@@ -268,14 +274,15 @@ test("Codex CLI 0.147 runs when all required capabilities are present", async ()
   assert.ok(events.some((event) => event.type === "output.completed"));
 });
 
-test("Codex CLI 0.146 remains rejected even when probe output looks otherwise compatible", async () => {
+test("Codex CLI 0.146 remains rejected even when probe output looks otherwise compatible", async (t) => {
+  const { path: codexHome } = await createOwnedTempRoot(t, "blogbot-codex-too-old-version-");
   const port = createCodexCliPort({
     command: process.execPath,
     commandPrefixArgs: [
       fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
       "--too-old-version"
     ],
-    codexHome: await mkdtemp(join(tmpdir(), "blogbot-codex-too-old-version-")),
+    codexHome,
     timeoutMs: 5_000
   });
   await assert.rejects(async () => {
@@ -285,14 +292,15 @@ test("Codex CLI 0.146 remains rejected even when probe output looks otherwise co
   }, (error: unknown) => error instanceof CodexCliPortError && error.code === "UNSUPPORTED_CLI");
 });
 
-test("Codex CLI startup rejects a runtime missing a required disable capability", async () => {
+test("Codex CLI startup rejects a runtime missing a required disable capability", async (t) => {
+  const { path: codexHome } = await createOwnedTempRoot(t, "blogbot-codex-missing-feature-");
   const port = createCodexCliPort({
     command: process.execPath,
     commandPrefixArgs: [
       fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
       "--missing-shell-feature"
     ],
-    codexHome: await mkdtemp(join(tmpdir(), "blogbot-codex-missing-feature-")),
+    codexHome,
     timeoutMs: 5_000
   });
   await assert.rejects(async () => {
@@ -302,8 +310,8 @@ test("Codex CLI startup rejects a runtime missing a required disable capability"
   }, (error: unknown) => error instanceof CodexCliPortError && error.code === "UNSUPPORTED_CLI");
 });
 
-test("session retention deletes only stale app-owned JSONL and resumes a recent UUID", async () => {
-  const retentionRoot = await mkdtemp(join(tmpdir(), "blogbot-codex-session-retention-"));
+test("session retention deletes only stale app-owned JSONL and resumes a recent UUID", async (t) => {
+  const { path: retentionRoot } = await createOwnedTempRoot(t, "blogbot-codex-session-retention-");
   const codexHome = join(retentionRoot, "app-owned-codex-home");
   const sessionDirectory = join(codexHome, "sessions", "2026", "08", "20");
   await mkdir(sessionDirectory, { recursive: true });
@@ -371,8 +379,8 @@ test("session retention deletes only stale app-owned JSONL and resumes a recent 
   assert.ok(currentArgs.includes(currentId));
 });
 
-test("a new persistent session evicts the oldest app-owned record before reaching the count bound", async () => {
-  const codexHome = await mkdtemp(join(tmpdir(), "blogbot-codex-session-count-"));
+test("a new persistent session evicts the oldest app-owned record before reaching the count bound", async (t) => {
+  const { path: codexHome } = await createOwnedTempRoot(t, "blogbot-codex-session-count-");
   const sessionDirectory = join(codexHome, "sessions", "2026", "08", "20");
   await mkdir(sessionDirectory, { recursive: true });
   let oldestPath = "";
@@ -411,6 +419,27 @@ test("optional live Codex probe completes the production draft contract with syn
 }, async () => {
   const appData = process.env.APPDATA;
   assert.ok(appData, "APPDATA is required for the application-owned Codex home");
+  const syntheticEvidence = [
+    "On 1 September 2026, the fictional Sampletown Community Library hosted a three-hour offline resilience drill called Local Link.",
+    "The exercise began at 09:00 and ended at 12:00; it simulated a municipal internet outage and did not interrupt any real public service.",
+    "Forty-eight registered volunteers took part alongside twelve staff members from the library, a community clinic, a fire station and the municipal information desk.",
+    "Organizers divided participants into four teams responsible for public notices, welfare checks, supply requests and incident records.",
+    "Each team received the same printed scenario, a paper contact tree, blank incident forms and a battery-powered local-network terminal.",
+    "The drill tested whether essential messages could move between the four locations without cloud services, mobile data or personal email accounts.",
+    "Staff recorded 126 simulated messages, of which 119 reached the intended desk within the exercise's fifteen-minute target.",
+    "Seven messages missed the target: four used an outdated desk code, two were duplicated during a shift change and one form lacked a destination.",
+    "No message was lost permanently, and the delayed items were identified during the scheduled reconciliation at 10:30.",
+    "The paper process was slower than the local-network terminal but remained usable when the terminal battery was deliberately removed for twenty minutes.",
+    "Observers noted that large-print desk codes helped participants find the correct destination, while handwritten timestamps were sometimes difficult to read.",
+    "The clinic team completed every simulated medicine-cooling status check, and the fire-station team acknowledged every priority welfare request.",
+    "The exercise did not collect patient records, real addresses, credentials or private contact details; all names, locations and message contents were synthetic.",
+    "At the closing review, participants asked for color-coded forms, a clearer duplicate-message rule and a second battery pack for each terminal.",
+    "Organizers accepted all three recommendations and assigned the library operations lead to publish a revised paper kit by 15 September 2026.",
+    "A follow-up tabletop exercise was scheduled for 6 October 2026 to check the revised desk codes and the new handover procedure.",
+    "The organizers described the result as a limited process test, not proof that Sampletown could manage a real emergency or a longer outage.",
+    "They said the most useful finding was that reconciliation caught every delayed message, while the main weakness was inconsistent form labeling.",
+    "The published drill record contains only aggregate counts and synthetic examples so that the exercise can be reviewed without exposing personal data."
+  ].join(" ");
   const task = await createDraftCodexTaskResolver().resolve({
     jobId: "synthetic-contract-probe",
     idempotencyKey: "synthetic-contract-probe",
@@ -418,7 +447,7 @@ test("optional live Codex probe completes the production draft contract with syn
     state: "RUNNING",
     version: 1,
     payload: {
-      instruction: "Write a short original report about a synthetic local event.",
+      instruction: "Write a complete original report about a synthetic local event.",
       candidateTitle: "Synthetic contract probe",
       section: "haberler",
       articleType: "news",
@@ -426,7 +455,7 @@ test("optional live Codex probe completes the production draft contract with syn
         id: "synthetic-source-1",
         title: "Synthetic evidence",
         url: "https://example.invalid/synthetic",
-        excerpt: "This is deliberately synthetic evidence used only to validate the local output contract.",
+        excerpt: syntheticEvidence,
         quoteHash: "0".repeat(64)
       }]
     }
@@ -440,6 +469,68 @@ test("optional live Codex probe completes the production draft contract with syn
   // Do not log generated article content. The result proves only that the
   // production schema, isolated runner and parser interoperate.
   assert.equal(result.status, "COMPLETED");
+});
+
+test("optional live Luna probe completes the ephemeral Boby guidance contract", {
+  skip: process.env.BLOGBOT_LIVE_BOBY_PROBE !== "1"
+}, async () => {
+  const appData = process.env.APPDATA;
+  assert.ok(appData, "APPDATA is required for the application-owned Codex home");
+  const task = createBobyGuideTask({
+    question: "Yeni bir kaynağı güvenli biçimde incelemeye nereden başlamalıyım?",
+    activePage: "content",
+    runtimeState: "ONLINE",
+    safeWorkspaceSummary: { draftCount: 0, reviewCount: 0, sourceCount: 0 }
+  });
+  const port = createCodexCliPort({
+    command: process.env.BLOGBOT_LIVE_CODEX_COMMAND ?? "codex.cmd",
+    codexHome: join(appData, "app.blogbot.desktop", "codex-home"),
+    timeoutMs: 120_000
+  });
+  const result = await runStructuredCodexTask(task, port);
+  // The generated guidance text is intentionally not logged. Its validator
+  // proves only that the real Luna route satisfies Boby's closed contract.
+  assert.equal(result.status, "COMPLETED");
+});
+
+test("optional live Codex failure probe keeps an empty app-owned home unauthenticated", {
+  skip: process.env.BLOGBOT_LIVE_CODEX_FAILURE_PROBES !== "1"
+}, async () => {
+  const codexHome = await mkdtemp(join(tmpdir(), "blogbot-live-no-auth-"));
+  try {
+    const port = createCodexCliPort({ command: "codex.cmd", codexHome, timeoutMs: 30_000 });
+    const result = await runStructuredCodexTask(createBobyGuideTask({
+      question: "Kaynak eklemeye nereden başlamalıyım?",
+      activePage: "content",
+      runtimeState: "ONLINE",
+      safeWorkspaceSummary: { draftCount: 0, reviewCount: 0, sourceCount: 0 }
+    }), port);
+    assert.equal(result.status, "WAITING_CODEX");
+    if (result.status === "WAITING_CODEX") assert.equal(result.reason, "AUTH_REQUIRED");
+  } finally {
+    await rm(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("optional live Codex failure probe enforces the actual Luna process deadline", {
+  skip: process.env.BLOGBOT_LIVE_CODEX_FAILURE_PROBES !== "1"
+}, async () => {
+  const appData = process.env.APPDATA;
+  assert.ok(appData, "APPDATA is required for the application-owned Codex home");
+  const port = createCodexCliPort({
+    command: "codex.cmd",
+    codexHome: join(appData, "app.blogbot.desktop", "codex-home"),
+    timeoutMs: 1_000
+  });
+  await assert.rejects(
+    runStructuredCodexTask(createBobyGuideTask({
+      question: "Kaynak eklemeye nereden başlamalıyım?",
+      activePage: "content",
+      runtimeState: "ONLINE",
+      safeWorkspaceSummary: { draftCount: 0, reviewCount: 0, sourceCount: 0 }
+    }), port),
+    (error: unknown) => error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
+  );
 });
 
 test("production draft schema keeps every closed claim property required", async () => {
@@ -457,12 +548,20 @@ test("production draft schema keeps every closed claim property required", async
   ]);
 });
 
-test("Windows command wrappers cannot keep a timed-out Codex task running", { skip: process.platform !== "win32" }, async () => {
-  const timeoutCodexHome = await mkdtemp(join(tmpdir(), "blogbot-isolated-codex-home-timeout-"));
+test("Windows command wrappers cannot keep a timed-out Codex task running", {
+  skip: process.platform !== "win32",
+  timeout: 30_000
+}, async (t) => {
+  const { path: timeoutCodexHome } = await createOwnedTempRoot(t, "blogbot-isolated-codex-home-timeout-");
+  let signalTaskSpawn: (() => void) | undefined;
+  const taskSpawned = new Promise<void>((resolve) => {
+    signalTaskSpawn = resolve;
+  });
   const port = createCodexCliPort({
     command: fileURLToPath(new URL("../fixtures/fake-codex-wrapper.cmd", import.meta.url)),
     commandPrefixArgs: ["--hang"],
     codexHome: timeoutCodexHome,
+    onSpawn: () => signalTaskSpawn?.(),
     // Node's test runner executes the integration files concurrently on
     // Windows. Give the fixture enough cold-start time to publish its exact
     // PID before the intentionally bounded timeout fires; the assertion still
@@ -479,6 +578,13 @@ test("Windows command wrappers cannot keep a timed-out Codex task running", { sk
     }
   };
 
+  const consumption = consume();
+  const completionBeforeSpawn = consumption.then(
+    () => Promise.reject(new Error("Codex caller completed before the task process spawned")),
+    (error: unknown) => Promise.reject(error)
+  );
+  await Promise.race([taskSpawned, completionBeforeSpawn]);
+
   let watchdog: NodeJS.Timeout | undefined;
   const callerReleaseGuard = new Promise<never>((_resolve, reject) => {
     watchdog = setTimeout(() => reject(new Error("timeout did not release the Codex caller")), 10_000);
@@ -486,7 +592,7 @@ test("Windows command wrappers cannot keep a timed-out Codex task running", { sk
   });
   try {
     await assert.rejects(
-      Promise.race([consume(), callerReleaseGuard]),
+      Promise.race([consumption, callerReleaseGuard]),
       (error: unknown) =>
         error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
     );
@@ -542,6 +648,7 @@ test("a chatty Codex stream cannot postpone the execution deadline", async () =>
     (error: unknown) =>
       error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
   );
+
 });
 
 test("the bounded capability probe budget is independent from the task execution deadline", async () => {
@@ -549,7 +656,7 @@ test("the bounded capability probe budget is independent from the task execution
     command: process.execPath,
     commandPrefixArgs: [
       fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
-      "--slow-capability-probe",
+      "--capability-probe-delay-ms=5500",
       "--heartbeat"
     ],
     codexHome: isolatedCodexHome,
@@ -563,13 +670,14 @@ test("the bounded capability probe budget is independent from the task execution
         input: {},
         outputSchema: { type: "object" }
       })) {
-        // The startup probe may take longer than this task's execution budget,
+        // The startup probe may take longer than both five seconds and this task's execution budget,
         // but the heartbeat task itself must still time out after one second.
       }
     },
     (error: unknown) =>
       error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
   );
+
 });
 
 test("a transient capability probe failure is not cached across a later user retry", async () => {
@@ -612,7 +720,7 @@ test("a transient capability probe failure is not cached across a later user ret
   }
 });
 
-test("concurrent capability probes with different bounded budgets do not share a timeout", async () => {
+test("concurrent capability probes share one bounded startup budget independent from task deadlines", async () => {
   const commandPrefixArgs = [
     fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
     "--capability-probe-delay-ms=5500"
@@ -621,7 +729,7 @@ test("concurrent capability probes with different bounded budgets do not share a
     command: process.execPath,
     commandPrefixArgs,
     codexHome: isolatedCodexHome,
-    timeoutMs: 1_000
+    timeoutMs: 5_000
   });
   const longPort = createCodexCliPort({
     command: process.execPath,
@@ -630,14 +738,13 @@ test("concurrent capability probes with different bounded budgets do not share a
     timeoutMs: 10_000
   });
 
-  const shortRun = assert.rejects(
-    async () => {
-      for await (const _event of shortPort.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
-        // The normalized five-second startup budget is intentionally too short.
-      }
-    },
-    (error: unknown) => error instanceof CodexCliPortError && error.code === "UNSUPPORTED_CLI"
-  );
+  const shortRun = (async () => {
+    const events = [];
+    for await (const event of shortPort.run({ model: "gpt-5.6-luna", input: {}, outputSchema: { type: "object" } })) {
+      events.push(event);
+    }
+    assert.ok(events.some((event) => event.type === "output.completed"));
+  })();
   await new Promise((resolve) => setTimeout(resolve, 100));
   const longRun = (async () => {
     const events = [];
@@ -649,8 +756,8 @@ test("concurrent capability probes with different bounded budgets do not share a
   await Promise.all([shortRun, longRun]);
 });
 
-test("a deadline that fires after the JSONL stream closes is still reported as a timeout", async () => {
-  const codexHome = await mkdtemp(join(tmpdir(), "blogbot-isolated-codex-home-linger-"));
+test("a deadline that fires after the JSONL stream closes is still reported as a timeout", async (t) => {
+  const { path: codexHome } = await createOwnedTempRoot(t, "blogbot-isolated-codex-home-linger-");
   // This is the Windows wrapper shape: the reported child closes stdout at once
   // while the process it launched lingers, so the deadline fires while the exit
   // status is still awaited rather than during iteration.
@@ -679,6 +786,15 @@ test("a deadline that fires after the JSONL stream closes is still reported as a
     (error: unknown) =>
       error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
   );
+
+  const cleanupDeadline = Date.now() + 2_000;
+  let taskDirectories: string[];
+  do {
+    taskDirectories = (await readdir(codexHome)).filter((entry) => entry.startsWith("task-"));
+    if (taskDirectories.length === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < cleanupDeadline);
+  assert.deepEqual(taskDirectories, [], "timed-out app-owned task directories must be removed");
 });
 
 test("deploy-time model policy can change a logical role without changing task routing", () => {
@@ -777,6 +893,97 @@ test("turns a Codex error event into a terminal runner failure instead of treati
       error.message.includes("invalid output schema")
   );
 });
+test("normalizes provider waiting errors into typed waiting contracts", async () => {
+  const cases = [
+    ["401 Unauthorized", "AUTH_REQUIRED"],
+    ["429 Too Many Requests", "RATE_LIMIT"],
+    ["usage quota exhausted", "USAGE_LIMIT"]
+  ] as const;
+
+  for (const [message, expectedReason] of cases) {
+    const result = await runStructuredCodexTask(
+      {
+        taskKind: "RESEARCH",
+        input: {},
+        outputSchema: { type: "object" },
+        validateOutput: (_value): _value is Record<string, never> => true
+      },
+      createMockStructuredCodexPort([{ type: "error", message }])
+    );
+    assert.equal(result.status, "WAITING_CODEX");
+    if (result.status === "WAITING_CODEX") assert.equal(result.reason, expectedReason);
+  }
+});
+
+test("does not classify an unrelated author validation error as authentication", async () => {
+  await assert.rejects(
+    runStructuredCodexTask(
+      {
+        taskKind: "RESEARCH",
+        input: {},
+        outputSchema: { type: "object" },
+        validateOutput: (_value): _value is Record<string, never> => true
+      },
+      createMockStructuredCodexPort([
+        { type: "error", message: "invalid author field in output schema" }
+      ])
+    ),
+    (error: unknown) =>
+      error instanceof CodexRunnerError &&
+      error.code === "PROCESS_FAILED" &&
+      error.message.includes("invalid author field")
+  );
+});
+
+test("a real CLI failure does not classify an unrelated author validation error as authentication", async () => {
+  const port = createCodexCliPort({
+    command: process.execPath,
+    commandPrefixArgs: [
+      fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
+      "--author-validation-failure"
+    ],
+    codexHome: isolatedCodexHome,
+    timeoutMs: 5_000
+  });
+
+  await assert.rejects(
+    async () => {
+      for await (const _event of port.run({
+        model: "gpt-5.6-luna",
+        input: {},
+        outputSchema: { type: "object" }
+      })) {
+        // Consume the stream so the non-zero CLI exit is classified.
+      }
+    },
+    (error: unknown) =>
+      error instanceof CodexCliPortError &&
+      error.code === "PROCESS_FAILED" &&
+      error.message.includes("invalid author field")
+  );
+});
+
+test("a real CLI authentication failure still yields the typed waiting event", async () => {
+  const port = createCodexCliPort({
+    command: process.execPath,
+    commandPrefixArgs: [
+      fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
+      "--authentication-failure"
+    ],
+    codexHome: isolatedCodexHome,
+    timeoutMs: 5_000
+  });
+  const events = [];
+  for await (const event of port.run({
+    model: "gpt-5.6-luna",
+    input: {},
+    outputSchema: { type: "object" }
+  })) {
+    events.push(event);
+  }
+  assert.deepEqual(events, [{ type: "auth.required" }]);
+});
+
 test("rejects unknown lifecycle events instead of silently accepting protocol drift", async () => {
   await assert.rejects(
     runStructuredCodexTask(
@@ -791,6 +998,19 @@ test("rejects unknown lifecycle events instead of silently accepting protocol dr
     (error: unknown) =>
       error instanceof CodexRunnerError && error.code === "DENIED_EVENT"
   );
+});
+
+test("prototype property names are denied as unknown Codex events", async () => {
+  for (const type of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
+    await assert.rejects(
+      runStructuredCodexTask({
+        taskKind: "CLASSIFY", input: {}, outputSchema: {},
+        validateOutput: (value): value is object => typeof value === "object"
+      }, createMockStructuredCodexPort([{ type }])),
+      (error: unknown) => error instanceof CodexRunnerError && error.code === "DENIED_EVENT",
+      type
+    );
+  }
 });
 
 test("rejects oversized final output files before parsing them", async () => {
@@ -880,8 +1100,8 @@ test("keeps paid API fallback hard-off even when a caller requests it", async ()
   );
 });
 
-test("a Codex runtime that dies before draining the prompt cannot crash the engine sidecar", async () => {
-  const codexHome = await mkdtemp(join(tmpdir(), "blogbot-isolated-codex-home-epipe-"));
+test("a Codex runtime that dies before draining the prompt cannot crash the engine sidecar", async (t) => {
+  const { path: codexHome } = await createOwnedTempRoot(t, "blogbot-isolated-codex-home-epipe-");
   const port = createCodexCliPort({
     command: process.execPath,
     commandPrefixArgs: [
@@ -975,4 +1195,53 @@ test("an unsafe command prefix cannot re-attach the user Codex configuration", (
   }
   assert.equal(hasUnsafeCommandPrefixArgs(["exec", "--json"]), false);
   assert.equal(hasUnsafeCommandPrefixArgs(undefined), false);
+});
+test("a bare Windows codex.cmd resolves its npm entry without corrupting config arguments", { skip: process.platform !== "win32" }, async () => {
+  const shimDirectory = await mkdtemp(join(tmpdir(), "blogbot-codex-path-shim-"));
+  const codexHome = await mkdtemp(join(tmpdir(), "blogbot-codex-path-home-"));
+  const capturePath = join(shimDirectory, "captured-argv.json");
+  const codexBinDirectory = join(shimDirectory, "node_modules", "@openai", "codex", "bin");
+  const previousPath = process.env.PATH;
+  try {
+    await mkdir(codexBinDirectory, { recursive: true });
+    await copyFile(
+      fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url)),
+      join(codexBinDirectory, "codex.js")
+    );
+    await writeFile(
+      join(shimDirectory, "codex.cmd"),
+      "@node \"%~dp0node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n",
+      "utf8"
+    );
+    process.env.PATH = previousPath
+      ? `${shimDirectory}${delimiter}${previousPath}`
+      : shimDirectory;
+
+    const port = createCodexCliPort({
+      command: "codex.cmd",
+      commandPrefixArgs: [`--capture-argv=${capturePath}`],
+      codexHome,
+      timeoutMs: 5_000
+    });
+    for await (const _event of port.run({
+      model: "gpt-5.6-luna",
+      input: {},
+      outputSchema: { type: "object" }
+    })) {
+      // Consume the fake task.
+    }
+
+    const capturedArgs = JSON.parse(await readFile(capturePath, "utf8")) as string[];
+    const configValues = capturedArgs.flatMap((argument, index) =>
+      argument === "-c" ? [capturedArgs[index + 1]] : []
+    );
+    assert.ok(configValues.includes("mcp_servers={}"));
+    assert.ok(configValues.includes("tools.web_search=false"));
+    assert.equal(configValues.some((value) => value?.startsWith('"')), false);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    await rm(shimDirectory, { recursive: true, force: true });
+    await rm(codexHome, { recursive: true, force: true });
+  }
 });

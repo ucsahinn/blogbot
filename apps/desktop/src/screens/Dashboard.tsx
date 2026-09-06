@@ -16,6 +16,7 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState("");
   const summary = summarizeWorkspace(workspace);
+  const offline = snapshot.runtime === "OFFLINE_READ_ONLY";
   const primaryToday = workspace.today.find((item) => item.state !== "DONE") ?? workspace.today[0];
   const formatTime = (value: string) => {
     const date = new Date(value);
@@ -118,22 +119,29 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
       </div>
 
       <section className="status-strip" aria-label="Sistem durumu">
-        <div className="status-primary">
+        <div className={`status-primary${offline ? " is-waiting" : ""}`}>
           <span className="status-orbit" aria-hidden="true">
             <span />
           </span>
           <div>
-            <small>OTOMASYON</small>
+            <small>{offline ? "OTOMASYON AYARI" : "OTOMASYON"}</small>
             <strong>
-              {snapshot.automation.mode === "PUBLISH_APPROVED"
-                ? "Onaylı yayın etkin"
-                : snapshot.automation.mode === "DRAFT_ONLY"
-                  ? "Taslak üretimi etkin"
-                  : "Kaynak izleme etkin"}
+              {offline
+                ? snapshot.automation.mode === "PUBLISH_APPROVED"
+                  ? "Yayın modu yapılandırıldı"
+                  : snapshot.automation.mode === "DRAFT_ONLY"
+                    ? "Taslak modu yapılandırıldı"
+                    : "Kaynak izleme modu yapılandırıldı"
+                : snapshot.automation.mode === "PUBLISH_APPROVED"
+                  ? "Onaylı yayın etkin"
+                  : snapshot.automation.mode === "DRAFT_ONLY"
+                    ? "Taslak üretimi etkin"
+                    : "Kaynak izleme etkin"}
             </strong>
             <p>
-              Sonraki tarama {formatTime(snapshot.automation.nextScanAt)} ·{" "}
-              {snapshot.sourceCount} kaynak · İstanbul saati
+              {offline
+                ? `Yerel motor bağlanınca işler güvenli kuyruktan devam edecek · ${snapshot.sourceCount} kaynak`
+                : <>Sonraki tarama {formatTime(snapshot.automation.nextScanAt)} ·{" "}{snapshot.sourceCount} kaynak · İstanbul saati</>}
             </p>
           </div>
         </div>
@@ -154,15 +162,17 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
         </div>
         <div className="compact-status">
           <span
-            className={`status-dot ${snapshot.codex.state === "READY" ? "status-online" : "status-degraded"}`}
+            className={`status-dot ${!offline && snapshot.codex.state === "READY" ? "status-online" : "status-degraded"}`}
             aria-hidden="true"
           />
           <div>
             <small>YAZI ÜRETİMİ</small>
             <strong>
-              {codexRuntimeLabel(snapshot.codex.state)}
+              {offline ? "Bağlantı bekleniyor" : codexRuntimeLabel(snapshot.codex.state)}
             </strong>
-            <p>{snapshot.codex.queueDepth} iş sırada · güvenli çalışma alanı</p>
+            <p>{offline
+              ? "İş kuyruğu korunuyor · yerel motor bekleniyor"
+              : `${snapshot.codex.queueDepth} iş sırada · güvenli çalışma alanı`}</p>
           </div>
         </div>
       </section>

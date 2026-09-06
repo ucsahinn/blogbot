@@ -24,8 +24,8 @@ fn main() -> Result<(), String> {
     io::stdin()
         .read_to_string(&mut input)
         .map_err(|_| "RESTORE_INPUT_UNAVAILABLE".to_string())?;
-    let request: RestoreRequest = serde_json::from_str(&input)
-        .map_err(|_| "RESTORE_INPUT_INVALID".to_string())?;
+    let request: RestoreRequest =
+        serde_json::from_str(&input).map_err(|_| "RESTORE_INPUT_INVALID".to_string())?;
     if request.files.is_empty() || request.files.len() > 256 {
         return Err("RESTORE_INPUT_INVALID".into());
     }

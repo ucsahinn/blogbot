@@ -802,8 +802,8 @@ pub fn pick_local_folder(
             use windows::Win32::Foundation::HWND;
             use windows::Win32::System::Com::CoTaskMemFree;
             use windows::Win32::UI::Shell::{
-                SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE,
-                BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+                SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS,
+                BROWSEINFOW,
             };
 
             let title: Vec<u16> = "OPE için bir proje klasörü seçin"
@@ -899,23 +899,10 @@ fn test_setup_connector_with_grants(
             "unknown setup connector field".into(),
         ));
     }
-    let serialized = serde_json::to_string(&config)
-        .map_err(|error| CommandError::InvalidInput(error.to_string()))?
-        .to_ascii_lowercase();
-    for forbidden in [
-        "token",
-        "password",
-        "privatekey",
-        "private_key",
-        "secret",
-        "credential",
-    ] {
-        if serialized.contains(forbidden) {
-            return Err(CommandError::InvalidInput(
-                "secret or credential fields are not accepted by setup".into(),
-            ));
-        }
-    }
+    // The field allowlist above is the credential boundary. Inspecting public
+    // values for words such as "secret" or "password" rejects valid repository
+    // names without adding protection: an actual credential requires an
+    // unapproved field, which already fails closed.
     let text = |key: &str| config.get(key).and_then(Value::as_str).map(str::trim);
     let site_mode = text("mode").unwrap_or("LOCAL_ONLY");
     let missing = match connector.as_str() {
@@ -962,10 +949,10 @@ fn test_setup_connector_with_grants(
             let owner = text("owner").unwrap_or_default();
             let repository = text("repository").unwrap_or_default();
             let client_id = text("clientId").unwrap_or_default();
-            (!valid_github_segment(owner)
+            (!valid_github_owner(owner)
                 || !valid_github_segment(repository)
                 || crate::github_broker::validate_client_id(client_id).is_err())
-            .then_some("GitHub sahibi, depo adı veya OAuth clientId alanı güvenli değil.")
+            .then_some("GitHub sahibi, depo adı veya GitHub App clientId alanı güvenli değil.")
         }
         "site" => {
             let path = text("repositoryPath").unwrap_or_default();
@@ -981,8 +968,7 @@ fn test_setup_connector_with_grants(
                     json!({"connector": connector, "ready": false, "state": "ATTENTION", "detail": "Yayın biçiminde public adres gerekir; yerel biçimlerde boş bırakılabilir."}),
                 );
             }
-            let valid_public_url =
-                site.is_empty() || (site.starts_with("https://") && site.len() <= 2048);
+            let valid_public_url = site.is_empty() || canonical_public_site_origin(site).is_some();
             if !is_local_path(path) || !Path::new(path).is_dir() || !valid_public_url {
                 Some("Site klasörü mevcut bir yerel klasör olmalı. Public adres yayın aşamasında eklenebilir ve https:// ile başlamalıdır.")
             } else if mode == "LOCAL_ONLY" {
@@ -1002,10 +988,7 @@ fn test_setup_connector_with_grants(
             }
         }
         "deploy" => {
-            let workflow_invalid = !text("workflowName")
-                .unwrap_or_default()
-                .chars()
-                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | '.'));
+            let workflow_invalid = !valid_github_workflow(text("workflowName").unwrap_or_default());
             if workflow_invalid {
                 Some("Workflow adı yalnız harf, sayı, tire, alt çizgi ve nokta içerebilir.")
             } else if !valid_required_github_checks(config.get("requiredChecks")) {
@@ -1069,15 +1052,7 @@ fn test_setup_connector_with_grants(
 }
 
 fn valid_github_workflow(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 120
-        && !value.contains("..")
-        && (value.ends_with(".yml") || value.ends_with(".yaml"))
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
-        && !value.starts_with('/')
-        && !value.contains("//")
+    crate::secure_store::valid_github_workflow_name(value)
 }
 
 fn valid_required_github_checks(value: Option<&Value>) -> bool {
@@ -1112,7 +1087,7 @@ fn github_preview_payload(
     let mut segments = repository.split('/');
     let owner = segments.next().unwrap_or_default();
     let repo = segments.next().unwrap_or_default();
-    if segments.next().is_some() || !valid_github_segment(owner) || !valid_github_segment(repo) {
+    if segments.next().is_some() || !valid_github_owner(owner) || !valid_github_segment(repo) {
         return Err(CommandError::InvalidInput(
             "GitHub repository must be owner/name".into(),
         ));
@@ -1134,7 +1109,7 @@ fn github_preview_payload(
         "workflow": workflow,
         "revisionId": revision_id,
         "revisionHash": revision_hash,
-        "steps": ["validate-scope", "preview-pull-request", "record-intent"]
+        "steps": ["validate-github-app-permissions", "preview-pull-request", "record-intent"]
     }))
 }
 
@@ -1170,9 +1145,11 @@ pub fn github_device_flow_start(
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
     let client_id = github_client_id(&bridge)?;
+    let repository = configured_github_repository(&bridge)
+        .ok_or_else(|| CommandError::InvalidInput("GitHub repository is not configured".into()))?;
     let result = state
         .github_broker
-        .begin_device_authorization(&client_id)
+        .begin_device_authorization(&client_id, &repository)
         .map_err(CommandError::EngineUnavailable)?;
     serde_json::to_value(result).map_err(|_| CommandError::StateUnavailable)
 }
@@ -1206,8 +1183,18 @@ pub fn github_device_flow_clear(
 #[tauri::command(async)]
 pub fn github_device_flow_status(
     state: tauri::State<'_, DesktopState>,
+    bridge: tauri::State<'_, EngineBridge>,
     app: tauri::AppHandle,
 ) -> Result<Value, CommandError> {
+    if github_client_id(&bridge).is_err() || configured_github_repository(&bridge).is_none() {
+        return Ok(json!({
+            "status": "unconfigured",
+            "writes": false,
+            "network": false,
+            "detail": "GitHub App istemci kimliği ve hedef depo kaydedilmedi; gerçek giriş ve yayın kapalı tutuluyor."
+        }));
+    }
+
     serde_json::to_value(
         state
             .github_broker
@@ -1225,7 +1212,7 @@ pub fn github_validate_repository(
     let owner = owner.trim();
     let repository = repository.trim();
     let workflow = workflow.trim();
-    if !valid_github_segment(owner)
+    if !valid_github_owner(owner)
         || !valid_github_segment(repository)
         || !valid_github_workflow(workflow)
     {
@@ -1249,24 +1236,14 @@ pub fn github_validate_repository(
 /// Branch names are interpolated into GitHub API paths, so the grammar stays
 /// deliberately narrow.
 fn valid_github_branch(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 255
-        && value == value.trim()
-        && !value.starts_with('/')
-        && !value.ends_with('/')
-        && !value.contains("..")
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+    crate::secure_store::valid_github_branch_name(value)
 }
 
 fn valid_git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn require_github_publication_readiness(
-    readiness: Result<(), String>,
-) -> Result<(), CommandError> {
+fn require_github_publication_readiness(readiness: Result<(), String>) -> Result<(), CommandError> {
     readiness.map_err(CommandError::EngineUnavailable)
 }
 
@@ -1313,8 +1290,12 @@ pub fn github_capture_base_sha(
 ) -> Result<Value, CommandError> {
     let owner = owner.trim().to_string();
     let repository = repository.trim().to_string();
-    let branch = if branch.trim().is_empty() { "main".to_string() } else { branch.trim().to_string() };
-    if !valid_github_segment(&owner) || !valid_github_segment(&repository) {
+    let branch = if branch.trim().is_empty() {
+        "main".to_string()
+    } else {
+        branch.trim().to_string()
+    };
+    if !valid_github_owner(&owner) || !valid_github_segment(&repository) {
         return Err(CommandError::InvalidInput(
             "GitHub depo adı güvenli değil.".into(),
         ));
@@ -1325,7 +1306,11 @@ pub fn github_capture_base_sha(
         ));
     }
     let token_path = github_token_path(&app)?;
-    if let Err(reason) = state.github_broker.publication_readiness(&token_path) {
+    let slug = format!("{owner}/{repository}");
+    if let Err(reason) = state
+        .github_broker
+        .publication_readiness(&token_path, &slug)
+    {
         // Fail closed: never report a captured base SHA without a real read.
         return Ok(json!({
             "captured": false,
@@ -1333,7 +1318,6 @@ pub fn github_capture_base_sha(
             "detail": "Temel SHA okumak için GitHub yetkilendirmesi gerekir."
         }));
     }
-    let slug = format!("{owner}/{repository}");
     let base_sha = state
         .github_broker
         .base_sha(&token_path, &slug, &branch)
@@ -1344,13 +1328,7 @@ pub fn github_capture_base_sha(
         ));
     }
     mutate_engine_local_state(&bridge, "desktop.connectors", |connectors| {
-        update_github_base_sha_state(
-            connectors,
-            &owner,
-            &repository,
-            &branch,
-            &base_sha,
-        )
+        update_github_base_sha_state(connectors, &owner, &repository, &branch, &base_sha)
     })?;
     Ok(github_base_sha_capture_result(&slug, &branch, &base_sha))
 }
@@ -1375,32 +1353,38 @@ fn site_adapter_dry_run(path: &str) -> Result<Value, &'static str> {
         return Err("Bu klasörde desteklenen Astro site dosyaları bulunamadı. Farklı bir site türü için ayrı adaptör gerekir.");
     }
     let root = Path::new(path);
-    if !root.join("src").is_dir() {
+    if !crate::secure_preview_fs::directory_exists(root, "src") {
         return Err("Astro sitesi için src klasörü bulunamadı.");
     }
-    if !root.join("src").join("content").is_dir() && !root.join("src").join("pages").is_dir() {
+    let has_content_directory = crate::secure_preview_fs::directory_exists(root, "src/content");
+    let has_pages_directory = crate::secure_preview_fs::directory_exists(root, "src/pages");
+    if !has_content_directory && !has_pages_directory {
         return Err("Astro sitesinde src/content veya src/pages bulunamadı.");
     }
-    let has_content_schema = [
-        root.join("src").join("content.config.ts"),
-        root.join("src").join("content.config.js"),
-        root.join("src").join("content").join("config.ts"),
-        root.join("src").join("content").join("config.js"),
+    let content_schema = [
+        "src/content.config.ts",
+        "src/content.config.js",
+        "src/content/config.ts",
+        "src/content/config.js",
     ]
-    .iter()
-    .any(|candidate| candidate.is_file());
-    if root.join("src").join("content").is_dir() && !has_content_schema {
+    .into_iter()
+    .find(|candidate| crate::secure_preview_fs::regular_file_exists(root, candidate));
+    let has_content_schema = content_schema.is_some();
+    if has_content_directory && !has_content_schema {
         return Err("Astro içerik klasörü bulundu ancak strict içerik şeması bulunamadı; src/content.config.ts veya src/content/config.ts ekleyin.");
     }
-    let files = [
+    let mut files = [
         "astro.config.mjs",
         "astro.config.js",
         "astro.config.ts",
         "package.json",
     ]
     .into_iter()
-    .filter(|candidate| root.join(candidate).is_file())
+    .filter(|candidate| crate::secure_preview_fs::regular_file_exists(root, candidate))
     .collect::<Vec<_>>();
+    if let Some(schema) = content_schema {
+        files.push(schema);
+    }
     Ok(json!({
         "ok": true,
         "adapterId": "astro-generic",
@@ -1415,16 +1399,12 @@ fn site_adapter_dry_run(path: &str) -> Result<Value, &'static str> {
 fn detect_site_format(path: &str) -> Option<&'static str> {
     let root = Path::new(path);
     for name in ["astro.config.mjs", "astro.config.js", "astro.config.ts"] {
-        if root.join(name).is_file() {
+        if crate::secure_preview_fs::regular_file_exists(root, name) {
             return Some("ASTRO");
         }
     }
-    let package = root.join("package.json");
-    let metadata = std::fs::metadata(&package).ok()?;
-    if metadata.len() > 2_000_000 {
-        return None;
-    }
-    let content = std::fs::read_to_string(package).ok()?;
+    let package = crate::secure_preview_fs::read_bounded(root, "package.json", 2_000_000).ok()?;
+    let content = String::from_utf8(package).ok()?;
     if content.contains("\"astro\"") {
         Some("ASTRO")
     } else {
@@ -1433,12 +1413,9 @@ fn detect_site_format(path: &str) -> Option<&'static str> {
 }
 
 fn detect_repository_remote(path: &str) -> Option<String> {
-    let config_path = Path::new(path).join(".git").join("config");
-    let metadata = std::fs::metadata(&config_path).ok()?;
-    if metadata.len() > 64 * 1024 {
-        return None;
-    }
-    let content = std::fs::read_to_string(config_path).ok()?;
+    let root = Path::new(path);
+    let config = crate::secure_preview_fs::read_bounded(root, ".git/config", 64 * 1024).ok()?;
+    let content = String::from_utf8(config).ok()?;
     content
         .lines()
         .map(str::trim)
@@ -1449,10 +1426,10 @@ fn detect_repository_remote(path: &str) -> Option<String> {
 
 fn detect_site_content_model(path: &str) -> &'static str {
     let root = Path::new(path);
-    if root.join("src").join("content").is_dir() {
+    if crate::secure_preview_fs::directory_exists(root, "src/content") {
         "ASTRO_CONTENT_COLLECTION"
-    } else if root.join("lib").join("editorial-content.ts").is_file()
-        || root.join("lib").join("editorial-content.tsx").is_file()
+    } else if crate::secure_preview_fs::regular_file_exists(root, "lib/editorial-content.ts")
+        || crate::secure_preview_fs::regular_file_exists(root, "lib/editorial-content.tsx")
     {
         "TYPESCRIPT_EDITORIAL_DATA"
     } else {
@@ -1469,16 +1446,13 @@ fn validate_local_dev_project(path: &str) -> Result<std::path::PathBuf, CommandE
     }
     let root = std::fs::canonicalize(raw)
         .map_err(|_| CommandError::InvalidInput("yerel proje klasörü bulunamadı".into()))?;
-    if !root.is_dir() || !root.join("package.json").is_file() {
+    if !root.is_dir() || !crate::secure_preview_fs::regular_file_exists(&root, "package.json") {
         return Err(CommandError::InvalidInput(
             "yerel proje klasöründe package.json bulunamadı".into(),
         ));
     }
-    let bytes = std::fs::read(root.join("package.json"))
+    let bytes = crate::secure_preview_fs::read_bounded(&root, "package.json", 2_000_000)
         .map_err(|_| CommandError::InvalidInput("package.json okunamadı".into()))?;
-    if bytes.len() > 2_000_000 {
-        return Err(CommandError::InvalidInput("package.json çok büyük".into()));
-    }
     let package: Value = serde_json::from_slice(&bytes)
         .map_err(|_| CommandError::InvalidInput("package.json geçerli JSON değil".into()))?;
     let has_dev = package
@@ -1666,11 +1640,30 @@ fn stop_local_dev_process(process: &RwLock<Option<Child>>) -> Result<(), Command
     Ok(())
 }
 
+fn canonical_public_site_origin(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 2048 {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
 fn configured_site_origin(connectors: &Value) -> Option<String> {
     connectors
         .pointer("/site/publicSiteUrl")
         .and_then(Value::as_str)
-        .map(|value| value.trim_end_matches('/').to_string())
+        .and_then(canonical_public_site_origin)
 }
 
 fn codex_executable() -> Option<&'static str> {
@@ -1743,7 +1736,9 @@ fn latest_boby_session_id(jobs: &[Value]) -> Option<String> {
             if job.pointer("/metadata/purpose").and_then(Value::as_str) != Some("BOBY_GUIDANCE") {
                 return None;
             }
-            let session_id = job.pointer("/metadata/bobySessionId").and_then(Value::as_str)?;
+            let session_id = job
+                .pointer("/metadata/bobySessionId")
+                .and_then(Value::as_str)?;
             if session_id.is_empty() || session_id.len() > 128 {
                 return None;
             }
@@ -1751,7 +1746,11 @@ fn latest_boby_session_id(jobs: &[Value]) -> Option<String> {
             let timestamp = metadata
                 .and_then(|value| value.get("completedAtUnixMs"))
                 .and_then(Value::as_u64)
-                .or_else(|| metadata.and_then(|value| value.get("createdAtUnixMs")).and_then(Value::as_u64))
+                .or_else(|| {
+                    metadata
+                        .and_then(|value| value.get("createdAtUnixMs"))
+                        .and_then(Value::as_u64)
+                })
                 .unwrap_or(0);
             Some((timestamp, index, session_id.to_string()))
         })
@@ -1760,7 +1759,10 @@ fn latest_boby_session_id(jobs: &[Value]) -> Option<String> {
 }
 
 fn boby_guidance_diagnostic_code(job: &Value) -> Option<&'static str> {
-    match job.pointer("/metadata/codexDiagnosticCode").and_then(Value::as_str) {
+    match job
+        .pointer("/metadata/codexDiagnosticCode")
+        .and_then(Value::as_str)
+    {
         Some("CODEX_PROTOCOL_REJECTED") => Some("CODEX_PROTOCOL_REJECTED"),
         Some("CODEX_OUTPUT_INVALID") => Some("CODEX_OUTPUT_INVALID"),
         Some("CODEX_OUTPUT_MISSING") => Some("CODEX_OUTPUT_MISSING"),
@@ -1951,17 +1953,16 @@ fn safe_legacy_site_connector(value: &Value) -> Option<Value> {
     if !is_local_path(repository_path) || !valid_site_work_mode(mode) {
         return None;
     }
-    let public_site_url = object
+    let raw_public_site_url = object
         .get("publicSiteUrl")
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    if !(public_site_url.is_empty()
-        || public_site_url.starts_with("https://")
-        || public_site_url.starts_with("http://"))
-    {
-        return None;
-    }
+    let public_site_url = if raw_public_site_url.is_empty() {
+        String::new()
+    } else {
+        canonical_public_site_origin(raw_public_site_url)?
+    };
     Some(json!({
         "repositoryPath": repository_path,
         "publicSiteUrl": public_site_url,
@@ -2053,7 +2054,9 @@ fn migrate_legacy_site_connector_if_needed(
     let _migration_guard = CONNECTOR_CATALOG_MIGRATION_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .map_err(|_| CommandError::EngineUnavailable("CONNECTOR_MIGRATION_LOCK_UNAVAILABLE".into()))?;
+        .map_err(|_| {
+            CommandError::EngineUnavailable("CONNECTOR_MIGRATION_LOCK_UNAVAILABLE".into())
+        })?;
     if read_engine_local_state_result(bridge, CONNECTOR_SITE_CATALOG_MIGRATION_KEY)?.is_some() {
         return Ok(None);
     }
@@ -2122,7 +2125,11 @@ pub async fn get_connector_state(
     // cursor between migration writes; the next connector read retries it.
     let migration = match migrate_legacy_site_connector_if_needed(&bridge) {
         Ok(migration) => migration,
-        Err(CommandError::EngineUnavailable(message)) if message.starts_with("VERSION_CONFLICT:") => None,
+        Err(CommandError::EngineUnavailable(message))
+            if message.starts_with("VERSION_CONFLICT:") =>
+        {
+            None
+        }
         Err(error) => return Err(error),
     };
     let connectors_state = read_engine_local_state_result(&bridge, "desktop.connectors")?;
@@ -2210,19 +2217,24 @@ pub async fn get_connector_state(
 
 fn configured_github_repository(bridge: &EngineBridge) -> Option<String> {
     let connectors = read_engine_local_state(bridge, "desktop.connectors")?;
-    let owner = connectors.pointer("/github/owner").and_then(Value::as_str)?.trim();
-    let repository = connectors.pointer("/github/repository").and_then(Value::as_str)?.trim();
-    if !valid_github_segment(owner) || !valid_github_segment(repository) {
+    let owner = connectors
+        .pointer("/github/owner")
+        .and_then(Value::as_str)?
+        .trim();
+    let repository = connectors
+        .pointer("/github/repository")
+        .and_then(Value::as_str)?
+        .trim();
+    if !valid_github_owner(owner) || !valid_github_segment(repository) {
         return None;
     }
     Some(format!("{owner}/{repository}"))
 }
 fn valid_github_segment(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 100
-        && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
+    secure_store::valid_github_repository_segment(value)
+}
+fn valid_github_owner(value: &str) -> bool {
+    secure_store::valid_github_repository_owner(value)
 }
 
 fn is_local_path(value: &str) -> bool {
@@ -2475,9 +2487,11 @@ pub async fn get_bootstrap_snapshot(
             )
         })
         .count();
-    let codex_runner_ready = capabilities
-        .as_array()
-        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("CODEX.RUNNER")));
+    let codex_runner_ready = capabilities.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.as_str() == Some("CODEX.RUNNER"))
+    });
     let codex_authenticated = read_lock(&state.codex_authenticated)?.unwrap_or(false);
     let boby_state = bootstrap_boby_state(codex_waiting, codex_runner_ready, codex_authenticated);
     let (discovered_count, researching_count) =
@@ -2683,7 +2697,8 @@ fn backup_prerequisite_check(backup_configured: bool, verification: Option<&Valu
     let restore_preview_at = verification
         .and_then(|record| record.get("restorePreviewAtUnixMs"))
         .and_then(Value::as_u64);
-    let complete = archive_sha256.is_some() && verified_at.is_some() && restore_preview_at.is_some();
+    let complete =
+        archive_sha256.is_some() && verified_at.is_some() && restore_preview_at.is_some();
     json!({
         "id": "backup",
         "label": "İsteğe bağlı şifreli yedek",
@@ -2759,22 +2774,16 @@ pub fn get_prerequisite_status(
     // `codex.cmd --version`, which is still an external process launch.
     let codex_available = codex_runner_ready || codex_configured;
     let codex_authenticated = read_lock(&state.codex_authenticated)?.unwrap_or(false);
-    let github_configured = connectors
-        .pointer("/github/owner")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-        && connectors
-            .pointer("/github/repository")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty());
-    let github_auth_status = serde_json::to_value(
-        app.state::<DesktopState>()
-            .github_broker
-            .status(github_token_path(&app).ok().as_deref()),
-    )
-    .unwrap_or_else(|_| json!({"status": "degraded"}));
-    let github_authorized =
-        github_auth_status.get("status").and_then(Value::as_str) == Some("authorized");
+    let github_repository = configured_github_repository(&bridge);
+    let github_configured = github_repository.is_some();
+    let github_authorized = github_repository.as_deref().is_some_and(|repository| {
+        github_token_path(&app).is_ok_and(|token_path| {
+            state
+                .github_broker
+                .publication_readiness(&token_path, repository)
+                .is_ok()
+        })
+    });
     let site_configured = connectors
         .pointer("/site/repositoryPath")
         .and_then(Value::as_str)
@@ -2868,8 +2877,8 @@ pub fn get_prerequisite_status(
                 "label": "GitHub yayın bağlantısı",
                 "state": if github_configured && github_authorized { "READY" } else { "BLOCKED" },
                 "scope": "PUBLISH",
-                "detail": if !github_configured { "GitHub depo hedefi henüz yapılandırılmadı." } else if github_authorized { "GitHub App broker ve depo yetkisi hazır." } else { "GitHub depo hedefi kaydedildi; GitHub App broker yapılandırılmadığı için yayın kilitli." },
-                "userAction": if github_configured && github_authorized { Value::Null } else { json!("GitHub App broker yapılandırması ve gerçek erişim için ayrı onay gerekir; aksi halde PR ve yayın işlemleri kilitli kalır.") }
+                "detail": if !github_configured { "GitHub App istemci kimliği ve depo hedefi henüz yapılandırılmadı." } else if github_authorized { "Süreli GitHub App kimliği tam olarak seçilen depoya bağlı; gerekli izinler doğrulandı." } else { "GitHub depo hedefi kaydedildi; depoya bağlı GitHub App yetkilendirmesi olmadığı için yayın kilitli." },
+                "userAction": if github_configured && github_authorized { Value::Null } else { json!("GitHub App'i yalnız seçilen depoya kurun ve cihaz girişini tamamlayın; aksi halde PR ve yayın işlemleri kilitli kalır.") }
             },
             backup_prerequisite_check(backup_configured, backup_verification),
             {
@@ -3004,19 +3013,25 @@ pub fn test_source(
             "source URL must use HTTPS".into(),
         ));
     }
-    let response = bridge.request(json!({
-        "version": 1,
-        "id": format!("desktop-source-test-{}", std::process::id()),
-        "kind": "source.test",
-        "url": url
-    })).map_err(CommandError::EngineUnavailable)?;
+    let response = bridge
+        .request(json!({
+            "version": 1,
+            "id": format!("desktop-source-test-{}", std::process::id()),
+            "kind": "source.test",
+            "url": url
+        }))
+        .map_err(CommandError::EngineUnavailable)?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         // A guarded fetch can reject one remote source for DNS, TLS, timeout,
         // or document-policy reasons. That is source health, not a failed
         // local engine; keeping the error typed prevents one bad URL from
         // turning the whole desktop into an offline workspace.
-        let error_message = response.get("message").and_then(Value::as_str).unwrap_or("");
-        let access_forbidden = error_message.contains("403") || error_message.to_ascii_lowercase().contains("forbidden");
+        let error_message = response
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let access_forbidden = error_message.contains("403")
+            || error_message.to_ascii_lowercase().contains("forbidden");
         return Ok(json!({
             "url": url,
             "kind": "SITE",
@@ -3718,12 +3733,11 @@ fn build_review_revision_with_predecessor(
     match revision.get("packageVersion") {
         None | Some(Value::Null) => {}
         Some(version) if version.as_u64() == Some(3) => {
-            let Some(public_sources) = revision
-                .get("publicationSources")
-                .and_then(Value::as_array) else {
-                    downgrade_invalid_v3_review_projection(&mut projected);
-                    return Ok(projected);
-                };
+            let Some(public_sources) = revision.get("publicationSources").and_then(Value::as_array)
+            else {
+                downgrade_invalid_v3_review_projection(&mut projected);
+                return Ok(projected);
+            };
             if public_sources.is_empty() {
                 downgrade_invalid_v3_review_projection(&mut projected);
                 return Ok(projected);
@@ -3737,7 +3751,9 @@ fn build_review_revision_with_predecessor(
                 let role = source.get("role").and_then(Value::as_str).unwrap_or("");
                 if id.is_empty()
                     || id.len() > 128
-                    || !id.chars().all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
+                    || !id.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "._:-".contains(character)
+                    })
                     || title.trim().is_empty()
                     || title.len() > 4_096
                     || url.trim().is_empty()
@@ -3759,22 +3775,20 @@ fn build_review_revision_with_predecessor(
             }
             let Some(assessment) = revision
                 .get("editorialAssessment")
-                .and_then(Value::as_object) else {
-                    downgrade_invalid_v3_review_projection(&mut projected);
-                    return Ok(projected);
-                };
-            let Some(is_ymyl) = assessment
-                .get("isYmyl")
-                .and_then(Value::as_bool) else {
-                    downgrade_invalid_v3_review_projection(&mut projected);
-                    return Ok(projected);
-                };
-            let Some(sensitive_topic) = assessment
-                .get("sensitiveTopic")
-                .and_then(Value::as_bool) else {
-                    downgrade_invalid_v3_review_projection(&mut projected);
-                    return Ok(projected);
-                };
+                .and_then(Value::as_object)
+            else {
+                downgrade_invalid_v3_review_projection(&mut projected);
+                return Ok(projected);
+            };
+            let Some(is_ymyl) = assessment.get("isYmyl").and_then(Value::as_bool) else {
+                downgrade_invalid_v3_review_projection(&mut projected);
+                return Ok(projected);
+            };
+            let Some(sensitive_topic) = assessment.get("sensitiveTopic").and_then(Value::as_bool)
+            else {
+                downgrade_invalid_v3_review_projection(&mut projected);
+                return Ok(projected);
+            };
             let mut requirements = vec![json!("EDITORIAL_REVIEW")];
             if is_ymyl {
                 requirements.push(json!("EXPERT_REVIEW"));
@@ -3938,18 +3952,39 @@ pub fn request_boby_guidance(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
-    let question = request.get("question").and_then(Value::as_str).map(str::trim).unwrap_or("");
-    let active_page = request.get("activePage").and_then(Value::as_str).map(str::trim).unwrap_or("");
-    let runtime_state = request.get("runtimeState").and_then(Value::as_str).unwrap_or("");
-    let summary = request.get("safeWorkspaceSummary").and_then(Value::as_object);
-    let count = |key: &str| summary
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_u64)
-        .filter(|value| *value <= 100_000)
-        .unwrap_or(0);
-    if question.is_empty() || question.len() > 600 || active_page.is_empty() || active_page.len() > 64
-        || !matches!(runtime_state, "ONLINE" | "DEGRADED" | "OFFLINE") {
-        return Err(CommandError::InvalidInput("Boby için kısa bir soru ve geçerli yerel durum gerekir".into()));
+    let question = request
+        .get("question")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let active_page = request
+        .get("activePage")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let runtime_state = request
+        .get("runtimeState")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let summary = request
+        .get("safeWorkspaceSummary")
+        .and_then(Value::as_object);
+    let count = |key: &str| {
+        summary
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= 100_000)
+            .unwrap_or(0)
+    };
+    if question.is_empty()
+        || question.len() > 600
+        || active_page.is_empty()
+        || active_page.len() > 64
+        || !matches!(runtime_state, "ONLINE" | "DEGRADED" | "OFFLINE")
+    {
+        return Err(CommandError::InvalidInput(
+            "Boby için kısa bir soru ve geçerli yerel durum gerekir".into(),
+        ));
     }
     let engine_state = read_engine_state(&bridge)?;
     let version = engine_state
@@ -3968,31 +4003,36 @@ pub fn request_boby_guidance(
     // leaving Boby visibly stuck even though the local Codex runner is healthy.
     let guidance_id = boby_guidance_request_token()?;
     let key = stable_source_key(&format!("boby-guidance:{guidance_id}"));
-    let response = engine_request(&bridge, json!({
-        "version": 1,
-        "id": key,
-        "kind": "command",
-        "command": {
+    let response = engine_request(
+        &bridge,
+        json!({
             "version": 1,
-            "requestId": key,
-            "idempotencyKey": key,
-            "expectedVersion": version,
-            "kind": "BOBY.GUIDE",
-            "payload": {
-                "guidanceId": guidance_id,
-                "sessionId": session_id,
-                "question": question,
-                "activePage": active_page,
-                "runtimeState": runtime_state,
-                "safeWorkspaceSummary": {
-                    "draftCount": count("draftCount"),
-                    "reviewCount": count("reviewCount"),
-                    "sourceCount": count("sourceCount")
+            "id": key,
+            "kind": "command",
+            "command": {
+                "version": 1,
+                "requestId": key,
+                "idempotencyKey": key,
+                "expectedVersion": version,
+                "kind": "BOBY.GUIDE",
+                "payload": {
+                    "guidanceId": guidance_id,
+                    "sessionId": session_id,
+                    "question": question,
+                    "activePage": active_page,
+                    "runtimeState": runtime_state,
+                    "safeWorkspaceSummary": {
+                        "draftCount": count("draftCount"),
+                        "reviewCount": count("reviewCount"),
+                        "sourceCount": count("sourceCount")
+                    }
                 }
             }
-        }
-    }))?;
-    let queued = response.pointer("/result/value").ok_or_else(|| CommandError::EngineUnavailable("BOBY_GUIDANCE_SHAPE_INVALID".into()))?;
+        }),
+    )?;
+    let queued = response
+        .pointer("/result/value")
+        .ok_or_else(|| CommandError::EngineUnavailable("BOBY_GUIDANCE_SHAPE_INVALID".into()))?;
     Ok(json!({
         "id": queued.get("id").cloned().unwrap_or_else(|| json!(guidance_id)),
         "state": queued.get("state").and_then(Value::as_str).unwrap_or("WAITING_CODEX")
@@ -4002,7 +4042,8 @@ pub fn request_boby_guidance(
 /// Boby chat is conversational, so duplicate text still represents a new turn.
 /// A time-plus-process-plus-sequence token avoids sharing a stale durable job.
 fn boby_guidance_request_token() -> Result<String, CommandError> {
-    static BOBY_GUIDANCE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static BOBY_GUIDANCE_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| CommandError::StateUnavailable)?
@@ -4016,14 +4057,23 @@ pub fn get_boby_guidance(
     bridge: tauri::State<'_, EngineBridge>,
 ) -> Result<Value, CommandError> {
     if !guidance_id.starts_with("boby-") || guidance_id.len() > 128 {
-        return Err(CommandError::InvalidInput("geçerli Boby rehberlik kimliği gerekir".into()));
+        return Err(CommandError::InvalidInput(
+            "geçerli Boby rehberlik kimliği gerekir".into(),
+        ));
     }
     let state = read_engine_state(&bridge)?;
-    let job = state.pointer("/snapshot/jobs").and_then(Value::as_array)
-        .and_then(|jobs| jobs.iter().find(|job| job.get("id").and_then(Value::as_str) == Some(guidance_id.as_str())))
+    let job = state
+        .pointer("/snapshot/jobs")
+        .and_then(Value::as_array)
+        .and_then(|jobs| {
+            jobs.iter()
+                .find(|job| job.get("id").and_then(Value::as_str) == Some(guidance_id.as_str()))
+        })
         .ok_or_else(|| CommandError::InvalidInput("Boby rehberlik isteği bulunamadı".into()))?;
     if job.pointer("/metadata/purpose").and_then(Value::as_str) != Some("BOBY_GUIDANCE") {
-        return Err(CommandError::InvalidInput("Boby rehberlik isteği bulunamadı".into()));
+        return Err(CommandError::InvalidInput(
+            "Boby rehberlik isteği bulunamadı".into(),
+        ));
     }
     let status = job.get("state").and_then(Value::as_str).unwrap_or("FAILED");
     Ok(json!({
@@ -4286,12 +4336,20 @@ fn validate_editorial_attestation_v3(attestation: &Value) -> Result<(), CommandE
     let mut source_ids = std::collections::HashSet::new();
     for source_role in source_roles {
         let source_role = source_role.as_object().ok_or_else(invalid)?;
-        let source_id = source_role.get("sourceId").and_then(Value::as_str).unwrap_or("");
-        let role = source_role.get("role").and_then(Value::as_str).unwrap_or("");
+        let source_id = source_role
+            .get("sourceId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let role = source_role
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if !exact_json_keys(source_role, &["sourceId", "role"])
             || source_id.is_empty()
             || source_id.len() > 128
-            || !source_id.chars().all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
+            || !source_id
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
             || !matches!(role, "primary" | "independent" | "supporting")
             || !source_ids.insert(source_id.to_string())
         {
@@ -4358,7 +4416,10 @@ fn validate_editorial_attestation_for_revision_v3(
             ))
         })
         .collect::<std::collections::HashSet<_>>();
-    if expected.len() != public_sources.len() || actual.len() != acknowledged.len() || expected != actual {
+    if expected.len() != public_sources.len()
+        || actual.len() != acknowledged.len()
+        || expected != actual
+    {
         return Err(invalid());
     }
     let assessment = revision
@@ -4391,7 +4452,9 @@ fn build_approval_revoke_command(
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
         || expected_hash.len() != 64
-        || !expected_hash.chars().all(|character| character.is_ascii_hexdigit())
+        || !expected_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
         || reason.is_empty()
         || reason.chars().count() > 512
     {
@@ -4488,15 +4551,18 @@ fn trusted_high_risk_checklist_hash(
         if gate.get("group").and_then(Value::as_str) != Some("security") {
             continue;
         }
-        let id = gate.get("id").and_then(Value::as_str).ok_or_else(|| {
-            CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into())
-        })?;
-        let state = gate.get("state").and_then(Value::as_str).ok_or_else(|| {
-            CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into())
-        })?;
-        let detail = gate.get("detail").and_then(Value::as_str).ok_or_else(|| {
-            CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into())
-        })?;
+        let id = gate
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into()))?;
+        let state = gate
+            .get("state")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into()))?;
+        let detail = gate
+            .get("detail")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CommandError::EngineUnavailable("RISK_CHECKLIST_INVALID".into()))?;
         security_gates.push((id.to_string(), state.to_string(), detail.to_string()));
     }
     security_gates.sort_by(|left, right| left.0.cmp(&right.0));
@@ -4620,7 +4686,9 @@ pub fn approve_revision(
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
     if package_version != 3 {
-        return Err(CommandError::InvalidInput("REVISION_REVIEW_UPGRADE_REQUIRED".into()));
+        return Err(CommandError::InvalidInput(
+            "REVISION_REVIEW_UPGRADE_REQUIRED".into(),
+        ));
     }
     let inspection_version = read_engine_state(&bridge)?
         .pointer("/snapshot/serverCursor")
@@ -4632,7 +4700,9 @@ pub fn approve_revision(
         .and_then(Value::as_u64)
         != Some(3)
     {
-        return Err(CommandError::InvalidInput("REVISION_REVIEW_UPGRADE_REQUIRED".into()));
+        return Err(CommandError::InvalidInput(
+            "REVISION_REVIEW_UPGRADE_REQUIRED".into(),
+        ));
     }
     validate_editorial_attestation_for_revision_v3(&materialization, &attestation)?;
     let command = command_after_consent(
@@ -4731,12 +4801,7 @@ pub fn revoke_revision_approval(
                 .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))
         },
         |expected_version| {
-            build_approval_revoke_command(
-                &revision_id,
-                &expected_hash,
-                &reason,
-                expected_version,
-            )
+            build_approval_revoke_command(&revision_id, &expected_hash, &reason, expected_version)
         },
     )?;
     let request_id = command
@@ -4748,12 +4813,12 @@ pub fn revoke_revision_approval(
         &bridge,
         json!({ "version": 1, "id": request_id, "kind": "command", "command": command }),
     )?;
-    let result = response
-        .pointer("/result/value")
-        .ok_or_else(|| CommandError::EngineUnavailable("APPROVAL_REVOCATION_SHAPE_INVALID".into()))?;
-    let revocation = result
-        .get("revocation")
-        .ok_or_else(|| CommandError::EngineUnavailable("APPROVAL_REVOCATION_SHAPE_INVALID".into()))?;
+    let result = response.pointer("/result/value").ok_or_else(|| {
+        CommandError::EngineUnavailable("APPROVAL_REVOCATION_SHAPE_INVALID".into())
+    })?;
+    let revocation = result.get("revocation").ok_or_else(|| {
+        CommandError::EngineUnavailable("APPROVAL_REVOCATION_SHAPE_INVALID".into())
+    })?;
     Ok(json!({
         "revokedAt": revocation.get("revokedAt").cloned().unwrap_or(Value::Null),
         "revisionHash": revocation.get("revisionHash").cloned().unwrap_or(Value::Null),
@@ -4809,11 +4874,8 @@ pub fn approve_high_risk_revision(
         .pointer("/snapshot/serverCursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| CommandError::EngineUnavailable("STATE_VERSION_MISSING".into()))?;
-    let risk_checklist_hash = trusted_high_risk_checklist_hash(
-        &bridge,
-        expected_version,
-        &revision_id,
-    )?;
+    let risk_checklist_hash =
+        trusted_high_risk_checklist_hash(&bridge, expected_version, &revision_id)?;
     let command = build_high_risk_approval_command(
         &revision_id,
         &expected_hash,
@@ -4889,12 +4951,14 @@ pub fn enqueue_publication(
         .unwrap_or_else(|| "LOCAL_ONLY".to_string());
     if connector_mode == "PUBLISH" {
         let token_path = github_token_path(&app)?;
-        require_github_publication_readiness(
-            state.github_broker.publication_readiness(&token_path),
-        )?;
-        configured_github_repository(&bridge).ok_or_else(|| {
+        let repository = configured_github_repository(&bridge).ok_or_else(|| {
             CommandError::EngineUnavailable("GITHUB_REPOSITORY_NOT_CONFIGURED".into())
         })?;
+        require_github_publication_readiness(
+            state
+                .github_broker
+                .publication_readiness(&token_path, &repository),
+        )?;
     }
     let version = read_engine_state(&bridge)?
         .pointer("/snapshot/serverCursor")
@@ -5986,7 +6050,10 @@ fn read_recent_diagnostic_lines(path: Option<&Path>) -> Vec<String> {
         return Vec::new();
     };
     let mut lines = Vec::new();
-    for variant in crate::engine_bridge::diagnostic_log_variants(path).into_iter().rev() {
+    for variant in crate::engine_bridge::diagnostic_log_variants(path)
+        .into_iter()
+        .rev()
+    {
         if let Ok(text) = std::fs::read_to_string(variant) {
             lines.extend(text.lines().map(redact_diagnostic_line));
         }
@@ -6128,12 +6195,9 @@ pub fn export_diagnostics(
     }
     let bridge_event_target = directory.join("bridge-events.log");
     for (index, source) in log_variants.iter().rev().enumerate() {
-        write_diagnostic_lines(
-            Some(source),
-            &bridge_event_target,
-            index > 0,
-            |line| line.starts_with("BRIDGE_") || line.starts_with("ENGINE_"),
-        );
+        write_diagnostic_lines(Some(source), &bridge_event_target, index > 0, |line| {
+            line.starts_with("BRIDGE_") || line.starts_with("ENGINE_")
+        });
     }
     if let Some(startup) = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -6153,15 +6217,18 @@ pub fn export_diagnostics(
             format!("engine.stderr.log.{index}")
         }
     }));
-    file_names.extend(["bridge-events.log".to_string(), "startup-state.log".to_string()]);
+    file_names.extend([
+        "bridge-events.log".to_string(),
+        "startup-state.log".to_string(),
+    ]);
     let files = file_names
-    .into_iter()
-    .filter_map(|name| {
-        let file = directory.join(&name);
-        file.is_file()
-            .then(|| json!({ "name": name, "bytes": diagnostic_file_size(&file) }))
-    })
-    .collect::<Vec<_>>();
+        .into_iter()
+        .filter_map(|name| {
+            let file = directory.join(&name);
+            file.is_file()
+                .then(|| json!({ "name": name, "bytes": diagnostic_file_size(&file) }))
+        })
+        .collect::<Vec<_>>();
     let manifest = json!({
         "format": "blogbot-diagnostics-manifest-v2",
         "generatedAtUnixMs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
@@ -6355,11 +6422,14 @@ fn candidate_workflow_state(
     // dismiss must win over that job's durable workflow state. A later promote
     // mutation still re-opens the candidate and continues through the job
     // projection below.
-    if mutations.iter().rev().find(|mutation| {
-        mutation.get("candidateId").and_then(Value::as_str) == Some(candidate_id)
-    }).is_some_and(|mutation| {
-        mutation.get("kind").and_then(Value::as_str) == Some("CANDIDATE.DISMISS")
-    }) {
+    if mutations
+        .iter()
+        .rev()
+        .find(|mutation| mutation.get("candidateId").and_then(Value::as_str) == Some(candidate_id))
+        .is_some_and(|mutation| {
+            mutation.get("kind").and_then(Value::as_str) == Some("CANDIDATE.DISMISS")
+        })
+    {
         return "DISMISSED";
     }
 
@@ -6585,22 +6655,23 @@ pub async fn get_editorial_workspace(
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
     let checked_at = generated_at.clone();
-    let candidate_values = if include_candidates.unwrap_or(false) && workspace_can_read_engine(runtime) {
-        engine_request(
-            &bridge,
-            json!({
-                "version": 1,
-                "id": format!("desktop-candidate-list-{}", std::process::id()),
-                "kind": "candidate.list"
-            }),
-        )
-        .ok()
-        .and_then(|response| response.get("candidates").cloned())
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let candidate_values =
+        if include_candidates.unwrap_or(false) && workspace_can_read_engine(runtime) {
+            engine_request(
+                &bridge,
+                json!({
+                    "version": 1,
+                    "id": format!("desktop-candidate-list-{}", std::process::id()),
+                    "kind": "candidate.list"
+                }),
+            )
+            .ok()
+            .and_then(|response| response.get("candidates").cloned())
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     let persisted_editorial = if workspace_can_read_engine(runtime) {
         read_engine_local_state(&bridge, "desktop.editorial").unwrap_or_else(|| json!({}))
     } else {
@@ -6649,7 +6720,12 @@ pub async fn get_editorial_workspace(
     let hidden_draft_ids = persisted_editorial
         .get("hiddenDraftIds")
         .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).collect::<std::collections::HashSet<_>>())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
         .unwrap_or_default();
     let hidden_draft_count = hidden_draft_ids.len();
     drafts.retain(|draft| {
@@ -6960,6 +7036,10 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
         let waiting_detail = match metadata
             .and_then(|value| value.get("codexWaitReason"))
             .and_then(Value::as_str) {
+                Some("AUTH_REQUIRED") => "Codex hesabı bağlı değil. Kurulum Merkezi'nden Codex bağlantısını tamamlayın.",
+                Some("RATE_LIMIT") => "Codex hız sınırı nedeniyle bekliyor. Sağlayıcı sınırı yenilendikten sonra yeniden deneyin.",
+                Some("USAGE_LIMIT") => "Codex kullanım sınırı nedeniyle bekliyor. Hesap limiti yenilendikten sonra yeniden deneyin.",
+                Some("PAID_FALLBACK_DISABLED") => "Ücretli API fallback'i kapalı; kullanıcı onayı olmadan ücretli sağlayıcıya geçilmez.",
                 Some("RUNNER_TIMEOUT") => "Yazı üretimi zaman sınırına ulaştı. İş durduruldu; Operasyonlar'dan güvenle yeniden deneyin.",
                 Some("RUNNER_REQUIRES_RETRY") => "Codex çıktısı güvenlik ve biçim kontrolünden geçmedi. İş yayınlanmadı; Operasyonlar'dan yeniden deneyin.",
                 Some("RETRY_LIMIT_REACHED") => "Yazı üretimi üç kez güvenle denendi ancak tamamlanamadı. İş durduruldu; yeniden denemeden önce tanı paketini inceleyin.",
@@ -6999,12 +7079,8 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
         };
         let (execution_state, next_action, reason_code) = match job_state {
             "RUNNING" => ("RUNNING", "NONE", Value::Null),
-            "RETRY_SCHEDULED" if retry_overdue => {
-                ("FAILED", "RETRY", json!("RETRY_OVERDUE"))
-            }
-            "RETRY_SCHEDULED" => {
-                ("RETRY_SCHEDULED", "NONE", json!("EXECUTION_FAILED"))
-            }
+            "RETRY_SCHEDULED" if retry_overdue => ("FAILED", "RETRY", json!("RETRY_OVERDUE")),
+            "RETRY_SCHEDULED" => ("RETRY_SCHEDULED", "NONE", json!("EXECUTION_FAILED")),
             "QUEUED" if retrying_codex => ("RETRY_SCHEDULED", "NONE", json!("EXECUTION_FAILED")),
             "QUEUED" => ("QUEUED", "NONE", Value::Null),
             _ => match wait_reason {
@@ -7013,8 +7089,8 @@ fn append_pending_draft_jobs(mut drafts: Vec<Value>, jobs: &[Value]) -> Vec<Valu
                     ("FAILED", "RETRY", json!("RUNNER_REQUIRES_RETRY"))
                 }
                 Some("RETRY_LIMIT_REACHED") => ("FAILED", "RETRY", json!("RETRY_LIMIT_REACHED")),
-                Some("RATE_LIMIT") => ("WAITING", "NONE", json!("RATE_LIMIT")),
-                Some("USAGE_LIMIT") => ("WAITING", "NONE", json!("USAGE_LIMIT")),
+                Some("RATE_LIMIT") => ("WAITING", "RETRY", json!("RATE_LIMIT")),
+                Some("USAGE_LIMIT") => ("WAITING", "RETRY", json!("USAGE_LIMIT")),
                 Some("PAID_FALLBACK_DISABLED") => {
                     ("WAITING", "NONE", json!("PAID_FALLBACK_DISABLED"))
                 }
@@ -7174,10 +7250,17 @@ pub fn hide_drafts(
         .filter(|id| !id.trim().is_empty() && id.len() <= 128)
         .collect::<std::collections::HashSet<_>>();
     if ids.is_empty() || ids.len() > 100 {
-        return Err(CommandError::InvalidInput("select between 1 and 100 draft ids".into()));
+        return Err(CommandError::InvalidInput(
+            "select between 1 and 100 draft ids".into(),
+        ));
     }
     let current_hidden = read_engine_local_state(&bridge, "desktop.editorial")
-        .and_then(|value| value.get("hiddenDraftIds").and_then(Value::as_array).cloned())
+        .and_then(|value| {
+            value
+                .get("hiddenDraftIds")
+                .and_then(Value::as_array)
+                .cloned()
+        })
         .unwrap_or_default()
         .into_iter()
         .filter_map(|value| value.as_str().map(str::to_string))
@@ -7192,7 +7275,11 @@ pub fn hide_drafts(
         "kind": "DRAFT.HIDE",
         "draftIds": ids.iter().collect::<Vec<_>>()
     });
-    persist_editorial_state(&bridge, mutation.clone(), Some(("hiddenDraftIds", json!(stored))))?;
+    persist_editorial_state(
+        &bridge,
+        mutation.clone(),
+        Some(("hiddenDraftIds", json!(stored))),
+    )?;
     write_lock(&state.editorial_mutations)?.push(mutation);
     Ok(json!({ "ok": true, "hidden": ids.len() }))
 }
@@ -7204,10 +7291,19 @@ pub fn restore_hidden_drafts(
 ) -> Result<Value, CommandError> {
     ensure_mutation_allowed(&state)?;
     let restored = read_engine_local_state(&bridge, "desktop.editorial")
-        .and_then(|value| value.get("hiddenDraftIds").and_then(Value::as_array).map(Vec::len))
+        .and_then(|value| {
+            value
+                .get("hiddenDraftIds")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
         .unwrap_or(0);
     let mutation = json!({ "kind": "DRAFT.RESTORE_HIDDEN" });
-    persist_editorial_state(&bridge, mutation.clone(), Some(("hiddenDraftIds", json!([]))))?;
+    persist_editorial_state(
+        &bridge,
+        mutation.clone(),
+        Some(("hiddenDraftIds", json!([]))),
+    )?;
     write_lock(&state.editorial_mutations)?.push(mutation);
     Ok(json!({ "ok": true, "restored": restored }))
 }
@@ -7761,12 +7857,7 @@ fn update_backup_verification_record(
     Ok(())
 }
 
-fn record_backup_check(
-    bridge: &EngineBridge,
-    field: &str,
-    archive_path: &Path,
-    response: &Value,
-) {
+fn record_backup_check(bridge: &EngineBridge, field: &str, archive_path: &Path, response: &Value) {
     let archive_name = archive_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -7785,13 +7876,7 @@ fn record_backup_check(
         let record = object
             .entry("backupVerification")
             .or_insert_with(|| json!({}));
-        update_backup_verification_record(
-            record,
-            field,
-            &archive_name,
-            archive_sha256,
-            recorded_at,
-        )
+        update_backup_verification_record(record, field, &archive_name, archive_sha256, recorded_at)
     });
 }
 
@@ -7826,12 +7911,7 @@ pub fn backup_restore_preview(
             }
         }),
     )?;
-    record_backup_check(
-        &bridge,
-        "restorePreviewAtUnixMs",
-        &archive_path,
-        &response,
-    );
+    record_backup_check(&bridge, "restorePreviewAtUnixMs", &archive_path, &response);
     Ok(response)
 }
 
@@ -7985,25 +8065,25 @@ mod tests {
 
     use super::{
         append_pending_draft_jobs, authorize_connector_directory, authorize_high_risk_consent,
-        authorize_native_confirmation, build_approval_command, build_approval_revoke_command,
-        build_high_risk_approval_command,
+        authorize_native_confirmation, boby_guidance_request_token, boby_guidance_wait_reason,
+        boby_role_state, bootstrap_boby_state, bootstrap_can_read_catalog, bound_editorial_state,
+        build_approval_command, build_approval_revoke_command, build_high_risk_approval_command,
         build_review_revision, build_revision_queue, build_source_scan_command,
-        boby_guidance_request_token, boby_guidance_wait_reason, boby_role_state, bootstrap_boby_state, bootstrap_can_read_catalog, candidate_draft_payload, candidate_workflow_state, configured_site_origin,
-        dashboard_pipeline_counts, doctor_runtime_mode, editorial_operation_events,
-        ensure_mutation_allowed, ensure_trusted_local_dev, github_preview_payload,
-        has_publication_capability, is_local_path, is_path_within_grant, is_reparse_point,
-        local_dev_environment_with, materialize_preview_bundle_with,
-        latest_boby_session_id, migrate_legacy_site_connector_catalog, preview_file_bytes, preview_file_media_reference,
-        bound_editorial_state, publication_observability, register_folder_grant, request_choice,
-        request_section, valid_git_object_id, valid_github_branch, MAX_EDITORIAL_MUTATIONS,
-        MAX_EDITORIAL_STATE_BYTES, SITE_SECTION_IDS,
-        require_granted_directory, require_granted_restore_target, retry_version_conflicted_draft,
-        revision_edit_payload, scheduled_operation_items, valid_github_segment,
+        candidate_draft_payload, candidate_workflow_state, configured_site_origin,
+        connector_state_for_runtime, dashboard_pipeline_counts, doctor_runtime_mode,
+        editorial_operation_events, ensure_mutation_allowed, ensure_trusted_local_dev,
+        github_preview_payload, has_publication_capability, is_local_path, is_path_within_grant,
+        is_reparse_point, latest_boby_session_id, local_dev_environment_with,
+        materialize_preview_bundle_with, migrate_legacy_site_connector_catalog,
+        operations_for_runtime, operations_job_is_visible_work, prerequisite_can_read_engine,
+        preview_file_bytes, preview_file_media_reference, publication_observability,
+        register_folder_grant, request_choice, request_section, require_granted_directory,
+        require_granted_restore_target, retry_version_conflicted_draft, revision_edit_payload,
+        scheduled_operation_items, valid_git_object_id, valid_github_branch, valid_github_segment,
         valid_github_workflow, valid_hhmm, valid_recovery_key, valid_schedule_slot,
         valid_site_work_mode, validate_folder_selection, validate_local_dev_project,
-        connector_state_for_runtime, operations_for_runtime, operations_job_is_visible_work,
-        prerequisite_can_read_engine, workspace_can_read_engine, workspace_engine_state, write_lock,
-        CommandError, DesktopState, RuntimeMode,
+        workspace_can_read_engine, workspace_engine_state, write_lock, CommandError, DesktopState,
+        RuntimeMode, MAX_EDITORIAL_MUTATIONS, MAX_EDITORIAL_STATE_BYTES, SITE_SECTION_IDS,
     };
 
     #[cfg(windows)]
@@ -8059,24 +8139,40 @@ mod tests {
         assert!(first.starts_with("boby-"));
         assert!(second.starts_with("boby-"));
         assert!(first.len() <= 128 && second.len() <= 128);
-        assert_ne!(first, second, "a repeated question must not inherit a stale Boby job");
+        assert_ne!(
+            first, second,
+            "a repeated question must not inherit a stale Boby job"
+        );
     }
     #[test]
     fn boby_waiting_states_expose_safe_editor_reasons() {
-        assert_eq!(boby_guidance_wait_reason("WAITING_CODEX"), Some("Boby bağlantıyı hazırlıyor; hazır olduğunda yanıtını gösterecek."));
-        assert_eq!(boby_guidance_wait_reason("RUNNING"), Some("Boby yanıtı hazırlıyor."));
-        assert_eq!(boby_guidance_wait_reason("QUEUED"), Some("Boby isteğini hazırlıyor."));
+        assert_eq!(
+            boby_guidance_wait_reason("WAITING_CODEX"),
+            Some("Boby bağlantıyı hazırlıyor; hazır olduğunda yanıtını gösterecek.")
+        );
+        assert_eq!(
+            boby_guidance_wait_reason("RUNNING"),
+            Some("Boby yanıtı hazırlıyor.")
+        );
+        assert_eq!(
+            boby_guidance_wait_reason("QUEUED"),
+            Some("Boby isteğini hazırlıyor.")
+        );
         assert_eq!(boby_guidance_wait_reason("FAILED"), None);
     }
 
     #[test]
     fn boby_diagnostic_code_is_allowlisted() {
         assert_eq!(
-            super::boby_guidance_diagnostic_code(&json!({ "metadata": { "codexDiagnosticCode": "CODEX_PROCESS_FAILED" } })),
+            super::boby_guidance_diagnostic_code(
+                &json!({ "metadata": { "codexDiagnosticCode": "CODEX_PROCESS_FAILED" } })
+            ),
             Some("CODEX_PROCESS_FAILED")
         );
         assert_eq!(
-            super::boby_guidance_diagnostic_code(&json!({ "metadata": { "codexDiagnosticCode": "untrusted-detail" } })),
+            super::boby_guidance_diagnostic_code(
+                &json!({ "metadata": { "codexDiagnosticCode": "untrusted-detail" } })
+            ),
             None
         );
     }
@@ -8131,10 +8227,23 @@ mod tests {
 
     #[test]
     fn offline_operations_screen_returns_a_truthful_non_retrying_projection() {
-        let snapshot = operations_for_runtime(RuntimeMode::OfflineReadOnly).expect("offline projection");
-        assert_eq!(snapshot.pointer("/worker/state").and_then(Value::as_str), Some("OFFLINE"));
-        assert_eq!(snapshot.pointer("/publisher/state").and_then(Value::as_str), Some("BLOCKED"));
-        assert_eq!(snapshot.get("events").and_then(Value::as_array).map(Vec::len), Some(0));
+        let snapshot =
+            operations_for_runtime(RuntimeMode::OfflineReadOnly).expect("offline projection");
+        assert_eq!(
+            snapshot.pointer("/worker/state").and_then(Value::as_str),
+            Some("OFFLINE")
+        );
+        assert_eq!(
+            snapshot.pointer("/publisher/state").and_then(Value::as_str),
+            Some("BLOCKED")
+        );
+        assert_eq!(
+            snapshot
+                .get("events")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
         assert!(operations_for_runtime(RuntimeMode::Online).is_none());
     }
 
@@ -8160,10 +8269,22 @@ mod tests {
 
     #[test]
     fn offline_connector_read_returns_the_safe_empty_snapshot() {
-        let snapshot = connector_state_for_runtime(RuntimeMode::OfflineReadOnly).expect("offline snapshot");
-        assert_eq!(snapshot.get("sourceState").and_then(Value::as_str), Some("ABSENT"));
-        assert_eq!(snapshot.get("mode").and_then(Value::as_str), Some("LOCAL_ONLY"));
-        assert_eq!(snapshot.pointer("/config/site/mode").and_then(Value::as_str), Some("LOCAL_ONLY"));
+        let snapshot =
+            connector_state_for_runtime(RuntimeMode::OfflineReadOnly).expect("offline snapshot");
+        assert_eq!(
+            snapshot.get("sourceState").and_then(Value::as_str),
+            Some("ABSENT")
+        );
+        assert_eq!(
+            snapshot.get("mode").and_then(Value::as_str),
+            Some("LOCAL_ONLY")
+        );
+        assert_eq!(
+            snapshot
+                .pointer("/config/site/mode")
+                .and_then(Value::as_str),
+            Some("LOCAL_ONLY")
+        );
     }
 
     #[cfg(windows)]
@@ -8342,9 +8463,26 @@ mod tests {
         for branch in ["main", "release/v1", "feature-1.2"] {
             assert!(valid_github_branch(branch), "must accept: {branch}");
         }
-        for branch in ["", " main", "/main", "main/", "a..b", "main?x", "main#1", "main branch"] {
+        for branch in [
+            "",
+            " main",
+            "/main",
+            "main/",
+            "main//next",
+            "a..b",
+            ".hidden",
+            "feature/.hidden",
+            "feature.lock",
+            "feature/x.lock",
+            "feature.",
+            "-main",
+            "main?x",
+            "main#1",
+            "main branch",
+        ] {
             assert!(!valid_github_branch(branch), "must reject: {branch}");
         }
+        assert!(!valid_github_branch(&"m".repeat(201)));
 
         // Approval binds this value, so a response that is not an object id must
         // never be written into the connector as if it were verified.
@@ -8397,11 +8535,7 @@ mod tests {
         assert_eq!(result["github"]["workflow"], "deploy.yml");
         assert_eq!(result["github"]["baseSha"], "a".repeat(40));
 
-        let response = super::github_base_sha_capture_result(
-            "owner/site",
-            "main",
-            &"a".repeat(40),
-        );
+        let response = super::github_base_sha_capture_result("owner/site", "main", &"a".repeat(40));
         assert_eq!(response["writes"], true);
         assert_eq!(response["network"], true);
     }
@@ -8415,7 +8549,8 @@ mod tests {
         assert_eq!(allowed.len(), 8);
         for section in ["teknoloji", "ekonomi", "kultur", "yasam"] {
             assert_eq!(
-                request_section(&json!({ "targetSection": section }), &allowed, "haberler").unwrap(),
+                request_section(&json!({ "targetSection": section }), &allowed, "haberler")
+                    .unwrap(),
                 section
             );
         }
@@ -8447,16 +8582,29 @@ mod tests {
         let mut connectors = json!({});
         let mut checks = json!({});
         let marker = migrate_legacy_site_connector_catalog(&mut connectors, &mut checks, Some(&json!({
-            "repositoryPath": r"C:\Blogbot\Site", "publicSiteUrl": "https://example.org", "mode": "PUBLISH"
+            "repositoryPath": r"C:\Blogbot\Site", "publicSiteUrl": "https://EXAMPLE.org:443/", "mode": "PUBLISH"
         }))).unwrap();
 
         assert_eq!(marker["state"], "MIGRATED_REVALIDATION_REQUIRED");
         assert_eq!(connectors["site"]["repositoryPath"], r"C:\Blogbot\Site");
+        assert_eq!(connectors["site"]["publicSiteUrl"], "https://example.org");
         assert_eq!(checks["site"]["ready"], false);
         assert_eq!(
             checks["site"]["migrationState"],
             "MIGRATED_REVALIDATION_REQUIRED"
         );
+    }
+
+    #[test]
+    fn legacy_site_connector_rejects_an_insecure_public_origin() {
+        let mut connectors = json!({});
+        let mut checks = json!({});
+        let marker = migrate_legacy_site_connector_catalog(&mut connectors, &mut checks, Some(&json!({
+            "repositoryPath": r"C:\Blogbot\Site", "publicSiteUrl": "http://example.org", "mode": "PUBLISH"
+        }))).unwrap();
+
+        assert_eq!(marker["state"], "NO_LEGACY_SITE_RECORD");
+        assert!(connectors.get("site").is_none());
     }
 
     #[test]
@@ -8676,7 +8824,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn codex_usage_projects_only_observed_local_draft_activity() {
         let now = 1_785_600_000_000_u128;
@@ -8795,6 +8942,52 @@ mod tests {
             drafts[0]["detail"],
             "Codex hesabı veya izole runner bekleniyor."
         );
+    }
+
+    #[test]
+    fn provider_wait_reasons_expose_only_their_safe_next_action() {
+        let cases = [
+            (
+                "AUTH_REQUIRED",
+                "CONNECT_CODEX",
+                "Codex hesabı bağlı değil. Kurulum Merkezi\'nden Codex bağlantısını tamamlayın.",
+            ),
+            (
+                "RATE_LIMIT",
+                "RETRY",
+                "Codex hız sınırı nedeniyle bekliyor. Sağlayıcı sınırı yenilendikten sonra yeniden deneyin.",
+            ),
+            (
+                "USAGE_LIMIT",
+                "RETRY",
+                "Codex kullanım sınırı nedeniyle bekliyor. Hesap limiti yenilendikten sonra yeniden deneyin.",
+            ),
+            (
+                "PAID_FALLBACK_DISABLED",
+                "NONE",
+                "Ücretli API fallback\'i kapalı; kullanıcı onayı olmadan ücretli sağlayıcıya geçilmez.",
+            ),
+        ];
+
+        for (reason, expected_action, expected_detail) in cases {
+            let drafts = append_pending_draft_jobs(
+                Vec::new(),
+                &[json!({
+                    "id": format!("draft-{reason}"),
+                    "kind": "DRAFT",
+                    "state": "WAITING_CODEX",
+                    "metadata": {
+                        "candidateTitle": "Sağlayıcı bekleme testi",
+                        "codexWaitReason": reason
+                    }
+                })],
+            );
+
+            assert_eq!(drafts.len(), 1, "{reason}");
+            assert_eq!(drafts[0]["reasonCode"], reason, "{reason}");
+            assert_eq!(drafts[0]["nextAction"], expected_action, "{reason}");
+            assert_eq!(drafts[0]["detail"], expected_detail, "{reason}");
+        }
     }
 
     #[test]
@@ -9121,6 +9314,8 @@ mod tests {
     #[test]
     fn setup_connector_validation_rejects_whitespace_and_unsafe_paths() {
         assert!(!valid_github_segment("  "));
+        assert!(!valid_github_segment("."));
+        assert!(!valid_github_segment(".."));
         assert!(valid_github_segment("ucsahinn"));
         assert!(is_local_path(r"C:\Blogbot"));
         assert!(!is_local_path("https://example.com"));
@@ -9136,6 +9331,69 @@ mod tests {
         assert!(!valid_recovery_key("short"));
         assert!(!valid_recovery_key("                "));
         assert!(valid_recovery_key("correct horse 2026"));
+    }
+
+    #[test]
+    fn github_connector_accepts_legal_names_containing_secret_words() {
+        let state = DesktopState::default();
+        let result = super::test_setup_connector_with_grants(
+            &state,
+            "github".into(),
+            json!({
+                "owner": "password-manager",
+                "repository": "secret-santa",
+                "clientId": "Iv1.0123456789abcdef"
+            }),
+        )
+        .expect("legal public repository names must validate");
+
+        assert_eq!(result["ready"], true);
+        assert_eq!(result["state"], "DRY_RUN_READY");
+
+        let dot_prefixed_repository = super::test_setup_connector_with_grants(
+            &state,
+            "github".into(),
+            json!({
+                "owner": "owner",
+                "repository": ".github",
+                "clientId": "Iv1.0123456789abcdef"
+            }),
+        )
+        .expect("legal dot-prefixed repository names must validate");
+        assert_eq!(dot_prefixed_repository["ready"], true);
+
+        for owner in [".owner", "_owner", "-owner"] {
+            let invalid_owner = super::test_setup_connector_with_grants(
+                &state,
+                "github".into(),
+                json!({
+                    "owner": owner,
+                    "repository": "site",
+                    "clientId": "Iv1.0123456789abcdef"
+                }),
+            )
+            .expect("invalid owner is a local validation result");
+            assert_eq!(invalid_owner["ready"], false, "{owner} must be rejected");
+            assert_eq!(invalid_owner["state"], "ATTENTION");
+        }
+    }
+
+    #[test]
+    fn github_connector_rejects_unknown_credential_fields() {
+        let state = DesktopState::default();
+        let error = super::test_setup_connector_with_grants(
+            &state,
+            "github".into(),
+            json!({
+                "owner": "owner",
+                "repository": "site",
+                "clientId": "Iv1.0123456789abcdef",
+                "token": "not-a-real-token"
+            }),
+        )
+        .expect_err("credential-shaped fields must remain outside connector config");
+
+        assert!(matches!(error, CommandError::InvalidInput(_)));
     }
 
     #[test]
@@ -9156,6 +9414,36 @@ mod tests {
         )
         .expect("validation result");
         assert_eq!(omitted["ready"], false);
+    }
+
+    #[test]
+    fn publish_deploy_connector_enforces_the_publication_workflow_contract() {
+        let state = DesktopState::default();
+        for workflow in ["deploy.yml".to_string(), "release_1.yaml".to_string()] {
+            let valid = super::test_setup_connector_with_grants(
+                &state,
+                "deploy".into(),
+                json!({ "workflowName": workflow, "requiredChecks": ["build"] }),
+            )
+            .expect("validation result");
+            assert_eq!(valid["ready"], true);
+        }
+
+        for workflow in [
+            format!("{}.yml", "w".repeat(97)),
+            "a..yml".to_string(),
+            ".yml".to_string(),
+            "deploy.txt".to_string(),
+            "nested/deploy.yml".to_string(),
+        ] {
+            let invalid = super::test_setup_connector_with_grants(
+                &state,
+                "deploy".into(),
+                json!({ "workflowName": workflow, "requiredChecks": ["build"] }),
+            )
+            .expect("validation result");
+            assert_eq!(invalid["ready"], false, "{workflow}");
+        }
     }
 
     #[test]
@@ -9224,12 +9512,186 @@ mod tests {
     }
 
     #[test]
+    fn site_inspection_accepts_regular_bounded_project_files() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "blogbot-site-inspection-regular-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src").join("content")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"dev":"astro dev"},"dependencies":{"astro":"5.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".git").join("config"),
+            "[remote \"origin\"]\nurl = https://github.com/example/site\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("content").join("config.ts"),
+            "export const collections = {};",
+        )
+        .unwrap();
+
+        let path = root.to_string_lossy();
+        let format = super::detect_site_format(&path);
+        let remote = super::detect_repository_remote(&path);
+        let content_model = super::detect_site_content_model(&path);
+        let local_dev = super::validate_local_dev_project(&path);
+        let adapter = super::site_adapter_dry_run(&path);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(format, Some("ASTRO"));
+        assert_eq!(remote.as_deref(), Some("https://github.com/example/site"));
+        assert_eq!(content_model, "ASTRO_CONTENT_COLLECTION");
+        assert!(local_dev.is_ok());
+        assert!(adapter.is_ok());
+    }
+
+    #[test]
+    fn site_inspection_never_follows_hard_links_or_junctions_outside_the_root() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "blogbot-site-inspection-root-{}-{nonce}",
+            std::process::id()
+        ));
+        let external = std::env::temp_dir().join(format!(
+            "blogbot-site-inspection-external-{}-{nonce}",
+            std::process::id()
+        ));
+        let external_git = external.join("git");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&external_git).unwrap();
+        let external_package = external.join("package.json");
+        std::fs::write(
+            &external_package,
+            r#"{"scripts":{"dev":"astro dev"},"dependencies":{"astro":"5.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::hard_link(&external_package, root.join("package.json")).unwrap();
+        std::fs::write(
+            external_git.join("config"),
+            "[remote \"origin\"]\nurl = https://github.com/outside/forbidden\n",
+        )
+        .unwrap();
+        let git_junction = root.join(".git");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&git_junction)
+            .arg(&external_git)
+            .status()
+            .unwrap();
+        assert!(status.success(), "junction fixture must be available");
+
+        let path = root.to_string_lossy();
+        let format = super::detect_site_format(&path);
+        let remote = super::detect_repository_remote(&path);
+        let local_dev = super::validate_local_dev_project(&path);
+
+        std::fs::remove_file(root.join("package.json")).unwrap();
+        std::fs::remove_dir(&git_junction).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&external);
+
+        assert_eq!(format, None);
+        assert_eq!(remote, None);
+        assert!(local_dev.is_err());
+    }
+
+    #[test]
+    fn site_adapter_dry_run_reports_every_inspected_file_and_never_writes() {
+        fn snapshot(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+            fn visit(
+                root: &std::path::Path,
+                current: &std::path::Path,
+                entries: &mut Vec<(String, Vec<u8>)>,
+            ) {
+                let mut children = std::fs::read_dir(current)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect::<Vec<_>>();
+                children.sort();
+                for path in children {
+                    if path.is_dir() {
+                        visit(root, &path, entries);
+                    } else {
+                        entries.push((
+                            path.strip_prefix(root)
+                                .unwrap()
+                                .to_string_lossy()
+                                .replace('\\', "/"),
+                            std::fs::read(&path).unwrap(),
+                        ));
+                    }
+                }
+            }
+
+            let mut entries = Vec::new();
+            visit(root, root, &mut entries);
+            entries
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "blogbot-site-adapter-dry-run-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("src").join("content")).unwrap();
+        std::fs::write(root.join("astro.config.mjs"), "export default {};").unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"dev":"astro dev"},"dependencies":{"astro":"5.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("content").join("config.ts"),
+            "export const collections = {};",
+        )
+        .unwrap();
+        std::fs::write(root.join("sentinel.txt"), b"do-not-change").unwrap();
+
+        let before = snapshot(&root);
+        let result = super::site_adapter_dry_run(&root.to_string_lossy()).unwrap();
+        let after = snapshot(&root);
+
+        assert_eq!(before, after);
+        assert_eq!(result["writes"], false);
+        assert_eq!(result["network"], false);
+        assert_eq!(
+            result["filesInspected"],
+            json!(["astro.config.mjs", "package.json", "src/content/config.ts"])
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn github_bridge_contracts_are_local_only_and_scope_safe() {
         assert!(valid_github_workflow("deploy.yml"));
         assert!(!valid_github_workflow("../deploy.yml"));
         assert!(
             github_preview_payload("owner/site", "deploy.yml", "rev-1", &"a".repeat(64)).is_ok()
         );
+        assert!(
+            github_preview_payload("owner/.github", "deploy.yml", "rev-1", &"a".repeat(64)).is_ok()
+        );
+        for repository in [".owner/site", "_owner/site", "-owner/site"] {
+            assert!(
+                github_preview_payload(repository, "deploy.yml", "rev-1", &"a".repeat(64)).is_err(),
+                "{repository} must not enter a native GitHub preview"
+            );
+        }
         assert!(github_preview_payload("owner/site", "deploy.yml", "rev-1", "secret").is_err());
     }
 
@@ -9369,6 +9831,26 @@ mod tests {
             })),
             None
         );
+        assert_eq!(
+            configured_site_origin(&json!({
+                "site": { "publicSiteUrl": "https://EXAMPLE.org:443/" }
+            })),
+            Some("https://example.org".to_string())
+        );
+        for unsafe_url in [
+            "http://example.org",
+            "https://user@example.org",
+            "https://example.org/site",
+            "https://example.org/?preview=true",
+            "https://example.org/#draft",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(
+                configured_site_origin(&json!({ "site": { "publicSiteUrl": unsafe_url } })),
+                None,
+                "{unsafe_url} must not be accepted as the configured public origin"
+            );
+        }
     }
 
     #[test]
@@ -9605,7 +10087,10 @@ mod tests {
         assert_eq!(command["payload"]["warningSetHash"], "b".repeat(64));
         assert_eq!(command["payload"]["deviceId"], "windows-local-device-v1");
         assert_eq!(command["payload"]["attestation"], attestation);
-        assert_eq!(command["payload"].as_object().map(|value| value.len()), Some(6));
+        assert_eq!(
+            command["payload"].as_object().map(|value| value.len()),
+            Some(6)
+        );
     }
 
     #[test]
@@ -9626,21 +10111,35 @@ mod tests {
         .expect("replayed command");
         assert_eq!(first, replay);
         assert_eq!(first["kind"], json!("APPROVAL.REVOKE"));
-        assert_eq!(first["payload"], json!({
-            "revisionId": "revision-1",
-            "revisionHash": "a".repeat(64),
-            "deviceId": "windows-local-device-v1",
-            "reason": "Kaynak doğrulaması yeniden yapılacak."
-        }));
+        assert_eq!(
+            first["payload"],
+            json!({
+                "revisionId": "revision-1",
+                "revisionHash": "a".repeat(64),
+                "deviceId": "windows-local-device-v1",
+                "reason": "Kaynak doğrulaması yeniden yapılacak."
+            })
+        );
         assert_eq!(first.as_object().map(|value| value.len()), Some(6));
     }
 
     #[test]
     fn approval_revoke_command_rejects_unbounded_or_malformed_inputs() {
-        assert!(build_approval_revoke_command("../revision", &"a".repeat(64), "geçerli gerekçe", 1).is_err());
-        assert!(build_approval_revoke_command("revision-1", "short", "geçerli gerekçe", 1).is_err());
+        assert!(build_approval_revoke_command(
+            "../revision",
+            &"a".repeat(64),
+            "geçerli gerekçe",
+            1
+        )
+        .is_err());
+        assert!(
+            build_approval_revoke_command("revision-1", "short", "geçerli gerekçe", 1).is_err()
+        );
         assert!(build_approval_revoke_command("revision-1", &"a".repeat(64), "   ", 1).is_err());
-        assert!(build_approval_revoke_command("revision-1", &"a".repeat(64), &"g".repeat(513), 1).is_err());
+        assert!(
+            build_approval_revoke_command("revision-1", &"a".repeat(64), &"g".repeat(513), 1)
+                .is_err()
+        );
     }
 
     #[test]
@@ -9651,7 +10150,14 @@ mod tests {
             "ethicsReview": null,
             "model": "codex"
         });
-        assert!(build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &model_authored, 7).is_err());
+        assert!(build_approval_command(
+            "revision-1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &model_authored,
+            7
+        )
+        .is_err());
 
         let duplicate_source = json!({
             "editorialReview": {
@@ -9664,7 +10170,14 @@ mod tests {
             "expertReview": null,
             "ethicsReview": null
         });
-        assert!(build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &duplicate_source, 7).is_err());
+        assert!(build_approval_command(
+            "revision-1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &duplicate_source,
+            7
+        )
+        .is_err());
     }
 
     #[test]
@@ -9704,14 +10217,22 @@ mod tests {
             "expertReview": complete["expertReview"].clone(),
             "ethicsReview": null
         });
-        assert!(super::validate_editorial_attestation_for_revision_v3(&materialization, &wrong_role).is_err());
+        assert!(super::validate_editorial_attestation_for_revision_v3(
+            &materialization,
+            &wrong_role
+        )
+        .is_err());
 
         let missing_expert = json!({
             "editorialReview": complete["editorialReview"].clone(),
             "expertReview": null,
             "ethicsReview": null
         });
-        assert!(super::validate_editorial_attestation_for_revision_v3(&materialization, &missing_expert).is_err());
+        assert!(super::validate_editorial_attestation_for_revision_v3(
+            &materialization,
+            &missing_expert
+        )
+        .is_err());
     }
 
     #[test]
@@ -9744,11 +10265,22 @@ mod tests {
 
         let review = build_review_revision(&materialization).expect("V3 review projection");
         assert_eq!(review["packageVersion"], 3);
-        assert_eq!(review["approvalRequirements"], json!(["EDITORIAL_REVIEW", "EXPERT_REVIEW", "ETHICS_REVIEW"]));
-        assert_eq!(review["publicationSources"], json!([{
-            "id": "source-1", "title": "Official report", "url": "https://example.com/report", "role": "primary"
-        }]));
-        assert_eq!(review["publicationSources"][0].as_object().map(|value| value.len()), Some(4));
+        assert_eq!(
+            review["approvalRequirements"],
+            json!(["EDITORIAL_REVIEW", "EXPERT_REVIEW", "ETHICS_REVIEW"])
+        );
+        assert_eq!(
+            review["publicationSources"],
+            json!([{
+                "id": "source-1", "title": "Official report", "url": "https://example.com/report", "role": "primary"
+            }])
+        );
+        assert_eq!(
+            review["publicationSources"][0]
+                .as_object()
+                .map(|value| value.len()),
+            Some(4)
+        );
         assert!(review["sources"][0].get("evidenceExcerpt").is_none());
         assert!(review["sources"][0].get("evidenceAnchors").is_none());
         assert!(review.get("editorialContext").is_none());
@@ -9858,7 +10390,10 @@ mod tests {
             "metadata": { "candidateId": "c1" }
         })];
 
-        assert_eq!(candidate_workflow_state("c1", &[], &jobs), "RESEARCH_QUEUED");
+        assert_eq!(
+            candidate_workflow_state("c1", &[], &jobs),
+            "RESEARCH_QUEUED"
+        );
         assert_eq!(candidate_workflow_state("c2", &[], &jobs), "NEW");
     }
 
@@ -9918,8 +10453,7 @@ mod tests {
             "workflowName": "deploy.yml",
             "requiredChecks": ["build", "build"]
         });
-        let invalid =
-            super::deploy_prerequisite_check(Some(&duplicate_checks), Some(&checked));
+        let invalid = super::deploy_prerequisite_check(Some(&duplicate_checks), Some(&checked));
         assert_ne!(invalid["state"], "READY");
         assert_eq!(invalid["checkPassed"], false);
     }
@@ -10131,10 +10665,22 @@ mod tests {
             "expertReview": null,
             "ethicsReview": null
         });
-        let first = build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &attestation, 7)
-            .expect("first approval command");
-        let second = build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &attestation, 8)
-            .expect("retried approval command");
+        let first = build_approval_command(
+            "revision-1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &attestation,
+            7,
+        )
+        .expect("first approval command");
+        let second = build_approval_command(
+            "revision-1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &attestation,
+            8,
+        )
+        .expect("retried approval command");
         assert_ne!(first["idempotencyKey"], second["idempotencyKey"]);
         assert_eq!(
             first["payload"]["revisionHash"],
@@ -10145,8 +10691,14 @@ mod tests {
             "expertReview": null,
             "ethicsReview": null
         });
-        let changed = build_approval_command("revision-1", &"a".repeat(64), &"b".repeat(64), &changed_attestation, 7)
-            .expect("changed human approval command");
+        let changed = build_approval_command(
+            "revision-1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &changed_attestation,
+            7,
+        )
+        .expect("changed human approval command");
         assert_ne!(first["idempotencyKey"], changed["idempotencyKey"]);
     }
 
@@ -10222,14 +10774,8 @@ mod tests {
         // secret-looking credential literal in repository source.
         let simulated_token = ["gh", "p_", "0123456789", "abcdefghij"].concat();
         let simulated_fault = format!("PUBLICATION_BROKER_CLAIM_FAILED: {simulated_token}");
-        super::record_broker_fault(
-            "effect-fault-test",
-            &simulated_fault,
-        );
-        super::record_broker_fault(
-            "effect-fault-test",
-            &simulated_fault,
-        );
+        super::record_broker_fault("effect-fault-test", &simulated_fault);
+        super::record_broker_fault("effect-fault-test", &simulated_fault);
 
         let report = super::broker_fault_report();
         let entry = report

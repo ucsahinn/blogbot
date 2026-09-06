@@ -86,6 +86,17 @@ export function setupConnectorLabel(connector: SetupConnectorId): string {
   }
 }
 
+export function generateRecoveryKey(
+  fillRandomBytes: (bytes: Uint8Array) => void = (bytes) => crypto.getRandomValues(bytes)
+): string {
+  const bytes = new Uint8Array(24);
+  fillRandomBytes(bytes);
+  return Array.from(
+    bytes,
+    (byte) => byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
 export function isRecoveryKeyUsable(value: string): boolean {
   return value.trim().length >= 16;
 }

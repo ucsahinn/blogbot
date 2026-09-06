@@ -102,11 +102,12 @@ fn root_handle(root: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
-fn relative_open(
+fn relative_open_with_access(
     parent: &File,
     name: &str,
     directory: bool,
     create: bool,
+    writable: bool,
 ) -> std::io::Result<(File, bool)> {
     let mut wide = OsStr::new(name).encode_wide().collect::<Vec<_>>();
     let byte_len = wide
@@ -130,9 +131,11 @@ fn relative_open(
     };
     let mut handle = HANDLE::default();
     let mut status = IO_STATUS_BLOCK::default();
-    let access = windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(
-        FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE.0,
-    );
+    let mut access_bits = FILE_GENERIC_READ.0;
+    if writable {
+        access_bits |= FILE_GENERIC_WRITE.0 | DELETE.0;
+    }
+    let access = windows::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(access_bits);
     let options = if directory {
         FILE_DIRECTORY_FILE
     } else {
@@ -175,6 +178,19 @@ fn relative_open(
     Ok((file, created))
 }
 
+fn relative_open(
+    parent: &File,
+    name: &str,
+    directory: bool,
+    create: bool,
+) -> std::io::Result<(File, bool)> {
+    relative_open_with_access(parent, name, directory, create, true)
+}
+
+fn relative_open_readonly(parent: &File, name: &str, directory: bool) -> std::io::Result<File> {
+    relative_open_with_access(parent, name, directory, false, false).map(|(file, _)| file)
+}
+
 fn directory_for(root: &File, segments: &[&str], create: bool) -> std::io::Result<File> {
     let mut current = root.try_clone()?;
     for segment in segments {
@@ -190,6 +206,59 @@ fn open_file(root: &File, relative: &str, create: bool) -> std::io::Result<(File
         .ok_or_else(|| invalid("preview path missing filename"))?;
     let parent = directory_for(root, parents, create)?;
     relative_open(&parent, name, false, create)
+}
+
+fn directory_for_readonly(root: &File, parts: &[&str]) -> std::io::Result<File> {
+    let mut current = root.try_clone()?;
+    for segment in parts {
+        current = relative_open_readonly(&current, segment, true)?;
+    }
+    Ok(current)
+}
+
+fn open_file_readonly(root: &File, relative: &str) -> std::io::Result<File> {
+    let parts = segments(relative)?;
+    let (name, parents) = parts
+        .split_last()
+        .ok_or_else(|| invalid("read path missing filename"))?;
+    let parent = directory_for_readonly(root, parents)?;
+    relative_open_readonly(&parent, name, false)
+}
+
+pub fn directory_exists(root_path: &Path, relative: &str) -> bool {
+    let Ok(parts) = segments(relative) else {
+        return false;
+    };
+    root_handle(root_path)
+        .and_then(|root| directory_for_readonly(&root, &parts))
+        .is_ok()
+}
+
+pub fn regular_file_exists(root_path: &Path, relative: &str) -> bool {
+    root_handle(root_path)
+        .and_then(|root| open_file_readonly(&root, relative))
+        .is_ok()
+}
+
+pub fn read_bounded(root_path: &Path, relative: &str, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    let root = root_handle(root_path)?;
+    let file = open_file_readonly(&root, relative)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > max_bytes {
+        return Err(invalid("read file too large"));
+    }
+    let capacity =
+        usize::try_from(metadata.len()).map_err(|_| invalid("read file size unsupported"))?;
+    let limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| invalid("read limit unsupported"))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut limited = file.take(limit);
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(invalid("read file too large"));
+    }
+    Ok(bytes)
 }
 
 fn copy_handle_to(root: &File, source: &mut File, backup_relative: &str) -> std::io::Result<()> {

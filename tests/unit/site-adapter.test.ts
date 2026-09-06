@@ -82,6 +82,22 @@ test("generic Astro adapter rejects unsafe markdown before materialization", () 
   }, { siteOrigin: "", repositoryPath: "C:\\site", adapterId: "astro-generic" }), /unsafe markdown/u);
 });
 
+test("generic Astro adapter rejects ambiguous non-UTC timestamps", () => {
+  const context = { siteOrigin: "", repositoryPath: "C:/site", adapterId: "astro-generic" };
+  const revision = {
+    id: "rev-ambiguous-time",
+    revisionHash: "a".repeat(64),
+    translationKey: "story-ambiguous-time",
+    tr: { slug: "ornek", title: "Örnek", description: "Açıklama", bodyMarkdown: "İçerik", section: "haberler", articleType: "news", publishedAt: "03/04/2026" },
+    en: { slug: "example", title: "Example", description: "Description", bodyMarkdown: "Content", section: "news", articleType: "news", publishedAt: "2026-03-04T00:00:00.000Z" }
+  };
+
+  assert.throws(
+    () => astroGenericAdapter.buildRevisionFiles(revision, context),
+    /exact UTC ISO timestamp/u
+  );
+});
+
 test("artifact manifest rejects executable or unknown top-level fields", () => {
   assert.throws(() => parseSiteArtifactManifest(JSON.stringify({
     version: 1,
@@ -187,6 +203,32 @@ test("the adapter refuses to publish a section or article type it does not decla
       tr: { slug: "ornek", title: "Örnek", description: "Açıklama", bodyMarkdown: "İçerik", section: "haberler", articleType: "editorial" }
     }), context),
     /does not support the article type editorial/u
+  );
+});
+
+test("the adapter binds both localized routes and article types to one section capability", () => {
+  const context = { siteOrigin: "", repositoryPath: "C:/site", adapterId: "astro-generic" };
+  const revision = {
+    id: "rev-route-pair",
+    revisionHash: "a".repeat(64),
+    translationKey: "story-route-pair",
+    tr: { slug: "ornek", title: "Örnek", description: "Açıklama", bodyMarkdown: "İçerik", section: "haberler", articleType: "news" },
+    en: { slug: "example", title: "Example", description: "Description", bodyMarkdown: "Content", section: "news", articleType: "news" }
+  };
+
+  assert.throws(
+    () => astroGenericAdapter.buildRevisionFiles({
+      ...revision,
+      en: { ...revision.en, section: "analysis" }
+    }, context),
+    /same section capability/u
+  );
+  assert.throws(
+    () => astroGenericAdapter.buildRevisionFiles({
+      ...revision,
+      tr: { ...revision.tr, articleType: "analysis" }
+    }, context),
+    /requires article type news for tr section haberler/u
   );
 });
 

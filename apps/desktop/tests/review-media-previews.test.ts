@@ -1,38 +1,12 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
-import { build } from "esbuild";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-type MediaPreviewAsset = { role: "hero" | "inline"; sha256: string; byteSize?: number; contentBase64?: string };
-type PreviewModule = {
-  MAX_MEDIA_PREVIEW_LOADS: number;
-  loadRevisionMediaPreviews(input: {
-    revisionId: string;
-    media: MediaPreviewAsset[];
-    readMedia(input: { revisionId: string; sha256: string }): Promise<{ mimeType: string; contentBase64: string }>;
-  }): Promise<{ urls: Record<string, string>; errors: Record<string, true>; selectedSha256: string[] }>;
-  selectMediaPreviewAssets(media: MediaPreviewAsset[]): MediaPreviewAsset[];
-};
-
-let previewModule: Promise<PreviewModule> | undefined;
-
-function loadPreviewModule(): Promise<PreviewModule> {
-  previewModule ??= build({
-    entryPoints: [fileURLToPath(new URL("../src/screens/ReviewWorkspace.tsx", import.meta.url))],
-    bundle: true,
-    format: "cjs",
-    platform: "node",
-    write: false
-  }).then((result) => {
-    const compiled = result.outputFiles[0]?.text;
-    if (!compiled) throw new Error("REVIEW_WORKSPACE_BUNDLE_MISSING");
-    const module = { exports: {} as PreviewModule };
-    new Function("module", "exports", "require", compiled)(module, module.exports, createRequire(import.meta.url));
-    return module.exports;
-  });
-  return previewModule;
-}
+import {
+  MAX_MEDIA_PREVIEW_LOADS,
+  loadRevisionMediaPreviews,
+  selectMediaPreviewAssets,
+  type MediaPreviewAsset
+} from "../src/screens/review-media-previews.ts";
 
 const hero: MediaPreviewAsset = {
   role: "hero",
@@ -41,7 +15,6 @@ const hero: MediaPreviewAsset = {
 };
 
 test("a failed preview read does not discard a valid hero and can succeed on retry", async () => {
-  const { loadRevisionMediaPreviews } = await loadPreviewModule();
   let failSecondary = true;
   const secondary: MediaPreviewAsset = { role: "inline", sha256: "b".repeat(64), byteSize: 12 };
   const readMedia = async ({ sha256 }: { revisionId: string; sha256: string }) => {
@@ -61,7 +34,6 @@ test("a failed preview read does not discard a valid hero and can succeed on ret
 });
 
 test("preview reads prioritize hero media and remain bounded", async () => {
-  const { MAX_MEDIA_PREVIEW_LOADS, loadRevisionMediaPreviews, selectMediaPreviewAssets } = await loadPreviewModule();
   const calls: string[] = [];
   const media: MediaPreviewAsset[] = [
     ...Array.from({ length: 10 }, (_, index) => ({ role: "inline" as const, sha256: String(index).padStart(64, "0"), byteSize: 12 })),

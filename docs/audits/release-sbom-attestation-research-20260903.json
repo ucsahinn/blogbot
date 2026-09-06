@@ -1,0 +1,183 @@
+{
+  "schemaVersion": "codex-chef.evidence-research.v1",
+  "generatedAt": "2026-09-03T13:15:00Z",
+  "status": "partial",
+  "charter": {
+    "decision": "Choose a fail-closed SBOM and GitHub artifact-attestation design for the signed Windows release workflow.",
+    "primaryQuestion": "Which current official action, SBOM format, permission split, and job ordering fit Blogbot's protected signing and least-privilege publication boundary?",
+    "subQuestions": [
+      "Which permissions are required for binary provenance and SBOM attestations?",
+      "Which current action accepts both binary subjects and an SPDX JSON SBOM?",
+      "How can the SBOM be generated on a Windows runner without giving its generator release or dependency-submission write access?",
+      "Where must attestation sit so a failed attestation cannot follow a published release?"
+    ],
+    "scope": "Current public-repository GitHub Actions behavior, Windows-hosted release jobs, SPDX JSON, and the local release-desktop.yml contract checked on 2026-09-03.",
+    "audience": "Blogbot maintainer and release-security reviewer",
+    "deadline": "Current repository-hardening session",
+    "exclusions": [
+      "Running a workflow or writing to the GitHub attestations API",
+      "Creating a release, publishing, deploying, or configuring repository settings",
+      "Reading or requesting signing credential values",
+      "Installing or upgrading local dependencies"
+    ]
+  },
+  "methods": {
+    "approach": "Bounded implementation research using current first-party GitHub documentation, immutable action source, and the SBOM producer's primary documentation.",
+    "inclusionCriteria": [
+      "Current official GitHub documentation or action source directly defining permissions and inputs",
+      "Primary SBOM action documentation that explicitly covers Windows and no-upload configuration",
+      "Immutable full commit references resolved from public release tags"
+    ],
+    "exclusionCriteria": [
+      "Deprecated actions when the current GitHub action supersedes them",
+      "Community snippets, mutable major tags, and unpinned third-party examples",
+      "Container-only guidance that does not apply to Windows binary release assets"
+    ],
+    "searchLog": [
+      "GitHub web search on 2026-09-03: artifact attestations, SBOM, subject-path, sbom-path, and required permissions; official GitHub domains preferred.",
+      "GitHub web search on 2026-09-03: anchore/sbom-action Windows output-file upload-artifact false; primary repository selected.",
+      "Read immutable actions/attest action.yml at commit 508db95dd578ae2727ebd6217d5ba78e4fbda05d.",
+      "Read immutable anchore/sbom-action action.yml at commit 3ad7283483fc7af8ff2b4ea19663c2d5ca935e26.",
+      "Resolved public tags with git ls-remote on 2026-09-03; no repository or account state was changed."
+    ]
+  },
+  "sources": [
+    {
+      "id": "github-attestation-docs",
+      "title": "Using artifact attestations to establish provenance for builds",
+      "sourceType": "official GitHub documentation",
+      "url": "https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations",
+      "checkedAt": "2026-09-03T13:15:00Z",
+      "confidence": "high",
+      "outdatedRisk": "GitHub Actions permissions and recommended action versions are version-sensitive and must be rechecked before a future workflow change.",
+      "supports": [
+        "claim-permissions",
+        "claim-sbom-mode",
+        "claim-ordering"
+      ]
+    },
+    {
+      "id": "actions-attest-immutable",
+      "title": "actions/attest action.yml at v4.2.1 commit",
+      "sourceType": "official GitHub action source",
+      "url": "https://github.com/actions/attest/blob/508db95dd578ae2727ebd6217d5ba78e4fbda05d/action.yml",
+      "checkedAt": "2026-09-03T13:15:00Z",
+      "confidence": "high",
+      "outdatedRisk": "The immutable commit will not drift, but later releases may contain security fixes and require a reviewed pin update.",
+      "supports": [
+        "claim-sbom-mode",
+        "claim-pins"
+      ]
+    },
+    {
+      "id": "anchore-sbom-docs",
+      "title": "Anchore SBOM Action README",
+      "sourceType": "primary project documentation",
+      "url": "https://github.com/anchore/sbom-action/blob/main/README.md",
+      "checkedAt": "2026-09-03T13:15:00Z",
+      "confidence": "medium",
+      "outdatedRisk": "The main branch can drift; implementation must use the separately checked immutable commit.",
+      "supports": [
+        "claim-generator"
+      ]
+    },
+    {
+      "id": "anchore-sbom-immutable",
+      "title": "anchore/sbom-action action.yml at v0.24.2 commit",
+      "sourceType": "immutable primary action source",
+      "url": "https://github.com/anchore/sbom-action/blob/3ad7283483fc7af8ff2b4ea19663c2d5ca935e26/action.yml",
+      "checkedAt": "2026-09-03T13:15:00Z",
+      "confidence": "high",
+      "outdatedRisk": "The immutable commit will not drift, but the action downloads Syft during CI and therefore still requires a real non-production workflow exercise.",
+      "supports": [
+        "claim-generator",
+        "claim-pins"
+      ]
+    }
+  ],
+  "claims": [
+    {
+      "id": "claim-permissions",
+      "statement": "For binary provenance and SBOM attestations, GitHub documents a job permission set of contents read, id-token write, and attestations write.",
+      "classification": "fact",
+      "confidence": "high",
+      "uncertainty": "Organization-linked artifact metadata has separate permissions, but it is not needed for this public binary attestation design.",
+      "sourceRefs": [
+        "github-attestation-docs"
+      ]
+    },
+    {
+      "id": "claim-sbom-mode",
+      "statement": "The current actions/attest action supports provenance from subject paths and an SBOM mode using a JSON SPDX or CycloneDX file supplied through sbom-path.",
+      "classification": "fact",
+      "confidence": "high",
+      "uncertainty": "A live workflow is still required to prove repository-plan availability and the exact hosted-runner integration.",
+      "sourceRefs": [
+        "github-attestation-docs",
+        "actions-attest-immutable"
+      ]
+    },
+    {
+      "id": "claim-generator",
+      "statement": "Anchore's SBOM action supports native Windows runners, SPDX JSON output, a caller-selected output file, and disabling its own workflow-artifact, dependency-snapshot, and release-asset writes.",
+      "classification": "fact",
+      "confidence": "medium",
+      "uncertainty": "Windows support is documented by the producer and must be exercised on the real hosted runner; the immutable action input file confirms the relevant no-upload controls.",
+      "sourceRefs": [
+        "anchore-sbom-docs",
+        "anchore-sbom-immutable"
+      ]
+    },
+    {
+      "id": "claim-ordering",
+      "statement": "A separate attestation job between verified build output and publication is the least-privilege ordering that prevents a failed attestation from following an already-created release.",
+      "classification": "recommendation",
+      "confidence": "high",
+      "uncertainty": "This is an architectural inference from the documented write permissions and the repository's existing signing/publish split.",
+      "sourceRefs": [
+        "github-attestation-docs"
+      ]
+    },
+    {
+      "id": "claim-pins",
+      "statement": "The reviewed implementation should pin actions/attest v4.2.1 and anchore/sbom-action v0.24.2 to their resolved full commit identifiers instead of mutable tags.",
+      "classification": "recommendation",
+      "confidence": "high",
+      "uncertainty": "Pins should be reviewed when upstream security releases are adopted.",
+      "sourceRefs": [
+        "actions-attest-immutable",
+        "anchore-sbom-immutable"
+      ]
+    }
+  ],
+  "synthesis": {
+    "findings": [
+      "The checked sources support SPDX JSON and the unified actions/attest action; the deprecated attest-sbom wrapper is unnecessary.",
+      "SBOM generation can remain in the read-only signing job with all generator uploads disabled.",
+      "Attestation needs its own job and token permissions; the publication job can remain the sole contents-write job.",
+      "The SBOM and exact signed subjects must be downloaded and revalidated before attestation, and publication must depend on successful attestation."
+    ],
+    "disagreements": [
+      "The actions/attest repository README lists artifact-metadata write in its general permission example, while GitHub's binary and SBOM how-to lists only contents read, id-token write, and attestations write. This design follows the narrower binary guidance because no registry push or linked-artifact storage record is requested."
+    ],
+    "limitations": [
+      "No hosted workflow, Sigstore signing, GitHub attestation API write, or gh verification command was run.",
+      "The SBOM producer downloads Syft during CI; its Windows execution and resulting component coverage remain unproven until an authorized non-production run.",
+      "An SBOM records discovered components but does not by itself prove completeness or absence of vulnerabilities."
+    ],
+    "recommendations": [
+      "Generate one SPDX JSON SBOM after signing credentials are removed and include it in the immutable workflow artifact.",
+      "Add a separate secrets-free attestation job with only contents read, id-token write, and attestations write.",
+      "Reverify the exact payload and signed subjects in the attestation job, create both provenance and SBOM attestations, and make publication depend on that job.",
+      "Retain the actual non-production workflow run and gh attestation verification as an external acceptance gate."
+    ]
+  },
+  "gaps": [
+    "Real hosted Windows SBOM generation, attestation persistence, and downstream gh verification have not been authorized or observed."
+  ],
+  "approvalGates": [
+    "Do not dispatch the workflow or write an attestation without separate approval.",
+    "Do not create, publish, or modify a GitHub release without separate approval.",
+    "Do not request or expose signing credential values."
+  ]
+}

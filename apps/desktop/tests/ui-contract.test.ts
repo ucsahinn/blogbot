@@ -101,6 +101,23 @@ test("background synchronization exposes failures without creating an unhandled 
   assert.match(shell, /role="status" aria-live="polite"/u);
 });
 
+test("overlapping native sync requests cannot let an older snapshot overwrite a newer one", async () => {
+  const app = await readFile(source("App.tsx"), "utf8");
+
+  assert.match(app, /const syncRequestSequence = useRef\(0\);/u);
+  assert.match(app, /const runtimeBridgeRef = useRef<BlogbotBridge \| null>\(null\);/u);
+  assert.match(app, /runtimeBridgeRef\.current = runtimeBridge;/u);
+  assert.match(app, /const syncBridge = runtimeBridgeRef\.current \?\? bridge;/u);
+  assert.match(
+    app,
+    /const syncSequence = \+\+syncRequestSequence\.current;[\s\S]*?const nextSnapshot = await syncBridge\.getBootstrapSnapshot\(\);[\s\S]*?if \(disposed \|\| syncSequence !== syncRequestSequence\.current\) return;[\s\S]*?setSnapshot\(nextSnapshot\);/u
+  );
+  assert.match(
+    app,
+    /\.catch\(\(reason\) => \{\s*if \(disposed \|\| syncSequence !== syncRequestSequence\.current\) return;\s*setSyncError/u
+  );
+});
+
 test("offline bootstrap does not start a connector read after Doctor has closed the local engine", async () => {
   const app = await readFile(source("App.tsx"), "utf8");
 
@@ -166,13 +183,18 @@ test("about control exposes the verified project identity and GitHub source", as
   assert.match(shell, /Güncellemeleri denetle/u);
   assert.match(shell, /indir ve kur/u);
   assert.doesNotMatch(shell, /downloadAndInstall/u);
+  assert.match(shell, /kurulumdan önce yayıncı kimliği doğrulanacak/u);
+  assert.doesNotMatch(shell, /güvenli bağlantı ve yayıncı kimliğiyle denetleniyor/u);
   assert.doesNotMatch(shell, /dangerousInsecureTransportProtocol/u);
 });
 
 test("mobile fixed navigation cannot obscure focus and form focus remains visible", async () => {
   const styles = await readFile(source("styles.css"), "utf8");
   assert.match(styles, /\.field input:focus-visible[\s\S]*?outline:\s*3px solid/u);
-  assert.match(styles, /@media \(max-width: 700px\)[\s\S]*?\.workspace\s*\{[\s\S]*?padding-bottom:\s*(?:8[4-9]|9\d|\d{3,})px/u);
+  assert.match(
+    styles,
+    /@media \(max-width: 700px\)[\s\S]*?\.workspace\s*\{[\s\S]*?padding-bottom:\s*calc\((?:8[4-9]|9\d|\d{3,})px \+ env\(safe-area-inset-bottom\)\)/u
+  );
 });
 
 test("Boby panel reserves message space without grid row collisions", async () => {
@@ -405,6 +427,10 @@ test("GitHub device login starts only from a user action and renders only the sa
   assert.match(setup, /githubDeviceFlow\.userCode/u);
   assert.match(setup, /https:\/\/github\.com\/login\/device/u);
   assert.doesNotMatch(setup, /githubDeviceFlow\.(?:deviceCode|accessToken|token)/u);
+  assert.match(setup, /GitHub App istemci kimliği/u);
+  assert.match(setup, /yalnız bu depoya kurulmalı/u);
+  assert.match(setup, /client secret/u);
+  assert.match(setup, /reauthorization-required/u);
 });
 
 test("publish setup requires explicit GitHub check names instead of assuming CI success", async () => {
@@ -541,13 +567,6 @@ test("instant create offers only publishable visual policies and explains their 
   );
   assert.match(instantCreate, /\u00d6nce ImageGen denenir; kullan\u0131lamazsa veya \u00fcretim ba\u015far\u0131s\u0131z olursa yerel olu\u015fturucu metinsiz kapak ve \u00fc\u00e7 yay\u0131n oran\u0131 \u00fcretir/u);
   assert.match(instantCreate, /Yerel olu\u015fturucu d\u0131\u015f g\u00f6rsel \u00fcretimi \u00e7a\u011f\u0131rmaz; metinsiz kapak ve \u00fc\u00e7 yay\u0131n oran\u0131 \u00fcretir/u);
-});
-
-test("Operations exposes a real retry action for a blocked active draft", async () => {
-  const contents = await readFile(source("screens", "OperationsHub.tsx"), "utf8");
-  assert.match(contents, /draft\.blockers > 0/u);
-  assert.match(contents, /onClick=\{\(\) => void retry\(draft\.id\)\}/u);
-  assert.match(contents, /Tekrar dene/u);
 });
 
 test("review approval is V3-only and collects a complete human declaration", async () => {

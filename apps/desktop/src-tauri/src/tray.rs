@@ -1,9 +1,9 @@
-﻿use tauri::{
+use std::sync::Mutex;
+use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     App, AppHandle, Emitter, Manager,
 };
-use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TrayProjection {
@@ -54,10 +54,22 @@ fn review_ready_transition(initialized: bool, previous: usize, current: usize) -
 pub fn update(app: &AppHandle, projection: TrayProjection) -> Result<bool, String> {
     let labels = project_labels(projection);
     let items = app.state::<TrayStatusItems>();
-    items.connection.set_text(labels.connection).map_err(|error| error.to_string())?;
-    items.approvals.set_text(labels.approvals).map_err(|error| error.to_string())?;
-    items.failures.set_text(labels.failures).map_err(|error| error.to_string())?;
-    items.upcoming.set_text(labels.upcoming).map_err(|error| error.to_string())?;
+    items
+        .connection
+        .set_text(labels.connection)
+        .map_err(|error| error.to_string())?;
+    items
+        .approvals
+        .set_text(labels.approvals)
+        .map_err(|error| error.to_string())?;
+    items
+        .failures
+        .set_text(labels.failures)
+        .map_err(|error| error.to_string())?;
+    items
+        .upcoming
+        .set_text(labels.upcoming)
+        .map_err(|error| error.to_string())?;
 
     let mut review = items
         .review_notification

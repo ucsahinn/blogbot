@@ -14,6 +14,7 @@ import {
 import { createNodeFetchTransport } from "../../fetcher/src/node-transport.ts";
 import { createFetcherSidecarTransport } from "./fetcher-sidecar-transport.ts";
 import { validateEngineCommandV1, type EngineCommandV1 } from "../../../packages/contracts/src/index.ts";
+import { isSafeGitHubWorkflowName } from "../../../packages/contracts/src/github-policy.ts";
 import { BackendStoreError, type BackendJob, type BackendRepository, type BackendRepositoryTransaction } from "../../../packages/database/src/backend-repository.ts";
 import { InMemoryBackendStore } from "../../../packages/database/src/in-memory-backend-store.ts";
 import { PGliteBackendRepository } from "../../../packages/database/src/pglite-backend-repository.ts";
@@ -1797,8 +1798,7 @@ export function createEngineProtocol(
               && new Set(deployObject.requiredChecks).size === deployObject.requiredChecks.length
                 ? deployObject.requiredChecks as string[]
                 : null;
-            const deployWorkflow = typeof deployObject.workflowName === "string"
-              && /^[A-Za-z0-9_.-]+\.ya?ml$/u.test(deployObject.workflowName)
+            const deployWorkflow = isSafeGitHubWorkflowName(deployObject.workflowName)
                 ? deployObject.workflowName
                 : null;
             if (publishMode && (!requiredChecks || !deployWorkflow)) throw new Error("PUBLICATION_POLICY_UNAVAILABLE");
@@ -2057,8 +2057,7 @@ export function createEngineProtocol(
           && new Set(payload.requiredChecks).size === payload.requiredChecks.length
             ? payload.requiredChecks as string[]
             : null;
-        const deployWorkflow = typeof payload.deployWorkflow === "string"
-          && /^[A-Za-z0-9_.-]+\.ya?ml$/u.test(payload.deployWorkflow)
+        const deployWorkflow = isSafeGitHubWorkflowName(payload.deployWorkflow)
             ? payload.deployWorkflow
             : null;
         if (!requiredChecks || !deployWorkflow) {
@@ -2176,7 +2175,7 @@ export function createEngineProtocol(
         ...withoutPreviousRetryDeadline
       } = effect;
       const nextAttemptAt = state === "UNKNOWN" && retryAfterMs !== undefined
-        ? new Date(Date.now() + retryAfterMs).toISOString()
+        ? new Date(nativePublicationNow() + retryAfterMs).toISOString()
         : undefined;
       let saved;
       try {

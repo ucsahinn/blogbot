@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { isSafeGitHubWorkflowName } from "../../../packages/contracts/src/github-policy.ts";
+import { isSafeGitHubBranchName, isSafeGitHubRepositoryName } from "./github-connector.ts";
 import { isEngineMediaReference } from "./publication.ts";
 import type {
   DeployIntent,
@@ -23,11 +25,16 @@ export interface GitHubEffectsStore {
 }
 
 type ResponseLike = { ok: boolean; status: number; json(): Promise<unknown>; headers: { get(name: string): string | null } };
-type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => Promise<ResponseLike>;
+type FetchLike = (url: string, init: {
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+  redirect: "manual";
+  signal?: AbortSignal;
+}) => Promise<ResponseLike>;
 
 const API = "https://api.github.com";
-const SAFE_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
-const SAFE_BRANCH = /^[A-Za-z0-9._/-]{1,200}$/u;
+const REQUEST_TIMEOUT_MS = 15_000;
 
 function object(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -38,10 +45,10 @@ function string(value: unknown): string | null {
 }
 
 function assertConfig(config: GitHubPublicationConfig): void {
-  if (!config.token.trim() || !SAFE_REPOSITORY.test(config.repository) || !SAFE_BRANCH.test(config.baseBranch)) {
+  if (!config.token.trim() || !isSafeGitHubRepositoryName(config.repository) || !isSafeGitHubBranchName(config.baseBranch)) {
     throw new Error("GitHub publication connector configuration is invalid");
   }
-  if (config.deployWorkflow && !/^[A-Za-z0-9_.-]+\.ya?ml$/u.test(config.deployWorkflow)) {
+  if (config.deployWorkflow && !isSafeGitHubWorkflowName(config.deployWorkflow)) {
     throw new Error("GitHub deploy workflow is invalid");
   }
   if (config.requiredChecks && (
@@ -132,21 +139,60 @@ export class GitHubPublicationEffects implements PublicationEffectsPort {
   }
 
   private async request(path: string, method = "GET", body?: unknown): Promise<{ response: ResponseLike; body: unknown }> {
-    const response = await this.fetcher(`${API}${path}`, {
-      method,
-      headers: {
-        accept: "application/vnd.github+json",
-        "content-type": "application/json",
-        "x-github-api-version": "2022-11-28",
-        authorization: `Bearer ${this.config.token}`
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("GitHub publication request timed out"));
+      }, REQUEST_TIMEOUT_MS);
     });
-    // GitHub's workflow-dispatch endpoint deliberately returns 204 No
-    // Content. Parsing it as JSON turns a successful dispatch into a local
-    // transport failure before the intent can be persisted.
-    const parsed = response.status === 204 ? null : await response.json();
-    return { response, body: parsed };
+    try {
+      let response: ResponseLike;
+      try {
+        response = await Promise.race([
+          this.fetcher(`${API}${path}`, {
+            method,
+            headers: {
+              accept: "application/vnd.github+json",
+              "content-type": "application/json",
+              "x-github-api-version": "2022-11-28",
+              authorization: `Bearer ${this.config.token}`
+            },
+            redirect: "manual",
+            signal: controller.signal,
+            ...(body === undefined ? {} : { body: JSON.stringify(body) })
+          }),
+          deadline
+        ]);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw new Error("GitHub publication request timed out", { cause: error });
+        }
+        throw error;
+      }
+      // GitHub's workflow-dispatch endpoint deliberately returns 204 No
+      // Content. Parsing it as JSON turns a successful dispatch into a local
+      // transport failure before the intent can be persisted.
+      if (response.status === 204) return { response, body: null };
+      try {
+        return {
+          response,
+          body: await Promise.race([response.json(), deadline])
+        };
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw new Error("GitHub publication request timed out", { cause: error });
+        }
+        // Preserve an error response's status even when a proxy or gateway
+        // supplies an empty/non-JSON body. Successful responses still require
+        // valid JSON and therefore remain fail-closed.
+        if (!response.ok) return { response, body: null };
+        throw error;
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private path(suffix: string): string {

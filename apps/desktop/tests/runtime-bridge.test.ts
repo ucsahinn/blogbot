@@ -31,7 +31,7 @@ test("application bootstrap renders the local workspace before a slow connector 
   assert.match(
     appSource,
     /const coalescingBridge = createCoalescingBridge\(runtimeBridge, \{ completedSnapshotFreshnessMs: \{ bootstrap: 1_500, workspace: 1_000 \} \}\);/u,
-    "slow local candidate projections must be briefly reused during startup reconciliation"
+    "ordinary navigation may briefly reuse expensive local projections"
   );
   assert.match(appSource, /const initialSnapshot = await withBootstrapTimeout\(coalescingBridge\.getBootstrapSnapshot\(\)\);[\s\S]*?const initialWorkspace = await withBootstrapTimeout\(coalescingBridge\.getEditorialWorkspace\(\)\);/u);
   assert.match(appSource, /setConnectorState\(fallbackConnectorState\);/u);
@@ -42,19 +42,19 @@ test("application bootstrap renders the local workspace before a slow connector 
   );
   assert.match(
     appSource,
-    /setTimeout\(\(\) => \{[\s\S]*?\}, 750\)/u,
+    /reconciliationTimer = window\.setTimeout\(\(\) => \{[\s\S]*?\}, BOOTSTRAP_RECONCILIATION_DELAY_MS\)/u,
     "a bounded post-Doctor refresh prevents the first visible workspace from retaining a pre-recovery projection"
   );
-  assert.match(appSource, /coalescingBridge\.getEditorialWorkspace\(\)/u);
+  assert.match(appSource, /coalescingBridge\.getEditorialWorkspace\(\{ fresh: true \}\)/u);
   assert.match(
     appSource,
-    /\[settledSnapshot, settledWorkspace\][\s\S]*?\.catch\(\(reason\) => \{/u,
+    /scheduleReconciliation\(1\);[\s\S]*?\.catch\(\(reason\) => \{/u,
     "post-Doctor reconciliation failures must remain visible instead of silently leaving stale workspace data"
   );
   assert.match(appSource, /Çalışma alanı arka planda yenilenemedi/u);
   assert.match(
     appSource,
-    /\.then\(\(\[settledSnapshot, settledWorkspace\][\s\S]*?setSyncError\(""\)/u,
+    /setWorkspace\(settledWorkspace\);\s*setSyncError\(""\)/u,
     "a successful post-Doctor reconciliation must clear an earlier transient sync error"
   );
   assert.match(
@@ -91,9 +91,39 @@ test("native startup projections are asynchronous commands so sidecar I/O cannot
 test("native smoke distinguishes first engine boot from in-app route responsiveness", async () => {
   const smoke = await readFile(join(desktopRoot, "..", "..", "scripts", "native-webview-smoke.mjs"), "utf8");
 
-  assert.match(smoke, /const MAX_INITIAL_BOOT_RENDER_MS = 15_000;/u);
+  assert.match(smoke, /const MAX_INITIAL_BOOT_RENDER_MS = 40_000;/u);
   assert.match(smoke, /waitForVisibleHeading\(sessionId, "operations", MAX_INITIAL_BOOT_RENDER_MS\)/u);
   assert.match(smoke, /const MAX_ROUTE_RENDER_MS = 3_000;/u);
+});
+
+test("bootstrap timeout outlives the native startup budget and offline recovery bypasses cached projections", async () => {
+  const appSource = await readFile(join(desktopRoot, "src", "App.tsx"), "utf8");
+
+  assert.match(appSource, /const BOOTSTRAP_TIMEOUT_MS = 35_000;/u);
+  assert.match(appSource, /const MAX_BOOTSTRAP_RECONCILIATION_ATTEMPTS = 8;/u);
+  assert.match(appSource, /const scheduleReconciliation = \(attempt: number\) => \{/u);
+  assert.match(
+    appSource,
+    /const settledSnapshot = await coalescingBridge\.getBootstrapSnapshot\(\{ fresh: true \}\);\s*const settledWorkspace = await coalescingBridge\.getEditorialWorkspace\(\{ fresh: true \}\);/u
+  );
+  assert.match(
+    appSource,
+    /settledSnapshot\.runtime !== "ONLINE"\s*&& attempt < MAX_BOOTSTRAP_RECONCILIATION_ATTEMPTS[\s\S]*?scheduleReconciliation\(attempt \+ 1\)/u
+  );
+});
+
+test("native smoke waits for the refreshed Operations action instead of accepting a stale status", async () => {
+  const smoke = await readFile(join(desktopRoot, "..", "..", "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(
+    smoke,
+    /if \(!clicked\)[\s\S]*?await wait\(150\);[\s\S]*?const expectedSnapshot = await invoke\(sessionId, "get_bootstrap_snapshot"\);/u
+  );
+  assert.match(smoke, /const expectedAction = expectedSnapshot\.result\.automation\.ingestionPaused/u);
+  assert.match(
+    smoke,
+    /finalState\.automationAction\?\.label === expectedAction\s*&&\s*!finalState\.automationAction\.disabled/u
+  );
 });
 
 test("native smoke can explicitly verify a connected Luna reply without making it part of ordinary release smoke", async () => {
@@ -128,6 +158,6 @@ test("operations refresh also waits for Doctor before reading runtime-dependent 
   );
   assert.match(
     operationsSource,
-    /const snapshot = await props\.bridge\.getBootstrapSnapshot\(\);\s*const \[workspace, connectorState\] = await Promise\.all/u
+    /const snapshot = await props\.bridge\.getBootstrapSnapshot\(\{ fresh: true \}\);\s*const \[workspace, connectorState\] = await Promise\.all\(\[\s*props\.bridge\.getEditorialWorkspace\(\{ fresh: true \}\),\s*props\.bridge\.getConnectorState\(\{ fresh: true \}\)/u
   );
 });

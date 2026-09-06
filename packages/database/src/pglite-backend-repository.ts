@@ -766,12 +766,31 @@ export class PGliteBackendRepository
           ])
         })
       : new PGlite(dataDir);
-    await database.waitReady;
-    await applyLocalMigrations(database);
-    const protector = JsonProtector.fromEnvironment();
-    await encryptLegacyBackendRows(database, protector);
-    await backfillRevisionListIndex(database, protector);
-    return new PGliteBackendRepository(database, protector);
+    try {
+      await database.waitReady;
+      await applyLocalMigrations(database);
+      const protector = JsonProtector.fromEnvironment();
+      await encryptLegacyBackendRows(database, protector);
+      await backfillRevisionListIndex(database, protector);
+      return new PGliteBackendRepository(database, protector);
+    } catch (error) {
+      // Until open succeeds there is no caller that can own this database.
+      // Complete shutdown before allowing a retry to open the same directory.
+      const failures: unknown[] = [error];
+      try {
+        await database.close();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+      if (failures.length > 1) {
+        throw new AggregateError(
+          failures,
+          "LOCAL_DATABASE_INITIALIZATION_CLEANUP_FAILED",
+          { cause: error }
+        );
+      }
+      throw error;
+    }
   }
 
   /** Explicit, potentially expensive full encrypted-row integrity check. */

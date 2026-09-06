@@ -32,6 +32,7 @@ async function createQaBridge(): Promise<BlogbotBridge> {
   let codexTested = false;
   let localWorkspaceRecovered = false;
   let retryAccepted = false;
+  let providerWaitRetryAccepted = false;
   let candidatePromoted = false;
   let delayedCandidateWorkspaceReads = 0;
   let instantDraftCreated = false;
@@ -80,6 +81,13 @@ async function createQaBridge(): Promise<BlogbotBridge> {
     }
     if ((state === "engine-timeout" || state === "recovery-postsuccess-refresh-failure") && command === "test_local_engine") {
       throw new Error("ENGINE_RESPONSE_TIMEOUT");
+    }
+    if (state === "codex-provider-waits" && command === "retry_job") {
+      if (String(args?.jobId ?? "") !== "qa-rate-wait") {
+        throw new Error("QA_SENTINEL: PROVIDER_WAIT_JOB_NOT_RETRYABLE");
+      }
+      providerWaitRetryAccepted = true;
+      return { ok: true };
     }
     if (state === "operations-refresh-race" && command === "get_bootstrap_snapshot") {
       bootstrapCalls += 1;
@@ -309,6 +317,17 @@ async function createQaBridge(): Promise<BlogbotBridge> {
       workspace.drafts = [];
       return workspace;
     }
+    if (state === "degraded" && command === "get_bootstrap_snapshot") {
+      const snapshot = structuredClone(value) as {
+        runtime: string;
+        capabilities: string[];
+        codex: { state: string; accountLabel: string; queueDepth: number; lastRunAt: string };
+      };
+      snapshot.runtime = "DEGRADED";
+      snapshot.capabilities = snapshot.capabilities.filter((capability) => capability !== "SOURCE.SCAN");
+      snapshot.codex = { ...snapshot.codex, state: "UNAVAILABLE", accountLabel: "Yazı üretimi · yeniden bağlantı bekleniyor" };
+      return snapshot;
+    }
     if ((state === "offline" || state === "offline-engine") && command === "get_bootstrap_snapshot") {
       const snapshot = structuredClone(value) as Record<string, unknown>;
       snapshot.runtime = "OFFLINE_READ_ONLY";
@@ -332,6 +351,35 @@ async function createQaBridge(): Promise<BlogbotBridge> {
       for (const key of ["today", "candidates", "drafts", "queue", "scheduled", "history", "failures", "codexRoles", "systemHealth"]) {
         workspace[key] = [];
       }
+      return workspace;
+    }
+    if (state === "codex-provider-waits" && command === "get_editorial_workspace") {
+      const workspace = structuredClone(value) as { drafts: Array<Record<string, unknown>> };
+      const baseDraft = {
+        titleEn: "Provider wait",
+        section: "haberler",
+        completion: null,
+        blockers: 1,
+        updatedAt: "2026-09-03T12:00:00.000Z",
+        scheduledAt: null,
+        state: "DRAFTING",
+        reviewable: false,
+        executionState: "WAITING"
+      };
+      workspace.drafts = [
+        { ...baseDraft, id: "qa-auth-wait", titleTr: "Codex auth wait", detail: "Codex hesabi baglanti bekliyor.", nextAction: "CONNECT_CODEX", reasonCode: "AUTH_REQUIRED" },
+        {
+          ...baseDraft,
+          id: "qa-rate-wait",
+          titleTr: "Codex rate wait",
+          detail: providerWaitRetryAccepted ? "Is guvenli yerel kuyrukta yeniden deneniyor." : "Saglayici hiz siniri bekleniyor.",
+          blockers: providerWaitRetryAccepted ? 0 : 1,
+          executionState: providerWaitRetryAccepted ? "RETRY_SCHEDULED" : "WAITING",
+          nextAction: providerWaitRetryAccepted ? "NONE" : "RETRY",
+          reasonCode: providerWaitRetryAccepted ? null : "RATE_LIMIT"
+        },
+        { ...baseDraft, id: "qa-paid-disabled", titleTr: "Paid fallback disabled", detail: "Ucretli fallback kapali.", nextAction: "NONE", reasonCode: "PAID_FALLBACK_DISABLED" }
+      ];
       return workspace;
     }
     if (state === "manual-retry-required" && command === "get_editorial_workspace") {
@@ -393,7 +441,7 @@ async function createQaBridge(): Promise<BlogbotBridge> {
         status: "unconfigured",
         writes: false,
         network: false,
-        detail: "GitHub App broker bu uygulama paketinde yapılandırılmadı; gerçek giriş ve yayın kapalı tutuluyor."
+        detail: "GitHub App istemci kimliği ve hedef depo kaydedilmedi; gerçek giriş ve yayın kapalı tutuluyor."
       };
     }
     if (state === "publish-ready" && command === "get_connector_state") {

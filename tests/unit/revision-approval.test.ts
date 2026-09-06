@@ -1051,10 +1051,13 @@ test("V3 validates exact cited-source projection and normalized deploy policy", 
     })),
     false
   );
-  assert.equal(
-    validateRevisionPackageV3(v3Revision({ deployWorkflow: "../deploy.yml" })),
-    false
-  );
+  for (const deployWorkflow of ["../deploy.yml", "w".repeat(97) + ".yml", "a..yml", ".yml", "deploy.txt"]) {
+    assert.equal(
+      validateRevisionPackageV3(v3Revision({ deployWorkflow })),
+      false,
+      deployWorkflow
+    );
+  }
 });
 
 test("publication source projection never exposes private evidence fields", () => {

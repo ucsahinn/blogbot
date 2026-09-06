@@ -41,12 +41,32 @@ export function BobyAssistant({ activePage, snapshot, workspace, bridge, open, o
   const [responding, setResponding] = useState(false);
   const [pendingGuidanceId, setPendingGuidanceId] = useState<string | null>(() => restorePendingBobyGuidance(window.sessionStorage));
   const inputRef = useRef<HTMLInputElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
   const availability = useMemo(() => describeBobyAvailability({ runtime: snapshot.runtime, codexState: snapshot.codex.state }), [snapshot.codex.state, snapshot.runtime]);
 
   useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
     if (!open) return;
+    if (document.activeElement instanceof HTMLElement) {
+      openerRef.current = document.activeElement;
+    }
     playFeedbackSound("boby-open");
-    window.setTimeout(() => inputRef.current?.focus(), 0);
+    const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 0);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onCloseRef.current();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.setTimeout(() => openerRef.current?.focus(), 0);
+    };
   }, [open]);
 
   useEffect(() => {

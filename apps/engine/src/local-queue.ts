@@ -51,6 +51,7 @@ interface Worker<T extends object> {
   timer: ReturnType<typeof setInterval>;
   running: boolean;
   faultReported: boolean;
+  pendingFailure?: { id: string; claimToken: string };
 }
 
 export interface LocalQueueRuntimeOptions {
@@ -90,9 +91,11 @@ CREATE TABLE IF NOT EXISTS blogbot_local_queue_jobs (
   payload jsonb NOT NULL,
   state text NOT NULL CHECK (state IN ('created', 'active', 'completed', 'failed')),
   attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  claim_token text,
   available_at_unix_ms bigint NOT NULL,
   updated_at_unix_ms bigint NOT NULL
 );
+ALTER TABLE blogbot_local_queue_jobs ADD COLUMN IF NOT EXISTS claim_token text;
 CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
   ON blogbot_local_queue_jobs (queue_name, state, available_at_unix_ms);
 `);
@@ -243,13 +246,20 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
   }
 
   private async runWorker(worker: Worker<object>): Promise<void> {
-    const job = await this.claim(worker.queue);
-    if (!job || this.stopping) return;
+    // A handler has already finished for this reservation. Retry only its
+    // durable state transition before claiming more work, never the handler.
+    if (worker.pendingFailure) {
+      await this.settleFailure(worker);
+      return;
+    }
+    const claimed = await this.claim(worker.queue);
+    if (!claimed || this.stopping) return;
+    const { claimToken, ...job } = claimed;
     try {
       await worker.handler(job);
       await this.database.query(
-        "UPDATE blogbot_local_queue_jobs SET state = 'completed', updated_at_unix_ms = $2 WHERE id = $1 AND state = 'active'",
-        [job.id, Date.now()]
+        "UPDATE blogbot_local_queue_jobs SET state = 'completed', updated_at_unix_ms = $2 WHERE id = $1 AND state = 'active' AND claim_token = $3",
+        [claimed.id, Date.now(), claimToken]
       );
     } catch {
       // Shutdown tears down the resources handlers depend on (fetcher sidecar,
@@ -258,21 +268,37 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
       // launch, exactly as it does after a hard kill; writing a terminal state
       // would dead-letter healthy work on its first attempt.
       if (this.stopping) return;
-      const plan = QUEUE_PLANS[worker.queue];
-      const row = await this.database.query<{ attempts: number }>(
-        "SELECT attempts FROM blogbot_local_queue_jobs WHERE id = $1",
-        [job.id]
-      );
-      const attempts = row.rows[0]?.attempts ?? plan.retryLimit;
-      const now = Date.now();
-      const retryable = attempts <= plan.retryLimit && !this.stopping;
-      await this.database.query(
-        `UPDATE blogbot_local_queue_jobs
-            SET state = $2, available_at_unix_ms = $3, updated_at_unix_ms = $4
-          WHERE id = $1 AND state = 'active'`,
-        [job.id, retryable ? "created" : "failed", retryable ? now + plan.retryDelaySeconds * 1_000 : now, now]
-      );
+      worker.pendingFailure = { id: claimed.id, claimToken };
+      await this.settleFailure(worker);
     }
+  }
+
+  private async settleFailure(worker: Worker<object>): Promise<void> {
+    const pending = worker.pendingFailure;
+    if (!pending || this.stopping) return;
+    const row = await this.database.query<{ attempts: number }>(
+      "SELECT attempts FROM blogbot_local_queue_jobs WHERE id = $1 AND state = 'active' AND claim_token = $2",
+      [pending.id, pending.claimToken]
+    );
+    // stop() may have arrived while storage was pending. Do not turn that
+    // race into a dead letter; startup still owns interrupted-job recovery.
+    if (this.stopping) return;
+    if (!row.rows[0]) {
+      delete worker.pendingFailure;
+      return;
+    }
+    const plan = QUEUE_PLANS[worker.queue];
+    const now = Date.now();
+    const retryable = row.rows[0].attempts <= plan.retryLimit;
+    await this.database.query(
+      `UPDATE blogbot_local_queue_jobs
+          SET state = $2, available_at_unix_ms = $3, updated_at_unix_ms = $4
+        WHERE id = $1 AND state = 'active' AND claim_token = $5`,
+      [pending.id, retryable ? "created" : "failed", retryable ? now + plan.retryDelaySeconds * 1_000 : now, now, pending.claimToken]
+    );
+    // A rejection retains the attempt identity for the next poll. The fenced
+    // update cannot overwrite a newer claim if recovery occurred meanwhile.
+    delete worker.pendingFailure;
   }
 
   /**
@@ -290,7 +316,7 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
     return removed.rows.length;
   }
 
-  private async claim(name: LocalQueueName): Promise<LocalJob<object> | null> {
+  private async claim(name: LocalQueueName): Promise<(LocalJob<object> & { claimToken: string }) | null> {
     const now = Date.now();
     return this.database.transaction(async (transaction) => {
       const selected = await transaction.query<QueueRow>(
@@ -303,15 +329,17 @@ CREATE INDEX IF NOT EXISTS blogbot_local_queue_claim_idx
       );
       const row = selected.rows[0];
       if (!row) return null;
-      const claimed = await transaction.query<{ id: string }>(
+      // Retry budgets reset when a dead letter is revived. A fresh claim token
+      // must not: otherwise an older attempt-one handler can own attempt one again.
+      const claimed = await transaction.query<{ id: string; claim_token: string }>(
         `UPDATE blogbot_local_queue_jobs
-            SET state = 'active', attempts = attempts + 1, updated_at_unix_ms = $2
+            SET state = 'active', attempts = attempts + 1, updated_at_unix_ms = $2, claim_token = $3
           WHERE id = $1 AND state = 'created'
-          RETURNING id`,
-        [row.id, now]
+          RETURNING id, claim_token`,
+        [row.id, now, randomUUID()]
       );
       return claimed.rows[0]
-        ? { id: row.id, data: structuredClone(row.payload) as object, state: "active" as const }
+        ? { id: row.id, data: structuredClone(row.payload) as object, state: "active" as const, claimToken: claimed.rows[0].claim_token }
         : null;
     });
   }

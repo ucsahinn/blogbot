@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   buildCodexExecArgs,
@@ -21,7 +21,7 @@ const CODEX_SESSION_MAX_COUNT = 32;
 const CODEX_SESSION_MAX_SCAN_ENTRIES = 512;
 const CODEX_SESSION_MAX_DIRECTORY_DEPTH = 8;
 const CODEX_CAPABILITY_PROBE_MAX_BYTES = 128_000;
-const CODEX_CAPABILITY_PROBE_MIN_TIMEOUT_MS = 5_000;
+const CODEX_CAPABILITY_PROBE_TIMEOUT_MS = 10_000;
 const MINIMUM_CODEX_CLI_VERSION = [0, 147, 0] as const;
 
 export class CodexCliPortError extends Error {
@@ -59,12 +59,28 @@ function quoteCmdArgument(value: string): string {
   return `"${value.replace(/"/gu, '""')}"`;
 }
 
+function resolveBareWindowsCommand(command: string): string | null {
+  if (process.platform !== "win32" || basename(command) !== command) return null;
+  const pathValue = process.env.PATH;
+  if (!pathValue) return null;
+  for (const rawDirectory of pathValue.split(delimiter)) {
+    const directory = rawDirectory.trim().replace(/^"(.*)"$/u, "$1");
+    if (!directory) continue;
+    const candidate = join(directory, command);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 async function resolveSpawn(command: string, args: string[]): Promise<{ command: string; args: string[] }> {
   // npm exposes Codex as a .cmd shim on Windows. Launching that shim creates
   // a visible cmd.exe parent for every background draft. The shim's real
   // target is stable, so invoke node directly and keep the process hidden.
-  if (process.platform === "win32" && /[\\/]codex\.cmd$/iu.test(command)) {
-    const npmDirectory = dirname(command);
+  const codexShim = process.platform === "win32" && /(?:^|[\\/])codex\.cmd$/iu.test(command)
+    ? (resolveBareWindowsCommand(command) ?? command)
+    : null;
+  if (codexShim) {
+    const npmDirectory = dirname(codexShim);
     const localNodeExecutable = join(npmDirectory, "node.exe");
     const codexEntry = join(npmDirectory, "node_modules", "@openai", "codex", "bin", "codex.js");
     if (existsSync(codexEntry)) {
@@ -152,7 +168,7 @@ async function runCodexCliProbe(
   // bounded, but it is not the task execution deadline: a deliberately short
   // task timeout must not turn ordinary process-start contention into a false
   // UNSUPPORTED_CLI result.
-  }, capabilityProbeTimeoutMs(options));
+  }, CODEX_CAPABILITY_PROBE_TIMEOUT_MS);
   try {
     const exitCode = await new Promise<number | null>((resolve, reject) => {
       child.once("error", reject);
@@ -185,15 +201,11 @@ export function versionIsSupported(output: string): boolean {
 
 const capabilityProbeCache = new Map<string, Promise<void>>();
 
-function capabilityProbeTimeoutMs(options: CodexCliPortOptions): number {
-  return Math.max(CODEX_CAPABILITY_PROBE_MIN_TIMEOUT_MS, Math.min(10_000, options.timeoutMs));
-}
-
 async function verifyCodexCliCapabilities(options: CodexCliPortOptions): Promise<void> {
   const cacheKey = JSON.stringify([
     options.command,
     ...(options.commandPrefixArgs ?? []),
-    { capabilityProbeTimeoutMs: capabilityProbeTimeoutMs(options) }
+    { capabilityProbeTimeoutMs: CODEX_CAPABILITY_PROBE_TIMEOUT_MS }
   ]);
   let probe = capabilityProbeCache.get(cacheKey);
   if (!probe) {
@@ -271,7 +283,7 @@ function isolatedEnvironment(codexHome: string): NodeJS.ProcessEnv {
  */
 function waitingEventFromFailure(...streams: readonly string[]): CodexEvent | null {
   const stderr = streams.join(" ");
-  if (/auth|login|credential|unauthori[sz]ed/i.test(stderr)) {
+  if (/\b(?:auth|authentication|authori[sz]ation|login|credentials?|unauthori[sz]ed|401)\b/iu.test(stderr)) {
     return { type: "auth.required" };
   }
   if (/rate.?limit|too many requests|429/i.test(stderr)) {
@@ -805,12 +817,19 @@ export function createCodexCliPort(
             await termination;
           }
         }
-        const cleanup = rm(taskDirectory, {
-          recursive: true,
-          force: true,
-          maxRetries: 3,
-          retryDelay: 50
-        });
+        const cleanup = (async () => {
+          // A timed-out Windows child may retain task files until taskkill has
+          // finished. Sequence the app-owned removal after that exact process
+          // tree settles; the promise still runs in the background so timeout
+          // reporting is never held behind OS cleanup latency.
+          if (termination) await termination.catch(() => undefined);
+          await rm(taskDirectory, {
+            recursive: true,
+            force: true,
+            maxRetries: 6,
+            retryDelay: 50
+          });
+        })();
         if (timedOut) {
           void cleanup.catch(() => undefined);
         } else {

@@ -1,0 +1,239 @@
+{
+  "schemaVersion": "codex-chef.evidence-research.v1",
+  "generatedAt": "2026-09-03T09:59:17.5216158Z",
+  "status": "partial",
+  "charter": {
+    "decision": "Select the least-privilege GitHub authentication model for Blogbot's local Windows publication broker.",
+    "primaryQuestion": "Should Blogbot retain a classic OAuth App device flow with repo scope or migrate to a repository-selected GitHub App user access token?",
+    "subQuestions": [
+      "Can a GitHub App use device flow from a desktop application without shipping an app private key?",
+      "Can access be limited to a user-selected installation repository?",
+      "Which repository permissions cover Blogbot's current REST endpoint set?",
+      "How should token expiration and refresh be handled locally?",
+      "Which parts still require an external owner or account mutation?"
+    ],
+    "scope": "GitHub.com, local Windows desktop architecture, current Blogbot GitHub REST adapter endpoints, official English-language GitHub documentation checked on 2026-09-03.",
+    "audience": "Blogbot owner and security/release reviewers",
+    "deadline": "Current completion-audit session",
+    "exclusions": [
+      "Registering or changing a GitHub App or OAuth App",
+      "Accessing private repositories or account secrets",
+      "Running publication writes",
+      "GitHub Enterprise Server-specific behavior",
+      "Third-party implementation guidance"
+    ]
+  },
+  "methods": {
+    "approach": "Bounded decision-support scan using official GitHub documentation plus a focused inventory of the current native broker and REST endpoint paths.",
+    "inclusionCriteria": [
+      "Current official GitHub documentation directly describing OAuth scopes, GitHub App device flow, repository selection, token lifecycle, or permissions for an endpoint used by Blogbot",
+      "Current Blogbot source that defines authentication or GitHub REST calls"
+    ],
+    "exclusionCriteria": [
+      "Search snippets without a checked official documentation page",
+      "Community posts, vendor summaries, and undocumented assumptions",
+      "Server-to-server designs that require shipping a GitHub App private key in the desktop application"
+    ],
+    "searchLog": [
+      "GitHub Docs search on 2026-09-03: GitHub App device flow, user access token, repository permissions",
+      "GitHub Docs search on 2026-09-03: REST permissions for Git references, pull requests, check runs, workflow dispatch, workflow runs, and branch protection",
+      "GitHub Docs search on 2026-09-03: classic OAuth repo scope and expiring GitHub App user access tokens",
+      "Local focused search on 2026-09-03: github_broker.rs and github_rest_adapter.rs authentication constants and endpoint paths"
+    ]
+  },
+  "sources": [
+    {
+      "id": "gh-oauth-scopes",
+      "title": "Scopes for OAuth apps",
+      "sourceType": "official GitHub documentation",
+      "url": "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "OAuth scope definitions can change; recheck before release.",
+      "supports": ["claim-1", "claim-6"]
+    },
+    {
+      "id": "gh-app-user-token",
+      "title": "Generating a user access token for a GitHub App",
+      "sourceType": "official GitHub documentation",
+      "url": "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "Token response and optional expiration behavior can change; recheck during implementation.",
+      "supports": ["claim-2", "claim-5", "claim-6"]
+    },
+    {
+      "id": "gh-app-repository-selection",
+      "title": "Reviewing and modifying installed GitHub Apps",
+      "sourceType": "official GitHub documentation",
+      "url": "https://docs.github.com/en/apps/using-github-apps/reviewing-and-modifying-installed-github-apps",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "Installation UI wording can change, while repository-selection semantics are stable but must be rechecked before operator guidance is finalized.",
+      "supports": ["claim-3", "claim-6"]
+    },
+    {
+      "id": "gh-app-permissions",
+      "title": "Choosing permissions for a GitHub App",
+      "sourceType": "official GitHub documentation",
+      "url": "https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "Permission names and endpoint mappings are versioned; recheck the endpoint reference during implementation.",
+      "supports": ["claim-3", "claim-4", "claim-6"]
+    },
+    {
+      "id": "gh-rest-refs",
+      "title": "REST API endpoints for Git references",
+      "sourceType": "official GitHub REST documentation",
+      "url": "https://docs.github.com/en/rest/git/refs",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "The required permission set is API-version-sensitive.",
+      "supports": ["claim-4", "claim-6"]
+    },
+    {
+      "id": "gh-rest-pulls",
+      "title": "REST API endpoints for pull requests",
+      "sourceType": "official GitHub REST documentation",
+      "url": "https://docs.github.com/en/rest/pulls/pulls",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "The required permission set is API-version-sensitive.",
+      "supports": ["claim-4", "claim-6"]
+    },
+    {
+      "id": "gh-rest-checks",
+      "title": "REST API endpoints for check runs",
+      "sourceType": "official GitHub REST documentation",
+      "url": "https://docs.github.com/en/rest/checks/runs",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "The required permission set is API-version-sensitive.",
+      "supports": ["claim-4", "claim-6"]
+    },
+    {
+      "id": "gh-rest-workflows",
+      "title": "REST API endpoints for workflows",
+      "sourceType": "official GitHub REST documentation",
+      "url": "https://docs.github.com/en/rest/actions/workflows",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "Workflow-dispatch responses and permission requirements are API-version-sensitive.",
+      "supports": ["claim-4", "claim-6"]
+    },
+    {
+      "id": "gh-rest-branch-protection",
+      "title": "REST API endpoints for protected branches",
+      "sourceType": "official GitHub REST documentation",
+      "url": "https://docs.github.com/en/rest/branches/branch-protection",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "Branch-protection availability and permissions depend on repository plan and API version.",
+      "supports": ["claim-4", "claim-6"]
+    },
+    {
+      "id": "gh-app-refresh",
+      "title": "Refreshing user access tokens",
+      "sourceType": "official GitHub documentation",
+      "url": "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "Expiring user access tokens remain configurable; recheck default and response fields before implementation.",
+      "supports": ["claim-5", "claim-6"]
+    },
+    {
+      "id": "gh-app-overview",
+      "title": "About creating GitHub Apps",
+      "sourceType": "official GitHub documentation",
+      "url": "https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps",
+      "checkedAt": "2026-09-03T09:59:17.5216158Z",
+      "confidence": "high",
+      "outdatedRisk": "Product capabilities may evolve; verify before registration.",
+      "supports": ["claim-2", "claim-6"]
+    }
+  ],
+  "claims": [
+    {
+      "id": "claim-1",
+      "statement": "The classic OAuth repo scope grants broad read/write repository access beyond Blogbot's single selected publication repository.",
+      "classification": "fact",
+      "confidence": "high",
+      "uncertainty": "The current repository is public, but the same token could reach private repositories available to the authorizing user.",
+      "sourceRefs": ["gh-oauth-scopes"]
+    },
+    {
+      "id": "claim-2",
+      "statement": "A GitHub App user access token can be obtained through device flow for a desktop application without embedding an app private key, and its effective access is the intersection of app and user permissions.",
+      "classification": "fact",
+      "confidence": "high",
+      "uncertainty": "Device flow must first be enabled on an externally registered GitHub App.",
+      "sourceRefs": ["gh-app-user-token", "gh-app-overview"]
+    },
+    {
+      "id": "claim-3",
+      "statement": "A GitHub App installation can be limited to explicitly selected repositories instead of every repository accessible to the user.",
+      "classification": "fact",
+      "confidence": "high",
+      "uncertainty": "An installation owner must select and maintain the repository access externally.",
+      "sourceRefs": ["gh-app-repository-selection", "gh-app-permissions"]
+    },
+    {
+      "id": "claim-4",
+      "statement": "Blogbot's current endpoint inventory maps to Contents write, Pull requests write, Checks read, Actions write, Administration read, and Metadata read; no organization or account permissions are evidenced by the current adapter.",
+      "classification": "inference",
+      "confidence": "high",
+      "uncertainty": "The exact minimum must be confirmed against every live endpoint response and X-Accepted-GitHub-Permissions header in a disposable repository.",
+      "sourceRefs": ["gh-app-permissions", "gh-rest-refs", "gh-rest-pulls", "gh-rest-checks", "gh-rest-workflows", "gh-rest-branch-protection"]
+    },
+    {
+      "id": "claim-5",
+      "statement": "Expiring GitHub App user access tokens support refresh tokens, and a token created through device flow can be refreshed without shipping an app private credential.",
+      "classification": "fact",
+      "confidence": "high",
+      "uncertainty": "The local broker must atomically persist expiration metadata and rotated access/refresh material before this is production-safe.",
+      "sourceRefs": ["gh-app-user-token", "gh-app-refresh"]
+    },
+    {
+      "id": "claim-6",
+      "statement": "Blogbot should migrate from classic repo-scoped OAuth to a repository-selected GitHub App user-to-server device flow before enabling real GitHub publication.",
+      "classification": "recommendation",
+      "confidence": "high",
+      "uncertainty": "The recommendation cannot become an operational decision until an owner registers the app, accepts the exact permissions, and authorizes disposable-repository validation.",
+      "sourceRefs": ["gh-oauth-scopes", "gh-app-user-token", "gh-app-repository-selection", "gh-app-permissions", "gh-rest-refs", "gh-rest-pulls", "gh-rest-checks", "gh-rest-workflows", "gh-rest-branch-protection", "gh-app-refresh", "gh-app-overview"]
+    }
+  ],
+  "synthesis": {
+    "findings": [
+      "The existing broker's repo scope and X-OAuth-Scopes validation are specific to a classic OAuth App and are incompatible with the preferred GitHub App user-token contract.",
+      "The current device-code endpoints and user-mediated flow can be retained conceptually, but token parsing, repository-installation validation, permission validation, expiration, and refresh storage must change together.",
+      "The least-privilege permission baseline evidenced by the adapter is Metadata read, Contents write, Pull requests write, Checks read, Actions write, and Administration read.",
+      "No GitHub App private key, installation JWT, webhook endpoint, organization permission, or account permission is needed for the user-attributed local desktop design."
+    ],
+    "disagreements": [
+      "An installation access token would be shorter-lived and app-attributed, but minting it requires app authentication material that must not be shipped in this local desktop product; a user access token preserves local-only architecture and user attribution."
+    ],
+    "limitations": [
+      "No GitHub App is currently registered or installed, so live token shape and permission headers were not exercised.",
+      "The current main branch is unprotected and no GitHub environment exists, so the complete protected publication policy cannot yet be rehearsed.",
+      "The scan covers GitHub.com official documentation and the adapter's current REST paths, not future endpoints."
+    ],
+    "recommendations": [
+      "Adopt GitHub App user access tokens through device flow and remove the classic repo scope request.",
+      "Require installation access to exactly the configured repository and validate the installation repository list before storing an authorized state.",
+      "Request only Metadata read, Contents write, Pull requests write, Checks read, Actions write, and Administration read; request no webhook, organization, or account permissions.",
+      "Keep expiring user tokens enabled and atomically rotate the DPAPI-protected access token, refresh token, and their expirations.",
+      "Keep real GitHub login and publication disabled until external app registration and disposable-repository acceptance are separately authorized."
+    ]
+  },
+  "gaps": [
+    "A human owner must register the GitHub App, enable device flow, select the target repository, and accept the exact permission set.",
+    "A disposable repository must prove token refresh, revocation, repository removal, insufficient-permission failure, branch protection reads, PR merge, ref cleanup, and workflow dispatch.",
+    "The native implementation and migration from any existing classic OAuth authorization state remain to be designed and tested."
+  ],
+  "approvalGates": [
+    "GitHub App registration or account configuration requires explicit approval.",
+    "Disposable-repository writes, device authorization, pull requests, merge, workflow dispatch, and ref deletion require explicit approval.",
+    "No commit, push, release, publish, or deploy is authorized by this report."
+  ]
+}

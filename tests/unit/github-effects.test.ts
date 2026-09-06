@@ -8,13 +8,14 @@ function response(body: unknown, status = 200) {
 
 test("GitHub publication effects dispatch a configured workflow and persist an idempotent intent", async () => {
   const saved = new Map<string, unknown>();
-  const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+  const calls: Array<{ url: string; method: string; redirect: unknown; body?: unknown }> = [];
   const effects = new GitHubPublicationEffects({ token: "token", repository: "owner/site", baseBranch: "main", deployWorkflow: "deploy.yml" }, {
     store: { get: async (key) => saved.get(key), set: async (key, value) => { saved.set(key, value); } },
     fetcher: async (url, init) => {
       calls.push({
         url,
         method: init.method,
+        redirect: (init as { redirect?: unknown }).redirect,
         ...(init.body ? { body: JSON.parse(init.body) } : {})
       });
       if (init.method === "GET" && url.includes("/git/ref/heads/blogbot/deploy-")) return response({}, 404);
@@ -37,6 +38,7 @@ test("GitHub publication effects dispatch a configured workflow and persist an i
   assert.equal(dispatchBody.inputs.merge_sha, "a".repeat(40));
   assert.ok(calls.some((call) => call.method === "POST" && call.url.endsWith("/git/refs") && (call.body as { ref?: string }).ref === `refs/heads/${dispatchBody.ref}`));
   assert.ok(calls.some((call) => call.method === "POST" && call.url.endsWith("/git/refs") && (call.body as { ref?: string }).ref === `refs/heads/blogbot/deploy-dispatched/${dispatchBody.inputs.intent_key}`));
+  assert.ok(calls.every((call) => call.redirect === "manual"));
 });
 
 test("GitHub publication effects recover a completed dispatch marker without dispatching twice", async () => {
@@ -61,11 +63,90 @@ test("GitHub publication effects reject an invalid target before network access"
   assert.throws(() => new GitHubPublicationEffects({ token: "token", repository: "not-a-repository", baseBranch: "main" }));
 });
 
+test("GitHub publication effects accept dot-prefixed names and reject URL-normalizing dot segments", () => {
+  assert.doesNotThrow(() =>
+    new GitHubPublicationEffects({ token: "token", repository: "owner/.github", baseBranch: "main" })
+  );
+  for (const repository of ["owner/.", "owner/..", "../site", "owner/site/extra"]) {
+    assert.throws(() =>
+      new GitHubPublicationEffects({ token: "token", repository, baseBranch: "main" })
+    );
+  }
+});
+
+test("GitHub publication effects enforce the shared base-branch contract", () => {
+  assert.doesNotThrow(() =>
+    new GitHubPublicationEffects({ token: "token", repository: "owner/site", baseBranch: "release/v1.2.3" })
+  );
+  for (const baseBranch of [
+    "/main", "main/", "main//next", "main..next", "main:next", ".hidden", "feature/.hidden",
+    "feature.lock", "feature/x.lock", "feature.", "-main", "m".repeat(201)
+  ]) {
+    assert.throws(
+      () => new GitHubPublicationEffects({ token: "token", repository: "owner/site", baseBranch }),
+      baseBranch
+    );
+  }
+});
+
+test("GitHub publication effects enforce the shared workflow filename contract", () => {
+  for (const deployWorkflow of ["deploy.yml", "release_1.yaml"]) {
+    assert.doesNotThrow(() =>
+      new GitHubPublicationEffects({ token: "token", repository: "owner/site", baseBranch: "main", deployWorkflow })
+    );
+  }
+  for (const deployWorkflow of ["w".repeat(97) + ".yml", "a..yml", ".yml", "deploy.txt", "nested/deploy.yml"]) {
+    assert.throws(
+      () => new GitHubPublicationEffects({ token: "token", repository: "owner/site", baseBranch: "main", deployWorkflow }),
+      deployWorkflow
+    );
+  }
+});
+
 test("GitHub publication effects expose only the read-only base snapshot", async () => {
   const effects = new GitHubPublicationEffects({ token: "token", repository: "owner/site", baseBranch: "main" }, {
     fetcher: async () => response({ object: { sha: "a".repeat(40) } })
   });
   assert.equal(await effects.getBaseBranchSha(), "a".repeat(40));
+});
+
+test("GitHub publication request deadline includes response body parsing", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let rejectBody: ((reason?: unknown) => void) | undefined;
+  const effects = new GitHubPublicationEffects({
+    token: "token",
+    repository: "owner/site",
+    baseBranch: "main"
+  }, {
+    fetcher: async (_url, init) => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: () => new Promise<unknown>((_resolve, reject) => {
+        rejectBody = reject;
+        (init as { signal?: AbortSignal }).signal?.addEventListener("abort", () => {
+          reject(new Error("fixture body read aborted"));
+        }, { once: true });
+      })
+    })
+  });
+  let outcome: "pending" | "resolved" | "rejected" = "pending";
+  const operation = effects.getBaseBranchSha().then(
+    () => { outcome = "resolved"; },
+    () => { outcome = "rejected"; }
+  );
+
+  for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+  assert.ok(rejectBody, "the fixture response body must be awaiting data");
+  context.mock.timers.tick(15_000);
+  for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+
+  try {
+    assert.equal(outcome, "rejected", "the publication request must not hang past its deadline");
+  } finally {
+    rejectBody?.(new Error("fixture cleanup"));
+    await operation;
+  }
 });
 
 test("GitHub publication effects never treat an existing publication branch as a successful creation", async () => {

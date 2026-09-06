@@ -19,6 +19,7 @@ import {
   retryModeLabel,
   sectionLabel,
   sectionArticleType,
+  generateRecoveryKey,
   slotStateLabel,
   isRecoveryKeyUsable,
   setupConnectorLabel,
@@ -97,6 +98,17 @@ test("recovery key UX requires the same minimum length as the backup domain", ()
   assert.equal(isRecoveryKeyUsable("short key"), false);
   assert.equal(isRecoveryKeyUsable("                "), false);
   assert.equal(isRecoveryKeyUsable("correct horse 2026"), true);
+});
+
+test("generated recovery keys contain 192 bits of caller-supplied randomness", () => {
+  const key = generateRecoveryKey((bytes) => {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = index;
+    }
+  });
+
+  assert.equal(key, "000102030405060708090a0b0c0d0e0f1011121314151617");
+  assert.equal(isRecoveryKeyUsable(key), true);
 });
 
 test("bulk URL parsing keeps every unique HTTP source without an app-level cap", () => {

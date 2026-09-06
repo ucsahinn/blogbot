@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { parseSiteArtifactManifest } from "../../../packages/site-adapter/src/index.ts";
+import { isSafeGitHubBranchName, isSafeGitHubRepositoryName } from "./github-connector.ts";
 
 export type PublisherGuardCode =
   | "BUNDLE_DUPLICATE_PATH"
@@ -137,11 +138,11 @@ export function validatePublisherConnectorConfig(input: PublisherConnectorConfig
     assertNoCredentials(genericSite, "site");
     if (genericHosting) assertNoCredentials(genericHosting, "hosting");
     const repository = requiredConfigString(github.repository, "github.repository");
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
+    if (!isSafeGitHubRepositoryName(repository)) {
       throw new ConnectorConfigError("INVALID_REPOSITORY", "github.repository must be owner/name");
     }
     const baseBranch = requiredConfigString(github.baseBranch, "github.baseBranch");
-    if (!/^[A-Za-z0-9._/-]+$/u.test(baseBranch) || baseBranch.startsWith("/") || baseBranch.includes("..")) {
+    if (!isSafeGitHubBranchName(baseBranch)) {
       throw new ConnectorConfigError("INVALID_BRANCH", "github.baseBranch is unsafe");
     }
     const siteOrigin = typeof genericSite.siteOrigin === "string" ? genericSite.siteOrigin.trim().replace(/\/$/u, "") : "";

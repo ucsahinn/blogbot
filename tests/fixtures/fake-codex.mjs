@@ -88,6 +88,14 @@ if (outputFlag < 0 || !process.argv[outputFlag + 1]) {
     // Consume the untrusted task prompt exactly as the real CLI does.
     void chunk;
   }
+  if (process.argv.includes("--author-validation-failure")) {
+    process.stderr.write("invalid author field in output schema\n");
+    process.exit(2);
+  }
+  if (process.argv.includes("--authentication-failure")) {
+    process.stderr.write("401 Unauthorized\n");
+    process.exit(2);
+  }
   if (process.argv.includes("--hang")) {
     // Simulates a child process retained by a Windows .cmd launcher.
     await writeFile(

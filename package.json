@@ -12,9 +12,10 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --test --experimental-transform-types \"tests/**/*.test.ts\" \"apps/desktop/tests/*.test.ts\" \"apps/codex-runner/tests/*.test.ts\"",
-    "test:all": "node --test --experimental-transform-types \"tests/**/*.test.ts\" \"apps/desktop/tests/*.test.ts\" \"apps/codex-runner/tests/*.test.ts\"",
+    "test": "npm run test:all",
+    "test:all": "npm run test:unit && npm run test:apps && npm run test:integration",
     "test:unit": "node --test --experimental-transform-types \"tests/unit/*.test.ts\"",
+    "test:apps": "node --test --experimental-transform-types \"apps/desktop/tests/*.test.ts\" \"apps/codex-runner/tests/*.test.ts\"",
     "test:integration": "node --test --experimental-transform-types \"tests/integration/*.test.ts\"",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

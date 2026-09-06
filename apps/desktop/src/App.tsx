@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import bobyAvatar from "./assets/boby-avatar-v3.webp";
 import { AppShell, type PageId } from "./components/AppShell.tsx";
@@ -51,7 +51,12 @@ function pageFromHash(): PageId {
   return pageIds.includes(candidate) ? candidate : "dashboard";
 }
 
-const BOOTSTRAP_TIMEOUT_MS = 20_000;
+// EngineBridge allows a cold encrypted PGlite startup up to 30 seconds. Keep
+// the visible fail-closed boundary beyond that native contract so the UI does
+// not replace a still-valid startup with its own earlier synthetic timeout.
+const BOOTSTRAP_TIMEOUT_MS = 35_000;
+const BOOTSTRAP_RECONCILIATION_DELAY_MS = 750;
+const MAX_BOOTSTRAP_RECONCILIATION_ATTEMPTS = 8;
 
 async function withBootstrapTimeout<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -82,24 +87,28 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   const [pendingEditorialDraft, setPendingEditorialDraft] = useState<{ id: string; title?: string } | undefined>();
   const [bobyOpen, setBobyOpen] = useState(false);
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const runtimeBridgeRef = useRef<BlogbotBridge | null>(null);
+  const syncRequestSequence = useRef(0);
 
   useEffect(() => {
     let alive = true;
     let reconciliationTimer: number | undefined;
+    let activeRuntimeBridge: BlogbotBridge | null = null;
     void withBootstrapTimeout(bridgeFactory())
       .then(async (runtimeBridge) => {
         // Doctor owns the initial runtime boundary. Reading the workspace
         // before it completes sees DesktopState's conservative offline default
         // and briefly paints a false red Operations health card.
-        // Candidate projections can require a bounded database scan. Reusing
-        // the just-read local snapshot during the 750 ms recovery pass avoids
-        // a second 3–5 second scan and the visible busy cursor it caused.
-        // Keep this shorter than the queue poll cadence so an accepted draft
-        // can never be hidden behind a stale projection.
+        // Candidate projections can require a bounded database scan. Ordinary
+        // navigation may reuse a very recent completed read; explicit recovery
+        // probes below bypass those windows so an offline snapshot cannot hide
+        // a sidecar that became ready after process shutdown completed.
         const coalescingBridge = createCoalescingBridge(runtimeBridge, { completedSnapshotFreshnessMs: { bootstrap: 1_500, workspace: 1_000 } });
         const initialSnapshot = await withBootstrapTimeout(coalescingBridge.getBootstrapSnapshot());
         const initialWorkspace = await withBootstrapTimeout(coalescingBridge.getEditorialWorkspace());
         if (alive) {
+          activeRuntimeBridge = runtimeBridge;
+          runtimeBridgeRef.current = runtimeBridge;
           setBridge(coalescingBridge);
           setSnapshot(initialSnapshot);
           setWorkspace(initialWorkspace);
@@ -126,30 +135,56 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             }
           });
         }
-        // The sidecar can recover a durable queue claim immediately after the
-        // first Doctor response. Keep the first truthful workspace visible,
-        // then reconcile it in the background instead of holding the editor
-        // on an artificial loading screen.
-        reconciliationTimer = window.setTimeout(() => {
-          if (!alive) return;
-          void Promise.all([
-            coalescingBridge.getBootstrapSnapshot(),
-            coalescingBridge.getEditorialWorkspace()
-          ]).then(([settledSnapshot, settledWorkspace]) => {
+        // The previous desktop process may need its bounded shutdown window to
+        // release the encrypted PGlite tree. Preserve the first truthful
+        // projection, then make a bounded series of fresh Doctor-led probes.
+        // Bootstrap must finish before workspace: DesktopState's runtime mode
+        // is the gate that allows the workspace command to touch the sidecar.
+        const scheduleReconciliation = (attempt: number) => {
+          reconciliationTimer = window.setTimeout(() => {
+            reconciliationTimer = undefined;
             if (!alive) return;
-            setSnapshot(settledSnapshot);
-            setWorkspace(settledWorkspace);
-            setSyncError("");
-          }).catch((reason) => {
-            if (!alive) return;
-            setSyncError(
-              userFacingBridgeError(
-                reason,
-                "Çalışma alanı arka planda yenilenemedi. Operasyonlar ekranından yerel durumu kontrol edin."
-              )
-            );
-          });
-        }, 750);
+            void (async () => {
+              const settledSnapshot = await coalescingBridge.getBootstrapSnapshot({ fresh: true });
+              const settledWorkspace = await coalescingBridge.getEditorialWorkspace({ fresh: true });
+              if (!alive) return;
+              setSnapshot(settledSnapshot);
+              setWorkspace(settledWorkspace);
+              setSyncError("");
+              if (initialSnapshot.runtime !== "ONLINE" && settledSnapshot.runtime === "ONLINE") {
+                void coalescingBridge.getConnectorState({ fresh: true }).then((settledConnectorState) => {
+                  if (alive) setConnectorState(settledConnectorState);
+                }).catch((reason) => {
+                  if (!alive) return;
+                  setSyncError(
+                    userFacingBridgeError(
+                      reason,
+                      "Bağlantı ayarları kurtarma sonrasında henüz okunamadı. Kurulum Merkezi'nden yeniden deneyin."
+                    )
+                  );
+                });
+              }
+              if (
+                settledSnapshot.runtime !== "ONLINE"
+                && attempt < MAX_BOOTSTRAP_RECONCILIATION_ATTEMPTS
+              ) {
+                scheduleReconciliation(attempt + 1);
+              }
+            })().catch((reason) => {
+              if (!alive) return;
+              setSyncError(
+                userFacingBridgeError(
+                  reason,
+                  "Çalışma alanı arka planda yenilenemedi. Operasyonlar ekranından yerel durumu kontrol edin."
+                )
+              );
+              if (attempt < MAX_BOOTSTRAP_RECONCILIATION_ATTEMPTS) {
+                scheduleReconciliation(attempt + 1);
+              }
+            });
+          }, BOOTSTRAP_RECONCILIATION_DELAY_MS);
+        };
+        scheduleReconciliation(1);
       })
       .catch((reason) => {
         if (alive) {
@@ -162,6 +197,9 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
       alive = false;
       if (reconciliationTimer !== undefined) {
         window.clearTimeout(reconciliationTimer);
+      }
+      if (runtimeBridgeRef.current === activeRuntimeBridge) {
+        runtimeBridgeRef.current = null;
       }
     };
   }, [bridgeFactory, bootstrapAttempt]);
@@ -182,26 +220,30 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
       const { listen } = await import("@tauri-apps/api/event");
       if (disposed) return;
       const cleanup = await listen("blogbot-sync-requested", () => {
-          if (disposed) return;
-          setSyncError("");
-          void (async () => {
-            const nextSnapshot = await bridge.getBootstrapSnapshot();
-            const nextWorkspace = await bridge.getEditorialWorkspace();
-            const nextConnectorState = nextSnapshot.runtime === "ONLINE"
-              ? await bridge.getConnectorState()
-              : fallbackConnectorState;
-            setSnapshot(nextSnapshot);
-            setWorkspace(nextWorkspace);
-            setConnectorState(nextConnectorState);
-          })().catch((reason) => {
-            setSyncError(
-              userFacingBridgeError(
-                reason,
-                "Yerel çalışma alanı yenilenemedi. Operasyonlar ekranından yeniden deneyin."
-              )
-            );
-          });
+        if (disposed) return;
+        const syncBridge = runtimeBridgeRef.current ?? bridge;
+        const syncSequence = ++syncRequestSequence.current;
+        setSyncError("");
+        void (async () => {
+          const nextSnapshot = await syncBridge.getBootstrapSnapshot();
+          const nextWorkspace = await syncBridge.getEditorialWorkspace();
+          const nextConnectorState = nextSnapshot.runtime === "ONLINE"
+            ? await syncBridge.getConnectorState()
+            : fallbackConnectorState;
+          if (disposed || syncSequence !== syncRequestSequence.current) return;
+          setSnapshot(nextSnapshot);
+          setWorkspace(nextWorkspace);
+          setConnectorState(nextConnectorState);
+        })().catch((reason) => {
+          if (disposed || syncSequence !== syncRequestSequence.current) return;
+          setSyncError(
+            userFacingBridgeError(
+              reason,
+              "Yerel çalışma alanı yenilenemedi. Operasyonlar ekranından yeniden deneyin."
+            )
+          );
         });
+      });
       if (disposed) {
         cleanup();
         return;
@@ -244,7 +286,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
       <main className="boot-state" aria-busy="true">
         <img className="boot-avatar boot-mark" src={bobyAvatar} alt="" width="64" height="64" />
         <h1>OPE güvenli çalışma alanı hazırlanıyor</h1>
-        <p role="status" aria-live="polite" aria-busy="true">Yerel köprü ve şifreli önbellek doğrulanıyor…</p>
+        <p role="status" aria-live="polite" aria-busy="true">Yerel köprü ve korumalı kayıtlar doğrulanıyor…</p>
       </main>
     );
   }

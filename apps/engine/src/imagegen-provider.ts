@@ -21,6 +21,8 @@ export interface OpenAiImageGeneratorOptions {
   fetchImpl?: typeof fetch;
 }
 
+const MAX_IMAGEGEN_RESPONSE_BYTES = 32_000_000;
+
 function boundedPromptText(value: unknown, maximum: number): string {
   return typeof value === "string"
     ? value.replaceAll("\u0000", "").replace(/\s+/gu, " ").trim().slice(0, maximum)
@@ -61,6 +63,52 @@ function promptFor(request: ImageGenerationRequest): string {
     "Do not include readable text, logos, watermarks, public figures, brand marks, screenshots, or copied artwork."
   ].filter(Boolean).join("\n");
 }
+
+async function readBoundedResponseJson(response: Response): Promise<unknown> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    if (!/^\d+$/u.test(declaredLength)) throw new Error("IMAGEGEN_RESPONSE_INVALID");
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength)) throw new Error("IMAGEGEN_RESPONSE_INVALID");
+    if (parsedLength > MAX_IMAGEGEN_RESPONSE_BYTES) throw new Error("IMAGEGEN_RESPONSE_TOO_LARGE");
+  }
+
+  if (!response.body) throw new Error("IMAGEGEN_RESPONSE_INVALID");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      totalBytes += result.value.byteLength;
+      if (totalBytes > MAX_IMAGEGEN_RESPONSE_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The safety limit remains authoritative even if the transport cannot cancel.
+        }
+        throw new Error("IMAGEGEN_RESPONSE_TOO_LARGE");
+      }
+      chunks.push(result.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    throw new Error("IMAGEGEN_RESPONSE_INVALID");
+  }
+}
+
 /**
  * Thin runtime adapter for ImageGen. The API key is read only from the parent
  * process environment by the packaged host and is never persisted in PGlite,
@@ -89,7 +137,7 @@ export function createOpenAiImageGenerator(options: OpenAiImageGeneratorOptions)
         signal: AbortSignal.timeout(90_000)
       });
       if (!response.ok) throw new Error(`IMAGEGEN_HTTP_${response.status}`);
-      const payload = await response.json() as { data?: Array<{ b64_json?: unknown }> };
+      const payload = await readBoundedResponseJson(response) as { data?: Array<{ b64_json?: unknown }> };
       const encoded = payload.data?.[0]?.b64_json;
       if (typeof encoded !== "string" || !encoded.trim()) throw new Error("IMAGEGEN_RESPONSE_INVALID");
       const bytes = Buffer.from(encoded, "base64");

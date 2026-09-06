@@ -144,9 +144,10 @@ pub fn redact_diagnostic_for_persistence(line: &str) -> String {
 
 pub(crate) fn diagnostic_log_variants(path: &Path) -> Vec<PathBuf> {
     let mut paths = vec![path.to_path_buf()];
-    paths.extend((1..=MAX_DIAGNOSTIC_LOG_ROTATIONS).map(|index| {
-        PathBuf::from(format!("{}.{}", path.display(), index))
-    }));
+    paths.extend(
+        (1..=MAX_DIAGNOSTIC_LOG_ROTATIONS)
+            .map(|index| PathBuf::from(format!("{}.{}", path.display(), index))),
+    );
     paths
 }
 
@@ -621,7 +622,8 @@ impl EngineBridge {
                 .err()
                 .is_some_and(|error| error.contains("LOCAL_DATA_DECRYPT_FAILED"))
             {
-                self.data_key_recovery_exhausted.store(true, Ordering::Release);
+                self.data_key_recovery_exhausted
+                    .store(true, Ordering::Release);
                 self.record_diagnostic_event("LOCAL_DATA_KEY_RECOVERY_REQUIRED");
             }
         }
@@ -1116,7 +1118,10 @@ fn should_attempt_data_key_fallback(request: &Value, error: &str) -> bool {
             || error.starts_with("ENGINE_PROTOCOL_FAULT"))
 }
 
-fn should_promote_data_key_after_fallback(fallback_was_used: bool, request_succeeded: bool) -> bool {
+fn should_promote_data_key_after_fallback(
+    fallback_was_used: bool,
+    request_succeeded: bool,
+) -> bool {
     fallback_was_used && request_succeeded
 }
 
@@ -1307,12 +1312,11 @@ fn discover_engine_node_modules(app: &AppHandle) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_command_candidates, diagnostic_log_variants, rotate_diagnostic_log,
+        can_advance_data_key_candidate, codex_command_candidates, diagnostic_log_variants,
         discover_engine_executable, has_pglite_assets, is_safe_read_retry,
-        redact_diagnostic_for_persistence, response_timeout_for_request, serialize_bounded_request,
-        can_advance_data_key_candidate, should_attempt_data_key_fallback,
-        should_promote_data_key_after_fallback,
-        should_retry_after_transport_fault,
+        redact_diagnostic_for_persistence, response_timeout_for_request, rotate_diagnostic_log,
+        serialize_bounded_request, should_attempt_data_key_fallback,
+        should_promote_data_key_after_fallback, should_retry_after_transport_fault,
         sidecar_environment_with, transport_error_for_request, EngineBridge, PendingResponses,
         MAINTENANCE_RESPONSE_TIMEOUT, MAX_DIAGNOSTIC_LOG_BYTES, RESPONSE_TIMEOUT,
         SHUTDOWN_DEADLINE, STARTUP_RESPONSE_TIMEOUT, WINDOWS_CREATE_NO_WINDOW,
@@ -1327,10 +1331,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "blogbot-{label}-{}-{stamp}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("blogbot-{label}-{}-{stamp}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("fixture directory");
         directory
     }
@@ -1341,7 +1343,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!("blogbot-diagnostic-{}-{stamp}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("blogbot-diagnostic-{}-{stamp}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("diagnostic fixture directory");
         let path = directory.join("engine.stderr.log");
         for (index, variant) in diagnostic_log_variants(&path).iter().enumerate() {
@@ -1677,8 +1680,12 @@ mod tests {
         assert!(environment.iter().any(|(key, _)| *key == "ComSpec"));
         assert!(environment.iter().any(|(key, _)| *key == "PATH"));
         assert!(environment.iter().any(|(key, _)| *key == "PATHEXT"));
-        assert!(environment.iter().any(|(key, _)| *key == "BLOGBOT_IMAGEGEN_API_KEY"));
-        assert!(environment.iter().any(|(key, _)| *key == "BLOGBOT_IMAGEGEN_MODEL"));
+        assert!(environment
+            .iter()
+            .any(|(key, _)| *key == "BLOGBOT_IMAGEGEN_API_KEY"));
+        assert!(environment
+            .iter()
+            .any(|(key, _)| *key == "BLOGBOT_IMAGEGEN_MODEL"));
         assert!(!environment.iter().any(|(key, _)| *key == "USERPROFILE"));
     }
 

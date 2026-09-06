@@ -6,6 +6,12 @@ import {
   scrypt as scryptCallback
 } from "node:crypto";
 
+import {
+  backupScryptPolicy,
+  CURRENT_BACKUP_ARCHIVE_VERSION,
+  type BackupArchiveVersion,
+  type BackupScryptParameters
+} from "./crypto-policy.ts";
 import { BackupError } from "./errors.ts";
 
 /**
@@ -31,11 +37,7 @@ import { BackupError } from "./errors.ts";
  */
 
 const ARCHIVE_FORMAT = "blogbot-logical-backup";
-const ARCHIVE_VERSION = 1;
-const SCRYPT_N = 16_384;
-const SCRYPT_R = 8;
-const SCRYPT_P = 1;
-const SCRYPT_MAXMEM = 64 * 1024 * 1024;
+const ARCHIVE_VERSION = CURRENT_BACKUP_ARCHIVE_VERSION;
 const MINIMUM_RECOVERY_KEY_LENGTH = 16;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
@@ -80,26 +82,22 @@ export interface LogicalBackupTableManifest {
 
 export interface LogicalBackupManifest {
   format: typeof ARCHIVE_FORMAT;
-  version: typeof ARCHIVE_VERSION;
+  version: BackupArchiveVersion;
   createdAt: string;
   tables: LogicalBackupTableManifest[];
 }
 
-interface LogicalBackupPayloadV1 {
+interface LogicalBackupPayload {
   manifest: LogicalBackupManifest;
   tables: LogicalTableDump[];
 }
 
-interface LogicalArchiveEnvelopeV1 {
+interface LogicalArchiveEnvelope {
   format: typeof ARCHIVE_FORMAT;
-  version: typeof ARCHIVE_VERSION;
-  kdf: {
+  version: BackupArchiveVersion;
+  kdf: BackupScryptParameters & {
     name: "scrypt";
     salt: string;
-    N: typeof SCRYPT_N;
-    r: typeof SCRYPT_R;
-    p: typeof SCRYPT_P;
-    maxmem: typeof SCRYPT_MAXMEM;
   };
   cipher: { name: "aes-256-gcm"; iv: string; tag: string };
   ciphertext: string;
@@ -131,8 +129,8 @@ export function logicalRestoreTables(plan: LogicalRestorePlan): readonly Logical
 }
 
 /**
- * Deterministic serialization used only for integrity hashes. Object keys are
- * sorted so an unrelated key order cannot change a table digest.
+ * Deterministic JSON snapshots and integrity hashes share this serialization.
+ * Sorted object keys keep unrelated key order from changing a table digest.
  */
 function stableStringify(value: unknown): string {
   if (typeof value === "number") {
@@ -149,8 +147,12 @@ function stableStringify(value: unknown): string {
   }
   if (typeof value === "string") return JSON.stringify(value);
   if (value === undefined) return "null";
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (Array.isArray(value)) return `[${Array.from(value, stableStringify).join(",")}]`;
   if (typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new BackupError("BACKUP_SOURCE_INVALID", "Backup rows require plain JSON objects.");
+    }
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, item]) => item !== undefined)
       .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
@@ -237,13 +239,17 @@ function assertBoundedTables(tables: readonly LogicalTableDump[]): void {
   }
 }
 
-function deriveKey(recoveryKey: string, salt: Buffer): Promise<Buffer> {
+function deriveKey(
+  recoveryKey: string,
+  salt: Buffer,
+  parameters: Readonly<BackupScryptParameters>
+): Promise<Buffer> {
   return new Promise((resolvePromise, reject) => {
     scryptCallback(
       recoveryKey.normalize("NFKC"),
       salt,
       32,
-      { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM },
+      parameters,
       (error, key) => {
         if (error) {
           reject(new BackupError("BACKUP_DECRYPT_FAILED", "Recovery key could not be derived.", { cause: error }));
@@ -278,7 +284,9 @@ export async function createLogicalBackup(input: CreateLogicalBackupInput): Prom
   const tables = input.tables.map((table) => ({
     name: table.name,
     columns: [...table.columns],
-    rows: table.rows.map((row) => [...row]),
+    // Freeze one plain JSON representation before hashing. User-defined
+    // toJSON methods and nested mutations must not change the stored bytes.
+    rows: table.rows.map((row) => JSON.parse(stableStringify(row)) as unknown[]),
     // Restore needs this to override a GENERATED ALWAYS column; dropping it
     // here made every archive unrestorable for tables that have one.
     ...(table.generatedColumns && table.generatedColumns.length > 0
@@ -297,21 +305,22 @@ export async function createLogicalBackup(input: CreateLogicalBackupInput): Prom
     }))
   };
 
-  const serialized = Buffer.from(JSON.stringify({ manifest, tables } satisfies LogicalBackupPayloadV1), "utf8");
+  const serialized = Buffer.from(JSON.stringify({ manifest, tables } satisfies LogicalBackupPayload), "utf8");
   if (serialized.byteLength > LOGICAL_BACKUP_LIMITS.maxPayloadBytes) {
     throw new BackupError("BACKUP_LIMIT_EXCEEDED", "Backup holds more data than this build can restore.");
   }
 
+  const kdf = backupScryptPolicy(ARCHIVE_VERSION)!;
   const salt = randomBytes(SALT_BYTES);
   const iv = randomBytes(IV_BYTES);
-  const key = await deriveKey(input.recoveryKey, salt);
+  const key = await deriveKey(input.recoveryKey, salt, kdf);
   try {
     const cipher = createCipheriv("aes-256-gcm", key, iv);
     const ciphertext = Buffer.concat([cipher.update(serialized), cipher.final()]);
-    const envelope: LogicalArchiveEnvelopeV1 = {
+    const envelope: LogicalArchiveEnvelope = {
       format: ARCHIVE_FORMAT,
       version: ARCHIVE_VERSION,
-      kdf: { name: "scrypt", salt: salt.toString("base64"), N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM },
+      kdf: { name: "scrypt", salt: salt.toString("base64"), ...kdf },
       cipher: { name: "aes-256-gcm", iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64") },
       ciphertext: ciphertext.toString("base64")
     };
@@ -326,7 +335,7 @@ export async function createLogicalBackup(input: CreateLogicalBackupInput): Prom
   }
 }
 
-function parseEnvelope(archive: Buffer): LogicalArchiveEnvelopeV1 {
+function parseEnvelope(archive: Buffer): LogicalArchiveEnvelope {
   if (!Buffer.isBuffer(archive) || archive.byteLength === 0) {
     throw new BackupError("BACKUP_ARCHIVE_INVALID", "Backup archive is empty.");
   }
@@ -339,15 +348,20 @@ function parseEnvelope(archive: Buffer): LogicalArchiveEnvelopeV1 {
   } catch (error) {
     throw new BackupError("BACKUP_ARCHIVE_INVALID", "Backup archive is not valid JSON.", { cause: error });
   }
-  const envelope = parsed as LogicalArchiveEnvelopeV1;
-  if (envelope?.format !== ARCHIVE_FORMAT || envelope.version !== ARCHIVE_VERSION
-    || envelope.kdf?.name !== "scrypt" || envelope.cipher?.name !== "aes-256-gcm") {
+  const envelope = parsed as LogicalArchiveEnvelope;
+  const policy = backupScryptPolicy(envelope?.version);
+  if (
+    envelope?.format !== ARCHIVE_FORMAT
+    || !policy
+    || envelope.kdf?.name !== "scrypt"
+    || envelope.cipher?.name !== "aes-256-gcm"
+  ) {
     throw new BackupError("BACKUP_ARCHIVE_INVALID", "Backup archive is not a supported logical backup.");
   }
   // Reject caller-supplied KDF parameters: an archive must not be able to talk
   // this build into a cheap derivation.
-  if (envelope.kdf.N !== SCRYPT_N || envelope.kdf.r !== SCRYPT_R
-    || envelope.kdf.p !== SCRYPT_P || envelope.kdf.maxmem !== SCRYPT_MAXMEM) {
+  if (envelope.kdf.N !== policy.N || envelope.kdf.r !== policy.r
+    || envelope.kdf.p !== policy.p || envelope.kdf.maxmem !== policy.maxmem) {
     throw new BackupError("BACKUP_ARCHIVE_INVALID", "Backup archive declares unsupported key-derivation parameters.");
   }
   return envelope;
@@ -363,7 +377,7 @@ export async function planLogicalRestore(input: PlanLogicalRestoreInput): Promis
   if (ciphertext.byteLength > LOGICAL_BACKUP_LIMITS.maxPayloadBytes) {
     throw new BackupError("BACKUP_LIMIT_EXCEEDED", "Backup payload exceeds the restorable size.");
   }
-  const key = await deriveKey(input.recoveryKey, salt);
+  const key = await deriveKey(input.recoveryKey, salt, envelope.kdf);
   let plaintext: Buffer;
   try {
     const decipher = createDecipheriv("aes-256-gcm", key, iv);
@@ -379,9 +393,9 @@ export async function planLogicalRestore(input: PlanLogicalRestoreInput): Promis
     key.fill(0);
   }
 
-  let payload: LogicalBackupPayloadV1;
+  let payload: LogicalBackupPayload;
   try {
-    payload = JSON.parse(plaintext.toString("utf8")) as LogicalBackupPayloadV1;
+    payload = JSON.parse(plaintext.toString("utf8")) as LogicalBackupPayload;
   } catch (error) {
     throw new BackupError("BACKUP_ARCHIVE_INVALID", "Decrypted backup payload is not valid JSON.", { cause: error });
   } finally {
@@ -389,7 +403,7 @@ export async function planLogicalRestore(input: PlanLogicalRestoreInput): Promis
   }
 
   const manifest = payload?.manifest;
-  if (manifest?.format !== ARCHIVE_FORMAT || manifest.version !== ARCHIVE_VERSION
+  if (manifest?.format !== ARCHIVE_FORMAT || manifest.version !== envelope.version
     || typeof manifest.createdAt !== "string" || !Array.isArray(manifest.tables)) {
     throw new BackupError("BACKUP_ARCHIVE_INVALID", "Backup manifest is missing or unsupported.");
   }

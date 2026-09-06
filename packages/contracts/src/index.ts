@@ -729,7 +729,7 @@ function isRevisionPackageV2(value: unknown): value is RevisionPackageV2 {
     typeof value.scheduledAt !== "string" ||
     !Number.isFinite(Date.parse(value.scheduledAt)) ||
     typeof value.adapterVersion !== "string" ||
-    value.adapterVersion.length === 0
+    value.adapterVersion.trim().length === 0
   ) {
     return false;
   }

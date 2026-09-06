@@ -63,7 +63,7 @@ export async function buildPublicationFiles(
     if (Number.isSafeInteger(media.byteSize) && media.byteSize! > 0 && /^[a-f0-9]{64}$/iu.test(media.sha256)) {
       return [{ path: mediaPath(media.filename), content: { kind: "engine-media-ref", revisionId: revision.id, sha256: media.sha256, byteSize: media.byteSize! } }];
     }
-    if (!media.contentBase64) return [];
+    if (!media.contentBase64) throw new Error("REVISION_MEDIA_CONTENT_UNAVAILABLE");
     const binary = Uint8Array.from(atob(media.contentBase64), (character) => character.charCodeAt(0));
     return [{ path: mediaPath(media.filename), content: binary }];
   });

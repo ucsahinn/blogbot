@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ArticleType, SiteSection } from "../../contracts/src/index.ts";
+import { isSafeGitHubWorkflowName } from "../../contracts/src/github-policy.ts";
 import {
   evaluateEditorialQualityV3,
   type EditorialApprovalAttestationV3,
@@ -713,8 +714,7 @@ export function validateRevisionPackageV3(
       revision.editorialAssessment,
       revision.publicationSources
     ) ||
-    !hasText(revision.deployWorkflow) ||
-    !/^[A-Za-z0-9_.-]+\.ya?ml$/u.test(revision.deployWorkflow) ||
+    !isSafeGitHubWorkflowName(revision.deployWorkflow) ||
     !hasNormalizedRequiredChecks(revision.requiredChecks)
   ) {
     return false;

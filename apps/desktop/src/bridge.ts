@@ -87,7 +87,7 @@ export interface EditorialApprovalAttestationV3 {
   };
 }
 
-export type GitHubDeviceFlowStatus = "unconfigured" | "logged-out" | "pending" | "authorized" | "expired" | "access-denied" | "degraded";
+export type GitHubDeviceFlowStatus = "unconfigured" | "logged-out" | "pending" | "authorized" | "reauthorization-required" | "expired" | "access-denied" | "degraded";
 
 export interface GitHubDeviceFlowResult {
   status: GitHubDeviceFlowStatus;
@@ -95,7 +95,8 @@ export interface GitHubDeviceFlowResult {
   network: boolean;
   userCode?: string;
   verificationUri?: "https://github.com/login/device";
-  scopes?: string[];
+  repository?: string;
+  permissions?: string[];
   detail?: string;
 }
 
@@ -131,7 +132,7 @@ export interface BlogbotBridge {
   openProjectPage(): Promise<{ opened: true }>;
   checkUnsignedUpdate(): Promise<UnsignedDesktopUpdateCheck>;
   installUnsignedUpdate(update: UnsignedDesktopUpdate): Promise<void>;
-  getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
+  getBootstrapSnapshot(options?: { fresh?: boolean }): Promise<BootstrapSnapshot>;
   getPrerequisiteStatus(): Promise<PrerequisiteSnapshot>;
   testLocalEngine(): Promise<LocalEngineTestResult>;
   verifyLocalIntegrity(): Promise<{ verified: true; completedAt: string }>;
@@ -144,7 +145,7 @@ export interface BlogbotBridge {
   startCodexLogin(): Promise<{ started: boolean; detail: string }>;
   testSetupConnector(input: { connector: SetupConnectorId; config: SetupConnectorDraft[SetupConnectorId] }): Promise<SetupConnectorTestResult>;
   saveSetupConnector(input: { connector: SetupConnectorId; config: SetupConnectorDraft[SetupConnectorId] }): Promise<SetupConnectorTestResult>;
-  getConnectorState(): Promise<ConnectorStateSnapshot>;
+  getConnectorState(options?: { fresh?: boolean }): Promise<ConnectorStateSnapshot>;
   startGitHubDeviceFlow(): Promise<GitHubDeviceFlowResult>;
   pollGitHubDeviceFlow(): Promise<GitHubDeviceFlowResult>;
   clearGitHubDeviceFlow(): Promise<GitHubDeviceFlowResult>;
@@ -164,7 +165,7 @@ export interface BlogbotBridge {
   sendTestNotification(): Promise<{ shown: boolean }>;
   requestBobyGuidance(request: BobyGuidanceRequest): Promise<Pick<BobyGuidanceStatus, "id" | "state">>;
   getBobyGuidance(guidanceId: string): Promise<BobyGuidanceStatus>;
-  getEditorialWorkspace(options?: { includeCandidates?: boolean }): Promise<EditorialWorkspaceSnapshot>;
+  getEditorialWorkspace(options?: { includeCandidates?: boolean; fresh?: boolean }): Promise<EditorialWorkspaceSnapshot>;
   promoteCandidate(candidateId: string): Promise<{
     ok: true;
     state: "RESEARCH_QUEUED";
@@ -324,6 +325,9 @@ export function userFacingBridgeError(
   if (code.includes("ENGINE_RESPONSE_TIMEOUT")) {
     return "Yerel çalışma bileşeni zamanında yanıt vermedi. Operasyonlar’dan yerel durumu yenileyin; sorun sürerse tanılama paketi oluşturun.";
   }
+  if (code.includes("BOOTSTRAP_TIMEOUT")) {
+    return "OPE çalışma alanı hazırlanırken zaman aşımına uğradı. Yeniden deneyin; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun.";
+  }
   if (code.includes("OFFLINE_READ_ONLY") || code.includes("ENGINE_DEGRADED")) {
     return "Yerel çalışma alanı şu anda salt okunur. Kurulum Merkezi’nden önkoşul testini çalıştırıp yeniden deneyin.";
   }
@@ -376,13 +380,13 @@ export type UnsignedDesktopUpdateCheck =
 
 export function userFacingUpdateError(reason: unknown): string {
   const raw = reason instanceof Error ? reason.message.trim().toLowerCase() : "";
-  if (/(?:signature|signature verification|public key|verification)/u.test(raw)) {
-    return "Güncelleme kaynağına ulaşıldı, fakat eski imzalı güncelleme yolu kullanıldı. Bu sürüm SHA-256 doğrulamalı imzasız release akışını kullanır.";
+  if (/(?:signature|signer|authenticode|timestamp|time-stamp|public key|verification)/u.test(raw)) {
+    return "İmzalı güncelleme doğrulanamadı. SHA-256, Windows yayıncı kimliği veya güvenilir zaman damgası kapısı geçilemedi. Kurulum başlatılmadı.";
   }
   if (/(?:timeout|timed out|connect|network|dns|http|endpoint)/u.test(raw)) {
     return "Güncelleme kaynağına ulaşılamadı. İnternet bağlantınızı kontrol edip yeniden deneyin.";
   }
-  return "Güncelleme denetlenemedi. OPE imzasız GitHub release akışını kullanır; indirilen kurulum yalnızca HTTPS kaynağı ve SHA-256 özeti doğrulanırsa başlatılır. Bağlantıyı kontrol edip yeniden deneyin.";
+  return "Güncelleme denetlenemedi. OPE kurulumu yalnız HTTPS kaynağı, SHA-256 özeti, sabitlenmiş Windows yayıncı kimliği ve güvenilir zaman damgası doğrulanırsa başlatır. Bağlantıyı kontrol edip yeniden deneyin.";
 }
 
 export function userFacingPublicationQueueError(reason: unknown): string {
@@ -543,9 +547,11 @@ export function createCoalescingBridge(
   const reads = new Map<CoalescedSnapshot, Promise<unknown>>();
   const completed = new Map<CoalescedSnapshot, {
     generation: number;
+    snapshotGeneration: number;
     validThrough: number;
     value: unknown;
   }>();
+  const snapshotGenerations = new Map<CoalescedSnapshot, number>();
   let generation = 0;
   let pendingMutations = 0;
   let resolveMutationQuiescence: (() => void) | undefined;
@@ -557,6 +563,7 @@ export function createCoalescingBridge(
       ? windowMs
       : 0;
   };
+  const snapshotGeneration = (key: CoalescedSnapshot): number => snapshotGenerations.get(key) ?? 0;
   const beginMutation = () => {
     generation += 1;
     completed.clear();
@@ -584,8 +591,9 @@ export function createCoalescingBridge(
     // while that work continues; only a read that actually crossed a
     // mutation boundary is stale and has to wait for reconciliation.
     const readGeneration = generation;
+    const readSnapshotGeneration = snapshotGeneration(key);
     const value = await read();
-    if (readGeneration !== generation) {
+    if (readGeneration !== generation || readSnapshotGeneration !== snapshotGeneration(key)) {
       await mutationQuiescence;
       return readCurrent(key, read);
     }
@@ -593,6 +601,7 @@ export function createCoalescingBridge(
     if (windowMs) {
       completed.set(key, {
         generation: readGeneration,
+        snapshotGeneration: readSnapshotGeneration,
         validThrough: performance.now() + windowMs,
         value
       });
@@ -604,7 +613,12 @@ export function createCoalescingBridge(
     if (existing) return existing as Promise<T>;
 
     const cached = completed.get(key);
-    if (cached && cached.generation === generation && cached.validThrough > performance.now()) {
+    if (
+      cached
+      && cached.generation === generation
+      && cached.snapshotGeneration === snapshotGeneration(key)
+      && cached.validThrough > performance.now()
+    ) {
       return Promise.resolve(cached.value as T);
     }
     completed.delete(key);
@@ -621,14 +635,29 @@ export function createCoalescingBridge(
     );
     return promise;
   };
+  const fresh = <T>(key: CoalescedSnapshot, read: () => Promise<T>): Promise<T> => {
+    snapshotGenerations.set(key, snapshotGeneration(key) + 1);
+    completed.delete(key);
+    reads.delete(key);
+    return share(key, read);
+  };
   const coalesced: BlogbotBridge = {
     ...bridge,
-    getBootstrapSnapshot: () => share("bootstrap", () => bridge.getBootstrapSnapshot()),
+    getBootstrapSnapshot: (options) => options?.fresh
+      ? fresh("bootstrap", () => bridge.getBootstrapSnapshot({ fresh: true }))
+      : share("bootstrap", () => bridge.getBootstrapSnapshot()),
     getPrerequisiteStatus: () => share("prerequisites", () => bridge.getPrerequisiteStatus()),
-    getConnectorState: () => share("connectors", () => bridge.getConnectorState()),
-    getEditorialWorkspace: (options) => options?.includeCandidates
-      ? share("workspaceCandidates", () => bridge.getEditorialWorkspace({ includeCandidates: true }))
-      : share("workspace", () => bridge.getEditorialWorkspace()),
+    getConnectorState: (options) => options?.fresh
+      ? fresh("connectors", () => bridge.getConnectorState({ fresh: true }))
+      : share("connectors", () => bridge.getConnectorState()),
+    getEditorialWorkspace: (options) => {
+      const key = options?.includeCandidates ? "workspaceCandidates" : "workspace";
+      const read = () => bridge.getEditorialWorkspace({
+        ...(options?.includeCandidates ? { includeCandidates: true } : {}),
+        ...(options?.fresh ? { fresh: true } : {})
+      });
+      return options?.fresh ? fresh(key, read) : share(key, read);
+    },
     getOperations: () => share("operations", () => bridge.getOperations()),
     getEngineDiagnostics: () => share("diagnostics", () => bridge.getEngineDiagnostics())
   };

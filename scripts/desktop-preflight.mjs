@@ -63,8 +63,14 @@ export async function runDesktopPreflight({ artifactsDir } = {}) {
   check("verify-config-no-bundle", verifyConfig.bundle?.active === false, "Verification config cannot emit installers");
 
   const tauriRoot = join(repositoryRoot, "apps", "desktop", "src-tauri");
-  const sidecar = join(tauriRoot, "binaries", "blogbot-engine-x86_64-pc-windows-msvc.exe");
-  check("bundled-engine-sidecar", await nonEmptyFile(sidecar), "Windows engine sidecar exists and is non-empty");
+  for (const [name, fileName] of [
+    ["engine", "blogbot-engine-x86_64-pc-windows-msvc.exe"],
+    ["fetcher", "blogbot-fetcher-x86_64-pc-windows-msvc.exe"],
+    ["secure-restore", "blogbot-secure-restore-x86_64-pc-windows-msvc.exe"]
+  ]) {
+    const sidecar = join(tauriRoot, "binaries", fileName);
+    check(`bundled-${name}-sidecar`, await nonEmptyFile(sidecar), `Windows ${name} sidecar exists and is non-empty`);
+  }
   for (const resource of ["pglite.wasm", "pglite.data", "initdb.wasm"]) {
     check(`pglite-${resource}`, await nonEmptyFile(join(tauriRoot, "resources", "pglite", resource)), "Bundled local PGlite asset exists");
   }

@@ -110,10 +110,10 @@ export function OperationsHub(props: OperationsHubProps) {
     setRefreshing(true);
     setMessage("");
     try {
-      const snapshot = await props.bridge.getBootstrapSnapshot();
+      const snapshot = await props.bridge.getBootstrapSnapshot({ fresh: true });
       const [workspace, connectorState] = await Promise.all([
-        props.bridge.getEditorialWorkspace(),
-        props.bridge.getConnectorState()
+        props.bridge.getEditorialWorkspace({ fresh: true }),
+        props.bridge.getConnectorState({ fresh: true })
       ]);
       props.onSnapshotChange(snapshot);
       props.onWorkspaceChange(workspace);
@@ -257,19 +257,24 @@ export function OperationsHub(props: OperationsHubProps) {
                     <button className="button button-primary" type="button" onClick={props.onOpenEditorial}>
                       Editoryal Masa’da aç
                     </button>
-                    {draft.blockers > 0 ? (
+                    {draft.nextAction === "CONNECT_CODEX" ? (
+                      <button className="button button-secondary" type="button" onClick={props.onOpenSetup}>
+                        Codex’i bağla
+                      </button>
+                    ) : null}
+                    {draft.nextAction === "RETRY" ? (
                       <button
                         className="button button-secondary"
                         type="button"
                         disabled={props.readOnly || busyId === draft.id}
-                        aria-describedby={props.readOnly ? "blocked-draft-retry-unavailable" : undefined}
+                        aria-describedby={props.readOnly ? `blocked-draft-retry-unavailable-${draft.id}` : undefined}
                         onClick={() => void retry(draft.id)}
                       >
                         {busyId === draft.id ? "Kuyruğa alınıyor" : "Tekrar dene"}
                       </button>
                     ) : null}
-                    {draft.blockers > 0 && props.readOnly ? (
-                      <small id="blocked-draft-retry-unavailable" className="action-unavailable-reason">
+                    {draft.nextAction === "RETRY" && props.readOnly ? (
+                      <small id={`blocked-draft-retry-unavailable-${draft.id}`} className="action-unavailable-reason">
                         Yerel çalışma alanı yeniden bağlanana kadar bu bloklu iş yeniden başlatılamaz.
                       </small>
                     ) : null}

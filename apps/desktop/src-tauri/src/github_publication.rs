@@ -636,38 +636,16 @@ fn validate(claim: &ApprovedClaim, config: &PublicationConfig) -> Result<(), Pub
 }
 
 fn safe_repository(value: &str) -> bool {
-    let parts: Vec<_> = value.split('/').collect();
-    parts.len() == 2
-        && parts.iter().all(|p| {
-            !p.is_empty()
-                && p.len() <= 100
-                && p.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
-        })
+    crate::secure_store::valid_github_repository_name(value)
 }
 fn safe_branch(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 200
-        && !value.starts_with('/')
-        && !value.ends_with('/')
-        && !value.contains("..")
-        && !value.contains('\\')
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
+    crate::secure_store::valid_github_branch_name(value)
 }
 fn safe_sha(value: &str) -> bool {
     (7..=64).contains(&value.len()) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 fn safe_workflow(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 100
-        && !value.contains('/')
-        && !value.contains("..")
-        && (value.ends_with(".yml") || value.ends_with(".yaml"))
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+    crate::secure_store::valid_github_workflow_name(value)
 }
 fn safe_adapter_identity(value: &str, adapter_id: &str) -> bool {
     !adapter_id.is_empty()
@@ -955,6 +933,68 @@ mod tests {
         PublicationConfig {
             required_checks: vec!["ci/test".into(), "ci/lint".into()],
             deploy_workflow: "deploy.yml".into(),
+        }
+    }
+
+    #[test]
+    fn publication_repository_uses_the_shared_dot_segment_contract() {
+        let mut valid = test_claim();
+        valid.repository = "owner/.github".into();
+        assert!(validate(&valid, &test_config()).is_ok());
+
+        for repository in ["owner/.", "owner/..", "../site", "owner/site/extra"] {
+            let mut invalid = test_claim();
+            invalid.repository = repository.into();
+            let error = validate(&invalid, &test_config()).unwrap_err();
+            assert_eq!(error.code, "INVALID_CLAIM", "{repository}");
+        }
+    }
+
+    #[test]
+    fn publication_branch_uses_the_shared_contract() {
+        let mut valid = test_claim();
+        valid.base_branch = "release/v1.2.3".into();
+        assert!(validate(&valid, &test_config()).is_ok());
+
+        for branch in [
+            "/main",
+            "main/",
+            "main//next",
+            "main..next",
+            "main:next",
+            ".hidden",
+            "feature/.hidden",
+            "feature.lock",
+            "feature/x.lock",
+            "feature.",
+            "-main",
+        ] {
+            let mut invalid = test_claim();
+            invalid.base_branch = branch.into();
+            let error = validate(&invalid, &test_config()).unwrap_err();
+            assert_eq!(error.code, "INVALID_CLAIM", "{branch}");
+        }
+    }
+
+    #[test]
+    fn publication_workflow_uses_the_shared_contract() {
+        for workflow in ["deploy.yml", "release_1.yaml"] {
+            let mut valid = test_config();
+            valid.deploy_workflow = workflow.into();
+            assert!(validate(&test_claim(), &valid).is_ok(), "{workflow}");
+        }
+
+        for workflow in [
+            format!("{}.yml", "w".repeat(97)),
+            "a..yml".to_string(),
+            ".yml".to_string(),
+            "deploy.txt".to_string(),
+            "nested/deploy.yml".to_string(),
+        ] {
+            let mut invalid = test_config();
+            invalid.deploy_workflow = workflow.clone();
+            let error = validate(&test_claim(), &invalid).unwrap_err();
+            assert_eq!(error.code, "INVALID_CONFIG", "{workflow}");
         }
     }
 

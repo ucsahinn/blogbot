@@ -11,9 +11,19 @@ on:
         description: "Release notes shown by OPE"
         required: true
         type: string
+      sign_windows:
+        description: "Opt in to Windows certificate signing (deferred; default is unsigned/manual installation)"
+        required: true
+        type: boolean
+        default: false
+      publish_release:
+        description: "Create the public GitHub Release after verification and attestations"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-ope-desktop
@@ -27,21 +37,46 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  release:
+  build-signed:
     needs: secret-scan
+    name: Build desktop (${{ inputs.sign_windows && 'signed' || 'unsigned' }})
     runs-on: windows-latest
+    timeout-minutes: 120
+    environment: ${{ inputs.sign_windows && 'windows-signing' || 'windows-unsigned' }}
+    permissions:
+      contents: read
+    env:
+      OPE_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ inputs.sign_windows && vars.OPE_WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
+      OPE_WINDOWS_TIMESTAMP_URL: ${{ inputs.sign_windows && vars.OPE_WINDOWS_TIMESTAMP_URL || '' }}
+      OPE_UPDATE_SIGNER_SHA256: ${{ inputs.sign_windows && vars.OPE_UPDATE_SIGNER_SHA256 || '' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version-file: package.json
-          cache: npm
-      - run: npm ci
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify release source ref
+        shell: pwsh
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_REF -cne 'refs/heads/main') {
+            throw "RELEASE_REF_NOT_ALLOWED"
+          }
+          if ($env:RELEASE_SHA -notmatch '^[0-9A-Fa-f]{40}$') {
+            throw "RELEASE_SHA_INVALID"
+          }
+          $checkedOutSha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkedOutSha.ToLowerInvariant() -cne $env:RELEASE_SHA.ToLowerInvariant()) {
+            throw "RELEASE_CHECKOUT_SHA_MISMATCH"
+          }
       - name: Verify release version
         shell: pwsh
         env:
@@ -54,6 +89,19 @@ jobs:
           if ($desktopManifest.version -ne $env:RELEASE_VERSION) {
             throw "RELEASE_VERSION_MISMATCH: apps/desktop/package.json must equal the requested release version"
           }
+          $tagRef = "refs/tags/v$env:RELEASE_VERSION"
+          $existingTagRefs = @(& git for-each-ref --format='%(refname)' $tagRef)
+          if ($LASTEXITCODE -ne 0) {
+            throw "RELEASE_TAG_LOOKUP_FAILED"
+          }
+          if ($existingTagRefs.Count -ne 0) {
+            throw "RELEASE_TAG_ALREADY_EXISTS"
+          }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
       # A dispatched release must never publish an installer built from a commit
       # that cannot pass the same gate `verify.yml` enforces on every push.
       # Each check is its own step: in a multi-line `run` block the hosted
@@ -76,47 +124,420 @@ jobs:
       - run: npm.cmd run smoke:fetcher
       - run: npm.cmd run native:test
       - run: npm.cmd run native:lint
-      - name: Build unsigned desktop installer
+      - name: Validate protected Windows signing inputs
+        if: ${{ inputs.sign_windows }}
+        shell: pwsh
+        env:
+          OPE_WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.OPE_WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          OPE_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.OPE_WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:OPE_WINDOWS_CERTIFICATE_PFX_BASE64)) { throw "WINDOWS_SIGNING_PFX_MISSING" }
+          if ([string]::IsNullOrWhiteSpace($env:OPE_WINDOWS_CERTIFICATE_PASSWORD)) { throw "WINDOWS_SIGNING_PASSWORD_MISSING" }
+          if ($env:OPE_WINDOWS_CERTIFICATE_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$') { throw "WINDOWS_CERTIFICATE_THUMBPRINT_INVALID" }
+          if ($env:OPE_UPDATE_SIGNER_SHA256 -notmatch '^[0-9A-Fa-f]{64}$') { throw "UPDATE_SIGNER_SHA256_INVALID" }
+          $timestamp = $null
+          if (-not [Uri]::TryCreate($env:OPE_WINDOWS_TIMESTAMP_URL, [UriKind]::Absolute, [ref]$timestamp)) { throw "WINDOWS_TIMESTAMP_URL_INVALID" }
+          if ($timestamp.Scheme -notin @('http', 'https') -or $timestamp.UserInfo -or $timestamp.Query -or $timestamp.Fragment) { throw "WINDOWS_TIMESTAMP_URL_INVALID" }
+
+      - name: Import Windows signing certificate
+        if: ${{ inputs.sign_windows }}
+        id: signing-import
+        shell: pwsh
+        env:
+          OPE_WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.OPE_WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          OPE_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.OPE_WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'ope-windows-signing.pfx'
+          $certificateBaselinePath = Join-Path $env:RUNNER_TEMP 'ope-certificate-baseline-thumbprints.txt'
+          $expectedThumbprint = $env:OPE_WINDOWS_CERTIFICATE_THUMBPRINT.ToUpperInvariant()
+          $before = @{}
+          Get-ChildItem -LiteralPath 'Cert:\CurrentUser\My' | ForEach-Object { $before[$_.Thumbprint.ToUpperInvariant()] = $true }
+          if ($before.ContainsKey($expectedThumbprint)) { throw "WINDOWS_SIGNING_CERTIFICATE_ALREADY_PRESENT" }
+          [IO.File]::WriteAllLines($certificateBaselinePath, [string[]]@($before.Keys | Sort-Object))
+          if (-not (Test-Path -LiteralPath $certificateBaselinePath -PathType Leaf)) { throw "WINDOWS_SIGNING_CERTIFICATE_BASELINE_MISSING" }
+          $baselineSha256 = (Get-FileHash -LiteralPath $certificateBaselinePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($baselineSha256 -notmatch '^[0-9a-f]{64}$') { throw "WINDOWS_SIGNING_CERTIFICATE_BASELINE_HASH_INVALID" }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "baseline_sha256=$baselineSha256" -Encoding utf8
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'tracking_started=true' -Encoding utf8
+
+          $pfxBytes = $null
+          try {
+            $pfxBytes = [Convert]::FromBase64String($env:OPE_WINDOWS_CERTIFICATE_PFX_BASE64)
+            [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+            $securePassword = ConvertTo-SecureString $env:OPE_WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            try {
+              $null = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation 'Cert:\CurrentUser\My' -Password $securePassword -Exportable:$false
+            } finally {
+              $securePassword.Dispose()
+            }
+
+            $newThumbprints = @(
+              Get-ChildItem -LiteralPath 'Cert:\CurrentUser\My' |
+                Where-Object { -not $before.ContainsKey($_.Thumbprint.ToUpperInvariant()) } |
+                ForEach-Object { $_.Thumbprint.ToUpperInvariant() }
+            )
+            if ($newThumbprints -notcontains $expectedThumbprint) { throw "WINDOWS_SIGNING_CERTIFICATE_NOT_TRACKED" }
+            $signer = Get-Item -LiteralPath ("Cert:\CurrentUser\My\" + $expectedThumbprint) -ErrorAction Stop
+            if (-not $signer.HasPrivateKey) { throw "WINDOWS_SIGNING_PRIVATE_KEY_MISSING" }
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $pfxPath) { throw "WINDOWS_SIGNING_PFX_CLEANUP_FAILED" }
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'completed=true' -Encoding utf8
+          } catch {
+            try {
+              Get-ChildItem -LiteralPath 'Cert:\CurrentUser\My' |
+                Where-Object { -not $before.ContainsKey($_.Thumbprint.ToUpperInvariant()) } |
+                ForEach-Object {
+                  try {
+                    Remove-Item -LiteralPath ("Cert:\CurrentUser\My\" + $_.Thumbprint) -DeleteKey -Force -ErrorAction Stop
+                  } catch {}
+                }
+            } catch {}
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+            throw
+          } finally {
+            if ($null -ne $pfxBytes) { [Array]::Clear($pfxBytes, 0, $pfxBytes.Length) }
+          }
+      - name: Sign packaged native runtime modules
+        if: ${{ inputs.sign_windows }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signtoolCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          if ($null -ne $signtoolCommand) {
+            $signtoolPath = $signtoolCommand.Source
+          } else {
+            $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+            $signtoolPath = @(
+              Get-ChildItem -LiteralPath $sdkRoot -Filter 'signtool.exe' -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+            ).FullName
+          }
+          if ([string]::IsNullOrWhiteSpace($signtoolPath)) { throw "SIGNTOOL_NOT_FOUND" }
+
+          $nativeRuntimeDirectory = 'apps/desktop/src-tauri/resources/engine-node_modules'
+          $nativeRuntimeFiles = @(
+            Get-ChildItem -LiteralPath $nativeRuntimeDirectory -Recurse -File |
+              Where-Object { $_.Extension -in @('.dll', '.node') }
+          )
+          if ($nativeRuntimeFiles.Count -eq 0) { throw "NATIVE_RUNTIME_FILES_MISSING" }
+
+          foreach ($nativeRuntime in $nativeRuntimeFiles) {
+            & $signtoolPath sign /sha1 $env:OPE_WINDOWS_CERTIFICATE_THUMBPRINT /fd SHA256 /tr $env:OPE_WINDOWS_TIMESTAMP_URL /td SHA256 $nativeRuntime.FullName
+            if ($LASTEXITCODE -ne 0) { throw "NATIVE_RUNTIME_SIGNING_FAILED: $($nativeRuntime.FullName)" }
+          }
+
+      - name: Build signed desktop installers
+        if: ${{ inputs.sign_windows }}
+        env:
+          OPE_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ vars.OPE_WINDOWS_CERTIFICATE_THUMBPRINT }}
+          OPE_WINDOWS_TIMESTAMP_URL: ${{ vars.OPE_WINDOWS_TIMESTAMP_URL }}
+          OPE_UPDATE_SIGNER_SHA256: ${{ vars.OPE_UPDATE_SIGNER_SHA256 }}
         run: npm.cmd run build:desktop -- --prepared-sidecars
+      - name: Build unsigned desktop installers (manual installation only)
+        if: ${{ !inputs.sign_windows }}
+        run: npm.cmd run build:desktop -- --prepared-sidecars
+      - name: Sign standalone application after bundling
+        if: ${{ inputs.sign_windows }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Tauri restores the original main EXE after signing each bundle.
+          # Sign that standalone payload separately before verifying or copying it.
+          $app = 'apps/desktop/src-tauri/target/release/blogbot.exe'
+          if (-not (Test-Path -LiteralPath $app -PathType Leaf)) { throw 'STANDALONE_APPLICATION_MISSING' }
+          $signtoolCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          if ($null -ne $signtoolCommand) {
+            $signtoolPath = $signtoolCommand.Source
+          } else {
+            $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+            $signtoolPath = @(
+              Get-ChildItem -LiteralPath $sdkRoot -Filter 'signtool.exe' -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+            ).FullName
+          }
+          if ([string]::IsNullOrWhiteSpace($signtoolPath)) { throw 'SIGNTOOL_NOT_FOUND' }
+          & $signtoolPath sign /sha1 $env:OPE_WINDOWS_CERTIFICATE_THUMBPRINT /fd SHA256 /tr $env:OPE_WINDOWS_TIMESTAMP_URL /td SHA256 $app
+          if ($LASTEXITCODE -ne 0) { throw 'STANDALONE_APPLICATION_SIGNING_FAILED' }
       - name: Verify packaged installer inputs
         run: npm.cmd run desktop:preflight -- --artifacts-dir apps/desktop/src-tauri/target/release/bundle
-      - name: Create unsigned updater manifest
-        id: manifest
+      - name: Verify signed application and installers
+        if: ${{ inputs.sign_windows }}
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = 'apps/desktop/src-tauri/target/release/blogbot.exe'
+          $engine = 'apps/desktop/src-tauri/binaries/blogbot-engine-x86_64-pc-windows-msvc.exe'
+          $fetcher = 'apps/desktop/src-tauri/binaries/blogbot-fetcher-x86_64-pc-windows-msvc.exe'
+          $secureRestore = 'apps/desktop/src-tauri/binaries/blogbot-secure-restore-x86_64-pc-windows-msvc.exe'
+          $nsis = Join-Path 'apps/desktop/src-tauri/target/release/bundle/nsis' "OPE_$($env:RELEASE_VERSION)_x64-setup.exe"
+          $msi = Join-Path 'apps/desktop/src-tauri/target/release/bundle/msi' "OPE_$($env:RELEASE_VERSION)_x64_en-US.msi"
+          $expectedThumbprint = $env:OPE_WINDOWS_CERTIFICATE_THUMBPRINT.ToUpperInvariant()
+          $expectedSignerSha256 = $env:OPE_UPDATE_SIGNER_SHA256.ToLowerInvariant()
+          $nativeRuntimeFiles = @(
+            Get-ChildItem -LiteralPath 'apps/desktop/src-tauri/resources/engine-node_modules' -Recurse -File |
+              Where-Object { $_.Extension -in @('.dll', '.node') }
+          )
+          if ($nativeRuntimeFiles.Count -eq 0) { throw "NATIVE_RUNTIME_FILES_MISSING" }
+          $signatureTargets = @($app, $engine, $fetcher, $secureRestore, $nsis, $msi) + $nativeRuntimeFiles
+
+          foreach ($candidate in $signatureTargets) {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "SIGNED_ARTIFACT_MISSING: $candidate" }
+            $signature = Get-AuthenticodeSignature -LiteralPath $candidate -ErrorAction Stop
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) { throw "AUTHENTICODE_INVALID: $candidate" }
+            if ($null -eq $signature.SignerCertificate) { throw "AUTHENTICODE_SIGNER_MISSING: $candidate" }
+            if ($null -eq $signature.TimeStamperCertificate) { throw "AUTHENTICODE_TIMESTAMP_MISSING: $candidate" }
+            if ($signature.SignerCertificate.Thumbprint.ToUpperInvariant() -cne $expectedThumbprint) { throw "AUTHENTICODE_THUMBPRINT_MISMATCH: $candidate" }
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+              $actualSignerSha256 = [BitConverter]::ToString($sha.ComputeHash($signature.SignerCertificate.RawData)).Replace('-', '').ToLowerInvariant()
+            } finally {
+              $sha.Dispose()
+            }
+            if ($actualSignerSha256 -cne $expectedSignerSha256) { throw "AUTHENTICODE_SIGNER_SHA256_MISMATCH: $candidate" }
+          }
+
+      - name: Remove signing credentials
+        if: ${{ always() && inputs.sign_windows }}
+        shell: pwsh
+        env:
+          SIGNING_TRACKING_STARTED: ${{ steps.signing-import.outputs.tracking_started }}
+          SIGNING_BASELINE_SHA256: ${{ steps.signing-import.outputs.baseline_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'ope-windows-signing.pfx'
+          $certificateBaselinePath = Join-Path $env:RUNNER_TEMP 'ope-certificate-baseline-thumbprints.txt'
+          $expectedThumbprint = [string]$env:OPE_WINDOWS_CERTIFICATE_THUMBPRINT
+          $expectedThumbprintValid = $expectedThumbprint -match '^[0-9A-Fa-f]{40}$'
+          if ($expectedThumbprintValid) { $expectedThumbprint = $expectedThumbprint.ToUpperInvariant() }
+          $cleanupFailed = $false
+          $baseline = @{}
+          $baselineAvailable = $false
+
+          try {
+            if ($env:SIGNING_TRACKING_STARTED -eq 'true') {
+              if (-not (Test-Path -LiteralPath $certificateBaselinePath -PathType Leaf)) { throw "WINDOWS_SIGNING_CERTIFICATE_BASELINE_MISSING" }
+              if ($env:SIGNING_BASELINE_SHA256 -notmatch '^[0-9A-Fa-f]{64}$') { throw "WINDOWS_SIGNING_CERTIFICATE_BASELINE_HASH_INVALID" }
+              $actualBaselineSha256 = (Get-FileHash -LiteralPath $certificateBaselinePath -Algorithm SHA256).Hash
+              if ($actualBaselineSha256 -cne $env:SIGNING_BASELINE_SHA256.ToUpperInvariant()) { throw "WINDOWS_SIGNING_CERTIFICATE_BASELINE_HASH_MISMATCH" }
+              foreach ($thumbprint in [IO.File]::ReadAllLines($certificateBaselinePath)) {
+                if ($thumbprint -notmatch '^[0-9A-Fa-f]{40}$') { throw "WINDOWS_SIGNING_CERTIFICATE_BASELINE_INVALID" }
+                $normalizedThumbprint = $thumbprint.ToUpperInvariant()
+                if ($baseline.ContainsKey($normalizedThumbprint)) { throw "WINDOWS_SIGNING_CERTIFICATE_BASELINE_INVALID" }
+                $baseline[$normalizedThumbprint] = $true
+              }
+              if ($expectedThumbprintValid -and $baseline.ContainsKey($expectedThumbprint)) { throw "WINDOWS_SIGNING_CERTIFICATE_BASELINE_INVALID" }
+              $baselineAvailable = $true
+            }
+          } catch {
+            $cleanupFailed = $true
+          }
+
+          $certificatesToRemove = @()
+          if ($baselineAvailable) {
+            try {
+              $certificatesToRemove = @(
+                Get-ChildItem -LiteralPath 'Cert:\CurrentUser\My' |
+                  Where-Object { -not $baseline.ContainsKey($_.Thumbprint.ToUpperInvariant()) }
+              )
+            } catch {
+              $cleanupFailed = $true
+            }
+          } elseif ($env:SIGNING_TRACKING_STARTED -eq 'true') {
+            $cleanupFailed = $true
+            if ($expectedThumbprintValid) {
+              try {
+                $expectedCertificatePath = "Cert:\CurrentUser\My\" + $expectedThumbprint
+                if (Test-Path -LiteralPath $expectedCertificatePath) {
+                  Remove-Item -LiteralPath $expectedCertificatePath -DeleteKey -Force -ErrorAction Stop
+                }
+                if (Test-Path -LiteralPath $expectedCertificatePath) { $cleanupFailed = $true }
+              } catch {
+                $cleanupFailed = $true
+              }
+            }
+          }
+
+          foreach ($certificate in $certificatesToRemove) {
+            $certificatePath = "Cert:\CurrentUser\My\" + $certificate.Thumbprint
+            try {
+              if (Test-Path -LiteralPath $certificatePath) {
+                Remove-Item -LiteralPath $certificatePath -DeleteKey -Force -ErrorAction Stop
+              }
+              if (Test-Path -LiteralPath $certificatePath) { $cleanupFailed = $true }
+            } catch {
+              $cleanupFailed = $true
+            }
+          }
+
+          if ($baselineAvailable) {
+            try {
+              $remainingAddedCertificates = @(
+                Get-ChildItem -LiteralPath 'Cert:\CurrentUser\My' |
+                  Where-Object { -not $baseline.ContainsKey($_.Thumbprint.ToUpperInvariant()) }
+              )
+              if ($remainingAddedCertificates.Count -ne 0) { $cleanupFailed = $true }
+            } catch {
+              $cleanupFailed = $true
+            }
+          }
+
+          foreach ($temporaryPath in @($certificateBaselinePath, $pfxPath)) {
+            try {
+              if (Test-Path -LiteralPath $temporaryPath) {
+                Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction Stop
+              }
+              if (Test-Path -LiteralPath $temporaryPath) { $cleanupFailed = $true }
+            } catch {
+              $cleanupFailed = $true
+            }
+          }
+
+          if ($cleanupFailed) { throw "WINDOWS_SIGNING_CREDENTIAL_CLEANUP_FAILED" }
+      - name: Create verified updater payload
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_NOTES: ${{ inputs.notes }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          $bundle = Join-Path 'apps/desktop/src-tauri/target/release/bundle/nsis' "OPE_$($env:RELEASE_VERSION)_x64-setup.exe"
-          $msi = Join-Path 'apps/desktop/src-tauri/target/release/bundle/msi' "OPE_$($env:RELEASE_VERSION)_x64_en-US.msi"
-          if (-not (Test-Path -LiteralPath $bundle -PathType Leaf)) { throw "UPDATER_ARCHIVE_MISSING" }
-          if (-not (Test-Path -LiteralPath $msi -PathType Leaf)) { throw "MSI_ARCHIVE_MISSING" }
-          $bundle = (Resolve-Path -LiteralPath $bundle).Path
-          $msi = (Resolve-Path -LiteralPath $msi).Path
-          $sha256 = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
+          $ErrorActionPreference = 'Stop'
+          $app = (Resolve-Path -LiteralPath 'apps/desktop/src-tauri/target/release/blogbot.exe').Path
+          $nsis = (Resolve-Path -LiteralPath (Join-Path 'apps/desktop/src-tauri/target/release/bundle/nsis' "OPE_$($env:RELEASE_VERSION)_x64-setup.exe")).Path
+          $msi = (Resolve-Path -LiteralPath (Join-Path 'apps/desktop/src-tauri/target/release/bundle/msi' "OPE_$($env:RELEASE_VERSION)_x64_en-US.msi")).Path
+          $payloadDirectory = Join-Path $env:GITHUB_WORKSPACE 'release-payload'
+          $null = New-Item -ItemType Directory -Path $payloadDirectory -Force
+          $sha256 = (Get-FileHash -LiteralPath $nsis -Algorithm SHA256).Hash.ToLowerInvariant()
           $manifest = [ordered]@{
             version = $env:RELEASE_VERSION
             notes = $env:RELEASE_NOTES
             pub_date = (Get-Date).ToUniversalTime().ToString('o')
             platforms = @{
               'windows-x86_64' = @{
-                url = "https://github.com/$($env:REPOSITORY)/releases/download/v$($env:RELEASE_VERSION)/$([IO.Path]::GetFileName($bundle))"
+                url = "https://github.com/$($env:REPOSITORY)/releases/download/v$($env:RELEASE_VERSION)/$([IO.Path]::GetFileName($nsis))"
                 sha256 = $sha256
               }
             }
           }
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath latest.json -Encoding utf8NoBOM
-          "archive=$bundle" >> $env:GITHUB_OUTPUT
-          "msi=$msi" >> $env:GITHUB_OUTPUT
-      - name: Publish unsigned release
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $payloadDirectory 'latest.json') -Encoding utf8NoBOM
+          Copy-Item -LiteralPath @($app, $nsis, $msi) -Destination $payloadDirectory
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: spdx-json
+          output-file: release-payload/ope-sbom.spdx.json
+          dependency-snapshot: false
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ope-${{ inputs.sign_windows && 'signed' || 'unsigned' }}-release-${{ inputs.version }}
+          path: release-payload
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  attest:
+    needs: build-signed
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      OPE_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ inputs.sign_windows && vars.OPE_WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
+      OPE_UPDATE_SIGNER_SHA256: ${{ inputs.sign_windows && vars.OPE_UPDATE_SIGNER_SHA256 || '' }}
+      RELEASE_SIGNING_MODE: ${{ inputs.sign_windows && 'signed' || 'unsigned' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ope-${{ inputs.sign_windows && 'signed' || 'unsigned' }}-release-${{ inputs.version }}
+          path: release-payload
+
+      - name: Reverify release payload before attestation
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./scripts/verify-release-payload.ps1 -SigningMode $env:RELEASE_SIGNING_MODE
+
+      - name: Attest release payload provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            release-payload/blogbot.exe
+            release-payload/OPE_${{ inputs.version }}_x64-setup.exe
+            release-payload/OPE_${{ inputs.version }}_x64_en-US.msi
+            release-payload/latest.json
+            release-payload/ope-sbom.spdx.json
+
+      - name: Attest release payload SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            release-payload/blogbot.exe
+            release-payload/OPE_${{ inputs.version }}_x64-setup.exe
+            release-payload/OPE_${{ inputs.version }}_x64_en-US.msi
+          sbom-path: release-payload/ope-sbom.spdx.json
+
+  publish:
+    if: ${{ inputs.publish_release }}
+    needs: attest
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      OPE_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ inputs.sign_windows && vars.OPE_WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
+      OPE_UPDATE_SIGNER_SHA256: ${{ inputs.sign_windows && vars.OPE_UPDATE_SIGNER_SHA256 || '' }}
+      RELEASE_SIGNING_MODE: ${{ inputs.sign_windows && 'signed' || 'unsigned' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ope-${{ inputs.sign_windows && 'signed' || 'unsigned' }}-release-${{ inputs.version }}
+          path: release-payload
+
+      - name: Reverify release payload before publication
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./scripts/verify-release-payload.ps1 -SigningMode $env:RELEASE_SIGNING_MODE
+
+      - name: Publish verified release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_NOTES: ${{ inputs.notes }}
-          UPDATER_ARCHIVE: ${{ steps.manifest.outputs.archive }}
-          MSI_ARCHIVE: ${{ steps.manifest.outputs.msi }}
         run: |
-          Set-Content -LiteralPath release-notes.txt -Value $env:RELEASE_NOTES -Encoding utf8NoBOM
-          gh release create "v$env:RELEASE_VERSION" $env:UPDATER_ARCHIVE $env:MSI_ARCHIVE latest.json --target "${{ github.sha }}" --title "OPE $env:RELEASE_VERSION" --notes-file release-notes.txt
+          $ErrorActionPreference = 'Stop'
+          $payloadDirectory = (Resolve-Path -LiteralPath 'release-payload').Path
+          $updaterArchive = Join-Path $payloadDirectory "OPE_$($env:RELEASE_VERSION)_x64-setup.exe"
+          $msiArchive = Join-Path $payloadDirectory "OPE_$($env:RELEASE_VERSION)_x64_en-US.msi"
+          $manifestPath = Join-Path $payloadDirectory 'latest.json'
+          $sbomArchive = Join-Path $payloadDirectory 'ope-sbom.spdx.json'
+          $notes = $env:RELEASE_NOTES
+          if ($env:RELEASE_SIGNING_MODE -eq 'unsigned') {
+            $notes += "`n`nUnsigned Windows build. Publisher identity is not certificate-verified. Manual installation only; in-app update installation is disabled."
+          }
+          Set-Content -LiteralPath release-notes.txt -Value $notes -Encoding utf8NoBOM
+          gh release create "v$env:RELEASE_VERSION" $updaterArchive $msiArchive $manifestPath $sbomArchive --target "${{ github.sha }}" --title "OPE $env:RELEASE_VERSION" --notes-file release-notes.txt

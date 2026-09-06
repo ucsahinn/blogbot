@@ -110,7 +110,7 @@ export function AppShell({
     setUpdateBusy(true);
     setUpdatePhase("checking");
     setPendingUpdate(null);
-    setUpdateMessage("Güncellemeler güvenli bağlantıyla denetleniyor…");
+    setUpdateMessage("Güncellemeler güvenli bağlantıyla denetleniyor; kurulumdan önce yayıncı kimliği doğrulanacak…");
     try {
       const result = await bridge.checkUnsignedUpdate();
       if (result.kind === "upToDate") {
@@ -140,13 +140,13 @@ export function AppShell({
     setUpdateBusy(true);
     setUpdatePhase("installing");
     try {
-      setUpdateMessage("Güncelleme indiriliyor ve SHA-256 ile doğrulanıyor…");
+      setUpdateMessage("Güncelleme indiriliyor; SHA-256, Windows yayıncı imzası ve zaman damgası doğrulanıyor…");
       await bridge.installUnsignedUpdate(pendingUpdate);
       setUpdatePhase("handoff");
       setUpdateMessage("OPE kapanıyor. Kurulum sihirbazı birkaç saniye içinde açılacak; kurulum bitene kadar bu pencereyi kapatmayın.");
     } catch {
       setUpdatePhase("error");
-      setUpdateMessage("Güncelleme indirilemedi veya SHA-256 doğrulaması başarısız oldu. Kurulum başlatılmadı.");
+      setUpdateMessage("Güncelleme indirilemedi veya bütünlük/yayıncı doğrulaması başarısız oldu. Kurulum başlatılmadı.");
     } finally {
       setUpdateBusy(false);
     }
@@ -305,13 +305,13 @@ export function AppShell({
                   <strong>Güncelleme adımları</strong>
                   <div className="update-progress-steps">
                     <span className={updatePhase === "checking" ? "is-current" : updatePhase === "error" ? "is-error" : "is-done"}>1 Kontrol</span>
-                    <span className={updatePhase === "installing" ? "is-current" : updatePhase === "handoff" ? "is-done" : "is-waiting"}>2 İndirme + SHA-256</span>
+                    <span className={updatePhase === "installing" ? "is-current" : updatePhase === "handoff" ? "is-done" : "is-waiting"}>2 Bütünlük + yayıncı</span>
                     <span className={updatePhase === "handoff" ? "is-current" : "is-waiting"}>3 Kurulum sihirbazı</span>
                   </div>
                 </div>
               ) : null}              {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
               <strong>OPE · OpenPostEditör</strong>
-              <span>Sürüm {desktopPackage.version} · İmzasız HTTPS + SHA-256 · @ucsahinn</span>
+              <span>Sürüm {desktopPackage.version} · Sabitlenmiş Windows yayıncı imzası · @ucsahinn</span>
               <a
                 className="about-project-link"
                 href="https://github.com/ucsahinn/blogbot"

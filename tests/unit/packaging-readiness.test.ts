@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -115,7 +115,7 @@ test("Windows bundle metadata is valid Turkish UTF-8 rather than mojibake", asyn
   assert.doesNotMatch(metadata, /(?:Â|Ä|Ã|Å)/u, "installer metadata must not contain mojibake");
 });
 
-test("Windows auto-update uses an unsigned HTTPS GitHub Release feed with SHA-256 integrity", async () => {
+test("Windows auto-update requires HTTPS, SHA-256, and a pinned timestamped Authenticode signer", async () => {
   const [configText, cargoText, desktopSource, releaseWorkflow] = await Promise.all([
     readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
     readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "Cargo.toml"), "utf8"),
@@ -133,10 +133,81 @@ test("Windows auto-update uses an unsigned HTTPS GitHub Release feed with SHA-25
   assert.match(desktopSource, /install_unsigned_update/u);
   assert.doesNotMatch(configText, /"pubkey"/u);
   assert.match(releaseWorkflow, /sha256/u);
-  assert.doesNotMatch(releaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY/u);
+  assert.match(releaseWorkflow, /OPE_UPDATE_SIGNER_SHA256/u);
+  assert.match(releaseWorkflow, /Get-AuthenticodeSignature/u);
+  assert.match(releaseWorkflow, /TimeStamperCertificate/u);
+  assert.match(releaseWorkflow, /OPE_WINDOWS_CERTIFICATE_PFX_BASE64/u);
+  assert.match(releaseWorkflow, /OPE_WINDOWS_CERTIFICATE_PASSWORD/u);
+  assert.match(releaseWorkflow, /Import-PfxCertificate/u);
+  assert.match(releaseWorkflow, /if:\s*\$\{\{\s*always\(\) && inputs\.sign_windows\s*\}\}/u);
+  assert.match(releaseWorkflow, /Remove-Item[^\n]+Cert:/u);
+  const topLevelPermissions = releaseWorkflow.slice(
+    releaseWorkflow.indexOf("permissions:"),
+    releaseWorkflow.indexOf("concurrency:")
+  );
+  assert.match(topLevelPermissions, /contents:\s*read/u);
+  const publishJob = releaseWorkflow.slice(releaseWorkflow.indexOf("\n  publish:"));
+  assert.match(publishJob, /permissions:\s*\r?\n\s+contents:\s*write/u);
+  assert.match(publishJob, /gh release create/u);
+  assert.doesNotMatch(
+    publishJob,
+    /OPE_WINDOWS_CERTIFICATE_PFX_BASE64|OPE_WINDOWS_CERTIFICATE_PASSWORD|Import-PfxCertificate/u
+  );
+  assert.match(releaseWorkflow, /environment:\s*\$\{\{ inputs\.sign_windows && 'windows-signing' \|\| 'windows-unsigned' \}\}/u);
+  assert.match(releaseWorkflow, /actions\/upload-artifact@[a-f0-9]{40}/u);
+  assert.match(publishJob, /actions\/download-artifact@[a-f0-9]{40}/u);
+
+  const importIndex = releaseWorkflow.indexOf("Import Windows signing certificate");
+  const buildIndex = releaseWorkflow.indexOf("Build signed desktop installers");
+  const verifyIndex = releaseWorkflow.indexOf("Verify signed application and installers");
+  const cleanupIndex = releaseWorkflow.indexOf("Remove signing credentials");
+  const uploadIndex = releaseWorkflow.indexOf("actions/upload-artifact@");
+  assert.ok(
+    importIndex < buildIndex &&
+      buildIndex < verifyIndex &&
+      verifyIndex < cleanupIndex &&
+      cleanupIndex < uploadIndex
+  );
+  const importStep = releaseWorkflow.slice(importIndex, buildIndex);
+  const cleanupStep = releaseWorkflow.slice(cleanupIndex, uploadIndex);
+  const baselineWriteIndex = importStep.indexOf("[IO.File]::WriteAllLines($certificateBaselinePath");
+  const certificateImportIndex = importStep.indexOf("Import-PfxCertificate");
+  assert.ok(
+    baselineWriteIndex >= 0 && baselineWriteIndex < certificateImportIndex,
+    "the certificate-store baseline must be durable before PFX import starts"
+  );
+  assert.match(importStep, /baseline_sha256=/u);
+  assert.match(importStep, /tracking_started=true/u);
+  assert.match(cleanupStep, /SIGNING_TRACKING_STARTED/u);
+  assert.match(cleanupStep, /SIGNING_BASELINE_SHA256/u);
+  assert.match(cleanupStep, /Get-FileHash -LiteralPath \$certificateBaselinePath -Algorithm SHA256/u);
+  assert.match(
+    cleanupStep,
+    /Where-Object \{ -not \$baseline\.ContainsKey\(\$_\.Thumbprint\.ToUpperInvariant\(\)\) \}/u,
+    "always cleanup must rediscover every certificate added after the durable baseline"
+  );
+  assert.match(
+    importStep,
+    /Remove-Item -LiteralPath \$pfxPath -Force -ErrorAction Stop/u
+  );
+  assert.match(importStep, /WINDOWS_SIGNING_CERTIFICATE_NOT_TRACKED/u);
+  assert.match(
+    importStep,
+    /Remove-Item -LiteralPath \("Cert:\\CurrentUser\\My\\" \+ \$_\.Thumbprint\) -DeleteKey -Force/u,
+    "failed imports must delete each imported certificate together with its private key"
+  );
+  assert.match(cleanupStep, /@\(\$certificateBaselinePath, \$pfxPath\)/u);
+  assert.match(
+    cleanupStep,
+    /Remove-Item -LiteralPath \$certificatePath -DeleteKey -Force -ErrorAction Stop/u,
+    "the always cleanup must delete the private-key container, not only the certificate record"
+  );
+  assert.match(cleanupStep, /Test-Path -LiteralPath \$temporaryPath/u);
+  assert.match(cleanupStep, /WINDOWS_SIGNING_CREDENTIAL_CLEANUP_FAILED/u);
   assert.match(releaseWorkflow, /latest\.json/u);
   assert.match(releaseWorkflow, /-setup\.exe/u);
   assert.doesNotMatch(releaseWorkflow, /UPDATER_SIGNATURE/u);
+  assert.match(releaseWorkflow, /Build unsigned desktop installers \(manual installation only\)\r?\n\s+if: \$\{\{ !inputs\.sign_windows \}\}/u);
 });
 
 test("Windows installer exposes OPE as the product name while preserving the stable local data identifier", async () => {
@@ -282,6 +353,56 @@ test("desktop build validates prepared sidecars without rebuilding them", async 
       ["run", "desktop:preflight:json"],
       ["run", "tauri", "--workspace", "@blogbot/desktop", "--", "build", "--", "--bin", "blogbot"]
     ]);
+
+    await writeFile(commandLog, "", "utf8");
+    const signingEnvironment = {
+      ...process.env,
+      npm_execpath: fakeNpmCli,
+      BLOGBOT_DESKTOP_BUILD_COMMAND_LOG: commandLog,
+      OPE_WINDOWS_CERTIFICATE_THUMBPRINT: "a".repeat(40),
+      OPE_UPDATE_SIGNER_SHA256: "b".repeat(64),
+      OPE_WINDOWS_TIMESTAMP_URL: "https://timestamp.example.test/rfc3161"
+    };
+    await execFile(
+      process.execPath,
+      [join(repositoryRoot, "scripts", "build-desktop.mjs"), "--prepared-sidecars"],
+      { cwd: repositoryRoot, env: signingEnvironment, windowsHide: true }
+    );
+    const signedCommands = (await readFile(commandLog, "utf8"))
+      .trim()
+      .split(/\r?\n/u)
+      .map((line) => JSON.parse(line) as string[]);
+    const tauriCommand = signedCommands[1] ?? [];
+    const configIndex = tauriCommand.indexOf("--config");
+    assert.ok(configIndex > -1, "a complete signing contract must reach Tauri as a config overlay");
+    assert.deepEqual(JSON.parse(tauriCommand[configIndex + 1] ?? "{}"), {
+      bundle: {
+        windows: {
+          certificateThumbprint: "a".repeat(40),
+          digestAlgorithm: "sha256",
+          timestampUrl: "https://timestamp.example.test/rfc3161",
+          tsp: true
+        }
+      }
+    });
+
+    await assert.rejects(
+      execFile(
+        process.execPath,
+        [join(repositoryRoot, "scripts", "build-desktop.mjs"), "--prepared-sidecars"],
+        {
+          cwd: repositoryRoot,
+          env: {
+            ...process.env,
+            npm_execpath: fakeNpmCli,
+            BLOGBOT_DESKTOP_BUILD_COMMAND_LOG: commandLog,
+            OPE_UPDATE_SIGNER_SHA256: "b".repeat(64)
+          },
+          windowsHide: true
+        }
+      ),
+      /WINDOWS_SIGNING_CONFIG_INCOMPLETE/u
+    );
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -336,8 +457,8 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
   );
   assert.match(
     smokeScript,
-    /attempt < 20/u,
-    "WebView2 shutdown can outlive the driver process and needs a bounded five-second cleanup window"
+    /attempt < 60/u,
+    "WebView2 shutdown can outlive the driver process and needs a bounded fifteen-second cleanup window"
   );
   assert.match(smokeScript, /BLOGBOT_NATIVE_PROFILE === "actual"/u);
   assert.match(
@@ -483,6 +604,15 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
     /verifyOperationsJourney/u,
     "native smoke must prove that Operations pause state persists and diagnostics remain redacted"
   );
+  const visiblePauseJourney = smokeScript.slice(
+    smokeScript.indexOf("async function verifyVisibleOperationsPauseJourney"),
+    smokeScript.indexOf("async function verifyVisibleDiagnosticsExportJourney")
+  );
+  assert.match(
+    visiblePauseJourney,
+    /await synchronizeVisibleOperationsState\(sessionId\);/u,
+    "direct IPC checks must reconcile the visible Operations snapshot before exercising its controls"
+  );
   assert.match(
     smokeScript,
     /verifyVisibleCandidateJournalJourney/u,
@@ -535,6 +665,16 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
     /fatal-state[\s\S]*?Safe error codes/u,
     "fatal native startup states must expose only redacted diagnostic codes"
   );
+  assert.match(
+    smokeScript,
+    /querySelector\('\.fatal-state h1 \+ p'\)/u,
+    "fatal startup diagnostics must inspect the user-facing error detail instead of the section kicker"
+  );
+  assert.match(
+    smokeScript,
+    /çalışma alanı hazırlanırken zaman aşımına uğradı[\s\S]*?BOOTSTRAP_TIMEOUT/u,
+    "fatal startup diagnostics must preserve the application's bounded bootstrap timeout code"
+  );
   assert.match(smokeScript, /Haftalık ritim, hazır (?:yayınlar|çıktılar) ve geçmiş\./u);
 });
 
@@ -548,11 +688,56 @@ test("sidecar doctor smoke contract checks durable local readiness", async () =>
   assert.match(smokeScript, /response\.status\s*!==\s*["']READY["']/u);
   assert.match(smokeScript, /response\.persistence\s*!==\s*["']pglite["']/u);
   assert.match(smokeScript, /response\.queue\s*!==\s*["']ready["']/u);
+  assert.match(smokeScript, /BLOGBOT_ENGINE_SMOKE_TIMEOUT_MS/u);
+  assert.match(smokeScript, /smokeTimeoutMs < 1_000[\s\S]*smokeTimeoutMs > 120_000/u);
   assert.match(
     smokeScript,
     /cwd:\s*localAppData/u,
     "sidecar smoke must not resolve native modules from the development repository"
   );
+  assert.match(
+    smokeScript,
+    /maxRetries:\s*[1-9]\d*/u,
+    "Windows sidecar cleanup must retry bounded transient file-handle contention"
+  );
+  assert.match(smokeScript, /retryDelay:\s*[1-9]\d*/u);
+});
+
+test("engine sidecar smoke removes its app-owned temporary directory", {
+  skip: process.platform !== "win32"
+}, async (context) => {
+  const executable = join(
+    repositoryRoot,
+    "apps",
+    "desktop",
+    "src-tauri",
+    "binaries",
+    "blogbot-engine-x86_64-pc-windows-msvc.exe"
+  );
+  try {
+    await access(executable);
+  } catch {
+    context.skip("the built engine sidecar is not available");
+    return;
+  }
+  const appOwnedSmokeDirectories = async () =>
+    (await readdir(tmpdir(), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("blogbot-sea-smoke-"))
+      .map((entry) => entry.name)
+      .sort();
+  const before = await appOwnedSmokeDirectories();
+
+  await execFile(process.execPath, [join(repositoryRoot, "scripts", "smoke-engine-sidecar.mjs")], {
+    cwd: repositoryRoot,
+    timeout: 75_000,
+    env: {
+      ...process.env,
+      BLOGBOT_ENGINE_SMOKE_TIMEOUT_MS: "60000"
+    },
+    windowsHide: true
+  });
+
+  assert.deepEqual(await appOwnedSmokeDirectories(), before);
 });
 
 test("fetcher SEA bundle starts its stdin protocol and has a packaged smoke gate", async () => {
@@ -579,7 +764,7 @@ test("fetcher SEA bundle starts its stdin protocol and has a packaged smoke gate
   assert.match(releaseWorkflow, /npm\.cmd run test:browser/u);
 });
 
-test("desktop release gates publication on a same-run pinned Gitleaks scan", async () => {
+test("desktop release gates publication on a same-run commit-pinned Gitleaks scan", async () => {
   const releaseWorkflow = await readFile(
     join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
     "utf8"
@@ -587,9 +772,10 @@ test("desktop release gates publication on a same-run pinned Gitleaks scan", asy
 
   assert.match(
     releaseWorkflow,
-    /secret-scan:[\s\S]*?permissions:\r?\n\s+contents:\s*read[\s\S]*?actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683[\s\S]*?fetch-depth:\s*0[\s\S]*?gitleaks\/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc/u
+    /secret-scan:[\s\S]*?permissions:\r?\n\s+contents:\s*read[\s\S]*?actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683[\s\S]*?fetch-depth:\s*0[\s\S]*?gitleaks\/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7/u
   );
-  assert.match(releaseWorkflow, /release:\s*\r?\n\s+needs:\s*secret-scan/u);
+  assert.match(releaseWorkflow, /build-signed:\s*\r?\n\s+needs:\s*secret-scan/u);
+  assert.match(releaseWorkflow, /attest:\s*\r?\n\s+needs:\s*build-signed/u);
 });
 
 test("desktop release prepares Windows sidecars before tests assert clean-machine inputs", async () => {
@@ -608,6 +794,20 @@ test("desktop release prepares Windows sidecars before tests assert clean-machin
   );
 });
 
+test("desktop build injects Windows signing configuration only from a complete public contract", async () => {
+  const buildScript = await readFile(
+    join(repositoryRoot, "scripts", "build-desktop.mjs"),
+    "utf8"
+  );
+
+  assert.match(buildScript, /OPE_WINDOWS_CERTIFICATE_THUMBPRINT/u);
+  assert.match(buildScript, /OPE_WINDOWS_TIMESTAMP_URL/u);
+  assert.match(buildScript, /OPE_UPDATE_SIGNER_SHA256/u);
+  assert.match(buildScript, /digestAlgorithm:\s*"sha256"/u);
+  assert.match(buildScript, /tsp:\s*true/u);
+  assert.match(buildScript, /"--config"/u);
+});
+
 test("desktop release packages prepared sidecars without rebuilding them", async () => {
   const releaseWorkflow = await readFile(
     join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
@@ -617,6 +817,37 @@ test("desktop release packages prepared sidecars without rebuilding them", async
   assert.match(
     releaseWorkflow,
     /run: npm\.cmd run build:desktop -- --prepared-sidecars/u
+  );
+});
+
+test("desktop release rejects an existing version tag before tool setup or build", async () => {
+  const workflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+  const buildJob = workflow.slice(
+    workflow.indexOf("\n  build-signed:"),
+    workflow.indexOf("\n  attest:")
+  );
+  const versionGateIndex = buildJob.indexOf("Verify release version");
+  const setupNodeIndex = buildJob.indexOf("actions/setup-node@");
+  const buildEngineIndex = buildJob.indexOf("npm.cmd run build:engine");
+
+  assert.match(
+    buildJob,
+    /actions\/checkout@[a-f0-9]{40}[\s\S]*?persist-credentials:\s*false[\s\S]*?fetch-depth:\s*0/u,
+    "the release checkout must include tags so the duplicate-version gate is authoritative"
+  );
+  assert.ok(
+    versionGateIndex > -1 && versionGateIndex < setupNodeIndex && setupNodeIndex < buildEngineIndex,
+    "version and duplicate-tag validation must finish before tool setup or repository build code"
+  );
+  const versionGate = buildJob.slice(versionGateIndex, setupNodeIndex);
+  assert.match(versionGate, /\$existingTagRefs = @\(& git for-each-ref --format='%\(refname\)' \$tagRef\)/u);
+  assert.match(
+    versionGate,
+    /\$LASTEXITCODE -ne 0[\s\S]*RELEASE_TAG_LOOKUP_FAILED[\s\S]*\$existingTagRefs\.Count -ne 0[\s\S]*RELEASE_TAG_ALREADY_EXISTS/u,
+    "an empty tag query must succeed while lookup failures and existing tags fail closed"
   );
 });
 
@@ -666,7 +897,7 @@ test("native smoke fails a slow route instead of tolerating a minute-long frozen
   const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
 
   assert.match(smoke, /const MAX_ROUTE_RENDER_MS = 3_000;/u);
-  assert.match(smoke, /route #\$\{route\} did not render a visible page heading within \$\{MAX_ROUTE_RENDER_MS\} ms/u);
+  assert.match(smoke, /route #\$\{route\} did not render a visible page heading within \$\{timeoutMs\} ms/u);
   assert.match(smoke, /routeRenderMs/u);
   assert.match(smoke, /profileRoutePerformance/u);
   assert.match(smoke, /BLOGBOT_PROFILE_TEST_SOURCES/u);
@@ -676,6 +907,16 @@ test("native smoke fails a slow route instead of tolerating a minute-long frozen
   assert.doesNotMatch(smoke, /actual profile source checks failed/u);
   assert.match(smoke, /verifyCodexRuntime/u);
   assert.match(smoke, /test_codex_runtime/u);
+});
+
+test("native smoke bounds its final WebDriver session cleanup", async () => {
+  const smoke = await readFile(join(repositoryRoot, "scripts", "native-webview-smoke.mjs"), "utf8");
+
+  assert.match(
+    smoke,
+    /fetch\(`\$\{webdriverBaseUrl\}\/session\/\$\{sessionId\}`, \{\s*method: "DELETE",\s*signal: AbortSignal\.timeout\(nativeSmokeRequestTimeoutMs\)\s*\}\)/u,
+    "a wedged local driver must not hold the smoke harness open forever during finally cleanup"
+  );
 });
 
 test("live Boby smoke reports a safe terminal status when the reply deadline expires", async () => {
@@ -719,6 +960,19 @@ test("native restart smoke waits for a non-blocking engine to recover its durabl
   assert.match(smoke, /async function waitForRecoveredDraft\(sessionId, draftId\)/u);
   assert.match(smoke, /performance\.now\(\) - startedAt < MAX_ENGINE_RECOVERY_RENDER_MS/u);
   assert.match(smoke, /await waitForRecoveredDraft\(sessionId, candidateJourney\.draftId\)/u);
+});
+
+test("native candidate action smoke waits for the prior mutation to settle before selecting again", async () => {
+  const matrix = await readFile(join(repositoryRoot, "scripts", "native-visible-action-matrix.mjs"), "utf8");
+  const settleCheck = matrix.indexOf(
+    'await waitUntil("return !document.querySelectorAll(\'.candidate-bulk-actions button\')[0].disabled;", "candidate single close did not settle");'
+  );
+  const nextSelection = matrix.indexOf(
+    'document.querySelector(\'.candidate-card input[type=checkbox]\').click()'
+  );
+
+  assert.notEqual(settleCheck, -1, "single-close mutation must expose an explicit settlement gate");
+  assert.ok(settleCheck < nextSelection, "the settlement gate must run before the next checkbox click");
 });
 
 test("live Boby smoke runs for both actual and fresh temporary profiles", async () => {
@@ -777,4 +1031,257 @@ test("release version stays identical across every packaged desktop manifest", a
     desktopVersion,
     "src-tauri/Cargo.toml version must match apps/desktop/package.json or the installed app reports the wrong version"
   );
+});
+
+test("signed release blocks publication until a pinned SBOM and both attestations succeed", async () => {
+  const workflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+  const cleanupIndex = workflow.indexOf("Remove signing credentials");
+  const sbomIndex = workflow.indexOf("Generate SPDX SBOM");
+  const uploadIndex = workflow.indexOf("actions/upload-artifact@");
+  const attestIndex = workflow.indexOf("\n  attest:");
+  const publishIndex = workflow.indexOf("\n  publish:");
+
+  assert.notEqual(attestIndex, -1, "release workflow needs a separate attestation job");
+  assert.ok(
+    cleanupIndex < sbomIndex && sbomIndex < uploadIndex && uploadIndex < attestIndex &&
+      attestIndex < publishIndex,
+    "credentials must be removed before SBOM generation, attestation, and publication"
+  );
+
+  const buildJob = workflow.slice(workflow.indexOf("\n  build-signed:"), attestIndex);
+  assert.match(
+    buildJob,
+    /anchore\/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26/u
+  );
+  assert.match(buildJob, /format:\s*spdx-json/u);
+  assert.match(buildJob, /output-file:\s*release-payload\/ope-sbom\.spdx\.json/u);
+  assert.match(buildJob, /upload-artifact:\s*false/u);
+  assert.match(buildJob, /upload-release-assets:\s*false/u);
+  assert.match(buildJob, /dependency-snapshot:\s*false/u);
+
+  const attestJob = workflow.slice(attestIndex, publishIndex);
+  assert.match(attestJob, /needs:\s*build-signed/u);
+  assert.match(
+    attestJob,
+    /actions\/checkout@[a-f0-9]{40}[\s\S]*?persist-credentials:\s*false[\s\S]*?actions\/download-artifact@/u
+  );
+  assert.match(
+    attestJob,
+    /permissions:\s*\r?\n\s+contents:\s*read\s*\r?\n\s+id-token:\s*write\s*\r?\n\s+attestations:\s*write/u
+  );
+  assert.doesNotMatch(
+    attestJob,
+    /contents:\s*write|OPE_WINDOWS_CERTIFICATE_PFX_BASE64|OPE_WINDOWS_CERTIFICATE_PASSWORD/u
+  );
+  assert.match(
+    attestJob,
+    /actions\/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093/u
+  );
+  assert.equal(
+    (attestJob.match(/actions\/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d/gu) ?? []).length,
+    2
+  );
+  assert.match(attestJob, /sbom-path:\s*release-payload\/ope-sbom\.spdx\.json/u);
+  assert.match(attestJob, /release-payload\/blogbot\.exe[\s\S]*?-setup\.exe[\s\S]*?_en-US\.msi/u);
+  assert.match(attestJob, /scripts\/verify-release-payload\.ps1/u);
+
+  const publishJob = workflow.slice(publishIndex);
+  assert.match(
+    workflow,
+    /publish_release:\s*\r?\n\s+description:[^\r\n]+\r?\n\s+required:\s*true\r?\n\s+type:\s*boolean\r?\n\s+default:\s*false/u,
+    "publication must require an explicit dispatch decision and default to verification-only"
+  );
+  assert.match(publishJob, /needs:\s*attest/u);
+  assert.match(
+    publishJob,
+    /if:\s*\$\{\{\s*inputs\.publish_release\s*\}\}/u,
+    "the only contents-write job must stay skipped unless publication is explicitly selected"
+  );
+  assert.match(publishJob, /scripts\/verify-release-payload\.ps1/u);
+  assert.match(
+    publishJob,
+    /actions\/checkout@[a-f0-9]{40}[\s\S]*?persist-credentials:\s*false[\s\S]*?actions\/download-artifact@/u
+  );
+  assert.match(publishJob, /ope-sbom\.spdx\.json[\s\S]*?gh release create/u);
+
+  const verifierPath = join(repositoryRoot, "scripts", "verify-release-payload.ps1");
+  await access(verifierPath);
+  const verifier = await readFile(verifierPath, "utf8");
+  assert.match(verifier, /ope-sbom\.spdx\.json/u);
+  assert.match(verifier, /SPDX-2\.3/u);
+  assert.match(verifier, /ConvertFrom-Json/u);
+  assert.match(verifier, /Get-AuthenticodeSignature/u);
+  assert.match(verifier, /AUTHENTICODE_SIGNER_SHA256_MISMATCH/u);
+  assert.match(verifier, /RELEASE_PAYLOAD_FILE_SET_INVALID/u);
+});
+
+test("desktop release fails closed unless dispatch targets the checked-out main commit", async () => {
+  const workflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+  const buildJob = workflow.slice(
+    workflow.indexOf("\n  build-signed:"),
+    workflow.indexOf("\n  attest:")
+  );
+  const sourceGateIndex = buildJob.indexOf("Verify release source ref");
+  const installIndex = buildJob.indexOf("npm ci");
+
+  assert.notEqual(sourceGateIndex, -1, "release source ref needs an explicit fail-closed gate");
+  assert.ok(sourceGateIndex < installIndex, "source identity must be checked before repository code runs");
+  assert.match(buildJob, /RELEASE_REF:\s*\$\{\{ github\.ref \}\}/u);
+  assert.match(buildJob, /RELEASE_SHA:\s*\$\{\{ github\.sha \}\}/u);
+  assert.match(buildJob, /refs\/heads\/main/u);
+  assert.match(buildJob, /git rev-parse HEAD/u);
+  assert.match(buildJob, /RELEASE_REF_NOT_ALLOWED/u);
+  assert.match(buildJob, /RELEASE_CHECKOUT_SHA_MISMATCH/u);
+});
+
+test("release payload verifier remains compatible with Windows PowerShell 5.1", async () => {
+  const verifier = await readFile(join(repositoryRoot, "scripts", "verify-release-payload.ps1"), "utf8");
+  assert.doesNotMatch(
+    verifier,
+    /\[IO\.Path\]::GetRelativePath/u,
+    "the local Windows PowerShell 5.1 runtime does not provide Path.GetRelativePath"
+  );
+  assert.match(verifier, /\$_\.Name/u);
+});
+
+test("release payload verifier accepts legal dot-prefixed repositories but rejects dot segments", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "blogbot-release-verifier-"));
+  const verifier = join(repositoryRoot, "scripts", "verify-release-payload.ps1");
+  const safeEnvironment = (repository: string) => ({
+    SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+    WINDIR: process.env.WINDIR ?? "C:\\Windows",
+    PATH: process.env.PATH ?? "",
+    TEMP: tmpdir(),
+    TMP: tmpdir(),
+    RELEASE_VERSION: "0.1.55",
+    RELEASE_NOTES: "Synthetic local verifier fixture",
+    REPOSITORY: repository,
+    OPE_WINDOWS_CERTIFICATE_THUMBPRINT: "0".repeat(40),
+    OPE_UPDATE_SIGNER_SHA256: "0".repeat(64)
+  });
+  const runVerifier = async (repository: string) => {
+    try {
+      await execFile("powershell.exe", [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        verifier
+      ], {
+        cwd: fixtureRoot,
+        env: safeEnvironment(repository),
+        timeout: 10_000,
+        windowsHide: true
+      });
+      return "UNEXPECTED_SUCCESS";
+    } catch (reason) {
+      const failure = reason as { stdout?: string; stderr?: string };
+      return `${failure.stdout ?? ""}\n${failure.stderr ?? ""}`;
+    }
+  };
+
+  try {
+    await mkdir(join(fixtureRoot, "release-payload"));
+    assert.match(await runVerifier("owner/.github"), /RELEASE_PAYLOAD_FILE_SET_INVALID/u);
+    assert.match(await runVerifier("owner/.github-private"), /RELEASE_PAYLOAD_FILE_SET_INVALID/u);
+    assert.match(await runVerifier("owner/."), /RELEASE_REPOSITORY_INVALID/u);
+    assert.match(await runVerifier("owner/.."), /RELEASE_REPOSITORY_INVALID/u);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test("signed release verifies every Tauri external sidecar with the pinned publisher", async () => {
+  const workflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+  const verification = workflow.slice(
+    workflow.indexOf("Verify signed application and installers"),
+    workflow.indexOf("Remove signing credentials")
+  );
+
+  assert.match(verification, /blogbot-engine-x86_64-pc-windows-msvc\.exe/u);
+  assert.match(verification, /blogbot-fetcher-x86_64-pc-windows-msvc\.exe/u);
+  assert.match(
+    verification,
+    /\$signatureTargets = @\(\$app, \$engine, \$fetcher, \$secureRestore, \$nsis, \$msi\) \+ \$nativeRuntimeFiles/u,
+    "the same Authenticode, timestamp, thumbprint, and SHA-256 pin gates must cover sidecars"
+  );
+  assert.match(verification, /TimeStamperCertificate/u);
+});
+
+test("secure restore helper is a Tauri-signed external binary rather than an opaque resource", async () => {
+  const [configText, buildScript, preflight, workflow] = await Promise.all([
+    readFile(join(repositoryRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
+    readFile(join(repositoryRoot, "scripts", "build-engine-sidecar.mjs"), "utf8"),
+    readFile(join(repositoryRoot, "scripts", "desktop-preflight.mjs"), "utf8"),
+    readFile(join(repositoryRoot, ".github", "workflows", "release-desktop.yml"), "utf8")
+  ]);
+  const config = JSON.parse(configText) as {
+    bundle?: { externalBin?: string[]; resources?: string[] };
+  };
+  const verification = workflow.slice(
+    workflow.indexOf("Verify signed application and installers"),
+    workflow.indexOf("Remove signing credentials")
+  );
+
+  assert.ok(config.bundle?.externalBin?.includes("binaries/blogbot-secure-restore"));
+  assert.ok(!config.bundle?.resources?.includes("resources/secure-restore/*"));
+  assert.match(
+    buildScript,
+    /binaryDirectory,[\s\S]*?"blogbot-secure-restore-x86_64-pc-windows-msvc\.exe"/u
+  );
+  assert.match(
+    buildScript,
+    /TAURI_CONFIG:\s*JSON\.stringify\(\{\s*bundle:\s*\{\s*externalBin:\s*\[\]\s*\}\s*\}\)/u,
+    "building the helper must temporarily disable sidecar copying to avoid a clean-build cycle"
+  );
+  assert.match(preflight, /blogbot-secure-restore-x86_64-pc-windows-msvc\.exe/u);
+  assert.match(verification, /blogbot-secure-restore-x86_64-pc-windows-msvc\.exe/u);
+  assert.match(
+    verification,
+    /\$signatureTargets = @\(\$app, \$engine, \$fetcher, \$secureRestore, \$nsis, \$msi\) \+ \$nativeRuntimeFiles/u
+  );
+});
+
+test("release signs packaged native runtime modules with SHA-256 and RFC 3161 before bundling", async () => {
+  const workflow = await readFile(
+    join(repositoryRoot, ".github", "workflows", "release-desktop.yml"),
+    "utf8"
+  );
+  const signIndex = workflow.indexOf("Sign packaged native runtime modules");
+  const buildIndex = workflow.indexOf("Build signed desktop installers");
+  assert.notEqual(signIndex, -1, "native runtime modules need an explicit signing step");
+  assert.ok(signIndex < buildIndex, "native modules must be signed before Tauri copies them into installers");
+
+  const signing = workflow.slice(signIndex, buildIndex);
+  assert.match(signing, /signtool\.exe/u);
+  assert.match(signing, /resources\/engine-node_modules/u);
+  assert.match(signing, /\.Extension -in @\('\.dll', '\.node'\)/u);
+  assert.match(signing, /\/sha1/u);
+  assert.match(signing, /\/fd SHA256/u);
+  assert.match(signing, /\/tr/u);
+  assert.match(signing, /\/td SHA256/u);
+
+  const verification = workflow.slice(
+    workflow.indexOf("Verify signed application and installers"),
+    workflow.indexOf("Remove signing credentials")
+  );
+  assert.match(verification, /\$nativeRuntimeFiles/u);
+  assert.match(
+    verification,
+    /\$signatureTargets = @\(\$app, \$engine, \$fetcher, \$secureRestore, \$nsis, \$msi\) \+ \$nativeRuntimeFiles/u
+  );
+  assert.match(verification, /foreach \(\$candidate in \$signatureTargets\)/u);
 });

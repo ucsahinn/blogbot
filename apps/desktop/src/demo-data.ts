@@ -14,6 +14,15 @@ import type {
 } from "./types.ts";
 
 const demoBobyGuidance = new Map<string, unknown>();
+const demoGitHubAppPermissions = [
+  "actions:write",
+  "administration:read",
+  "checks:read",
+  "contents:write",
+  "metadata:read",
+  "pull_requests:write"
+];
+
 let demoBobyGuidanceSequence = 0;
 
 export const DEMO_REVIEW_MEDIA_CONTENT_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl3sAAAAASUVORK5CYII=";
@@ -282,7 +291,7 @@ const bootstrap: BootstrapSnapshot = {
     engineLabel: "OPE Engine · bu bilgisayar",
     bridgeReady: true,
     latencyMs: 8,
-    storageLabel: "PGlite · yerel ve şifreli",
+    storageLabel: "PGlite · hassas kayıtlar şifreli",
     lastSyncAt: "2026-07-29T12:44:12.000Z"
   },
   automation: {
@@ -795,7 +804,7 @@ export function createDemoTransport(): InvokeTransport {
       case "github_device_flow_start":
         return { started: true, writes: false, network: false, userCode: "DEMO-CODE", verificationUri: "https://github.com/login/device", detail: "Demo GitHub cihaz akışı hazır." };
       case "github_device_flow_poll":
-        return { status: "authorized", writes: false, network: false, scopes: ["repo"], detail: "Demo GitHub bağlantısı hazır." };
+        return { status: "authorized", writes: false, network: false, repository: "owner/site", permissions: demoGitHubAppPermissions, detail: "Demo GitHub App bağlantısı hazır." };
       case "github_device_flow_clear":
         return { status: "logged-out", writes: false, network: false, detail: "Demo GitHub bağlantısı kaldırıldı." };
       case "github_validate_repository":
@@ -825,7 +834,7 @@ export function createDemoTransport(): InvokeTransport {
           steps: ["Immutable paketi doğrula", "Korumalı PR aç", "Zorunlu kontrolleri bekle"]
         };
       case "github_device_flow_status":
-        return { status: "authorized", writes: false, network: false, scopes: ["repo"], detail: "Demo GitHub bağlantısı hazır." };
+        return { status: "authorized", writes: false, network: false, repository: "owner/site", permissions: demoGitHubAppPermissions, detail: "Demo GitHub App bağlantısı hazır." };
       case "backup_create":
         return { outputPath: String(args?.outputPath ?? "C:\\OPE-Demo\\blogbot.backup"), archiveSha256: "0".repeat(64), bytes: 0, entries: 0 };
       case "backup_verify":

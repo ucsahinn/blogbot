@@ -209,6 +209,38 @@ test("completed snapshot freshness is opt-in and scoped", async () => {
   assert.equal(cachedCalls, 1);
 });
 
+test("explicit fresh snapshots bypass completed and in-flight cached reads", async () => {
+  let calls = 0;
+  let resolveFirst: ((value: unknown) => void) | undefined;
+  const bridge = createCoalescingBridge(
+    createInvokeBridge(async (command) => {
+      assert.equal(command, "get_bootstrap_snapshot");
+      calls += 1;
+      if (calls === 1) {
+        return new Promise((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return { revision: calls };
+    }),
+    { completedSnapshotFreshnessMs: { bootstrap: 1_000 } }
+  );
+
+  const staleRead = bridge.getBootstrapSnapshot();
+  await Promise.resolve();
+  const fresh = await bridge.getBootstrapSnapshot({ fresh: true });
+  assert.deepEqual(fresh, { revision: 2 });
+
+  resolveFirst?.({ revision: 1 });
+  const reconciled = await staleRead;
+  assert.notDeepEqual(reconciled, { revision: 1 });
+  assert.ok(calls >= 3);
+
+  const cached = await bridge.getBootstrapSnapshot();
+  assert.deepEqual(cached, reconciled);
+  assert.equal(calls, 3);
+});
+
 test("editorial workspace actions use explicit commands instead of a generic action channel", async () => {
   const calls: Array<{ command: string; args: unknown }> = [];
   const transport: InvokeTransport = async (command, args) => {
@@ -348,6 +380,10 @@ test("bridge protocol failures become actionable Turkish user messages", () => {
     "Yerel çalışma bileşeni zamanında yanıt vermedi. Operasyonlar’dan yerel durumu yenileyin; sorun sürerse tanılama paketi oluşturun."
   );
   assert.equal(
+    userFacingBridgeError(new Error("BOOTSTRAP_TIMEOUT")),
+    "OPE çalışma alanı hazırlanırken zaman aşımına uğradı. Yeniden deneyin; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun."
+  );
+  assert.equal(
     userFacingBridgeError(new Error("VERSION_CONFLICT: 12:13")),
     "Veriler siz işlem yaparken değişti. Ekranı yenileyip işlemi yeniden deneyin."
   );
@@ -357,10 +393,14 @@ test("bridge protocol failures become actionable Turkish user messages", () => {
   );
 });
 
-test("unsigned updater errors distinguish an invalid legacy response from a network outage", () => {
+test("signed updater errors distinguish trust configuration from a network outage", () => {
   assert.match(
     userFacingUpdateError(new Error("signature verification failed")),
-    /eski imzalı güncelleme yolu.*SHA-256/u
+    /İmzalı güncelleme doğrulanamadı.*Kurulum başlatılmadı/u
+  );
+  assert.match(
+    userFacingUpdateError(new Error("UPDATE_SIGNER_NOT_CONFIGURED")),
+    /İmzalı güncelleme doğrulanamadı.*Kurulum başlatılmadı/u
   );
   assert.match(
     userFacingUpdateError(new Error("failed to connect to endpoint")),
@@ -548,7 +588,7 @@ test("GitHub bridge exposes read-only broker status and dry-run intent commands"
     calls.push({ command, args });
     if (command === "github_device_flow_status") return { status: "logged-out", writes: false, network: false };
     if (command === "github_validate_repository") return { valid: true, repository: "owner/site", workflow: "deploy.yml", writes: false };
-    return { mode: "dry-run", writes: false, repository: "owner/site", workflow: "deploy.yml", steps: ["validate-scope", "preview-pull-request", "record-intent"] };
+    return { mode: "dry-run", writes: false, repository: "owner/site", workflow: "deploy.yml", steps: ["validate-github-app-permissions", "preview-pull-request", "record-intent"] };
   });
 
   await bridge.getGitHubDeviceFlowStatus();

@@ -464,6 +464,35 @@ test("REVISION.SAVE accepts production V2 media and rejects missing heroes or un
   }
 });
 
+test("REVISION.SAVE rejects an adapter identity without a pinned version", () => {
+  const hero = {
+    role: "hero",
+    path: "media/revision-contract-v2/hero.webp",
+    sha256: "2".repeat(64),
+    width: 1600,
+    height: 900,
+    byteSize: 1_024,
+    contentBase64: "AA==",
+    source: "LOCAL_RENDERER"
+  };
+
+  const result = validateEngineCommandV1({
+    version: 1,
+    requestId: "revision-adapter-contract",
+    idempotencyKey: "revision-adapter-contract-key",
+    expectedVersion: 0,
+    kind: "REVISION.SAVE",
+    payload: {
+      revision: {
+        ...productionV2Revision([hero]),
+        adapterVersion: " "
+      }
+    }
+  });
+
+  assert.equal(result.valid, false);
+});
+
 test("local workflow commands use exact, bounded shared command contracts", () => {
   const base = {
     version: 1,

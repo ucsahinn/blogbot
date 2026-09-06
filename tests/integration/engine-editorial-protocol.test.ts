@@ -996,9 +996,11 @@ test("publication enqueue persists one approved preview without nesting the PGli
   });
   const revisionHash = computeRevisionHash(expectedRevision);
   const manifestPath = `.blogbot/manifests/${expectedRevision.id}.json`;
+  let nativeNow = Date.parse("2026-07-30T12:02:00.000Z");
   const runtime = await createPersistentEngineProtocol(dataDir, {
     startSourceWorker: false,
-    nativePublicationBroker: true
+    nativePublicationBroker: true,
+    nativePublicationNow: () => nativeNow
   });
   t.after(() => runtime.close());
   const currentVersion = async (suffix: string): Promise<number> => {
@@ -1182,6 +1184,7 @@ test("publication enqueue persists one approved preview without nesting the PGli
   assert.equal(waitingEffect.resultRef, priorResultRef.slice(0, 512));
   assert.equal(waitingEffect.lastError, "GITHUB_REQUIRED_CHECKS_PENDING");
   assert.ok(Number.isFinite(Date.parse(waitingEffect.nextAttemptAt ?? "")));
+  assert.equal(waitingEffect.nextAttemptAt, "2026-07-30T12:02:00.050Z");
 
   const notDue = await runtime.handle({
     version: 1,
@@ -1189,7 +1192,7 @@ test("publication enqueue persists one approved preview without nesting the PGli
     kind: "publication.broker.pending"
   });
   assert.deepEqual((notDue.value as { effectIds: string[] }).effectIds, []);
-  await new Promise((resolve) => setTimeout(resolve, 75));
+  nativeNow += 50;
   const due = await runtime.handle({
     version: 1,
     id: "pending-native-publication-due",

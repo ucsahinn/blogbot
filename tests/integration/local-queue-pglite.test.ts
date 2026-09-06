@@ -1,27 +1,29 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { PGlite } from "@electric-sql/pglite";
 
 import { LocalQueueRuntime } from "../../apps/engine/src/local-queue.ts";
 import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
+import { createOwnedTempRoot } from "../helpers/owned-temp-root.ts";
 
-test("local PGlite queue keeps one durable job for the same idempotency key", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-"));
-  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+test("local PGlite queue keeps one durable job for the same idempotency key", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-queue-");
+  const repository = await PGliteBackendRepository.open(join(ownedRoot.path, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
 
   const firstRuntime = new LocalQueueRuntime(repository.getDatabase());
+  const stopFirstRuntime = ownedRoot.track(() => firstRuntime.stop());
   await firstRuntime.start();
   const firstId = await firstRuntime.enqueue(
     "blogbot.ingest",
     { trigger: "manual" },
     "scan-all-sources-1"
   );
-  await firstRuntime.stop();
+  await stopFirstRuntime();
 
   const secondRuntime = new LocalQueueRuntime(repository.getDatabase());
+  const stopSecondRuntime = ownedRoot.track(() => secondRuntime.stop());
   await secondRuntime.start();
   const replayId = await secondRuntime.enqueue(
     "blogbot.ingest",
@@ -43,14 +45,16 @@ test("local PGlite queue keeps one durable job for the same idempotency key", as
     /IDEMPOTENCY_KEY_REUSED/
   );
 
-  await secondRuntime.stop();
-  await repository.close();
+  await stopSecondRuntime();
+  await closeRepository();
 });
 
-test("local PGlite queue delivers a newly enqueued job to its local worker", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-worker-"));
-  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+test("local PGlite queue delivers a newly enqueued job to its local worker", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-queue-worker-");
+  const repository = await PGliteBackendRepository.open(join(ownedRoot.path, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
   const runtime = new LocalQueueRuntime(repository.getDatabase());
+  const stopRuntime = ownedRoot.track(() => runtime.stop());
   await runtime.start();
 
   let resolveReceived: ((value: { id: string; data: object }) => void) | undefined;
@@ -73,23 +77,26 @@ test("local PGlite queue delivers a newly enqueued job to its local worker", asy
 
   assert.equal(result.id, id);
   assert.deepEqual(result.data, { jobId: "draft-1", idempotencyKey: "draft-1", generation: 1 });
-  await runtime.stop();
-  await repository.close();
+  await stopRuntime();
+  await closeRepository();
 });
 
-test("local PGlite queue delivers a durable job queued before the worker registers", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-recovery-"));
-  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+test("local PGlite queue delivers a durable job queued before the worker registers", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-queue-recovery-");
+  const repository = await PGliteBackendRepository.open(join(ownedRoot.path, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
   const producer = new LocalQueueRuntime(repository.getDatabase());
+  const stopProducer = ownedRoot.track(() => producer.stop());
   await producer.start();
   const id = await producer.enqueue(
     "blogbot.codex",
     { jobId: "draft-recovery", idempotencyKey: "draft-recovery", generation: 1 },
     "codex:draft-recovery:1"
   );
-  await producer.stop();
+  await stopProducer();
 
   const consumer = new LocalQueueRuntime(repository.getDatabase());
+  const stopConsumer = ownedRoot.track(() => consumer.stop());
   await consumer.start();
   let resolveReceived: ((value: { id: string; data: object }) => void) | undefined;
   const received = new Promise<{ id: string; data: object }>((resolve) => {
@@ -110,15 +117,18 @@ test("local PGlite queue delivers a durable job queued before the worker registe
     idempotencyKey: "draft-recovery",
     generation: 1
   });
-  await consumer.stop();
-  await repository.close();
+  await stopConsumer();
+  await closeRepository();
 });
 
-test("local PGlite queue recovers an active Codex job after an interrupted local engine", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-active-recovery-"));
-  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+test("local PGlite queue recovers an active Codex job after an interrupted local engine", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-queue-active-recovery-");
+  const repository = await PGliteBackendRepository.open(join(ownedRoot.path, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
   const producer = new LocalQueueRuntime(repository.getDatabase());
+  const stopProducer = ownedRoot.track(() => producer.stop());
   let consumer: LocalQueueRuntime | undefined;
+  let stopConsumer: (() => Promise<void>) | undefined;
   try {
   await producer.start();
 
@@ -127,9 +137,10 @@ test("local PGlite queue recovers an active Codex job after an interrupted local
     { jobId: "draft-active", idempotencyKey: "draft-active", generation: 1 },
     "codex:draft-active:1"
   );
-  await producer.stop();
+  await stopProducer();
 
   consumer = new LocalQueueRuntime(repository.getDatabase());
+  stopConsumer = ownedRoot.track(() => consumer!.stop());
   await consumer.start();
   await repository.getDatabase().query(
     "UPDATE blogbot_local_queue_jobs SET state = 'active' WHERE id = $1",
@@ -150,8 +161,8 @@ test("local PGlite queue recovers an active Codex job after an interrupted local
   assert.equal(result.id, id);
   assert.deepEqual(result.data, { jobId: "draft-active", idempotencyKey: "draft-active", generation: 1 });
   } finally {
-    await consumer?.stop().catch(() => undefined);
-    await repository.close();
+    await stopConsumer?.();
+    await closeRepository();
   }
 });
 
@@ -202,10 +213,12 @@ test("local PGlite queue cannot finish startup after a concurrent stop request",
   );
 });
 
-test("local PGlite queue atomically replays concurrent idempotent enqueues", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-race-"));
-  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+test("local PGlite queue atomically replays concurrent idempotent enqueues", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-queue-race-");
+  const repository = await PGliteBackendRepository.open(join(ownedRoot.path, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
   const runtime = new LocalQueueRuntime(repository.getDatabase());
+  const stopRuntime = ownedRoot.track(() => runtime.stop());
   await runtime.start();
 
   const results = await Promise.allSettled([
@@ -221,14 +234,16 @@ test("local PGlite queue atomically replays concurrent idempotent enqueues", asy
   );
   assert.equal(rows.rows[0]?.count, "1");
 
-  await runtime.stop();
-  await repository.close();
+  await stopRuntime();
+  await closeRepository();
 });
 
-test("re-enqueueing a dead-lettered key hands back work a worker can actually claim", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-deadletter-"));
-  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+test("re-enqueueing a dead-lettered key hands back work a worker can actually claim", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-queue-deadletter-");
+  const repository = await PGliteBackendRepository.open(join(ownedRoot.path, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
   const runtime = new LocalQueueRuntime(repository.getDatabase());
+  const stopRuntime = ownedRoot.track(() => runtime.stop());
   await runtime.start();
 
   const id = await runtime.enqueue("blogbot.ingest", { trigger: "manual" }, "revive-me");
@@ -251,14 +266,16 @@ test("re-enqueueing a dead-lettered key hands back work a worker can actually cl
   );
   assert.equal(Number(attempts.rows[0]?.attempts), 0, "reviving must reset the spent attempt budget");
 
-  await runtime.stop();
-  await repository.close();
+  await stopRuntime();
+  await closeRepository();
 });
 
-test("re-enqueueing a completed key never silently redoes finished work", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-completed-"));
-  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+test("re-enqueueing a completed key never silently redoes finished work", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-queue-completed-");
+  const repository = await PGliteBackendRepository.open(join(ownedRoot.path, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
   const runtime = new LocalQueueRuntime(repository.getDatabase());
+  const stopRuntime = ownedRoot.track(() => runtime.stop());
   await runtime.start();
 
   const id = await runtime.enqueue("blogbot.ingest", { trigger: "manual" }, "already-done");
@@ -272,14 +289,16 @@ test("re-enqueueing a completed key never silently redoes finished work", async 
   const job = await runtime.getJob("blogbot.ingest", id);
   assert.equal(job?.state, "completed", "finished work must stay finished");
 
-  await runtime.stop();
-  await repository.close();
+  await stopRuntime();
+  await closeRepository();
 });
 
-test("queue retention removes only terminal rows past the window", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-queue-retention-"));
-  const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+test("queue retention removes only terminal rows past the window", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-queue-retention-");
+  const repository = await PGliteBackendRepository.open(join(ownedRoot.path, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
   const runtime = new LocalQueueRuntime(repository.getDatabase());
+  const stopRuntime = ownedRoot.track(() => runtime.stop());
   await runtime.start();
 
   const stale = await runtime.enqueue("blogbot.ingest", { n: 1 }, "stale-terminal");
@@ -304,6 +323,6 @@ test("queue retention removes only terminal rows past the window", async () => {
   assert.ok(await runtime.getJob("blogbot.ingest", recent));
   assert.equal((await runtime.getJob("blogbot.ingest", pending))?.state, "created");
 
-  await runtime.stop();
-  await repository.close();
+  await stopRuntime();
+  await closeRepository();
 });

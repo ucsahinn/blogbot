@@ -41,6 +41,10 @@ test("a logical backup round-trips every archived row", async () => {
     createdAt: "2026-08-19T10:00:00.000Z"
   });
 
+  const envelope = JSON.parse(archive.toString("utf8")) as { version: number; kdf: { N: number } };
+  assert.equal(envelope.version, 2);
+  assert.equal(envelope.kdf.N, 131_072);
+
   const plan = await planLogicalRestore({ archive, recoveryKey });
 
   assert.equal(plan.createdAt, "2026-08-19T10:00:00.000Z");
@@ -49,6 +53,16 @@ test("a logical backup round-trips every archived row", async () => {
     plan.tables.map((table) => [table.name, table.rowCount]),
     [["blogbot_automation", 1], ["blogbot_revisions", 2]]
   );
+  assert.deepEqual(logicalRestoreTables(plan), tables());
+});
+
+test("logical restore remains compatible with a legacy v1 archive", async () => {
+  const current = await createLogicalBackup({
+    tables: tables(),
+    recoveryKey,
+    createdAt: "2026-08-19T10:00:00.000Z"
+  });
+  const plan = await planLogicalRestore({ archive: await rewriteLogicalArchiveAsV1(current), recoveryKey });
   assert.deepEqual(logicalRestoreTables(plan), tables());
 });
 
@@ -148,6 +162,44 @@ function decryptJson(
     decipher.update(Buffer.from(envelope.ciphertext, "base64")),
     decipher.final()
   ]).toString("utf8")) as unknown;
+}
+
+async function rewriteLogicalArchiveAsV1(archive: Buffer): Promise<Buffer> {
+  const envelope = JSON.parse(archive.toString("utf8")) as {
+    format: string;
+    version: number;
+    kdf: { name: string; salt: string; N: number; r: number; p: number; maxmem: number };
+    cipher: { name: string; iv: string; tag: string };
+    ciphertext: string;
+  };
+  const currentKey = await scryptKey(Buffer.from(envelope.kdf.salt, "base64"), envelope.kdf);
+  const payload = decryptJson(envelope, currentKey) as { manifest: { version: number } };
+  currentKey.fill(0);
+  payload.manifest.version = 1;
+  const legacyKdf = { N: 16_384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+  const salt = randomBytes(16);
+  const key = await scryptKey(salt, legacyKdf);
+  try {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    const ciphertext = Buffer.concat([
+      cipher.update(Buffer.from(JSON.stringify(payload), "utf8")),
+      cipher.final()
+    ]);
+    return Buffer.from(JSON.stringify({
+      ...envelope,
+      version: 1,
+      kdf: {
+        name: "scrypt",
+        salt: salt.toString("base64"),
+        ...legacyKdf
+      },
+      cipher: { name: "aes-256-gcm", iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64") },
+      ciphertext: ciphertext.toString("base64")
+    }), "utf8");
+  } finally {
+    key.fill(0);
+  }
 }
 
 test("create refuses an archive this build could never restore", async () => {
@@ -301,4 +353,24 @@ test("non-finite numbers anywhere in a row are rejected instead of becoming null
       );
     });
   }
+});
+
+test("logical backup rejects non-JSON objects before returning an unrestorable archive", async () => {
+  for (const value of [new Date("2026-09-05T00:00:00Z"), Buffer.from("fixture")]) {
+    await assert.rejects(createLogicalBackup({
+      tables: [{ name: "records", columns: ["value"], rows: [[value]] }], recoveryKey
+    }), (error: unknown) => error instanceof BackupError && error.code === "BACKUP_SOURCE_INVALID");
+  }
+});
+
+test("logical backup hashes the same nested JSON snapshot that restore reads", async () => {
+  const value = { array: Array(2), content: { title: "retained" } };
+  Object.defineProperty(value.content, "toJSON", { value: () => "substituted" });
+  const archive = await createLogicalBackup({
+    tables: [{ name: "records", columns: ["value"], rows: [[value]] }], recoveryKey
+  });
+  const plan = await planLogicalRestore({ archive, recoveryKey });
+  assert.deepEqual(logicalRestoreTables(plan)[0]?.rows, [[{
+    array: [null, null], content: { title: "retained" }
+  }]]);
 });

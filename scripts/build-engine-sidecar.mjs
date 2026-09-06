@@ -37,13 +37,8 @@ const fetcherExecutable = join(
   "blogbot-fetcher-x86_64-pc-windows-msvc.exe"
 );
 const secureRestoreExecutable = join(
-  root,
-  "apps",
-  "desktop",
-  "src-tauri",
-  "resources",
-  "secure-restore",
-  "blogbot-secure-restore.exe"
+  binaryDirectory,
+  "blogbot-secure-restore-x86_64-pc-windows-msvc.exe"
 );
 const bundle = join(work, "sea-entry.cjs");
 const blob = join(work, "sea-prep.blob");
@@ -156,7 +151,12 @@ await run("cargo", [
   "--release",
   "--example",
   "blogbot-secure-restore"
-]);
+], {
+  env: {
+    ...process.env,
+    TAURI_CONFIG: JSON.stringify({ bundle: { externalBin: [] } })
+  }
+});
 await copyFile(
   join(root, "apps", "desktop", "src-tauri", "target", "release", "examples", "blogbot-secure-restore.exe"),
   secureRestoreExecutable
@@ -164,12 +164,13 @@ await copyFile(
 
 process.stdout.write(`${executable}\n`);
 
-function run(command, args) {
+function run(command, args, { env = process.env } = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd: root,
       stdio: "inherit",
-      windowsHide: true
+      windowsHide: true,
+      env
     });
     child.once("error", reject);
     child.once("exit", (code) => {

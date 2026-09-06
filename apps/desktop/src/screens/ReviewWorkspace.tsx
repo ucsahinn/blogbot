@@ -10,6 +10,11 @@ import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
 import { contentCategoryLabel, sectionLabel } from "../app-model.ts";
 import { buildPublicationFiles } from "../publication-files.ts";
+import {
+  loadRevisionMediaPreviews,
+  selectMediaPreviewAssets,
+  type MediaPreviewAsset
+} from "./review-media-previews.ts";
 import type {
   BootstrapSnapshot,
   ConnectorStateSnapshot,
@@ -34,56 +39,6 @@ interface ReviewWorkspaceProps {
 type ReviewTab = "content" | "claims" | "media" | "gates" | "diff";
 type Locale = "tr" | "en";
 type EditorialApprovalRequirement = "EDITORIAL_REVIEW" | "EXPERT_REVIEW" | "ETHICS_REVIEW";
-export const MAX_MEDIA_PREVIEW_LOADS = 4;
-const MEDIA_PREVIEW_CONCURRENCY = 2;
-export type MediaPreviewAsset = Pick<ReviewRevision["media"][number], "role" | "sha256" | "byteSize" | "contentBase64">;
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure selection is tested with deterministic bridge fakes.
-export function selectMediaPreviewAssets(media: MediaPreviewAsset[]): MediaPreviewAsset[] {
-  return [...media]
-    .sort((left, right) => Number(right.role === "hero") - Number(left.role === "hero"))
-    .filter((asset, index, items) => items.findIndex((candidate) => candidate.sha256 === asset.sha256) === index)
-    .slice(0, MAX_MEDIA_PREVIEW_LOADS);
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure preview reader is tested with deterministic bridge fakes.
-export async function loadRevisionMediaPreviews({
-  revisionId,
-  media,
-  readMedia
-}: {
-  revisionId: string;
-  media: MediaPreviewAsset[];
-  readMedia: (input: { revisionId: string; sha256: string }) => Promise<{ mimeType: string; contentBase64: string }>;
-}): Promise<{ urls: Record<string, string>; errors: Record<string, true>; selectedSha256: string[] }> {
-  const selected = selectMediaPreviewAssets(media);
-  const urls: Record<string, string> = {};
-  const errors: Record<string, true> = {};
-  let nextIndex = 0;
-  const worker = async (): Promise<void> => {
-    while (nextIndex < selected.length) {
-      const asset = selected[nextIndex++];
-      if (!asset) continue;
-      try {
-        if (asset.contentBase64) {
-          urls[asset.sha256] = `data:image/webp;base64,${asset.contentBase64}`;
-          continue;
-        }
-        const byteSize = asset.byteSize;
-        if (typeof byteSize !== "number" || !Number.isSafeInteger(byteSize) || byteSize < 1 || !/^[a-f0-9]{64}$/iu.test(asset.sha256)) {
-          errors[asset.sha256] = true;
-          continue;
-        }
-        const loaded = await readMedia({ revisionId, sha256: asset.sha256 });
-        urls[asset.sha256] = `data:${loaded.mimeType};base64,${loaded.contentBase64}`;
-      } catch {
-        errors[asset.sha256] = true;
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(MEDIA_PREVIEW_CONCURRENCY, selected.length) }, worker));
-  return { urls, errors, selectedSha256: selected.map((asset) => asset.sha256) };
-}
 
 type ReviewRevisionV3 = ReviewRevision & {
   packageVersion: 3;
@@ -840,7 +795,11 @@ export function ReviewWorkspace({
       <aside className="review-queue" aria-label="İnceleme kuyruğu">
         <header>
           <p className="section-kicker">İNCELEME</p>
-          <h1>Yayın kuyruğu</h1>
+          {embedded ? (
+            <h2 className="review-queue-title">Yayın kuyruğu</h2>
+          ) : (
+            <h1 className="review-queue-title">Yayın kuyruğu</h1>
+          )}
           <span>{pendingRevisionCount} açık revizyon</span>
         </header>
         <label className="search-field review-search">
@@ -1233,7 +1192,11 @@ export function ReviewWorkspace({
                         <article className="article-preview" key={contentLocale} lang={contentLocale}>
                           <div className="locale-heading"><strong>{contentLocale.toUpperCase()}</strong><span>{contentLocale === "tr" ? "Özgün editoryal sürüm" : "Doğal yerelleştirme"}</span></div>
                           <div className="article-meta"><span>{sectionLabel(revision.section)}</span><span>{readingTimeMinutes(content.bodyMarkdown)} dk okuma</span><span>{revision.author}</span></div>
-                          <h1>{content.title}</h1>
+                          {embedded ? (
+                            <h3 className="article-title">{content.title}</h3>
+                          ) : (
+                            <h2 className="article-title">{content.title}</h2>
+                          )}
                           <p className="article-description">{content.description}</p>
                           {heroMedia && heroDataUrl ? (
                             <figure className="article-hero-media">

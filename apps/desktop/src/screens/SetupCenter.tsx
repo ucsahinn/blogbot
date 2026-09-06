@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { canEnableAutomationMode, connectorDraftFromState, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
+import { canEnableAutomationMode, connectorDraftFromState, generateRecoveryKey, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
 import { describePrerequisiteState, summarizeGuidedStates, type SetupStatusTone } from "../setup-status.ts";
 import { buildSetupRequirements } from "../types.ts";
-import type { AutomaticBackupSnapshot, BlogbotBridge } from "../bridge.ts";
+import type { AutomaticBackupSnapshot, BlogbotBridge, GitHubDeviceFlowStatus } from "../bridge.ts";
 import type {
   OnboardingSettings,
   ConnectorStateSnapshot,
@@ -82,7 +82,7 @@ function explainFailure(reason: unknown, fallback: string, recovery: string): st
   const detail = raw.includes("CODEX_NOT_INSTALLED")
     ? "Codex çalışma zamanı bu bilgisayarda bulunamadı. OPE bunu otomatik kurmaz; önce Codex'i kurup device login yapın."
     : raw.includes("GITHUB_CLIENT_ID_REQUIRED")
-      ? "GitHub OAuth istemci kimliği yapılandırılmadı. Kurulum Merkezi'ndeki GitHub alanına public client ID değerini girin; token veya private key girmeyin."
+      ? "GitHub App istemci kimliği yapılandırılmadı. Kurulum Merkezi'ndeki GitHub alanına public client ID değerini girin; token, client secret veya private key girmeyin."
       : raw.includes("ENGINE") || raw.includes("engine")
     ? "OPE'nin yerel çalışma bileşeni hazır değil."
     : raw.includes("SOURCE")
@@ -123,6 +123,7 @@ export function SetupCenter({
   const [backupTargetParent, setBackupTargetParent] = useState("");
   const [backupTargetName, setBackupTargetName] = useState("OPE-Geri-Yukleme");
   const [backupRecoveryKey, setBackupRecoveryKey] = useState("");
+  const [backupRecoveryKeyVisible, setBackupRecoveryKeyVisible] = useState(false);
   const [backupMessage, setBackupMessage] = useState("");
   const [automaticSnapshots, setAutomaticSnapshots] = useState<AutomaticBackupSnapshot[]>([]);
   const [selectedAutomaticBackupName, setSelectedAutomaticBackupName] = useState("");
@@ -134,7 +135,7 @@ export function SetupCenter({
   const [localDevStatusError, setLocalDevStatusError] = useState(false);
   const [localDevTrusted, setLocalDevTrusted] = useState(false);
   const localDevStatusRequestId = useRef(0);
-  const [githubBrokerStatus, setGitHubBrokerStatus] = useState<"unknown" | "unconfigured" | "logged-out" | "pending" | "authorized" | "expired" | "access-denied" | "degraded">("unknown");
+  const [githubBrokerStatus, setGitHubBrokerStatus] = useState<"unknown" | GitHubDeviceFlowStatus>("unknown");
   const [githubDeviceFlow, setGitHubDeviceFlow] = useState<{ userCode: string } | null>(null);
   const [selectedTask, setSelectedTask] = useState<SetupTaskId>(() =>
     startInGuide ? "first-start" : "overview"
@@ -694,7 +695,7 @@ export function SetupCenter({
     } catch (reason) {
       setConnectorMessages((current) => ({
         ...current,
-        github: explainFailure(reason, "GitHub cihaz giriş akışı başlatılamadı.", "public OAuth istemci kimliğini kontrol edip yeniden deneyin.")
+        github: explainFailure(reason, "GitHub cihaz giriş akışı başlatılamadı.", "public GitHub App istemci kimliğini ve tek depo kurulumunu kontrol edip yeniden deneyin.")
       }));
     } finally {
       setBusy(false);
@@ -737,6 +738,16 @@ export function SetupCenter({
       setBusy(false);
     }
   };
+  const forgetBackupRecoveryKey = () => {
+    setBackupRecoveryKey("");
+    setBackupRecoveryKeyVisible(false);
+  };
+  const generateBackupRecoveryKey = () => {
+    setBackupRecoveryKey(generateRecoveryKey());
+    setBackupRecoveryKeyVisible(true);
+    setBackupMessage("192 bit rastgele kurtarma anahtarı üretildi. Yedeği oluşturmadan önce güvenli bir parola yöneticisine kopyalayın; OPE bu anahtarı kaydetmez.");
+  };
+
   const verifyBackup = async () => {
     setBusy(true); setBackupMessage("Yedek doğrulanıyor; anahtar yalnızca bu işlem için bellekte tutuluyor…");
     try {
@@ -744,7 +755,7 @@ export function SetupCenter({
       setBackupMessage(result.verified ? `Yedek doğrulandı: ${result.entries?.length ?? 0} dosya.` : "Yedek doğrulanamadı.");
     } catch (reason) {
       setBackupMessage(explainFailure(reason, "Yedek doğrulanamadı.", "dosya yolunu ve recovery key'i kontrol edip yeniden deneyin."));
-    } finally { setBackupRecoveryKey(""); setBusy(false); }
+    } finally { forgetBackupRecoveryKey(); setBusy(false); }
   };
   const createBackup = async () => {
     setBusy(true); setBackupMessage("Şifreli yedek oluşturuluyor; anahtar yalnızca bu işlem için bellekte tutuluyor…");
@@ -758,7 +769,7 @@ export function SetupCenter({
       setBackupMessage(`Yedek oluşturuldu: ${result.entries} dosya, ${result.bytes} bayt.`);
     } catch (reason) {
       setBackupMessage(explainFailure(reason, "Yedek oluşturulamadı.", "kaynak klasörü, dosya listesini ve yeni çıktı yolunu kontrol edip yeniden deneyin."));
-    } finally { setBackupRecoveryKey(""); setBusy(false); }
+    } finally { forgetBackupRecoveryKey(); setBusy(false); }
   };
   const previewBackup = async () => {
     setBusy(true); setBackupMessage("Geri yükleme önizlemesi hazırlanıyor; hiçbir dosya yazılmayacak…");
@@ -767,7 +778,7 @@ export function SetupCenter({
       setBackupMessage(`Geri yükleme önizlemesi hazır: ${result.entries.length} dosya; hiçbir dosya yazılmadı.`);
     } catch (reason) {
       setBackupMessage(explainFailure(reason, "Geri yükleme önizlemesi alınamadı.", "arşiv ve boş hedef klasörü kontrol edip yeniden deneyin."));
-    } finally { setBackupRecoveryKey(""); setBusy(false); }
+    } finally { forgetBackupRecoveryKey(); setBusy(false); }
   };
   const restoreBackup = async () => {
     setBusy(true); setBackupMessage("Geri yükleme çalışıyor; yalnızca onaylanan boş klasöre yazılıyor…");
@@ -776,7 +787,7 @@ export function SetupCenter({
       setBackupMessage(`Geri yükleme tamamlandı: ${result.entries} dosya yeni klasöre çıkarıldı. Aktif çalışma alanı değiştirilmedi.`);
     } catch (reason) {
       setBackupMessage(explainFailure(reason, "Geri yükleme yapılamadı.", "hedef klasörün boş ve yazılabilir olduğunu doğrulayın."));
-    } finally { setBackupRecoveryKey(""); setBusy(false); }
+    } finally { forgetBackupRecoveryKey(); setBusy(false); }
   };
   const refreshAutomaticBackups = async () => {
     setBusy(true); setBackupMessage("Yerel kurtarma snapshot'ları okunuyor…");
@@ -836,8 +847,8 @@ export function SetupCenter({
     {
       id: "github",
       label: "Sitenin GitHub deposu",
-      description: "Onaylanan yazıların gönderileceği site deposu. GitHub hesabı ayrı ve güvenli bir pencerede bağlanır.",
-      fields: [["owner", "GitHub kullanıcı adı / kuruluş"], ["repository", "Site deposu adı"], ["clientId", "GitHub OAuth istemci kimliği (gerekli)"]]
+      description: "Onaylanan yazıların gönderileceği tek site deposu. GitHub App yalnız bu depoya kurulmalı; OPE tam depo ve izin eşleşmesini doğrular.",
+      fields: [["owner", "GitHub kullanıcı adı / kuruluş"], ["repository", "Site deposu adı"], ["clientId", "GitHub App istemci kimliği (gerekli)"]]
     },
     {
       id: "site",
@@ -863,18 +874,20 @@ export function SetupCenter({
     }
   ];
   const githubBrokerHelp = githubBrokerStatus === "unconfigured"
-    ? "GitHub App broker bu uygulama paketinde yapılandırılmadı; gerçek giriş ve yayın kapalı tutuluyor."
+    ? "GitHub App istemci kimliği ve hedef depo kaydedilmedi; gerçek giriş ve yayın kapalı tutuluyor."
     : githubBrokerStatus === "unknown"
-      ? "GitHub broker durumu doğrulanıyor; doğrulama tamamlanana kadar giriş kapalı tutulur."
+      ? "GitHub App durumu doğrulanıyor; doğrulama tamamlanana kadar giriş kapalı tutulur."
       : githubBrokerStatus === "degraded"
         ? "GitHub yetkilendirme durumu okunamadı; gerçek giriş ve yayın kapalı tutuluyor."
         : githubBrokerStatus === "authorized"
-          ? "Bu bilgisayarda GitHub yetkilendirmesi zaten tamamlanmış görünüyor; yayın yine ayrı insan onayı ve connector denetimi ister."
+          ? "Bu bilgisayardaki GitHub App yetkilendirmesi hedef depoya ve gerekli izinlere bağlıdır; yayın yine ayrı insan onayı ve connector denetimi ister."
+          : githubBrokerStatus === "reauthorization-required"
+            ? "GitHub App erişimi yenilenmeli. Yeni cihaz girişini tamamlamadan yayın kapalı kalır."
           : githubBrokerStatus === "pending"
             ? "GitHub giriş onayı bekliyor; tarayıcıdaki device login adımını tamamlayıp durumu yenileyin."
             : githubBrokerStatus === "logged-out"
               ? "GitHub cihaz girişini yalnız siz düğmeye bastığınızda başlatır. Kod hazır olduğunda sabit GitHub doğrulama adresi gösterilir; durum otomatik sorgulanmaz."
-              : "Giriş için yalnız public OAuth istemci kimliği gerekir. Token ve private key OPE ekranına yazılmaz; depo erişimi doğrulanmadan yayın kapalı kalır.";
+              : "Giriş için yalnız public GitHub App istemci kimliği gerekir. Token, client secret ve private key OPE ekranına yazılmaz; tek depo ve gerekli izinler doğrulanmadan yayın kapalı kalır.";
 
   return (
     <section className="page setup-page" aria-busy={busy}>
@@ -1356,7 +1369,7 @@ export function SetupCenter({
                 {connector.id === "github" ? (
                   <>
                     <button className="button button-secondary" type="button" disabled={busy} onClick={() => void refreshGitHubBrokerStatus()}>GitHub bağlantı durumunu kontrol et</button>
-                    <button className="button button-primary" type="button" disabled={busy} onClick={() => void startGitHubDeviceFlow()}>GitHub cihaz girişini başlat</button>
+                    {githubBrokerStatus !== "unconfigured" ? <button className="button button-primary" type="button" disabled={busy} onClick={() => void startGitHubDeviceFlow()}>GitHub cihaz girişini başlat</button> : null}
                     <button className="button button-secondary" type="button" disabled={busy || githubBrokerStatus !== "pending"} aria-describedby="github-broker-help" onClick={() => void pollGitHubDeviceFlow()}>GitHub onayını kontrol et</button>
                     {githubDeviceFlow ? (
                       <div role="status" aria-live="polite">
@@ -1420,8 +1433,12 @@ export function SetupCenter({
           </label>
           <label className="field">
             <span>Yeni yedekleme şifresi <small>(en az 16 karakter; kaydedilmez)</small></span>
-            <input id="backup-create-recovery-key" name="backup-create-recovery-key" type="password" value={backupRecoveryKey} onChange={(event) => setBackupRecoveryKey(event.target.value)} autoComplete="new-password" minLength={16} aria-describedby="backup-create-help" required />
+            <input id="backup-create-recovery-key" name="backup-create-recovery-key" type={backupRecoveryKeyVisible ? "text" : "password"} value={backupRecoveryKey} onChange={(event) => setBackupRecoveryKey(event.target.value)} autoComplete="new-password" minLength={16} spellCheck={false} aria-describedby="backup-create-help" required />
           </label>
+          <div className="button-row">
+            <button id="backup-generate-recovery-key" className="button button-secondary" type="button" disabled={busy} onClick={generateBackupRecoveryKey}>192 bit güçlü anahtar üret</button>
+            <label className="checkbox-field"><input type="checkbox" checked={backupRecoveryKeyVisible} onChange={(event) => setBackupRecoveryKeyVisible(event.target.checked)} /> Anahtarı göster</label>
+          </div>
           <button className="button button-secondary" type="button" disabled={busy || !backupSourceDirectory || !backupOutputPath || !backupRelativePaths.trim() || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => void createBackup()}>Şifreli yedek oluştur</button>
           <small id="backup-create-help">Her satıra bir dosya yolu yazın. Dosya listesi kaynak klasörüne göre göreli olmalıdır; mevcut çıktı dosyasının üzerine yazılmaz.</small>
         </fieldset>

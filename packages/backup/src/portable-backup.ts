@@ -22,14 +22,18 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 
+import {
+  backupScryptPolicy,
+  CURRENT_BACKUP_ARCHIVE_VERSION,
+  LEGACY_BACKUP_ARCHIVE_VERSION,
+  type BackupArchiveVersion,
+  type BackupScryptParameters
+} from "./crypto-policy.ts";
 import { BackupError } from "./errors.ts";
 
 const ARCHIVE_FORMAT = "blogbot-portable-backup";
-const ARCHIVE_VERSION = 1;
-const SCRYPT_N = 16_384;
-const SCRYPT_R = 8;
-const SCRYPT_P = 1;
-const SCRYPT_MAXMEM = 64 * 1024 * 1024;
+const ARCHIVE_VERSION = CURRENT_BACKUP_ARCHIVE_VERSION;
+const RESTORE_PLAN_VERSION = 1;
 const MINIMUM_RECOVERY_KEY_LENGTH = 16;
 // Restore is intentionally bounded below the protocol's raw archive ceiling.
 // AES-GCM decryption and the JSON/base64 envelope transiently co-exist, so a
@@ -41,16 +45,12 @@ const MAX_RESTORE_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_RESTORE_DECODED_BYTES = 128 * 1024 * 1024;
 const restorePayload = Symbol("restorePayload");
 
-interface PortableArchiveEnvelopeV1 {
+interface PortableArchiveEnvelope {
   format: typeof ARCHIVE_FORMAT;
-  version: typeof ARCHIVE_VERSION;
-  kdf: {
+  version: BackupArchiveVersion;
+  kdf: BackupScryptParameters & {
     name: "scrypt";
     salt: string;
-    N: typeof SCRYPT_N;
-    r: typeof SCRYPT_R;
-    p: typeof SCRYPT_P;
-    maxmem: typeof SCRYPT_MAXMEM;
   };
   cipher: {
     name: "aes-256-gcm";
@@ -60,10 +60,10 @@ interface PortableArchiveEnvelopeV1 {
   ciphertext: string;
 }
 
-interface PortableBackupPayloadV1 {
+interface PortableBackupPayload {
   manifest: {
     format: typeof ARCHIVE_FORMAT;
-    version: typeof ARCHIVE_VERSION;
+    version: BackupArchiveVersion;
     createdAt: string;
     files: PortableBackupFileManifest[];
   };
@@ -142,7 +142,7 @@ export async function createPortableBackup(
   }
 
   const manifestFiles: PortableBackupFileManifest[] = [];
-  const payloadFiles: PortableBackupPayloadV1["files"] = [];
+  const payloadFiles: PortableBackupPayload["files"] = [];
   let decodedBytes = 0;
   for (const relativePath of paths) {
     const data = readBackupSourceFile(sourceDirectory, relativePath);
@@ -170,7 +170,7 @@ export async function createPortableBackup(
     });
   }
 
-  const payload: PortableBackupPayloadV1 = {
+  const payload: PortableBackupPayload = {
     manifest: {
       format: ARCHIVE_FORMAT,
       version: ARCHIVE_VERSION,
@@ -191,7 +191,7 @@ export async function planPortableRestore(
   }
   const envelope = parseEnvelope(input.archive);
   const payload = await decryptPayload(envelope, input.recoveryKey);
-  const verified = verifyPayload(payload);
+  const verified = verifyPayload(payload, envelope.version);
   const targetDirectory = resolve(input.targetDirectory);
   const rootExists = existsSync(targetDirectory);
   const entries = verified.entries.map((entry) =>
@@ -210,7 +210,7 @@ export async function planPortableRestore(
 
   return Object.freeze({
     kind: "blogbot-portable-restore-plan" as const,
-    version: ARCHIVE_VERSION,
+    version: RESTORE_PLAN_VERSION,
     archiveSha256: sha256(input.archive),
     createdAt: verified.createdAt,
     targetDirectory,
@@ -272,28 +272,29 @@ export async function applyPortableRestorePlan(
 }
 
 async function encryptPayload(
-  payload: PortableBackupPayloadV1,
+  payload: PortableBackupPayload,
   recoveryKey: string
 ): Promise<Buffer> {
+  const kdf = backupScryptPolicy(ARCHIVE_VERSION);
+  if (!kdf) {
+    throw new BackupError("BACKUP_ARCHIVE_INVALID", "Backup cryptographic policy is unavailable.");
+  }
   const salt = randomBytes(16);
   const iv = randomBytes(12);
-  const key = await deriveKey(recoveryKey, salt);
+  const key = await deriveKey(recoveryKey, salt, kdf, true);
   try {
     const cipher = createCipheriv("aes-256-gcm", key, iv);
     const ciphertext = Buffer.concat([
       cipher.update(Buffer.from(JSON.stringify(payload), "utf8")),
       cipher.final()
     ]);
-    const envelope: PortableArchiveEnvelopeV1 = {
+    const envelope: PortableArchiveEnvelope = {
       format: ARCHIVE_FORMAT,
       version: ARCHIVE_VERSION,
       kdf: {
         name: "scrypt",
         salt: salt.toString("base64"),
-        N: SCRYPT_N,
-        r: SCRYPT_R,
-        p: SCRYPT_P,
-        maxmem: SCRYPT_MAXMEM
+        ...kdf
       },
       cipher: {
         name: "aes-256-gcm",
@@ -309,14 +310,19 @@ async function encryptPayload(
 }
 
 async function decryptPayload(
-  envelope: PortableArchiveEnvelopeV1,
+  envelope: PortableArchiveEnvelope,
   recoveryKey: string
 ): Promise<unknown> {
   const salt = decodeBase64(envelope.kdf.salt);
   const iv = decodeBase64(envelope.cipher.iv);
   const tag = decodeBase64(envelope.cipher.tag);
   const ciphertext = decodeBase64(envelope.ciphertext);
-  const key = await deriveKey(recoveryKey, salt);
+  const key = await deriveKey(
+    recoveryKey,
+    salt,
+    envelope.kdf,
+    envelope.version !== LEGACY_BACKUP_ARCHIVE_VERSION
+  );
   try {
     const decipher = createDecipheriv("aes-256-gcm", key, iv);
     decipher.setAuthTag(tag);
@@ -349,7 +355,7 @@ async function decryptPayload(
   }
 }
 
-function parseEnvelope(archive: Buffer): PortableArchiveEnvelopeV1 {
+function parseEnvelope(archive: Buffer): PortableArchiveEnvelope {
   let value: unknown;
   try {
     value = JSON.parse(archive.toString("utf8")) as unknown;
@@ -360,16 +366,17 @@ function parseEnvelope(archive: Buffer): PortableArchiveEnvelopeV1 {
       { cause: error }
     );
   }
+  const policy = isRecord(value) ? backupScryptPolicy(value.version) : undefined;
   if (
     !isRecord(value) ||
     value.format !== ARCHIVE_FORMAT ||
-    value.version !== ARCHIVE_VERSION ||
+    !policy ||
     !isRecord(value.kdf) ||
     value.kdf.name !== "scrypt" ||
-    value.kdf.N !== SCRYPT_N ||
-    value.kdf.r !== SCRYPT_R ||
-    value.kdf.p !== SCRYPT_P ||
-    value.kdf.maxmem !== SCRYPT_MAXMEM ||
+    value.kdf.N !== policy.N ||
+    value.kdf.r !== policy.r ||
+    value.kdf.p !== policy.p ||
+    value.kdf.maxmem !== policy.maxmem ||
     typeof value.kdf.salt !== "string" ||
     !isRecord(value.cipher) ||
     value.cipher.name !== "aes-256-gcm" ||
@@ -382,7 +389,7 @@ function parseEnvelope(archive: Buffer): PortableArchiveEnvelopeV1 {
       "Backup archive format or cryptographic parameters are unsupported."
     );
   }
-  const envelope = value as unknown as PortableArchiveEnvelopeV1;
+  const envelope = value as unknown as PortableArchiveEnvelope;
   if (
     decodeBase64(envelope.kdf.salt).byteLength !== 16 ||
     decodeBase64(envelope.cipher.iv).byteLength !== 12 ||
@@ -396,7 +403,10 @@ function parseEnvelope(archive: Buffer): PortableArchiveEnvelopeV1 {
   return envelope;
 }
 
-function verifyPayload(value: unknown): {
+function verifyPayload(
+  value: unknown,
+  archiveVersion: BackupArchiveVersion
+): {
   createdAt: string;
   entries: RestorePayloadEntry[];
 } {
@@ -404,7 +414,7 @@ function verifyPayload(value: unknown): {
     !isRecord(value) ||
     !isRecord(value.manifest) ||
     value.manifest.format !== ARCHIVE_FORMAT ||
-    value.manifest.version !== ARCHIVE_VERSION ||
+    value.manifest.version !== archiveVersion ||
     typeof value.manifest.createdAt !== "string" ||
     !Array.isArray(value.manifest.files) ||
     !Array.isArray(value.files)
@@ -494,7 +504,7 @@ function verifyFile(
 function assertRestorePlan(plan: PortableRestorePlan): void {
   if (
     plan.kind !== "blogbot-portable-restore-plan" ||
-    plan.version !== ARCHIVE_VERSION ||
+    plan.version !== RESTORE_PLAN_VERSION ||
     !Array.isArray(plan.entries) ||
     !Array.isArray(plan[restorePayload]) ||
     plan.entries.length !== plan[restorePayload].length
@@ -622,6 +632,18 @@ function normalizeUniquePaths(paths: readonly string[]): string[] {
   });
 }
 
+const windowsReservedBackupSegment =
+  /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\..*)?$/iu;
+
+function isUnsafeWindowsBackupSegment(value: string): boolean {
+  return value === "." ||
+    value === ".." ||
+    /[<>:"|?*]/u.test(value) ||
+    [...value].some((character) => character.charCodeAt(0) <= 0x1f) ||
+    /[ .]$/u.test(value) ||
+    windowsReservedBackupSegment.test(value);
+}
+
 function normalizeBackupPath(value: string): string {
   if (
     value.length === 0 ||
@@ -637,7 +659,8 @@ function normalizeBackupPath(value: string): string {
     normalized === "." ||
     normalized === ".." ||
     normalized.startsWith("../") ||
-    normalized.startsWith("/")
+    normalized.startsWith("/") ||
+    normalized.split("/").some(isUnsafeWindowsBackupSegment)
   ) {
     throw new BackupError("BACKUP_PATH_UNSAFE", `Unsafe backup path: ${value}`);
   }
@@ -682,18 +705,18 @@ function assertIsoTimestamp(value: string): void {
   }
 }
 
-function deriveKey(recoveryKey: string, salt: Buffer): Promise<Buffer> {
+function deriveKey(
+  recoveryKey: string,
+  salt: Buffer,
+  parameters: Readonly<BackupScryptParameters>,
+  normalize: boolean
+): Promise<Buffer> {
   return new Promise((resolveKey, rejectKey) => {
     scryptCallback(
-      recoveryKey,
+      normalize ? recoveryKey.normalize("NFKC") : recoveryKey,
       salt,
       32,
-      {
-        N: SCRYPT_N,
-        r: SCRYPT_R,
-        p: SCRYPT_P,
-        maxmem: SCRYPT_MAXMEM
-      },
+      parameters,
       (error, derivedKey) => {
         if (error) {
           rejectKey(error);

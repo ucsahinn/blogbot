@@ -36,6 +36,7 @@ import { createPortableBackup } from "../../packages/backup/src/portable-backup.
 import { InMemoryBackendStore } from "../../packages/database/src/in-memory-backend-store.ts";
 import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
 import { PGliteSourceRepository } from "../../packages/database/src/source-repository.ts";
+import { createOwnedTempRoot } from "../helpers/owned-temp-root.ts";
 
 /**
  * Minimal stand-in for the snapshot read port. An automatic snapshot archives
@@ -558,8 +559,8 @@ test("stdio framing rejects an oversized line without retaining or parsing it", 
   assert.deepEqual(lines, [null, '{"version":1}']);
 });
 
-test("engine backup verification decrypts in memory and returns a preview without restoring", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-backup-"));
+test("engine backup verification decrypts in memory and returns a preview without restoring", async (t) => {
+  const { path: root } = await createOwnedTempRoot(t, "blogbot-engine-backup-");
   const source = join(root, "source");
   const archive = join(root, "backup.blogbot");
   await mkdir(source);
@@ -593,8 +594,8 @@ test("engine backup verification decrypts in memory and returns a preview withou
   }]);
 });
 
-test("engine backup verification rejects a directory masquerading as an archive", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-backup-invalid-"));
+test("engine backup verification rejects a directory masquerading as an archive", async (t) => {
+  const { path: root } = await createOwnedTempRoot(t, "blogbot-engine-backup-invalid-");
   const archive = join(root, "not-an-archive");
   await mkdir(archive);
 
@@ -612,8 +613,8 @@ test("engine backup verification rejects a directory masquerading as an archive"
   assert.equal(result.code, "BACKUP_INVALID");
 });
 
-test("engine backup restore fails closed when the native restore writer is unavailable", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-engine-backup-apply-"));
+test("engine backup restore fails closed when the native restore writer is unavailable", async (t) => {
+  const { path: root } = await createOwnedTempRoot(t, "blogbot-engine-backup-apply-");
   const source = join(root, "source");
   const archive = join(root, "backup.blogbot");
   const target = join(root, "restore-target");

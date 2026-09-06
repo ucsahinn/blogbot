@@ -46,8 +46,12 @@
       "icons/256x256.png",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/blogbot-engine", "binaries/blogbot-fetcher"],
-    "resources": ["resources/pglite/*", "resources/engine-node_modules/**/*", "resources/secure-restore/*"],
+    "externalBin": [
+      "binaries/blogbot-engine",
+      "binaries/blogbot-fetcher",
+      "binaries/blogbot-secure-restore"
+    ],
+    "resources": ["resources/pglite/*", "resources/engine-node_modules/**/*"],
     "targets": ["msi", "nsis"],
     "category": "Productivity",
     "shortDescription": "Seçtiğiniz site için yerel editoryal otomasyon",

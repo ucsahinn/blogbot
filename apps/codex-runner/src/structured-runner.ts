@@ -141,6 +141,24 @@ const waitingReasons = {
   "usage_limit.reached": "USAGE_LIMIT"
 } as const;
 
+type CodexWaitingReason = (typeof waitingReasons)[keyof typeof waitingReasons];
+
+function waitingReasonFromErrorMessage(
+  value: unknown
+): CodexWaitingReason | undefined {
+  const message = typeof value === "string" ? value : "";
+  if (/\b(?:auth|authentication|authori[sz]ation|login|credentials?|unauthori[sz]ed|401)\b/iu.test(message)) {
+    return "AUTH_REQUIRED";
+  }
+  if (/rate.?limit|too many requests|\b429\b/iu.test(message)) {
+    return "RATE_LIMIT";
+  }
+  if (/usage.?limit|quota|credit/iu.test(message)) {
+    return "USAGE_LIMIT";
+  }
+  return undefined;
+}
+
 const deniedEventPattern =
   /(?:^|[._-])(command(?:_execution)?|tool|file(?:_change)?|mcp|web|browser|computer|shell|patch)(?:$|[._-])/i;
 
@@ -203,6 +221,19 @@ export async function runStructuredCodexTask<T>(
       const threadId = safeConversationSessionId(event.thread_id ?? event.threadId);
       if (threadId) conversationSessionId = threadId;
     }
+    const errorMessage = event.type === "error"
+      ? event.message
+      : event.item?.type === "error"
+        ? event.item.text
+        : undefined;
+    const errorWaitingReason = waitingReasonFromErrorMessage(errorMessage);
+    if (errorWaitingReason) {
+      return {
+        status: "WAITING_CODEX",
+        reason: errorWaitingReason,
+        ...selection
+      };
+    }
     if (event.type === "error") {
       const detail = typeof event.message === "string" && event.message.trim()
         ? event.message.trim().slice(0, 500)
@@ -215,8 +246,9 @@ export async function runStructuredCodexTask<T>(
         : "Codex çalıştırması tamamlanamadı";
       throw new CodexRunnerError("PROCESS_FAILED", detail);
     }
-    const waitingReason =
-      waitingReasons[event.type as keyof typeof waitingReasons];
+    const waitingReason = Object.hasOwn(waitingReasons, event.type)
+      ? waitingReasons[event.type as keyof typeof waitingReasons]
+      : undefined;
     if (waitingReason) {
       return {
         status: "WAITING_CODEX",

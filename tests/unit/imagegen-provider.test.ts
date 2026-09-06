@@ -87,3 +87,49 @@ test("ImageGen treats source titles as data rather than prompt instructions", as
   assert.match(body.prompt ?? "", /&lt;script&gt;/u);
   assert.doesNotMatch(body.prompt ?? "", /<script>/u);
 });
+
+test("ImageGen rejects a response whose declared body exceeds the JSON safety limit", async () => {
+  const generator = createOpenAiImageGenerator({
+    apiKey: "test-key",
+    fetchImpl: async () => new Response("{}", {
+      status: 200,
+      headers: { "content-length": "32000001" }
+    })
+  });
+
+  await assert.rejects(
+    generator.generate({
+      title: "Bounded response",
+      articleType: "news",
+      section: "news",
+      sourceTitles: []
+    }),
+    /IMAGEGEN_RESPONSE_TOO_LARGE/u
+  );
+});
+
+test("ImageGen stops reading a chunked response once the JSON safety limit is exceeded", async () => {
+  const chunk = new Uint8Array(4_000_000).fill(0x20);
+  let deliveredChunks = 0;
+  const generator = createOpenAiImageGenerator({
+    apiKey: "test-key",
+    fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        deliveredChunks += 1;
+        controller.enqueue(chunk);
+        if (deliveredChunks === 9) controller.close();
+      }
+    }), { status: 200 })
+  });
+
+  await assert.rejects(
+    generator.generate({
+      title: "Chunked response",
+      articleType: "news",
+      section: "news",
+      sourceTitles: []
+    }),
+    /IMAGEGEN_RESPONSE_TOO_LARGE/u
+  );
+  assert.equal(deliveredChunks, 9);
+});

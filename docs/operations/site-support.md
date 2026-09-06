@@ -25,5 +25,13 @@ Yeni adaptör üç güvenli işlem uygular:
 2. `dryRun`: şema, route, dosya ve SEO sözleşmesini yazmadan doğrular.
 3. `buildRevisionFiles`: yalnız onaylanmış değişmez revizyonun izinli dosyalarını üretir.
 
+Bir revizyon dosyaya dönüştürülürken Türkçe ve İngilizce rota kökleri aynı
+tanımlı bölüm yeteneğine bağlı olmalı; her dilin `articleType` değeri de o
+yeteneğin ilan ettiği türle tam eşleşmelidir. Hero medya yolu yalnız değişmez
+motor medya özeti (`sha256` + `byteSize`) veya eski uyumluluk baytları gerçekten
+varsa üretilebilir; aksi durumda materyalizasyon fail-closed durur. Yayın ve
+değişiklik zamanları da ortam-bağımlı tarih metinleri değil, `toISOString()` ile
+birebir aynı UTC ISO değerleri olmalıdır.
+
 Adaptör dry-run başarısızsa taslak ve yerel inceleme kullanılabilir; yalnız PR,
 merge ve deploy işlemleri kilitli kalır.

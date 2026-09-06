@@ -22,6 +22,37 @@ const MAX_MANIFEST_JSON_BYTES: usize = 64 * 1024;
 const MAX_GITHUB_RELEASE_JSON_BYTES: usize = 1024 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
 const UPDATE_DOWNLOAD_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const UPDATE_SIGNER_SHA256: Option<&str> = option_env!("OPE_UPDATE_SIGNER_SHA256");
+
+const AUTHENTICODE_VERIFIER_SCRIPT: &str = r#"$ErrorActionPreference = 'Stop'
+$installer = [Environment]::GetEnvironmentVariable('OPE_UPDATE_INSTALLER_PATH', 'Process')
+$expected = [Environment]::GetEnvironmentVariable('OPE_UPDATE_EXPECTED_SIGNER_SHA256', 'Process')
+try {
+  $signature = Get-AuthenticodeSignature -LiteralPath $installer -ErrorAction Stop
+  if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) { exit 21 }
+  if ($null -eq $signature.SignerCertificate) { exit 22 }
+  if ($null -eq $signature.TimeStamperCertificate) { exit 23 }
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try { $actual = [BitConverter]::ToString($sha.ComputeHash($signature.SignerCertificate.RawData)).Replace('-', '').ToLowerInvariant() }
+  finally { $sha.Dispose() }
+  if ($actual -cne $expected) { exit 24 }
+  exit 0
+} catch { exit 25 }"#;
+
+fn parse_update_signer_sha256(raw: Option<&str>) -> Result<String, CommandError> {
+    let fingerprint =
+        raw.ok_or_else(|| CommandError::UpdateUnavailable("UPDATE_SIGNER_NOT_CONFIGURED".into()))?;
+    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CommandError::UpdateUnavailable(
+            "UPDATE_SIGNER_NOT_CONFIGURED".into(),
+        ));
+    }
+    Ok(fingerprint.to_ascii_lowercase())
+}
+
+fn expected_update_signer_sha256() -> Result<String, CommandError> {
+    parse_update_signer_sha256(UPDATE_SIGNER_SHA256)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpdateJsonResource {
@@ -386,6 +417,7 @@ async fn fetch_update() -> Result<UnsignedUpdateCheck, CommandError> {
 }
 
 pub async fn check_unsigned_update() -> Result<UnsignedUpdateCheck, CommandError> {
+    expected_update_signer_sha256()?;
     let result = fetch_update().await?;
     let authorization = match &result {
         UnsignedUpdateCheck::UpdateAvailable { update } => {
@@ -411,16 +443,44 @@ fn configure_hidden_command(command: &mut Command) {
 fn powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
+fn verify_installer_authenticode(
+    installer_path: &Path,
+    expected_signer_sha256: &str,
+) -> Result<(), CommandError> {
+    let mut verifier = Command::new("powershell.exe");
+    configure_hidden_command(&mut verifier);
+    let status = verifier
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            AUTHENTICODE_VERIFIER_SCRIPT,
+        ])
+        .env("OPE_UPDATE_INSTALLER_PATH", installer_path)
+        .env("OPE_UPDATE_EXPECTED_SIGNER_SHA256", expected_signer_sha256)
+        .status()
+        .map_err(|_| {
+            CommandError::UpdateUnavailable("UPDATE_SIGNATURE_CHECK_UNAVAILABLE".into())
+        })?;
+    if !status.success() {
+        return Err(CommandError::UpdateUnavailable(
+            "UPDATE_INSTALLER_SIGNATURE_INVALID".into(),
+        ));
+    }
+    Ok(())
+}
 
 fn deferred_installer_script_visible(
     installer_path: &Path,
     parent_pid: u32,
     app_path: &Path,
     expected_sha256: &str,
+    expected_signer_sha256: &str,
 ) -> String {
     let installer = powershell_single_quoted(&installer_path.display().to_string());
     let app = powershell_single_quoted(&app_path.display().to_string());
     let expected = powershell_single_quoted(&expected_sha256.to_ascii_lowercase());
+    let expected_signer = powershell_single_quoted(&expected_signer_sha256.to_ascii_lowercase());
     format!(
         r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
 $form = New-Object System.Windows.Forms.Form; $form.Text = 'OPE güncelleme'; $form.Width = 620; $form.Height = 330; $form.StartPosition = 'CenterScreen'; $form.TopMost = $true; $form.FormBorderStyle = 'FixedDialog'; $form.MaximizeBox = $false; $form.MinimizeBox = $false;
@@ -433,8 +493,12 @@ $form.Show(); [System.Windows.Forms.Application]::DoEvents(); $status.Text = 'Uy
 $deadline = (Get-Date).AddSeconds(60); while ((Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 250; [System.Windows.Forms.Application]::DoEvents() }}
 if (Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue) {{ $status.Text = 'OPE kapatılamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Uygulamayı kapatıp güncellemeyi yeniden başlatın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✗ Uygulama kapatılamadı`r`n○ Kurulum sihirbazı başlatılmadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
 $status.Text = 'Kurulum sihirbazı başlatılıyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n→ Kurulum sihirbazı başlatılıyor`r`n○ Kurulum tamamlanacak ve OPE yeniden açılacak"; $bar.Value = 50; [System.Windows.Forms.Application]::DoEvents();
-$actualHash = (Get-FileHash -LiteralPath '{installer}' -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash; if ($actualHash -ne '{expected}') {{ $status.Text = 'Güncelleme paketi doğrulanamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Kurulum başlatılmadı; mevcut sürüm korundu.'; $steps.Text = "✗ Güncelleme paketi doğrulanamadı`r`n✓ Uygulama kapatıldı`r`n○ Kurulum sihirbazı başlatılmadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; Remove-Item -LiteralPath '{installer}' -Force -ErrorAction SilentlyContinue; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
-try {{ $installerProcess = Start-Process -FilePath '{installer}' -ArgumentList '/UPDATE','/P' -PassThru -WindowStyle Normal }} catch {{ $status.Text = 'Kurulum başlatılamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✗ Kurulum sihirbazı başlatılamadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
+$installerLock = $null; function Stop-Update {{ param([string]$reason); if ($null -ne $installerLock) {{ $installerLock.Dispose() }}; $status.Text = 'Güncelleme paketi doğrulanamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = $reason; $steps.Text = "✗ Güncelleme paketi doğrulanamadı`r`n✓ Uygulama kapatıldı`r`n○ Kurulum sihirbazı başlatılmadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; Remove-Item -LiteralPath '{installer}' -Force -ErrorAction SilentlyContinue; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
+try {{ $installerLock = [System.IO.File]::Open('{installer}', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read) }} catch {{ Stop-Update 'Kurulum dosyası güvenli biçimde kilitlenemedi; mevcut sürüm korundu.' }}
+$actualHash = (Get-FileHash -LiteralPath '{installer}' -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash; if ($actualHash -ne '{expected}') {{ Stop-Update 'Kurulum başlatılmadı; mevcut sürüm korundu.' }}
+try {{ $signature = Get-AuthenticodeSignature -LiteralPath '{installer}' -ErrorAction Stop; if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {{ Stop-Update 'Kurulum imzası Windows tarafından doğrulanamadı; mevcut sürüm korundu.' }}; if ($null -eq $signature.SignerCertificate) {{ Stop-Update 'Kurulum yayıncı sertifikası bulunamadı; mevcut sürüm korundu.' }}; if ($null -eq $signature.TimeStamperCertificate) {{ Stop-Update 'Kurulum imzasında güvenilir zaman damgası bulunamadı; mevcut sürüm korundu.' }}; $signerSha = [System.Security.Cryptography.SHA256]::Create(); try {{ $actualSigner = [BitConverter]::ToString($signerSha.ComputeHash($signature.SignerCertificate.RawData)).Replace('-', '').ToLowerInvariant() }} finally {{ $signerSha.Dispose() }}; if ($actualSigner -cne '{expected_signer}') {{ Stop-Update 'Kurulum beklenen OPE yayıncısı tarafından imzalanmamış; mevcut sürüm korundu.' }} }} catch {{ Stop-Update 'Kurulum imzası denetlenemedi; mevcut sürüm korundu.' }}
+try {{ $installerProcess = Start-Process -FilePath '{installer}' -ArgumentList '/UPDATE','/P' -PassThru -WindowStyle Normal }} catch {{ if ($null -ne $installerLock) {{ $installerLock.Dispose() }}; Remove-Item -LiteralPath '{installer}' -Force -ErrorAction SilentlyContinue; $status.Text = 'Kurulum başlatılamadı'; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✗ Kurulum sihirbazı başlatılamadı`r`n○ OPE yeniden başlatılmadı"; $bar.Value = 0; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit 1 }}
+$installerLock.Dispose(); $installerLock = $null;
 $status.Text = 'Kurulum devam ediyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✓ Kurulum sihirbazı çalışıyor`r`n→ Kurulum tamamlanacak ve OPE yeniden açılacak"; $bar.Value = 65; [System.Windows.Forms.Application]::DoEvents(); while (-not $installerProcess.HasExited) {{ if ($bar.Value -lt 95) {{ $bar.Value += 1 }}; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 350 }}
 Remove-Item -LiteralPath '{installer}' -Force -ErrorAction SilentlyContinue;
 if ($installerProcess.ExitCode -eq 0) {{ $status.Text = 'Kurulum tamamlandı; OPE yeniden başlatılıyor'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✓ Kurulum tamamlandı`r`n✓ OPE yeniden açılıyor"; $bar.Value = 100; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 800; Start-Process -FilePath '{app}' }} else {{ $status.Text = 'Kurulum hata koduyla sonlandı: ' + $installerProcess.ExitCode; $status.ForeColor = [System.Drawing.Color]::Firebrick; $detail.Text = 'Tanı paketi için Operasyonlar ekranını açın.'; $steps.Text = "✓ Güncelleme paketi doğrulandı`r`n✓ Uygulama kapatıldı`r`n✗ Kurulum hata ile sonlandı`r`n○ OPE yeniden başlatılmadı"; [System.Windows.Forms.Application]::DoEvents(); [System.Windows.Forms.Application]::Run($form); exit $installerProcess.ExitCode }}
@@ -445,11 +509,17 @@ fn launch_installer_after_exit(
     installer_path: &Path,
     parent_pid: u32,
     expected_sha256: &str,
+    expected_signer_sha256: &str,
 ) -> Result<(), CommandError> {
     let app_path = std::env::current_exe()
         .map_err(|_| CommandError::UpdateUnavailable("UPDATE_APP_PATH_UNAVAILABLE".into()))?;
-    let installer_script =
-        deferred_installer_script_visible(installer_path, parent_pid, &app_path, expected_sha256);
+    let installer_script = deferred_installer_script_visible(
+        installer_path,
+        parent_pid,
+        &app_path,
+        expected_sha256,
+        expected_signer_sha256,
+    );
     let mut launcher = Command::new("powershell.exe");
     configure_hidden_command(&mut launcher);
     launcher
@@ -519,6 +589,7 @@ pub async fn install_unsigned_update(
     if !is_newer_version(&request.version)? {
         return Err(CommandError::InvalidInput("UPDATE_NOT_NEWER".into()));
     }
+    let expected_signer_sha256 = expected_update_signer_sha256()?;
     let (path, mut installer_file) = create_installer_file(&request.version)?;
     // The deferred launcher is armed only after the download is verified. Arming
     // it first meant that quitting the app mid-download handed an unverified,
@@ -588,11 +659,19 @@ pub async fn install_unsigned_update(
         ));
     }
 
-    // Only a fully downloaded, hash-verified installer may be handed to the
-    // elevated launcher. The launcher re-checks the digest before executing it,
-    // because the file waits in a user-writable temp directory until this
-    // process exits.
-    if launch_installer_after_exit(&path, std::process::id(), &actual).is_err() {
+    if verify_installer_authenticode(&path, &expected_signer_sha256).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(CommandError::UpdateUnavailable(
+            "UPDATE_INSTALLER_SIGNATURE_INVALID".into(),
+        ));
+    }
+
+    // Only a fully downloaded, digest-verified, pinned Authenticode installer
+    // may reach the launcher. After this process exits the launcher reopens the
+    // file with read-only sharing, then repeats every gate before CreateProcess.
+    if launch_installer_after_exit(&path, std::process::id(), &actual, &expected_signer_sha256)
+        .is_err()
+    {
         let _ = std::fs::remove_file(&path);
         return Err(CommandError::UpdateUnavailable(
             "UPDATE_INSTALLER_START_FAILED".into(),
@@ -609,12 +688,25 @@ mod tests {
 
     use super::{
         append_update_json_chunk, current_version, github_release_update, is_newer_version,
-        manifest_update, resolve_manifest_or_release, update_freshness_for_version,
-        validate_release_url, validate_sha256, validate_update_json_content_length,
-        CheckedUpdateAuthorization, CommandError, GithubRelease, InstallUnsignedUpdateRequest,
-        ReleaseManifest, UnsignedUpdate, UnsignedUpdateCheck, UpdateFreshness, UpdateJsonResource,
-        MAX_GITHUB_RELEASE_JSON_BYTES, MAX_MANIFEST_JSON_BYTES,
+        manifest_update, parse_update_signer_sha256, resolve_manifest_or_release,
+        update_freshness_for_version, validate_release_url, validate_sha256,
+        validate_update_json_content_length, CheckedUpdateAuthorization, CommandError,
+        GithubRelease, InstallUnsignedUpdateRequest, ReleaseManifest, UnsignedUpdate,
+        UnsignedUpdateCheck, UpdateFreshness, UpdateJsonResource, MAX_GITHUB_RELEASE_JSON_BYTES,
+        MAX_MANIFEST_JSON_BYTES,
     };
+
+    #[test]
+    fn update_signer_pin_is_required_and_must_be_an_exact_sha256_fingerprint() {
+        assert!(parse_update_signer_sha256(None).is_err());
+        assert!(parse_update_signer_sha256(Some("")).is_err());
+        assert!(parse_update_signer_sha256(Some(&"a".repeat(63))).is_err());
+        assert!(parse_update_signer_sha256(Some(&format!("{}g", "a".repeat(63)))).is_err());
+        assert_eq!(
+            parse_update_signer_sha256(Some(&"A".repeat(64))).unwrap(),
+            "a".repeat(64)
+        );
+    }
 
     fn next_test_version() -> String {
         let mut segments = current_version()
@@ -816,6 +908,7 @@ mod tests {
             4242,
             Path::new(r"C:\Program Files\OPE\OPE.exe"),
             "AABBCC",
+            &"D".repeat(64),
         );
         assert!(script.contains("System.Windows.Forms"));
         assert!(script.contains("ProgressBar"));
@@ -841,6 +934,7 @@ mod tests {
             4242,
             Path::new(r"C:\Program Files\OPE\OPE.exe"),
             "AbCdEf",
+            &"D".repeat(64),
         );
 
         let gate = script
@@ -860,5 +954,16 @@ mod tests {
         assert!(script.contains("Güncelleme paketi doğrulanamadı"));
         // A rejected or finished installer must not be left behind in %TEMP%.
         assert!(script.contains("Remove-Item -LiteralPath 'C:\\Temp\\OPE.setup.exe' -Force"));
+        let signature_gate = script
+            .find("Get-AuthenticodeSignature")
+            .expect("the launcher must re-verify the Authenticode signature");
+        assert!(
+            signature_gate < launch,
+            "the signature gate must precede launch"
+        );
+        assert!(script.contains("SignatureStatus]::Valid"));
+        assert!(script.contains("TimeStamperCertificate"));
+        assert!(script.contains("SHA256]::Create"));
+        assert!(script.contains(&"d".repeat(64)));
     }
 }

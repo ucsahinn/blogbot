@@ -7,7 +7,7 @@ import test from "node:test";
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const source = (...parts: string[]) => join(desktopRoot, "src", ...parts);
 
-test("unsigned updater uses the native HTTPS release bridge instead of Tauri signature verification", async () => {
+test("native updater requires a pinned, timestamped Authenticode installer in addition to the release digest", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
   const bridge = await readFile(source("bridge.ts"), "utf8");
   const native = await readFile(join(desktopRoot, "src-tauri", "src", "lib.rs"), "utf8");
@@ -28,14 +28,22 @@ test("unsigned updater uses the native HTTPS release bridge instead of Tauri sig
   assert.doesNotMatch(workflow, /Get-ChildItem .*\*-setup\.exe.*Select-Object -First 1/u);
   assert.match(workflow, /\^\\d\+\\\.\\d\+\\\.\\d\+\$/u);
   assert.equal(workflow.includes("(?:-[0-9A-Za-z.-]+)?"), false);
-  assert.doesNotMatch(workflow, /TAURI_SIGNING_PRIVATE_KEY/u);
+  assert.match(workflow, /OPE_UPDATE_SIGNER_SHA256/u);
+  assert.match(workflow, /Get-AuthenticodeSignature/u);
+  assert.match(workflow, /TimeStamperCertificate/u);
+  assert.match(workflow, /OPE_WINDOWS_CERTIFICATE_PFX_BASE64/u);
+  assert.match(workflow, /Import-PfxCertificate/u);
+  assert.match(workflow, /if:\s*\$\{\{\s*always\(\) && inputs\.sign_windows\s*\}\}/u);
+  assert.match(workflow, /Remove-Item[^\n]+Cert:/u);
+  assert.doesNotMatch(workflow, /Publish unsigned release/u);
   assert.doesNotMatch(workflow, /UPDATER_SIGNATURE/u);
 });
 test("release notes never become PowerShell source in the release workflow", async () => {
   const workflow = await readFile(join(desktopRoot, "..", "..", ".github", "workflows", "release-desktop.yml"), "utf8");
 
   assert.match(workflow, /RELEASE_NOTES: \$\{\{ inputs\.notes \}\}/u);
-  assert.match(workflow, /Set-Content -LiteralPath release-notes\.txt -Value \$env:RELEASE_NOTES/u);
+  assert.match(workflow, /\$notes = \$env:RELEASE_NOTES/u);
+  assert.match(workflow, /Set-Content -LiteralPath release-notes\.txt -Value \$notes/u);
   assert.match(workflow, /--notes-file release-notes\.txt/u);
   assert.doesNotMatch(workflow, /--notes\s+"\$\{\{\s*inputs\.notes/u);
 });

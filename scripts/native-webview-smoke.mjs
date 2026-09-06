@@ -42,10 +42,10 @@ const nativeSmokeRequestTimeoutMs = Number.parseInt(
 const webdriverBaseUrl = "http://127.0.0.1:4444";
 let webdriverUserDataFolder;
 const smokeFeedUrl = process.env.BLOGBOT_SMOKE_FEED_URL ?? "https://www.cshub.com/rss/news";
-// Navigation is a local render, not a network operation. A multi-second wait
-// means the user sees a frozen menu, so keep this gate deliberately stricter
-// than setup and engine-startup probes.
-const MAX_INITIAL_BOOT_RENDER_MS = 15_000;
+// A cold encrypted PGlite start may consume the native 30-second startup
+// contract, so the initial window observes the application's 35-second safe
+// boundary. Later navigation is local and retains the strict three-second gate.
+const MAX_INITIAL_BOOT_RENDER_MS = 40_000;
 const MAX_ENGINE_RECOVERY_RENDER_MS = 15_000;
 const MAX_ROUTE_RENDER_MS = 3_000;
 const ROUTE_RENDER_POLL_MS = 100;
@@ -94,7 +94,7 @@ const requiredNativeReadContracts = {
   local_dev_status: { required: ["running", "supported"] },
   github_device_flow_status: {
     required: ["status", "writes", "network", "detail"],
-    optional: ["userCode", "verificationUri", "scopes", "retryAfterSeconds", "lastError"]
+    optional: ["userCode", "verificationUri", "repository", "permissions", "retryAfterSeconds", "lastError"]
   },
   autostart_status: { required: ["enabled"] }
 };
@@ -109,7 +109,7 @@ function wait(milliseconds) {
 async function cleanupSmokeDataRoot(root) {
   // WebView2 can release its profile lock shortly after the driver exits.
   // Keep cleanup bounded but long enough for that asynchronous shutdown.
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
     try {
       await access(root);
@@ -316,13 +316,24 @@ async function safeFatalDiagnostic(sessionId) {
   return execute(
     sessionId,
     `return (() => {
-      const detail = document.querySelector('.fatal-state p')?.textContent ?? '';
+      const detail = document.querySelector('.fatal-state h1 + p')?.textContent ?? '';
       const knownCodes = [
         'BRIDGE_UNAVAILABLE', 'ENGINE_EXECUTABLE_MISSING', 'PGLITE_ASSETS_MISSING',
         'LOCAL_DATA_KEY_UNAVAILABLE', 'ENGINE_START_FAILED', 'ENGINE_RESPONSE_TIMEOUT',
         'ENGINE_CLOSED_PIPE', 'ENGINE_READ_FAILED', 'ENGINE_WRITE_FAILED'
       ];
-      return knownCodes.find((code) => detail.includes(code)) ?? 'UNCLASSIFIED_FATAL_STARTUP';
+      const embeddedCode = knownCodes.find((code) => detail.includes(code));
+      if (embeddedCode) return embeddedCode;
+      const safeMessages = [
+        ['çalışma alanı hazırlanırken zaman aşımına uğradı', 'BOOTSTRAP_TIMEOUT'],
+        ['zamanında yanıt vermedi', 'ENGINE_RESPONSE_TIMEOUT'],
+        ['paketlenmiş yerel engine bileşenleri eksik veya bozuk', 'ENGINE_NATIVE_MODULES_MISSING'],
+        ['yerel şifreli çalışma alanı açılamadı', 'ENGINE_STORAGE_UNAVAILABLE'],
+        ['şu anda salt okunur', 'ENGINE_DEGRADED'],
+        ['yerel çalışma bileşeni bu işlemi doğrulayamadı', 'ENGINE_VALIDATION_FAILED']
+      ];
+      return safeMessages.find(([message]) => detail.toLocaleLowerCase('tr-TR').includes(message))?.[1]
+        ?? 'UNCLASSIFIED_FATAL_STARTUP';
     })()`
   );
 }
@@ -351,7 +362,7 @@ async function waitForVisibleHeading(sessionId, route, timeoutMs = MAX_ROUTE_REN
     sessionId,
     "return document.body?.innerText?.replace(/\\s+/g, ' ').trim().slice(0, 500) ?? '';"
   );
-  fail(`route #${route} did not render a visible page heading within ${MAX_ROUTE_RENDER_MS} ms. Visible text: ${JSON.stringify(diagnostic)}`);
+  fail(`route #${route} did not render a visible page heading within ${timeoutMs} ms. Visible text: ${JSON.stringify(diagnostic)}`);
 }
 
 async function verifySetupGuideStartsFocusedWizard(sessionId) {
@@ -1226,9 +1237,77 @@ async function verifyOperationsJourney(sessionId) {
   return { diagnosticsIncluded: exported.result.included };
 }
 
+async function synchronizeVisibleOperationsState(sessionId) {
+  const refreshLabel = "Operasyon durumunu yenile";
+  let clicked = false;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    clicked = await execute(
+      sessionId,
+      `return (() => {
+        const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === ${JSON.stringify(refreshLabel)});
+        if (!button || button.disabled) return false;
+        button.click();
+        return true;
+      })();`
+    );
+    if (clicked) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+  }
+  if (!clicked) {
+    const buttons = await execute(
+      sessionId,
+      "return [...document.querySelectorAll('button')].map((item) => ({ label: item.textContent?.trim() ?? '', disabled: item.disabled })).filter((item) => item.label).slice(0, 30);"
+    );
+    fail(`visible Operations refresh was not available before pause verification: ${JSON.stringify(buttons)}`);
+  }
+
+  // Let React commit the refresh-start state before reading any prior status
+  // message. A fast WebDriver round trip can otherwise accept the previous
+  // completed refresh while the new native reads have not started rendering.
+  await wait(150);
+  const expectedSnapshot = await invoke(sessionId, "get_bootstrap_snapshot");
+  if (!expectedSnapshot?.ok || typeof expectedSnapshot.result?.automation?.ingestionPaused !== "boolean") {
+    fail(`native automation state was unavailable during Operations synchronization: ${JSON.stringify(expectedSnapshot)}`);
+  }
+  const expectedAction = expectedSnapshot.result.automation.ingestionPaused
+    ? "Taramayı sürdür"
+    : "Taramayı duraklat";
+
+  let finalState;
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    finalState = await execute(
+      sessionId,
+      `return (() => {
+        const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === ${JSON.stringify(refreshLabel)});
+        const automationAction = [...document.querySelectorAll('.page-header .header-actions button')]
+          .find((item) => ['Taramayı duraklat', 'Taramayı sürdür'].includes(item.textContent?.trim() ?? ''));
+        return {
+          ready: Boolean(button) && !button.disabled,
+          automationAction: automationAction ? {
+            label: automationAction.textContent?.trim() ?? '',
+            disabled: automationAction.disabled
+          } : null,
+          status: [...document.querySelectorAll('[role="status"]')].map((item) => item.textContent?.trim() ?? '').filter(Boolean)
+        };
+      })();`
+    );
+    if (
+      finalState?.ready
+      && finalState.automationAction?.label === expectedAction
+      && !finalState.automationAction.disabled
+      && finalState.status.some((message) => message.includes("Operasyon durumu yerel veriden yenilendi."))
+    ) {
+      return;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+  }
+  fail(`visible Operations refresh did not reconcile native state: ${JSON.stringify(finalState)}`);
+}
+
 async function verifyVisibleOperationsPauseJourney(sessionId) {
-  await execute(sessionId, "window.location.hash = '#operations'; window.location.reload(); return true;");
+  await execute(sessionId, "window.location.hash = '#operations'; return true;");
   await waitForVisibleHeading(sessionId, "operations");
+  await synchronizeVisibleOperationsState(sessionId);
   for (const [action, expectedMessage, nextAction] of [
     ["Taramayı duraklat", "Kaynak taraması duraklatıldı.", "Taramayı sürdür"],
     ["Taramayı sürdür", "Kaynak taraması devam ettirildi.", "Taramayı duraklat"]
@@ -1247,7 +1326,25 @@ async function verifyVisibleOperationsPauseJourney(sessionId) {
       if (clicked) break;
       await new Promise((resolveWait) => setTimeout(resolveWait, 150));
     }
-    if (!clicked) fail(`visible Operations action ${JSON.stringify(action)} was not available.`);
+    if (!clicked) {
+      const visibleState = await execute(
+        sessionId,
+        `return {
+          actions: [...document.querySelectorAll('.page-header .header-actions button')].map((item) => ({
+            label: item.textContent?.trim() ?? '',
+            disabled: item.disabled,
+            describedBy: item.getAttribute('aria-describedby') ?? ''
+          })),
+          statuses: [...document.querySelectorAll('[role="status"]')].map((item) => item.textContent?.trim() ?? '').filter(Boolean)
+        };`
+      );
+      const snapshot = await invoke(sessionId, "get_bootstrap_snapshot");
+      fail(`visible Operations action ${JSON.stringify(action)} was not available: ${JSON.stringify({
+        visibleState,
+        automation: snapshot?.result?.automation,
+        connection: snapshot?.result?.connection
+      })}`);
+    }
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const state = await execute(
         sessionId,
@@ -1363,7 +1460,7 @@ async function verifyVisibleReviewEmptyJourney(sessionId) {
         );
         return {
           empty: empty?.textContent?.trim() ?? '',
-          queueHeading: [...document.querySelectorAll('h1')].some((item) => item.textContent?.trim() === 'Yayın kuyruğu')
+          queueHeading: document.querySelector('.review-queue-title')?.textContent?.trim() === 'Yayın kuyruğu'
         };
       })();`
     );
@@ -1920,7 +2017,10 @@ async function main() {
     throw new Error(`${message}\nTauri driver output (last 12 KB):\n${detail}`, { cause: error });
   } finally {
     if (sessionId) {
-      await fetch(`${webdriverBaseUrl}/session/${sessionId}`, { method: "DELETE" }).catch(() => undefined);
+      await fetch(`${webdriverBaseUrl}/session/${sessionId}`, {
+        method: "DELETE",
+        signal: AbortSignal.timeout(nativeSmokeRequestTimeoutMs)
+      }).catch(() => undefined);
     }
     if (!driver.killed) {
       driver.kill();

@@ -93,6 +93,45 @@ test("review publication manifest binds engine-owned media by immutable referenc
   });
 });
 
+test("publication refuses a hero reference when its bundle media bytes are unavailable", async () => {
+  const revision: ReviewRevision = {
+    id: "revision-missing-hero-bytes",
+    revisionHash: "e".repeat(64),
+    articleId: "article-missing-hero-bytes",
+    state: "APPROVED",
+    section: "haberler",
+    articleType: "news",
+    author: "Yerel Editorya",
+    tags: [],
+    scheduledAt: "2026-08-04T12:00:00.000Z",
+    adapterVersion: "astro-generic@1",
+    tr: { title: "Türkçe başlık", description: "Türkçe açıklama", slug: "turkce-baslik", bodyMarkdown: "Türkçe içerik" },
+    en: { title: "English title", description: "English description", slug: "english-title", bodyMarkdown: "English content" },
+    previous: {
+      tr: { title: "Türkçe başlık", description: "Türkçe açıklama", slug: "turkce-baslik", bodyMarkdown: "Türkçe içerik" },
+      en: { title: "English title", description: "English description", slug: "english-title", bodyMarkdown: "English content" }
+    },
+    claims: [],
+    sources: [],
+    gates: [],
+    media: [{
+      id: "missing-hero",
+      role: "hero",
+      filename: "missing.webp",
+      width: 1600,
+      height: 900,
+      sha256: "",
+      altTr: "Türkçe kapak",
+      altEn: "English cover"
+    }]
+  };
+
+  await assert.rejects(
+    () => buildPublicationFiles(revision, "PUBLISH", "astro-generic"),
+    /REVISION_MEDIA_CONTENT_UNAVAILABLE/u
+  );
+});
+
 test("review publication materialization rejects an adapter that is not in the production registry", async () => {
   const revision: ReviewRevision = {
     id: "revision-unknown-adapter",
@@ -153,5 +192,36 @@ test("review publication materialization binds connector config to the approved 
     () => buildPublicationFiles(revision, "PUBLISH", "astro-generic"),
     (error: unknown) => error instanceof Error &&
       (error as Error & { code?: string }).code === "SITE_ADAPTER_IDENTITY_MISMATCH"
+  );
+});
+
+test("review publication materialization rejects an approval without a pinned adapter version", async () => {
+  const revision: ReviewRevision = {
+    id: "revision-adapter-version-missing",
+    revisionHash: "f".repeat(64),
+    articleId: "article-adapter-version-missing",
+    state: "APPROVED",
+    section: "haberler",
+    articleType: "news",
+    author: "Yerel Editorya",
+    tags: [],
+    scheduledAt: "2026-08-04T12:00:00.000Z",
+    adapterVersion: " ",
+    tr: { title: "Baslik", description: "Aciklama", slug: "baslik", bodyMarkdown: "Icerik" },
+    en: { title: "Title", description: "Description", slug: "title", bodyMarkdown: "Content" },
+    previous: {
+      tr: { title: "Baslik", description: "Aciklama", slug: "baslik", bodyMarkdown: "Icerik" },
+      en: { title: "Title", description: "Description", slug: "title", bodyMarkdown: "Content" }
+    },
+    claims: [],
+    sources: [],
+    gates: [],
+    media: []
+  };
+
+  await assert.rejects(
+    () => buildPublicationFiles(revision, "PUBLISH", "astro-generic"),
+    (error: unknown) => error instanceof Error &&
+      (error as Error & { code?: string }).code === "SITE_ADAPTER_VERSION_MISMATCH"
   );
 });

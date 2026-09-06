@@ -89,6 +89,7 @@ export async function verifyVisibleActionMatrix({ execute: rawExecute, fail, ses
   const singleCloseClicked = await execute(sessionId, "return (() => { const button = document.querySelector('.candidate-card .card-actions .button-secondary'); if (!button || button.disabled) return false; button.click(); return true; })();");
   assert(singleCloseClicked, "candidate single close action was unavailable");
   await waitUntil(`return document.querySelectorAll('.candidate-card').length < ${beforeClose};`, "candidate single close did not remove the selected row");
+  await waitUntil("return !document.querySelectorAll('.candidate-bulk-actions button')[0].disabled;", "candidate single close did not settle");
   currentStage = "candidate-bulk-hide";
   const beforeHide = await execute(sessionId, "return document.querySelectorAll('.candidate-card').length;");
   if (beforeHide < 1) {
@@ -101,6 +102,7 @@ export async function verifyVisibleActionMatrix({ execute: rawExecute, fail, ses
   await waitUntil("return document.querySelector('.candidate-card input[type=checkbox]')?.checked === true && !document.querySelectorAll('.candidate-bulk-actions button')[2].disabled;", "candidate selection did not enable bulk hide");
   await execute(sessionId, "document.querySelectorAll('.candidate-bulk-actions button')[2].click(); return true;");
   await waitUntil(`return document.querySelectorAll('.candidate-card').length < ${beforeHide};`, "candidate bulk hide did not remove the selected row");
+  await waitUntil("return !document.querySelectorAll('.candidate-bulk-actions button')[0].disabled;", "candidate bulk hide did not settle");
   evidence.push("candidate-select-clear-hide-close");
 
   currentStage = "candidate-bulk-research";

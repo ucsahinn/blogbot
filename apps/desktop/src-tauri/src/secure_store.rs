@@ -1,5 +1,5 @@
-use std::fs::{self, OpenOptions};
 use std::fmt::Write as _;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -36,6 +36,69 @@ const LEGACY_IDENTIFIERS: &[&str] = &["net.siberdergi.blogbot"];
 const GITHUB_AUTH_STATE_VALIDATED: &[u8] = b"blogbot-github-auth-state:v1:validated";
 const GITHUB_AUTH_STATE_REAUTH_REQUIRED: &[u8] =
     b"blogbot-github-auth-state:v1:reauthorization-required";
+const GITHUB_APP_CREDENTIAL_MAGIC: &[u8] = b"blogbot-github-app-credentials:v1\0";
+
+pub(crate) fn valid_github_repository_segment(value: &str) -> bool {
+    !matches!(value, "." | "..")
+        && (1..=100).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+pub(crate) fn valid_github_repository_owner(value: &str) -> bool {
+    (1..=100).contains(&value.len())
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+pub(crate) fn valid_github_repository_name(value: &str) -> bool {
+    let mut segments = value.split('/');
+    match (segments.next(), segments.next(), segments.next()) {
+        (Some(owner), Some(repository), None) => {
+            valid_github_repository_owner(owner) && valid_github_repository_segment(repository)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn valid_github_branch_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 200
+        && !value.starts_with('-')
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.ends_with('.')
+        && !value.contains("//")
+        && !value.contains("..")
+        && value
+            .split('/')
+            .all(|part| !part.starts_with('.') && !part.ends_with(".lock"))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-'))
+}
+
+pub(crate) fn valid_github_workflow_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > 100 || value.contains("..") {
+        return false;
+    }
+    let Some(stem) = value
+        .strip_suffix(".yaml")
+        .or_else(|| value.strip_suffix(".yml"))
+    else {
+        return false;
+    };
+    !stem.is_empty()
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
 
 /// App-owned plaintext GitHub token storage. The wrapper is intentionally not
 /// cloneable or printable. It removes durable and per-request application
@@ -78,6 +141,61 @@ impl SecretBytes {
 impl Drop for SecretBytes {
     fn drop(&mut self) {
         self.wipe();
+    }
+}
+pub(crate) struct GithubAppCredentials {
+    pub(crate) client_id: String,
+    pub(crate) repository: String,
+    pub(crate) access_token: SecretBytes,
+    pub(crate) refresh_token: SecretBytes,
+    pub(crate) access_expires_at: u64,
+    pub(crate) refresh_expires_at: u64,
+}
+
+impl std::fmt::Debug for GithubAppCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GithubAppCredentials")
+            .field("client_id", &self.client_id)
+            .field("repository", &self.repository)
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("access_expires_at", &self.access_expires_at)
+            .field("refresh_expires_at", &self.refresh_expires_at)
+            .finish()
+    }
+}
+
+impl GithubAppCredentials {
+    pub(crate) fn new(
+        client_id: String,
+        repository: String,
+        access_token: SecretBytes,
+        refresh_token: SecretBytes,
+        access_expires_at: u64,
+        refresh_expires_at: u64,
+    ) -> Result<Self, String> {
+        let valid_client_id = (8..=128).contains(&client_id.len())
+            && client_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+        let valid_repository = valid_github_repository_name(&repository);
+        if !valid_client_id
+            || !valid_repository
+            || access_expires_at == 0
+            || refresh_expires_at <= access_expires_at
+            || access_token.as_bytes() == refresh_token.as_bytes()
+        {
+            return Err("GITHUB_APP_CREDENTIALS_INVALID".into());
+        }
+        Ok(Self {
+            client_id,
+            repository: repository.to_ascii_lowercase(),
+            access_token,
+            refresh_token,
+            access_expires_at,
+            refresh_expires_at,
+        })
     }
 }
 
@@ -285,8 +403,7 @@ pub fn load_data_key_candidates(app: &AppHandle) -> Result<Vec<String>, String> 
         if let Some(key) = existing_valid_key(&path) {
             let mut encoded = String::with_capacity(key.len() * 2);
             for byte in key {
-                write!(&mut encoded, "{byte:02x}")
-                    .expect("writing to a String cannot fail");
+                write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
             }
             if !candidates.iter().any(|candidate| candidate == &encoded) {
                 candidates.push(encoded);
@@ -467,6 +584,167 @@ pub fn unprotect_for_current_user(ciphertext: &[u8]) -> Result<Vec<u8>, WindowsE
         )?;
     }
     Ok(copy_and_free(output, true))
+}
+
+fn append_github_credential_field(destination: &mut Vec<u8>, field: &[u8]) -> Result<(), String> {
+    let length = u16::try_from(field.len()).map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID")?;
+    destination.extend_from_slice(&length.to_be_bytes());
+    destination.extend_from_slice(field);
+    Ok(())
+}
+
+fn serialize_github_app_credentials(credentials: &GithubAppCredentials) -> Result<Vec<u8>, String> {
+    let mut plaintext = Vec::with_capacity(
+        GITHUB_APP_CREDENTIAL_MAGIC.len()
+            + 24
+            + credentials.client_id.len()
+            + credentials.repository.len()
+            + credentials.access_token.as_bytes().len()
+            + credentials.refresh_token.as_bytes().len(),
+    );
+    plaintext.extend_from_slice(GITHUB_APP_CREDENTIAL_MAGIC);
+    plaintext.extend_from_slice(&credentials.access_expires_at.to_be_bytes());
+    plaintext.extend_from_slice(&credentials.refresh_expires_at.to_be_bytes());
+    append_github_credential_field(&mut plaintext, credentials.client_id.as_bytes())?;
+    append_github_credential_field(&mut plaintext, credentials.repository.as_bytes())?;
+    append_github_credential_field(&mut plaintext, credentials.access_token.as_bytes())?;
+    append_github_credential_field(&mut plaintext, credentials.refresh_token.as_bytes())?;
+    Ok(plaintext)
+}
+
+fn take_github_credential_field<'a>(
+    plaintext: &'a [u8],
+    cursor: &mut usize,
+) -> Result<&'a [u8], String> {
+    let length_end = (*cursor)
+        .checked_add(2)
+        .ok_or("GITHUB_APP_CREDENTIALS_INVALID")?;
+    let length_bytes: [u8; 2] = plaintext
+        .get(*cursor..length_end)
+        .ok_or("GITHUB_APP_CREDENTIALS_INVALID")?
+        .try_into()
+        .map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID")?;
+    *cursor = length_end;
+    let field_end = (*cursor)
+        .checked_add(usize::from(u16::from_be_bytes(length_bytes)))
+        .ok_or("GITHUB_APP_CREDENTIALS_INVALID")?;
+    let field = plaintext
+        .get(*cursor..field_end)
+        .ok_or("GITHUB_APP_CREDENTIALS_INVALID")?;
+    *cursor = field_end;
+    Ok(field)
+}
+
+fn parse_github_app_credentials(plaintext: &[u8]) -> Result<GithubAppCredentials, String> {
+    if !plaintext.starts_with(GITHUB_APP_CREDENTIAL_MAGIC) {
+        return Err("GITHUB_APP_CREDENTIALS_INVALID".into());
+    }
+    let mut cursor = GITHUB_APP_CREDENTIAL_MAGIC.len();
+    let access_expiry_end = cursor
+        .checked_add(8)
+        .ok_or("GITHUB_APP_CREDENTIALS_INVALID")?;
+    let access_expires_at = u64::from_be_bytes(
+        plaintext
+            .get(cursor..access_expiry_end)
+            .ok_or("GITHUB_APP_CREDENTIALS_INVALID")?
+            .try_into()
+            .map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID")?,
+    );
+    cursor = access_expiry_end;
+    let refresh_expiry_end = cursor
+        .checked_add(8)
+        .ok_or("GITHUB_APP_CREDENTIALS_INVALID")?;
+    let refresh_expires_at = u64::from_be_bytes(
+        plaintext
+            .get(cursor..refresh_expiry_end)
+            .ok_or("GITHUB_APP_CREDENTIALS_INVALID")?
+            .try_into()
+            .map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID")?,
+    );
+    cursor = refresh_expiry_end;
+    let client_id =
+        String::from_utf8(take_github_credential_field(plaintext, &mut cursor)?.to_vec())
+            .map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID")?;
+    let repository =
+        String::from_utf8(take_github_credential_field(plaintext, &mut cursor)?.to_vec())
+            .map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID")?;
+    let access_token =
+        SecretBytes::new(take_github_credential_field(plaintext, &mut cursor)?.to_vec())
+            .map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID")?;
+    let refresh_token =
+        SecretBytes::new(take_github_credential_field(plaintext, &mut cursor)?.to_vec())
+            .map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID")?;
+    if cursor != plaintext.len() {
+        return Err("GITHUB_APP_CREDENTIALS_INVALID".into());
+    }
+    GithubAppCredentials::new(
+        client_id,
+        repository,
+        access_token,
+        refresh_token,
+        access_expires_at,
+        refresh_expires_at,
+    )
+}
+
+pub(crate) fn store_github_app_credentials_at(
+    path: &Path,
+    credentials: &GithubAppCredentials,
+) -> Result<(), String> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| "GITHUB_TOKEN_DIRECTORY_UNAVAILABLE".to_string())?;
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("GITHUB_TOKEN_DIRECTORY_CREATE_FAILED: {error}"))?;
+    clear_github_authorization_state_at(path)?;
+    let mut plaintext = serialize_github_app_credentials(credentials)?;
+    let protected_result = protect_for_current_user(&plaintext)
+        .map_err(|error| format!("GITHUB_TOKEN_PROTECT_FAILED: {error}"));
+    volatile_zero(&mut plaintext);
+    let protected = protected_result?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = directory.join(format!(
+        "github-app-credentials.{}.{}.tmp",
+        std::process::id(),
+        nonce
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .map_err(|error| format!("GITHUB_TOKEN_TEMP_CREATE_FAILED: {error}"))?;
+        file.write_all(&protected)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("GITHUB_TOKEN_WRITE_FAILED: {error}"))?;
+        let source = windows::core::HSTRING::from(temp.as_os_str());
+        let destination = windows::core::HSTRING::from(path.as_os_str());
+        unsafe {
+            MoveFileExW(
+                &source,
+                &destination,
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+            .map_err(|error| format!("GITHUB_TOKEN_COMMIT_FAILED: {error}"))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
+pub(crate) fn load_github_app_credentials_at(path: &Path) -> Result<GithubAppCredentials, String> {
+    let protected = fs::read(path).map_err(|_| "GITHUB_APP_CREDENTIALS_UNAVAILABLE".to_string())?;
+    let mut plaintext = unprotect_for_current_user(&protected)
+        .map_err(|_| "GITHUB_APP_CREDENTIALS_INVALID".to_string())?;
+    let result = parse_github_app_credentials(&plaintext);
+    volatile_zero(&mut plaintext);
+    result
 }
 
 #[allow(dead_code)]
@@ -657,6 +935,107 @@ mod tests {
                 .expect("load rotated token")
                 .as_bytes(),
             b"rotated-native-token"
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn github_app_credential_bundle_is_dpapi_protected_and_round_trips() {
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-github-app-credentials-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create credential directory");
+        let path = directory.join("github-token.dpapi");
+        let credentials = super::GithubAppCredentials::new(
+            "Iv1.0123456789abcdef".into(),
+            "owner/site".into(),
+            super::SecretBytes::new(b"github-app-access-fixture".to_vec()).unwrap(),
+            super::SecretBytes::new(b"github-app-refresh-fixture".to_vec()).unwrap(),
+            10_000,
+            20_000,
+        )
+        .expect("valid GitHub App credentials");
+
+        super::store_github_app_credentials_at(&path, &credentials)
+            .expect("store credential bundle");
+        let disk = fs::read(&path).expect("read encrypted bundle");
+        let disk_text = String::from_utf8_lossy(&disk);
+        assert!(!disk_text.contains("github-app-access-fixture"));
+        assert!(!disk_text.contains("github-app-refresh-fixture"));
+        assert!(!disk_text.contains("owner/site"));
+
+        let loaded = super::load_github_app_credentials_at(&path).expect("load credential bundle");
+        assert_eq!(loaded.client_id, "Iv1.0123456789abcdef");
+        assert_eq!(loaded.repository, "owner/site");
+        assert_eq!(loaded.access_token.as_bytes(), b"github-app-access-fixture");
+        assert_eq!(
+            loaded.refresh_token.as_bytes(),
+            b"github-app-refresh-fixture"
+        );
+        assert_eq!(loaded.access_expires_at, 10_000);
+        assert_eq!(loaded.refresh_expires_at, 20_000);
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn github_app_credentials_reject_invalid_repository_identity() {
+        for repository in [
+            "./site",
+            "owner/.",
+            "../site",
+            "owner/..",
+            ".owner/site",
+            "_owner/site",
+            "-owner/site",
+        ] {
+            let result = super::GithubAppCredentials::new(
+                "Iv1.0123456789abcdef".into(),
+                repository.into(),
+                super::SecretBytes::new(b"github-app-access-fixture".to_vec()).unwrap(),
+                super::SecretBytes::new(b"github-app-refresh-fixture".to_vec()).unwrap(),
+                10_000,
+                20_000,
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                "GITHUB_APP_CREDENTIALS_INVALID",
+                "{repository} must not be persisted as a repository identity"
+            );
+        }
+
+        assert!(super::GithubAppCredentials::new(
+            "Iv1.0123456789abcdef".into(),
+            "owner/.github".into(),
+            super::SecretBytes::new(b"github-app-access-fixture".to_vec()).unwrap(),
+            super::SecretBytes::new(b"github-app-refresh-fixture".to_vec()).unwrap(),
+            10_000,
+            20_000,
+        )
+        .is_ok());
+    }
+    #[test]
+    fn legacy_single_token_record_is_not_a_github_app_credential_bundle() {
+        let directory = std::env::temp_dir().join(format!(
+            "blogbot-legacy-github-token-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create credential directory");
+        let path = directory.join("github-token.dpapi");
+        super::store_github_token_at(&path, b"classic-oauth-token-fixture")
+            .expect("store legacy fixture");
+
+        assert_eq!(
+            super::load_github_app_credentials_at(&path).unwrap_err(),
+            "GITHUB_APP_CREDENTIALS_INVALID"
         );
         fs::remove_dir_all(directory).expect("cleanup");
     }

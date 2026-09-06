@@ -15,6 +15,7 @@ import type { ApprovalRevocation } from "../../packages/database/src/backend-rep
 import { JsonProtector } from "../../packages/database/src/encrypted-json.ts";
 import { PGliteBackendRepository } from "../../packages/database/src/pglite-backend-repository.ts";
 import type { ApprovalV3, ArticleRevision, ArticleState, HighRiskApproval } from "../../packages/editorial/src/revision.ts";
+import { createOwnedTempRoot } from "../helpers/owned-temp-root.ts";
 
 /** Smallest revision the list index and the due-list projection accept. */
 function sampleRevision(id: string, state: ArticleState): ArticleRevision {
@@ -59,11 +60,13 @@ function command(
   };
 }
 
-test("PGlite engine persists state and idempotent responses across restart", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-pglite-"));
+test("PGlite engine persists state and idempotent responses across restart", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-pglite-");
+  const root = ownedRoot.path;
   const dataDir = join(root, "pgdata");
 
   const firstRepository = await PGliteBackendRepository.open(dataDir);
+  const closeFirstRepository = ownedRoot.track(() => firstRepository.close());
   const firstEngine = new LocalEngine({ repository: firstRepository });
   const first = await firstEngine.execute(command());
   assert.equal(first.ok, true);
@@ -80,9 +83,10 @@ test("PGlite engine persists state and idempotent responses across restart", asy
     JSON.stringify(encrypted.rows[0]?.value),
     /DRAFT_ONLY|scanIntervalMinutes/
   );
-  await firstRepository.close();
+  await closeFirstRepository();
 
   const secondRepository = await PGliteBackendRepository.open(dataDir);
+  const closeSecondRepository = ownedRoot.track(() => secondRepository.close());
   const secondEngine = new LocalEngine({ repository: secondRepository });
   const replay = await secondEngine.execute(command());
   assert.deepEqual(replay, first);
@@ -103,7 +107,7 @@ test("PGlite engine persists state and idempotent responses across restart", asy
     assert.equal(conflict.error.code, "IDEMPOTENCY_KEY_REUSED");
   }
   assert.equal((await secondRepository.sync(0)).serverCursor, 1);
-  await secondRepository.close();
+  await closeSecondRepository();
 });
 
 test("PGlite dashboard paging never advances the cursor beyond delivered changes", async (t) => {
@@ -209,9 +213,11 @@ test("the file-based backup handler refuses backup.auto instead of writing an un
   }
 });
 
-test("persistent stdio protocol reports ready local storage and queue", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-protocol-"));
+test("persistent stdio protocol reports ready local storage and queue", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-protocol-");
+  const root = ownedRoot.path;
   const runtime = await createPersistentEngineProtocol(join(root, "pgdata"));
+  const closeRuntime = ownedRoot.track(() => runtime.close());
 
   const doctor = await runtime.handle({
     version: 1,
@@ -223,7 +229,7 @@ test("persistent stdio protocol reports ready local storage and queue", async ()
   assert.equal(doctor.status, "READY");
   assert.equal(doctor.persistence, "pglite");
   assert.equal(doctor.queue, "ready");
-  await runtime.close();
+  await closeRuntime();
 });
 
 test("normal and high-risk approvals persist as separate immutable records", async (t) => {
@@ -399,9 +405,11 @@ test("PGlite due revision reads support stable pagination", async (t) => {
   );
 });
 
-test("local database records immutable migration versions and hashes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "blogbot-migrations-"));
+test("local database records immutable migration versions and hashes", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-migrations-");
+  const root = ownedRoot.path;
   const repository = await PGliteBackendRepository.open(join(root, "pgdata"));
+  const closeRepository = ownedRoot.track(() => repository.close());
   const result = await repository.getDatabase().query<{
     version: number;
     name: string;
@@ -428,7 +436,7 @@ test("local database records immutable migration versions and hashes", async () 
       { version: 9, name: "approval-revocations", hashIsSha256: true }
     ]
   );
-  await repository.close();
+  await closeRepository();
 });
 
 test("local database rejects a schema newer than the running binary", async (t) => {
@@ -737,6 +745,69 @@ test("an interrupted legacy encryption migration resumes from its recorded marke
     "SELECT last_key FROM blogbot_encryption_migration_progress WHERE scope = 'backend'"
   );
   assert.equal(progress.rows.length, 0);
+});
+
+test("a rejected legacy migration closes its partially initialized database", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-pglite-failed-open-");
+  const dataDir = join(ownedRoot.path, "pgdata");
+  const prepared = await PGliteBackendRepository.open(dataDir);
+  const closePrepared = ownedRoot.track(() => prepared.close());
+  await prepared.getDatabase().query("DELETE FROM blogbot_encryption_migrations WHERE scope = 'backend'");
+  await prepared.getDatabase().query(
+    "INSERT INTO blogbot_revisions (id, value) VALUES ($1, $2::jsonb)",
+    ["revision-injected", JSON.stringify({ forgedBy: "synthetic-fixture" })]
+  );
+  await closePrepared();
+
+  // Observe the real database; do not replace migration or close behavior.
+  const initialized = new Set<PGlite>();
+  const originalExec = PGlite.prototype.exec;
+  t.mock.method(PGlite.prototype, "exec", async function (this: PGlite, ...args: Parameters<PGlite["exec"]>) {
+    initialized.add(this);
+    return await originalExec.apply(this, args);
+  });
+  ownedRoot.track(async () => {
+    for (const database of initialized) {
+      if (!database.closed) await database.close();
+    }
+  });
+
+  await assert.rejects(PGliteBackendRepository.open(dataDir), /LOCAL_DATA_LEGACY_UNVERIFIABLE/u);
+  assert.equal(initialized.size, 1, "observe the actual failed-open instance");
+  assert.equal([...initialized][0]?.closed, true, "open must close resources before propagating migration failure");
+});
+
+test("a failed database cleanup preserves the initialization error as its cause", async (t) => {
+  const ownedRoot = await createOwnedTempRoot(t, "blogbot-pglite-failed-cleanup-");
+  const initializeError = new Error("SYNTHETIC_PROTECTOR_INITIALIZATION_FAILED");
+  const cleanupError = new Error("SYNTHETIC_DATABASE_CLOSE_FAILED");
+  const initialized = new Set<PGlite>();
+  const originalExec = PGlite.prototype.exec;
+  const originalClose = PGlite.prototype.close;
+  t.mock.method(PGlite.prototype, "exec", async function (this: PGlite, ...args: Parameters<PGlite["exec"]>) {
+    initialized.add(this);
+    return await originalExec.apply(this, args);
+  });
+  t.mock.method(JsonProtector, "fromEnvironment", () => { throw initializeError; });
+  t.mock.method(PGlite.prototype, "close", async function (this: PGlite) {
+    await originalClose.call(this);
+    // PGlite also closes an internal initdb instance; do not inject a failure
+    // into that dependency-owned bootstrap operation.
+    if (initialized.has(this)) throw cleanupError;
+  });
+  ownedRoot.track(async () => {
+    for (const database of initialized) {
+      if (!database.closed) await originalClose.call(database);
+    }
+  });
+
+  await assert.rejects(PGliteBackendRepository.open(join(ownedRoot.path, "pgdata")), (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.message, "LOCAL_DATABASE_INITIALIZATION_CLEANUP_FAILED");
+    assert.equal(error.cause, initializeError);
+    assert.deepEqual(error.errors, [initializeError, cleanupError]);
+    return true;
+  });
 });
 
 test("the legacy encryption migration refuses to reseal a row that is not its record", async (t) => {

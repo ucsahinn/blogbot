@@ -194,19 +194,21 @@ test("desktop route transitions open the next workspace at the top", async ({ pa
   await expect.poll(() => workspace.evaluate((element) => element.scrollTop)).toBe(0);
 });
 
-test("mobile route transitions reset the document scroll position", async ({ page }) => {
+test("mobile route transitions reset the scrollable workspace position", async ({ page }) => {
   await page.setViewportSize({ width: 650, height: 740 });
   await page.goto("#dashboard");
 
-  await page.evaluate(() => { window.scrollTo(0, 600); });
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  const workspace = page.locator("#main-workspace");
+  await workspace.evaluate((element) => { element.scrollTop = 600; });
+  expect(await workspace.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 
   await page.getByRole("navigation", { name: "Ana menü" })
     .getByRole("button", { name: "İçerik Akışı" })
     .click();
 
   await expect(page).toHaveURL(/#content$/u);
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await expect.poll(() => workspace.evaluate((element) => element.scrollTop)).toBe(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
 });
 test("operational workspace copy follows the 14px body type floor", async ({ page }) => {
   for (const route of ["#dashboard", "#content", "#instant", "#setup", "#publishing"]) {
@@ -783,6 +785,26 @@ test("operations retry sends an actionable failed job back to the durable queue"
   await expect(page.getByRole("status")).toContainText("İş güvenli tekrar deneme kuyruğuna alındı.");
 });
 
+test("provider waits expose only their typed safe action", async ({ page }) => {
+  await page.goto("?state=codex-provider-waits#operations");
+
+  const authWait = page.getByRole("article").filter({ hasText: "Codex auth wait" });
+  await expect(authWait.getByRole("button", { name: /Codex.*bağla/u })).toBeVisible();
+  await expect(authWait.getByRole("button", { name: "Tekrar dene" })).toHaveCount(0);
+
+  const rateWait = page.getByRole("article").filter({ hasText: "Codex rate wait" });
+  await expect(rateWait.getByRole("button", { name: "Tekrar dene" })).toBeVisible();
+  await rateWait.getByRole("button", { name: "Tekrar dene" }).click();
+  await expect(page.getByRole("status")).toContainText("İş güvenli tekrar deneme kuyruğuna alındı.");
+
+  const paidDisabled = page.getByRole("article").filter({ hasText: "Paid fallback disabled" });
+  await expect(paidDisabled.getByRole("button", { name: "Tekrar dene" })).toHaveCount(0);
+  await expect(paidDisabled.getByRole("button", { name: /Codex.*bağla/u })).toHaveCount(0);
+
+  await authWait.getByRole("button", { name: /Codex.*bağla/u }).click();
+  await expect(page).toHaveURL(/#setup(?:-guide)?$/u);
+});
+
 test("manual-retry jobs explain why automatic retry is unavailable", async ({ page }) => {
   await page.goto("?state=manual-retry-required#operations");
 
@@ -865,7 +887,7 @@ test("review queue count never overlaps its heading at constrained desktop width
   await page.setViewportSize({ width: 960, height: 680 });
   await page.goto("#editorial-review");
   const layout = await page.getByRole("complementary", { name: "İnceleme kuyruğu" }).evaluate((queue) => {
-    const heading = queue.querySelector("header h1");
+    const heading = queue.querySelector("header .review-queue-title");
     const count = queue.querySelector("header > span");
     if (!(heading instanceof HTMLElement) || !(count instanceof HTMLElement)) return null;
     const headingRect = heading.getBoundingClientRect();
@@ -1000,6 +1022,23 @@ test("idempotent source replay updates the existing catalog row instead of dupli
   await page.getByRole("button", { name: "Tümünü izlemeye al" }).click();
 
   await expect(page.getByRole("article", { name: "Proje duyuruları (örnek) kaynak durumu" })).toHaveCount(1);
+});
+
+test("backup setup generates a non-persisted 192-bit recovery key", async ({ page }) => {
+  await page.goto("#setup");
+  await page.getByRole("button", { name: /Yedekleme ve kurtarma/u }).click();
+
+  const recoveryKey = page.locator("#backup-create-recovery-key");
+  await expect(recoveryKey).toHaveAttribute("type", "password");
+  await page.locator("#backup-generate-recovery-key").click();
+  await expect(recoveryKey).toHaveValue(/^[a-f0-9]{48}$/u);
+  await expect(recoveryKey).toHaveAttribute("type", "text");
+  await expect(page.getByRole("status").filter({ hasText: "192 bit rastgele" })).toBeVisible();
+
+  await page.reload();
+  await page.getByRole("button", { name: /Yedekleme ve kurtarma/u }).click();
+  await expect(recoveryKey).toHaveValue("");
+  await expect(recoveryKey).toHaveAttribute("type", "password");
 });
 
 test("backup setup guides the user through picker-backed create, verify, preview, and confirmed new-folder restore", async ({ page }) => {
@@ -1764,7 +1803,7 @@ test("setup exposes the read-only GitHub broker status before external authoriza
   const status = github.getByRole("button", { name: "GitHub bağlantı durumunu kontrol et" });
   await expect(status).toBeEnabled();
   await status.click();
-  await expect(github.getByRole("status")).toContainText("Demo GitHub bağlantısı hazır.");
+  await expect(github.getByRole("status")).toContainText("Demo GitHub App bağlantısı hazır.");
 });
 
 test("local project setup explains when the safe process status cannot be checked", async ({ page }) => {
@@ -1834,10 +1873,10 @@ test("unconfigured GitHub broker never offers a misleading login action", async 
   await page.goto("?state=github-unconfigured#setup");
   await page.getByRole("button", { name: /Yayın bağlantısı/u }).click();
   await page.getByRole("radio", { name: /Yayındaki siteye gönder/u }).click();
-  await page.getByRole("textbox", { name: "GitHub OAuth istemci kimliği (gerekli)" }).fill("public-client-id");
+  await page.getByRole("textbox", { name: "GitHub App istemci kimliği (gerekli)" }).fill("public-client-id");
 
   await expect(page.getByRole("button", { name: "GitHub girişini başlat" })).toHaveCount(0);
-  await expect(page.getByText("GitHub App broker bu uygulama paketinde yapılandırılmadı; gerçek giriş ve yayın kapalı tutuluyor.")).toBeVisible();
+  await expect(page.getByText("GitHub App istemci kimliği ve hedef depo kaydedilmedi; gerçek giriş ve yayın kapalı tutuluyor.")).toBeVisible();
 });
 
 test("about panel shows the project signature and keeps update checks explicit", async ({ page }) => {
@@ -1848,6 +1887,7 @@ test("about panel shows the project signature and keeps update checks explicit",
   await about.click();
   await expect(about).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByText("@ucsahinn")).toBeVisible();
+  await expect(page.getByText(/Sabitlenmiş Windows yayıncı imzası/u)).toBeVisible();
   const projectPage = page.getByRole("link", { name: "GitHub’da projeyi görüntüle" });
   await expect(projectPage).toBeVisible();
   await projectPage.click();
@@ -1941,4 +1981,107 @@ test("mobile About opens above the fixed utility navigation without overflow", a
   expect(box!.y).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(390);
   expect(box!.y + box!.height).toBeLessThanOrEqual(844);
+});
+
+test("Boby closes with Escape and returns focus to the launcher", async ({ page }) => {
+  await page.goto("#dashboard");
+  const launcher = page.getByRole("button", { name: "Editör Boby'yi aç" });
+  await launcher.focus();
+  await launcher.press("Enter");
+
+  const dialog = page.getByRole("dialog", { name: "Editör Boby" });
+  const question = dialog.getByRole("textbox", { name: "Boby'ye sor" });
+  await expect(question).toBeFocused();
+  await question.press("Escape");
+
+  await expect(dialog).toHaveCount(0);
+  await expect(launcher).toBeFocused();
+});
+
+test("offline dashboard never presents configured automation as operational success", async ({ page }) => {
+  await page.goto("?state=offline#dashboard");
+
+  const status = page.locator(".status-strip");
+  await expect(status.locator(".status-primary")).toContainText("Yayın modu yapılandırıldı");
+  await expect(status.locator(".status-primary")).toContainText("Yerel motor bağlanınca");
+  await expect(status).not.toContainText("Onaylı yayın etkin");
+  await expect(status.locator(".compact-status").filter({ hasText: "YAZI ÜRETİMİ" })).toContainText("Bağlantı bekleniyor");
+});
+
+test("degraded runtime disables only the unavailable capability", async ({ page }) => {
+  await page.goto("?state=degraded#dashboard");
+  await expect(page.getByText("Bazı özellikler bekliyor", { exact: true })).toBeVisible();
+  await expect(page.locator(".compact-status").filter({ hasText: "YAZI ÜRETİMİ" })).toContainText("Kullanılamıyor");
+
+  await page.goto("?state=degraded#content");
+  await page.getByRole("textbox", { name: "Kaynak adresi" }).fill("https://example.net/feed.xml");
+  await expect(page.getByRole("button", { name: "Adresi kontrol et" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Tümünü tara" })).toBeDisabled();
+});
+
+test("embedded editorial review exposes one page heading and ordered section headings", async ({ page }) => {
+  await page.goto("#editorial-review");
+
+  await expect(page.locator("#main-workspace h1")).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Yayın kuyruğu", level: 2 })).toBeVisible();
+  const previews = page.locator("article.article-preview");
+  await expect(previews).toHaveCount(2);
+  await expect(previews.nth(0).getByRole("heading", { level: 3 })).toHaveCount(1);
+  await expect(previews.nth(1).getByRole("heading", { level: 3 })).toHaveCount(1);
+});
+
+test("desktop navigation and readiness stay inside short viewports", async ({ page }) => {
+  for (const viewport of [
+    { width: 1366, height: 768 },
+    { width: 960, height: 680 }
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto("#dashboard");
+
+    const bounds = await page.locator(".sidebar").evaluate((sidebar) => {
+      const rail = sidebar.getBoundingClientRect();
+      const readiness = sidebar.querySelector(".connection-card")?.getBoundingClientRect();
+      return {
+        railTop: rail.top,
+        railBottom: rail.bottom,
+        readinessTop: readiness?.top ?? -1,
+        readinessBottom: readiness?.bottom ?? -1
+      };
+    });
+    expect(bounds.railTop).toBeGreaterThanOrEqual(0);
+    expect(bounds.railBottom).toBeLessThanOrEqual(viewport.height);
+    expect(bounds.readinessTop).toBeGreaterThanOrEqual(0);
+    expect(bounds.readinessBottom).toBeLessThanOrEqual(viewport.height);
+  }
+});
+
+test("200 percent zoom equivalent keeps the bottom rail compact and clear of focused content", async ({ page }) => {
+  await page.setViewportSize({ width: 683, height: 384 });
+  await page.goto("#dashboard");
+
+  const rail = page.locator(".sidebar");
+  const details = page.getByRole("button", { name: "Ayrıntılar" });
+  await details.focus();
+  await details.evaluate((element) => element.scrollIntoView({ block: "nearest" }));
+  const [railBox, detailsBox] = await Promise.all([rail.boundingBox(), details.boundingBox()]);
+  expect(railBox).not.toBeNull();
+  expect(detailsBox).not.toBeNull();
+  expect(railBox!.height).toBeLessThanOrEqual(72);
+  expect(detailsBox!.y + detailsBox!.height).toBeLessThanOrEqual(railBox!.y - 3);
+});
+
+test("reduced motion leaves route content stable without running animations", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("#dashboard");
+  await page.getByRole("button", { name: "İçerik Akışı" }).click();
+  await expect(page.getByRole("heading", { name: "Kaynaklardan yayın fikrine tek çalışma alanı" })).toBeVisible();
+
+  const motion = await page.evaluate(() => ({
+    mediaMatches: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    running: document.getAnimations().filter((animation) => animation.playState === "running").length,
+    pageAnimationDuration: window.getComputedStyle(document.querySelector(".page")!).animationDuration
+  }));
+  expect(motion.mediaMatches).toBe(true);
+  expect(motion.running).toBe(0);
+  expect(Number.parseFloat(motion.pageAnimationDuration)).toBeLessThanOrEqual(0.001);
 });

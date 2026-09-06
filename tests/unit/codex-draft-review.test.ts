@@ -132,6 +132,28 @@ test("standard drafts keep a quality floor even when one selected source is brie
   assert.equal(requirements.enMinimumWords, 595);
 });
 
+test("draft schemas keep locale-specific early length floors while local validation counts words", async () => {
+  const task = await createDraftCodexTaskResolver().resolve({
+    jobId: "r:schema-word-floor",
+    idempotencyKey: "schema-word-floor",
+    definitionId: "DRAFT.CREATE",
+    payload: { articleType: "news" },
+    state: "RUNNING",
+    version: 1
+  });
+  const schema = task.outputSchema as {
+    properties?: {
+      tr?: { properties?: { bodyMarkdown?: { minLength?: unknown } } };
+      en?: { properties?: { bodyMarkdown?: { minLength?: unknown } } };
+    };
+  };
+  const trMinimumCharacters = schema.properties?.tr?.properties?.bodyMarkdown?.minLength;
+  const enMinimumCharacters = schema.properties?.en?.properties?.bodyMarkdown?.minLength;
+  assert.equal(trMinimumCharacters, 2_100);
+  assert.equal(enMinimumCharacters, 1_785);
+  assert.match(String((task.input as { policy?: unknown }).policy), /hard output floors override/u);
+});
+
 test("draft tasks reject a teaser when the selected evidence supports a full standard article", async () => {
   const resolver = createDraftCodexTaskResolver();
   const task = await resolver.resolve({
@@ -821,4 +843,12 @@ test("a captured base SHA is what makes a PUBLISH target approvable", () => {
   );
   assert.equal(withBaseSha.targetBaseSha, "a".repeat(40));
   assert.equal(withBaseSha.targetRepository, "owner/site");
+  assert.throws(
+    () => finalizeReviewedRevision(revision, publishReview, {
+      ...target,
+      baseSha: "a".repeat(40),
+      deployWorkflow: "a..yml"
+    }),
+    /PUBLICATION_POLICY_UNAVAILABLE/u
+  );
 });

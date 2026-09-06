@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted — 2026-08-12
+Partially superseded — accepted 2026-08-12; updater decision superseded by ADR
+0007 on 2026-09-03. The same-profile DPAPI recovery boundary remains active.
 
 ## Context
 
