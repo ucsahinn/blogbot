@@ -45,24 +45,22 @@ jobs:
               const localdata = join(fixture, 'AppData', 'Local');
               await mkdir(appdata, { recursive: true });
               await mkdir(localdata, { recursive: true });
-              for (const [name, extra] of [
-                ['minimal', {}],
-                ['closed-stdin', {}],
-                ['complete-isolated-environment', { USERPROFILE: fixture, APPDATA: appdata, LOCALAPPDATA: localdata,
-                  ComSpec: join(system, 'System32', 'cmd.exe'), PATH: join(system, 'System32') }]
+              for (const [name, environment] of [
+                ['inherited-environment', undefined],
+                ['minimal-measured-startup', base]
               ]) {
                 const started = Date.now();
                 await new Promise(resolve => {
                   const child = execFile(join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
                   ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "Write-Output 'SHELL_READY'"],
-                  { cwd: fixture, env: { ...base, ...extra }, timeout: 15000, windowsHide: true },
+                  { cwd: fixture, env: environment, timeout: 60000, windowsHide: true },
                   (error, stdout) => {
                     console.log(JSON.stringify({ name, elapsedMs: Date.now() - started,
                       ready: stdout.trim() === 'SHELL_READY', code: error?.code ?? 0,
                       killed: error?.killed ?? false, signal: error?.signal ?? null }));
                     resolve();
                   });
-                  if (name === 'closed-stdin') child.stdin.end();
+                  child.stdin.end();
                 });
               }
             } finally {
