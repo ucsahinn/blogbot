@@ -13,6 +13,60 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-release-scripts:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      - name: Exercise Windows release scripts before packaging
+        run: node --test --experimental-transform-types --test-name-pattern="release payload verifier accepts|release signs|explicit unsigned payload|release payload verification preserves" tests/unit/packaging-readiness.test.ts tests/unit/release-scripts.test.ts
+      - name: Diagnose isolated PowerShell startup
+        if: ${{ failure() }}
+        shell: pwsh
+        run: |
+          @'
+          const { execFile } = require('node:child_process');
+          const { mkdtemp, mkdir, rm } = require('node:fs/promises');
+          const { tmpdir } = require('node:os');
+          const { join } = require('node:path');
+          (async () => {
+            const fixture = await mkdtemp(join(tmpdir(), 'blogbot-shell-probe-'));
+            try {
+              const system = process.env.SystemRoot || 'C:\\Windows';
+              const base = { SystemRoot: system, WINDIR: system, TEMP: fixture, TMP: fixture };
+              const appdata = join(fixture, 'AppData', 'Roaming');
+              const localdata = join(fixture, 'AppData', 'Local');
+              await mkdir(appdata, { recursive: true });
+              await mkdir(localdata, { recursive: true });
+              for (const [name, extra] of [
+                ['minimal', {}],
+                ['isolated-profile', { USERPROFILE: fixture, APPDATA: appdata, LOCALAPPDATA: localdata }],
+                ['system-shell', { ComSpec: join(system, 'System32', 'cmd.exe'), PATH: join(system, 'System32') }]
+              ]) {
+                const started = Date.now();
+                await new Promise(resolve => execFile(join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+                  ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "Write-Output 'SHELL_READY'"],
+                  { cwd: fixture, env: { ...base, ...extra }, timeout: 15000, windowsHide: true },
+                  (error, stdout) => {
+                    console.log(JSON.stringify({ name, elapsedMs: Date.now() - started,
+                      ready: stdout.trim() === 'SHELL_READY', code: error?.code ?? 0,
+                      killed: error?.killed ?? false, signal: error?.signal ?? null }));
+                    resolve();
+                  }));
+              }
+            } finally {
+              await rm(fixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            }
+          })().catch(() => { console.error('SHELL_PROBE_FAILED'); process.exitCode = 1; });
+          '@ | node
+
   node:
     runs-on: ubuntu-latest
     steps:
