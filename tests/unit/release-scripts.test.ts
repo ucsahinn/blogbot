@@ -22,8 +22,9 @@ async function runPowerShell(script: string, cwd: string, env: Record<string, st
   ], { cwd, env: { ...safeEnvironment, ...env }, timeout: 15_000, windowsHide: true }).catch((error: { stderr?: string; code?: string | number }) => {
     const stderr = error.stderr?.replaceAll(/_x000[DA]_/gu, "\n") ?? "";
     const errorId = stderr.match(/FullyQualifiedErrorId\s*:\s*([A-Za-z0-9_.,-]+)/u)?.[1] ?? "UNKNOWN_ERROR_ID";
+    const missingCommand = stderr.match(/ObjectNotFound:\s*\(([A-Za-z][A-Za-z0-9-]*):String\)/u)?.[1] ?? "UNKNOWN_COMMAND";
     throw new Error(stderr.match(/(?:RELEASE|STANDALONE|AUTHENTICODE)_[A-Z0-9_]+/u)?.[0]
-      ?? `POWERSHELL_FIXTURE_FAILED: ${error.code}; ${errorId}`);
+      ?? `POWERSHELL_FIXTURE_FAILED: ${error.code}; ${errorId}; ${missingCommand}`);
   });
 }
 
