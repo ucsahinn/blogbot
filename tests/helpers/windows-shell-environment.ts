@@ -22,6 +22,7 @@ export function windowsShellEnvironment(source: NodeJS.ProcessEnv = process.env)
     // These fixtures launch Windows PowerShell 5.1, not the parent CI pwsh.
     // Core's module path can hide 5.1 script commands such as Get-FileHash.
     PSModulePath: win32.join(source.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "Modules"),
+    PSModuleAnalysisCachePath: "NUL",
     TEMP: tmpdir(),
     TMP: tmpdir()
   };

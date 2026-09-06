@@ -19,5 +19,6 @@ test("Windows shell fixtures retain OS startup context without inheriting applic
   assert.equal(environment.PATH, "C:\\Windows\\System32");
   assert.equal(environment.PSModulePath, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules");
   assert.equal(environment.ComSpec, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(environment.PSModuleAnalysisCachePath, "NUL");
   assert.equal(Object.values(environment).includes("synthetic-must-not-pass"), false);
 });
