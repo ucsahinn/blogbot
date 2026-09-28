@@ -34,7 +34,6 @@
     "native:lint": "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings",
     "check:all": "npm run test:all && npm run lint && npm run typecheck && npm run build && npm run build:engine && npm run smoke:engine && npm run smoke:fetcher && npm run security:verify && npm run native:test && npm run native:lint",
     "icons:generate": "node --experimental-transform-types scripts/generate-desktop-icons.ts",
-    "pilot:report": "node --experimental-transform-types scripts/pilot-report.ts",
     "token:audit": "node scripts/token-audit.mjs",
     "test:browser": "playwright test",
     "smoke:native-webview": "node scripts/native-webview-smoke.mjs"
