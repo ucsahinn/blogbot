@@ -24,6 +24,9 @@ the source-only stage before release authorization.
 
 ## 0.1.56 cycle — opened 2026-09-28
 
+OPE **v0.1.56 is published** from `f92cc8c`; see the
+[0.1.56 release closure](unsigned-release-closure-20260928.md).
+
 The operator asked to collect every remaining item, run and visually verify the
 application, fix the remaining defects and deliver an unsigned v0.1.56. The live
 task board for this cycle is

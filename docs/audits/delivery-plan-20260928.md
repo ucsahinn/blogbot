@@ -135,7 +135,7 @@ CI kendi derlemesini yapar):
 
 Beş dosyalık payload doğrulaması (`verify-release-payload.ps1`) CI'ın ürettiği
 `latest.json` ve SPDX SBOM'u gerektirir; yayımlanan payload üzerinde koşulacak.
-| Push, Verify CI, Release workflow | TODO |
-| Yayımlanan payload hash doğrulaması | TODO |
-| Bu makinede kurulum | TODO |
+| Push, Verify CI, Release workflow | DONE — `f92cc8c`; Verify 36470168204 ve Release 36475756901 başarılı |
+| Yayımlanan payload hash doğrulaması | DONE — 4/4 varlık GitHub digest'iyle eşleşiyor; provenance ve SBOM attestation doğrulandı; ayrıntı: [kapanış raporu](unsigned-release-closure-20260928.md) |
+| Bu makinede 0.1.55 → 0.1.56 kurulum | TODO — ayrı onay bekliyor |
 | Blogbot 0.1.30 kaydını güvenli kaldırma (veri klasörünü paylaşıyor) | DONE — kaldırıcı çalıştırılmadı; eski ikililer, iki kısayol ve kayıt girdisi `C:\Users\ulasc\OPE-profile-backup-20260928\blogbot-0.1.30-quarantine` altına alındı; `data`, `secrets`, `diagnostics`, `logs` yerinde |
