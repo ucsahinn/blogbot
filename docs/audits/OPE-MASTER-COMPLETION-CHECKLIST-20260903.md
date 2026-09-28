@@ -44,8 +44,9 @@ markers exist in apps, packages, scripts or tests):
 
 | Finding | Decision |
 | --- | --- |
-| Codex usage role `.expect` in the dashboard projection can panic | Fix with regression test |
+| Codex usage role `.expect` in the dashboard projection | No change: roles are built from three literal JSON objects, so the invariant holds |
 | Autostart rollback result dropped after an engine settings failure | Fix with regression test |
+| rustls 0.23.43 advisory RUSTSEC-2026-0285 found by the baseline audit | Patch update to 0.23.45 |
 | Backup-verification record write failure dropped silently | Fix (log) |
 | Scheduler drops a due revision whose record is missing without a skip record | Fix with regression test |
 | Engine silently falls back to in-process fetch without `BLOGBOT_FETCHER_BIN` | Fix: report the transport in doctor |

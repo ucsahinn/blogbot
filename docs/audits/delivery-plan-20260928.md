@@ -42,7 +42,13 @@ Durum anahtarı: `TODO`, `DOING`, `DONE`, `BLOCKED`, `OUT_OF_SCOPE`.
 
 | Kalem | Durum | Kanıt |
 | --- | --- | --- |
-| Tam doğrulama merdiveni, düzeltme yapmadan | DOING | `build/verification/0.1.56/phase0/STATUS.txt` |
+| Tam doğrulama merdiveni, düzeltme yapmadan | DONE | `build/verification/0.1.56/phase0/SUMMARY.md` |
+
+Ölçülen sonuç: unit 489/489, app 171/171, tarayıcı 155/155, native WebView
+11 rota, soak ön kontrolü 1/1, lint/typecheck/build/smoke yeşil. Entegrasyon
+grubunda 2 dosya ve Rust testleri ilk koşuda düştü; ikisi de makinedeki bellek
+baskısı ve `target/` dosya kilidi kaynaklıydı ve yalnız koşulunca 36/36 ile
+255/255 geçti. Tek gerçek bulgu: `rustls` 0.23.43 için RUSTSEC-2026-0285.
 
 ### Faz 1 — doküman uzlaştırma
 
@@ -57,36 +63,59 @@ Durum anahtarı: `TODO`, `DOING`, `DONE`, `BLOCKED`, `OUT_OF_SCOPE`.
 | AGENTS/threat-model/deploy dokümanında site-nötr hosting ifadesi | DONE |
 | GitHub App araştırma JSON'undaki bayat boşluk | DONE |
 | Master kontrol listesine 0.1.56 bölümü ve triyaj | DONE |
-| Temizlik: `artifacts/*.patch`, eski temp kökleri, bayat gitleaks raporu | TODO |
+| Temizlik: 128 `artifacts/*.patch` ve bayat gitleaks raporu silindi; eski `blogbot-*` temp kökleri zaten yoktu | DONE |
 
 ### Faz 2 — kod düzeltmeleri
 
 | Kalem | Durum |
 | --- | --- |
-| Ölü kod ve eski token yardımcıları | TODO |
-| `pilot:report` kaldırma | TODO |
-| Codex usage role paniği | TODO |
-| Autostart rollback hatası | TODO |
-| Backup-verification kaydı hatası | TODO |
-| Eksik revizyon için scheduler atlama kaydı | TODO |
-| Fetch transport'unun doctor'da görünmesi | TODO |
-| Baseline'da çıkan hatalar | TODO |
+| Ölü kod ve eski token yardımcıları | DONE |
+| `pilot:report` kaldırma | DONE |
+| Codex usage role `expect` | DONE — değişiklik gerekmez: roller üç sabit JSON nesnesinden kurulur |
+| Autostart rollback hatası tanılama günlüğüne | DONE |
+| Backup-verification kaydı hatası tanılama günlüğüne | DONE |
+| Eksik revizyon için scheduler atlama kaydı | DONE |
+| Fetch transport'unun doctor'da görünmesi | DONE |
+| Baseline bulgusu: `rustls` 0.23.45'e yükseltme | DONE |
+| Paketli engine smoke'u fetcher sidecar'ı zorunlu kılsın | DONE |
+| Sidecar ortamının test anahtarı tetikleyicilerini devralmadığı açık test | DONE |
+| Faz 2 kapanışı: `check:all` + tarayıcı testleri | DONE |
+
+Faz 2 kapanış ölçümü: tarayıcı 155/155; `check:all` ilk koşuda yük altındaki
+iki zaman aşımıyla düştü (migration çocuk süreci ve kuyruk testi 45 sn sınırı).
+İki dosya yalnız başına 11/11, tüm entegrasyon grubu 246 geçti + 4 canlı
+sağlayıcı atlaması; lint, typecheck, build, engine derleme, iki smoke, güvenlik
+ve 257 Rust testi yeşil.
 
 ### Faz 3 — görsel doğrulama
 
 | Kalem | Durum |
 | --- | --- |
-| Native smoke, geçici profil | TODO |
-| qa.html hata durumları ekran görüntüleri | TODO |
-| Gerçek profil yedeği ve salt-okunur gezinti | TODO |
+| qa.html: 11 rota × 2 boyut + 17 hata durumu, sayfa hatası ve yatay taşma yok | DONE |
+| İlk başlangıç adım rozetleri Türkçe başlıkları örtüyordu (ğ, ç) | DONE — düzeltildi, test eklendi |
+| Çevrimdışı genel bakış "kontrol altında" diyordu | DONE — düzeltildi, test eklendi |
+| Kısa pencerelerde hazırlık kartı "Hakkında"yı örtüyordu | DONE — sıkı kenar çubuğu, test eklendi |
+| "Hakkında" imzasız derlemede sabit yayıncı imzası iddia ediyordu | DONE — düzeltildi, test eklendi |
+| Takvim metninde iç kod `NEXT_SLOT`; aday toplu çubuğunda boşluk yok | DONE — düzeltildi, test eklendi |
+| Tüm rota/durum/sekmelerde görünen iç kod taraması (17 durum × 11 rota, tüm sekmeler) | DONE — `NEXT_SLOT` sonrası bulgu yok |
+| Native smoke, geçici profil, yeni exe, 1280×800 | DONE — PASS, 11 rota görüntüsü |
+| Gerçek profil yedeği (repo dışında, `C:\Users\ulasc\OPE-profile-backup-20260928`) | DONE |
+| Gerçek profil salt-okunur durum özeti (kurulu 0.1.55 ile) | DONE — PASS; motor/PGlite/Codex sağlıklı, 11 rota, 0 hata |
+
+Risk kaydı: OPE'nin gerçek veritabanı `%LOCALAPPDATA%\Blogbot\data`
+altında; bu klasör eski "Blogbot 0.1.30" kurulumunun kurulum klasörüdür.
+0.1.30 kaldırıcısı çalıştırılırsa gerçek veri silinebilir. Kaldırma adımı
+operatör kararına bırakıldı; kaldırıcı çalıştırılmadı.
 
 ### Faz 4 — kapsam içi dış kapılar
 
 | Kalem | Durum |
 | --- | --- |
-| Gerçek Codex taslak + Boby | TODO |
+| Gerçek Codex taslak + Boby | BLOCKED — hesap kotası: gerçek yanıt `WAITING_CODEX`/`USAGE_LIMIT`; kota yenilenince yeniden koşulacak |
+| Gerçek kota sinyalinin tipli bekleme durumuna eşlenmesi (PROV-01 kanıtı) | DONE — `build/verification/0.1.56/phase4/live-boby-waiting-reason.json` |
 | GitHub App kaydı (operatör) | TODO |
-| Fixture Astro deposu ve yayın provası | TODO |
+| Fixture deposu `ucsahinn/ope-acceptance-fixture` (public, sentetik), squash-only, sıkı `build` korumalı `main` | DONE — deploy workflow elle tetiklenip build başarılı |
+| Yayın provası (PR → check → merge → dispatch → ref temizliği) | TODO — GitHub App kaydı bekleniyor |
 | `DATA-01` aynı profilde ayrı dizine restore | TODO |
 
 ### Faz 5 — sürüm
@@ -97,4 +126,5 @@ Durum anahtarı: `TODO`, `DOING`, `DONE`, `BLOCKED`, `OUT_OF_SCOPE`.
 | Yerel installer ve payload doğrulaması | TODO |
 | Push, Verify CI, Release workflow | TODO |
 | Yayımlanan payload hash doğrulaması | TODO |
-| Bu makinede kurulum ve Blogbot 0.1.30 kaldırma | TODO |
+| Bu makinede kurulum | TODO |
+| Blogbot 0.1.30 kaydını güvenli kaldırma (veri klasörünü paylaşıyor) | BLOCKED — operatör kararı |
