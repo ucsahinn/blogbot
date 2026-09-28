@@ -13,6 +13,14 @@ const executable = join(
   "binaries",
   "blogbot-engine-x86_64-pc-windows-msvc.exe"
 );
+const fetcherExecutable = join(
+  root,
+  "apps",
+  "desktop",
+  "src-tauri",
+  "binaries",
+  "blogbot-fetcher-x86_64-pc-windows-msvc.exe"
+);
 const assets = join(
   root,
   "apps",
@@ -55,6 +63,9 @@ try {
       LOCALAPPDATA: localAppData,
       BLOGBOT_PGLITE_ASSETS: assets,
       BLOGBOT_ENGINE_MODULES: engineModules,
+      // Mirrors the desktop bridge: the packaged engine reads sources only
+      // through the isolated fetcher sidecar. Doctor does not spawn it.
+      BLOGBOT_FETCHER_BIN: fetcherExecutable,
       BLOGBOT_DATA_KEY_HEX:
         "8e51c4f05c864820531146e549d2c2e1f865d5e639ccf0cff8d496c214b2387c"
     },
@@ -102,7 +113,8 @@ try {
     response.id !== "sea-doctor" ||
     response.status !== "READY" ||
     response.persistence !== "pglite" ||
-    response.queue !== "ready"
+    response.queue !== "ready" ||
+    response.sourceTransport !== "sidecar"
   ) {
     throw new Error(`Unexpected engine doctor response: ${stdout.trim()}`);
   }

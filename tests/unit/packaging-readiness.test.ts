@@ -91,6 +91,10 @@ test("engine sidecar packaging externalizes Sharp and gives only the bundled run
   assert.match(buildScript, /engine-node_modules/u);
   assert.match(buildScript, /sharp-win32-x64/u);
   assert.match(smokeScript, /BLOGBOT_ENGINE_MODULES/u);
+  // The packaged engine must read sources through the isolated fetcher, as
+  // the desktop bridge configures it, not through its in-process fallback.
+  assert.match(smokeScript, /BLOGBOT_FETCHER_BIN/u);
+  assert.match(smokeScript, /sourceTransport\s*!==\s*"sidecar"/u);
   assert.match(visualSource, /createRequire/u);
   assert.match(visualSource, /BLOGBOT_ENGINE_MODULES/u);
 });
