@@ -1687,6 +1687,14 @@ mod tests {
             .iter()
             .any(|(key, _)| *key == "BLOGBOT_IMAGEGEN_MODEL"));
         assert!(!environment.iter().any(|(key, _)| *key == "USERPROFILE"));
+
+        // A parent test runner must never make the packaged engine fall back to
+        // its fixed test data key or inherit Node options.
+        let inherited = sidecar_environment_with(|key| match key {
+            "NODE_TEST_CONTEXT" | "NODE_OPTIONS" | "BLOGBOT_DATA_KEY_HEX" => Some("parent".into()),
+            _ => None,
+        });
+        assert!(inherited.is_empty());
     }
 
     #[test]
