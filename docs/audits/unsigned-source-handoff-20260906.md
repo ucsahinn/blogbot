@@ -1,5 +1,10 @@
 # Unsigned source handoff — 2026-09-06
 
+Historical source-only handoff. The subsequent authorized v0.1.55 publication
+and current remaining acceptance work are recorded in the
+[release closure](unsigned-release-closure-20260908.md). The boundaries below
+describe this earlier stage, not the later release authorization.
+
 Status: PASS_LOCAL for the current source handoff. External acceptance is
 deferred by the operator, not passed. This is not an installer or release report.
 

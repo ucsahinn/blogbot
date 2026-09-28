@@ -1,16 +1,26 @@
 # OPE master completion checklist — 2026-09-03
 
-## Current scope decision — 2026-09-06
+## Current scope decision — revalidated 2026-09-08
 
-The operator selected unsigned/manual delivery, authorized commit and push of
-the finalized source, and deferred signing and the remaining external acceptance
-work. [ADR 0009](../adr/0009-unsigned-manual-delivery.md) is authoritative for this
-delivery scope. The historical full-acceptance ledger below is preserved; its
-open external gates do not block ordinary source completion and must not be
-reported as passing tests. The interrupted 24-hour soak remains unaccepted.
-No release, publish, deploy, version bump or installer regeneration is included.
-Final source checks and handoff are recorded in
-[the unsigned source handoff](unsigned-source-handoff-20260906.md).
+The operator selected unsigned/manual delivery and subsequently authorized the
+version bump, commit, push, installer build and GitHub Release publication.
+OPE **v0.1.55 is published**, from commit
+`6d05db5be96431ed5a016af4cfca81079b99c359`. Release and source CI both passed.
+[The release closure and remaining acceptance checklist](unsigned-release-closure-20260908.md)
+records the authoritative current delivery status and evidence.
+
+[ADR 0009](../adr/0009-unsigned-manual-delivery.md) remains authoritative:
+Windows signing and automatic update installation are outside this delivery
+scope, not mandatory unfinished release work. The interrupted 24-hour soak and
+the remaining clean-machine, real-profile and external acceptance gates remain
+unaccepted. Publication does not make those tests pass.
+
+Everything below is a historical pre-release ledger. Its statements about
+v0.1.54, missing release authority, absent artifacts and future version selection
+are superseded by the closure report above, not current blockers. Preserve its
+original observations and test counts as historical evidence. The earlier
+[unsigned source handoff](unsigned-source-handoff-20260906.md) likewise records
+the source-only stage before release authorization.
 
 ## Historical full-acceptance ledger
 
