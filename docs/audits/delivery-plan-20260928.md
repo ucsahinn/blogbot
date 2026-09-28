@@ -113,18 +113,29 @@ operatör kararına bırakıldı; kaldırıcı çalıştırılmadı.
 | --- | --- |
 | Gerçek Codex taslak + Boby | BLOCKED — hesap kotası: gerçek yanıt `WAITING_CODEX`/`USAGE_LIMIT`; kota yenilenince yeniden koşulacak |
 | Gerçek kota sinyalinin tipli bekleme durumuna eşlenmesi (PROV-01 kanıtı) | DONE — `build/verification/0.1.56/phase4/live-boby-waiting-reason.json` |
-| GitHub App kaydı (operatör) | TODO |
+| GitHub App kaydı (operatör) | BLOCKED — operatör henüz kaydetmedi; kayıt bağlantısı ve adımlar hazır |
 | Fixture deposu `ucsahinn/ope-acceptance-fixture` (public, sentetik), squash-only, sıkı `build` korumalı `main` | DONE — deploy workflow elle tetiklenip build başarılı |
 | Yayın provası (PR → check → merge → dispatch → ref temizliği) | TODO — GitHub App kaydı bekleniyor |
-| `DATA-01` aynı profilde ayrı dizine restore | TODO |
+| `DATA-01` aynı profilde ayrı dizine restore | OUT_OF_SCOPE — operatör kararı 2026-09-28; sentetik backup/restore testleri yeşil |
 
 ### Faz 5 — sürüm
 
 | Kalem | Durum |
 | --- | --- |
-| Beş yerde sürüm 0.1.56 ve `docs/releases/OPE-0.1.56.md` | TODO |
-| Yerel installer ve payload doğrulaması | TODO |
+| Beş yerde sürüm 0.1.56 ve `docs/releases/OPE-0.1.56.md` | DONE — unit 491/491, app 171/171, cargo check |
+| Yerel installer ve artifact ön kontrolü | DONE — `build:desktop` ve `desktop:preflight --artifacts-dir` geçti |
+
+Yerel imzasız installer'lar (yayımlanan dosyalarla aynı olmaları beklenmez;
+CI kendi derlemesini yapar):
+
+| Dosya | Bayt | SHA-256 |
+| --- | ---: | --- |
+| `OPE_0.1.56_x64-setup.exe` | 62838560 | `cc0a80253db0e732d576a38dff36cf86386764e06044907b61650b38ba410473` |
+| `OPE_0.1.56_x64_en-US.msi` | 91232222 | `8cd163efbfd2558b2d3018924ad18f10412adf2bb3ecee65b520eae0a061c96e` |
+
+Beş dosyalık payload doğrulaması (`verify-release-payload.ps1`) CI'ın ürettiği
+`latest.json` ve SPDX SBOM'u gerektirir; yayımlanan payload üzerinde koşulacak.
 | Push, Verify CI, Release workflow | TODO |
 | Yayımlanan payload hash doğrulaması | TODO |
 | Bu makinede kurulum | TODO |
-| Blogbot 0.1.30 kaydını güvenli kaldırma (veri klasörünü paylaşıyor) | BLOCKED — operatör kararı |
+| Blogbot 0.1.30 kaydını güvenli kaldırma (veri klasörünü paylaşıyor) | DONE — kaldırıcı çalıştırılmadı; eski ikililer, iki kısayol ve kayıt girdisi `C:\Users\ulasc\OPE-profile-backup-20260928\blogbot-0.1.30-quarantine` altına alındı; `data`, `secrets`, `diagnostics`, `logs` yerinde |
