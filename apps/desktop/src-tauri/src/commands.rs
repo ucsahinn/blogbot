@@ -30,11 +30,8 @@ fn configure_hidden_command(command: &mut Command) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-// The engine handshake will construct online/degraded states.
-#[allow(dead_code)]
 pub enum RuntimeMode {
     Online,
-    Degraded,
     OfflineReadOnly,
 }
 
@@ -232,8 +229,6 @@ impl Drop for DesktopState {
 pub enum CommandError {
     #[error("OFFLINE_READ_ONLY: encrypted offline cache cannot be mutated")]
     OfflineReadOnly,
-    #[error("ENGINE_DEGRADED: local engine is not ready for mutations")]
-    ConnectionNotAuthenticated,
     #[error("ENGINE_UNAVAILABLE: {0}")]
     EngineUnavailable(String),
     #[error("INVALID_INPUT: {0}")]
@@ -274,7 +269,6 @@ fn write_lock<T>(lock: &RwLock<T>) -> Result<std::sync::RwLockWriteGuard<'_, T>,
 fn ensure_mutation_allowed(state: &DesktopState) -> Result<(), CommandError> {
     match *read_lock(&state.runtime)? {
         RuntimeMode::OfflineReadOnly => Err(CommandError::OfflineReadOnly),
-        RuntimeMode::Degraded => Err(CommandError::ConnectionNotAuthenticated),
         RuntimeMode::Online => Ok(()),
     }
 }
@@ -8207,21 +8201,18 @@ mod tests {
     #[test]
     fn offline_bootstrap_never_reads_catalog_projections() {
         assert!(!bootstrap_can_read_catalog(RuntimeMode::OfflineReadOnly));
-        assert!(!bootstrap_can_read_catalog(RuntimeMode::Degraded));
         assert!(bootstrap_can_read_catalog(RuntimeMode::Online));
     }
 
     #[test]
     fn offline_editorial_workspace_never_probes_a_closed_engine() {
         assert!(!workspace_can_read_engine(RuntimeMode::OfflineReadOnly));
-        assert!(!workspace_can_read_engine(RuntimeMode::Degraded));
         assert!(workspace_can_read_engine(RuntimeMode::Online));
     }
 
     #[test]
     fn offline_prerequisite_screen_never_reopens_the_encrypted_engine_store() {
         assert!(!prerequisite_can_read_engine(RuntimeMode::OfflineReadOnly));
-        assert!(!prerequisite_can_read_engine(RuntimeMode::Degraded));
         assert!(prerequisite_can_read_engine(RuntimeMode::Online));
     }
 
@@ -8264,7 +8255,6 @@ mod tests {
     #[test]
     fn offline_content_catalog_is_recovery_gated_before_sidecar_io() {
         assert!(!workspace_can_read_engine(RuntimeMode::OfflineReadOnly));
-        assert!(!workspace_can_read_engine(RuntimeMode::Degraded));
     }
 
     #[test]
@@ -9280,12 +9270,6 @@ mod tests {
         assert!(matches!(
             ensure_mutation_allowed(&state),
             Err(CommandError::OfflineReadOnly)
-        ));
-
-        *write_lock(&state.runtime).expect("runtime lock") = RuntimeMode::Degraded;
-        assert!(matches!(
-            ensure_mutation_allowed(&state),
-            Err(CommandError::ConnectionNotAuthenticated)
         ));
 
         *write_lock(&state.runtime).expect("runtime lock") = RuntimeMode::Online;

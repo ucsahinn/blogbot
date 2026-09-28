@@ -747,7 +747,9 @@ pub(crate) fn load_github_app_credentials_at(path: &Path) -> Result<GithubAppCre
     result
 }
 
-#[allow(dead_code)]
+/// Legacy single-token writer, kept only to build classic-OAuth fixtures that
+/// the GitHub App credential loader must reject.
+#[cfg(test)]
 pub fn store_github_token_at(path: &Path, token: &[u8]) -> Result<(), String> {
     if token.is_empty() || token.len() > 1024 {
         return Err("GITHUB_TOKEN_INVALID".into());
@@ -795,7 +797,7 @@ pub fn store_github_token_at(path: &Path, token: &[u8]) -> Result<(), String> {
     result
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn load_github_token_at(path: &Path) -> Result<SecretBytes, String> {
     let protected = fs::read(path).map_err(|_| "GITHUB_TOKEN_UNAVAILABLE".to_string())?;
     let token = unprotect_for_current_user(&protected)
