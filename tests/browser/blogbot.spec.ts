@@ -333,6 +333,32 @@ test("first-start guide uses a readable step rail and current-step panel", async
   await expect(page.locator(".guided-progress button").first()).toHaveAttribute("aria-current", "step");
 });
 
+test("offline dashboard headline does not claim the publishing flow is under control", async ({ page }) => {
+  await page.goto("?state=offline#dashboard");
+  const heading = page.getByRole("heading", { level: 1 });
+  await expect(heading).toHaveText("Yayın akışı bekletiliyor.");
+  await expect(page.locator(".dashboard-header")).toContainText("Yerel sistem çalışmıyor");
+
+  await page.goto("?state=ready#dashboard");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Yayın akışı kontrol altında.");
+});
+
+test("a focused sidebar action is never hidden behind the pinned readiness card", async ({ page }) => {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 1024, height: 700 }, { width: 960, height: 680 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto("#dashboard");
+    const about = page.locator(".sidebar").getByRole("button", { name: "OPE hakkında" });
+    await expect(about).toBeVisible();
+    await about.focus();
+    const covered = await about.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return !(top && element.contains(top));
+    });
+    expect(covered, `About is covered at ${viewport.width}x${viewport.height}`).toBe(false);
+  }
+});
+
 test("first-start step status badges never cover their Turkish step titles", async ({ page }) => {
   for (const viewport of [{ width: 1600, height: 940 }, { width: 960, height: 680 }]) {
     await page.setViewportSize(viewport);
@@ -834,7 +860,7 @@ test("manual-retry jobs explain why automatic retry is unavailable", async ({ pa
 
 test("offline, empty, loading and fatal states are distinguishable", async ({ page }) => {
   await page.goto("?state=offline#dashboard");
-  await expect(page.getByText(/salt okunur/iu)).toBeVisible();
+  await expect(page.locator(".connection-card").getByText(/salt okunur/iu)).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("offline.png"), fullPage: true });
 
   await page.goto("?state=empty#operations");
@@ -1902,7 +1928,9 @@ test("about panel shows the project signature and keeps update checks explicit",
   await about.click();
   await expect(about).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByText("@ucsahinn")).toBeVisible();
-  await expect(page.getByText(/Sabitlenmiş Windows yayıncı imzası/u)).toBeVisible();
+  // Unsigned manual builds exist (ADR 0009); the panel must not claim a pinned signature.
+  await expect(page.getByText(/Sabitlenmiş Windows yayıncı imzası/u)).toHaveCount(0);
+  await expect(page.getByText(/Güncelleme yalnız doğrulanmış yayıncı imzasıyla kurulur/u)).toBeVisible();
   const projectPage = page.getByRole("link", { name: "GitHub’da projeyi görüntüle" });
   await expect(projectPage).toBeVisible();
   await projectPage.click();

@@ -64,10 +64,11 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
       <header className="page-header dashboard-header">
         <div>
           <p className="section-kicker">{todayLabel.toLocaleUpperCase("tr-TR")}</p>
-          <h1>Yayın akışı kontrol altında.</h1>
+          <h1>{offline ? "Yayın akışı bekletiliyor." : "Yayın akışı kontrol altında."}</h1>
           <p>
-            Kaynaklar izleniyor, kanıt eksiği olan işler duruyor ve hiçbir
-            revizyon insan onayı olmadan yayın hattına geçmiyor.
+            {offline
+              ? "Yerel sistem çalışmıyor; son sağlam görünüm salt okunur gösteriliyor ve hiçbir revizyon yayın hattına geçmiyor."
+              : "Kaynaklar izleniyor, kanıt eksiği olan işler duruyor ve hiçbir revizyon insan onayı olmadan yayın hattına geçmiyor."}
           </p>
         </div>
         <div className="header-actions">

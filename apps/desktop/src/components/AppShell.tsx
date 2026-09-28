@@ -311,7 +311,7 @@ export function AppShell({
                 </div>
               ) : null}              {updateMessage ? <small role="status" aria-live="polite">{updateMessage}</small> : null}
               <strong>OPE · OpenPostEditör</strong>
-              <span>Sürüm {desktopPackage.version} · Sabitlenmiş Windows yayıncı imzası · @ucsahinn</span>
+              <span>Sürüm {desktopPackage.version} · Güncelleme yalnız doğrulanmış yayıncı imzasıyla kurulur · @ucsahinn</span>
               <a
                 className="about-project-link"
                 href="https://github.com/ucsahinn/blogbot"

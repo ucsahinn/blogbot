@@ -898,10 +898,14 @@ strong {
 }
 
 .connection-card {
+  /* Readiness stays pinned if the rail ever overflows; the shadow shows that
+     content continues beneath it. Short desktop windows use the compact rail
+     below so nothing is covered in the first place. */
   position: sticky;
   z-index: 2;
   bottom: 0;
   flex: 0 0 auto;
+  box-shadow: 0 -14px 16px -8px var(--sidebar);
   gap: 4px;
   padding: 14px;
   border: 1px solid var(--sidebar-line);
@@ -7386,4 +7390,20 @@ h1, h2, h3 { text-wrap: balance; }
     padding-bottom: calc(120px + env(safe-area-inset-bottom));
     scroll-padding-bottom: calc(120px + env(safe-area-inset-bottom));
   }
+}
+
+/* Short desktop windows (the app minimum is 960x680): keep the whole rail
+   inside the window. Its 828px default height made the pinned readiness card
+   cover the About action at 1280x800 and 1024x700. */
+@media (min-width: 921px) and (max-height: 860px) {
+  .sidebar { padding-top: 18px; padding-bottom: 12px; }
+  .sidebar .primary-nav { margin-top: 20px; gap: 3px; }
+  .sidebar .nav-eyebrow { padding-bottom: 4px; }
+  .sidebar .nav-item,
+  .sidebar .setup-button { min-height: 36px; padding-block: 4px; }
+  .sidebar .setup-button { margin-bottom: 4px; }
+  .sidebar .diagnostic-button { margin-top: 0; }
+  .sidebar .sidebar-spacer { min-height: 10px; }
+  .sidebar .boby-launcher { min-height: 42px; margin-top: 6px; }
+  .sidebar .connection-card { padding: 10px 12px; }
 }
