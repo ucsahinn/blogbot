@@ -6763,8 +6763,13 @@ strong {
   grid-template-columns: 30px minmax(0, 1fr);
   grid-template-rows: auto auto;
   column-gap: 9px;
+  /* The legacy circular-dot rule above fixes height at 32px; without resetting
+     it the title and status rows were squeezed 3.5px into each other and the
+     badge clipped Turkish descenders (ğ, ç). */
+  row-gap: 3px;
   align-items: center;
   width: auto;
+  height: auto;
   min-height: 58px;
   padding: 9px 11px;
   border: 1px solid var(--line);

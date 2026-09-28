@@ -333,6 +333,21 @@ test("first-start guide uses a readable step rail and current-step panel", async
   await expect(page.locator(".guided-progress button").first()).toHaveAttribute("aria-current", "step");
 });
 
+test("first-start step status badges never cover their Turkish step titles", async ({ page }) => {
+  for (const viewport of [{ width: 1600, height: 940 }, { width: 960, height: 680 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto("#setup-guide");
+    await expect(page.locator(".guided-progress button")).toHaveCount(3);
+    const gaps = await page.locator(".guided-progress button").evaluateAll((buttons) => buttons.map((button) => {
+      const label = button.querySelector(".guided-step-label")!.getBoundingClientRect();
+      const badge = button.querySelector(".guided-status")!.getBoundingClientRect();
+      return badge.top - label.bottom;
+    }));
+    // Descenders and cedillas (ğ, ç, ş) must stay visible above the badge.
+    for (const gap of gaps) expect(gap).toBeGreaterThanOrEqual(2);
+  }
+});
+
 test("setup shows the native Windows folder path without decorative separators", async ({ page }) => {
   await page.goto("#setup");
   await advanceSetupToTarget(page);
