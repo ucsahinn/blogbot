@@ -7407,3 +7407,12 @@ h1, h2, h3 { text-wrap: balance; }
   .sidebar .boby-launcher { min-height: 42px; margin-top: 6px; }
   .sidebar .connection-card { padding: 10px 12px; }
 }
+
+/* The candidate bulk bar had no layout rule, so its count text touched the
+   first button. */
+.candidate-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

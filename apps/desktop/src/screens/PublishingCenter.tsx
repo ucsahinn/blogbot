@@ -166,7 +166,7 @@ export function PublishingCenter({
         <div>
           <p className="section-kicker">{siteMode === "PUBLISH" ? "TAKVİM VE YAYIN" : "TAKVİM VE ÇIKTI"}</p>
           <h1>{siteMode === "PUBLISH" ? "Haftalık ritim, hazır yayınlar ve geçmiş." : "Haftalık ritim, hazır çıktılar ve geçmiş."}</h1>
-          <p>Her gün için beşe kadar yayın saati açın. Yeni taslaklar için NEXT_SLOT ritmi budur; onaylı bir içerik bu takvimden atanmaz veya planlanmaz.</p>
+          <p>Her gün için beşe kadar yayın saati açın. Yeni taslaklar “ilk uygun slot” seçeneğinde bu ritmi izler; onaylı bir içerik bu takvimden atanmaz veya planlanmaz.</p>
           {readOnly ? (
             <p className="inline-notice" role="status" aria-live="polite">
               Takvim ayarları yerel çalışma alanı yeniden bağlanana kadar salt okunur.

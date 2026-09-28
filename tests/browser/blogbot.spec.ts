@@ -333,6 +333,24 @@ test("first-start guide uses a readable step rail and current-step panel", async
   await expect(page.locator(".guided-progress button").first()).toHaveAttribute("aria-current", "step");
 });
 
+test("publishing copy never shows internal scheduling codes to the editor", async ({ page }) => {
+  await page.goto("#publishing");
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await expect(page.locator("main")).not.toContainText("NEXT_SLOT");
+});
+
+test("candidate bulk controls keep the selection count clear of its buttons", async ({ page }) => {
+  await page.goto("#content-candidates");
+  const bar = page.getByLabel("Seçili aday işlemleri");
+  await expect(bar).toBeVisible();
+  const gap = await bar.evaluate((element) => {
+    const count = element.querySelector("span")!.getBoundingClientRect();
+    const first = element.querySelector("button")!.getBoundingClientRect();
+    return first.top >= count.bottom ? Number.POSITIVE_INFINITY : first.left - count.right;
+  });
+  expect(gap).toBeGreaterThanOrEqual(6);
+});
+
 test("offline dashboard headline does not claim the publishing flow is under control", async ({ page }) => {
   await page.goto("?state=offline#dashboard");
   const heading = page.getByRole("heading", { level: 1 });
