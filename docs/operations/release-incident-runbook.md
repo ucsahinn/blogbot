@@ -21,12 +21,16 @@ onaylı iletişim kanalının etiketi yazılır.
 
 | Rol | Birincil sahip | Yedek sahip | Onaylı iletişim kanalı | Son tatbikat tarihi |
 | --- | --- | --- | --- | --- |
-| Olay komutanı | Atanmadı | Atanmadı | Atanmadı | Yapılmadı |
-| Nihai yayın onaylayıcısı | Atanmadı | Atanmadı | Atanmadı | Yapılmadı |
-| Kod imzalama sertifikası sorumlusu | Atanmadı | Atanmadı | Atanmadı | Yapılmadı |
-| GitHub App ve depo politikası sorumlusu | Atanmadı | Atanmadı | Atanmadı | Yapılmadı |
-| Statik hosting/rollback operatörü | Atanmadı | Atanmadı | Atanmadı | Yapılmadı |
-| Destek verisi sorumlusu | Atanmadı | Atanmadı | Atanmadı | Yapılmadı |
+| Olay komutanı | Depo sahibi (tek operatör) | Yok | Claude Code/terminal oturumu | Yapılmadı |
+| Nihai yayın onaylayıcısı | Depo sahibi (tek operatör) | Yok | Claude Code/terminal oturumu | Yapılmadı |
+| Kod imzalama sertifikası sorumlusu | Uygulanmaz — imzasız lane (ADR 0009) | Uygulanmaz | Uygulanmaz | Uygulanmaz |
+| GitHub App ve depo politikası sorumlusu | Depo sahibi (tek operatör) | Yok | GitHub hesabı | Yapılmadı |
+| Statik hosting/rollback operatörü | Uygulanmaz — gerçek site 0.1.56 kapsamı dışında | Uygulanmaz | Uygulanmaz | Uygulanmaz |
+| Destek verisi sorumlusu | Depo sahibi (tek operatör) | Yok | Claude Code/terminal oturumu | Yapılmadı |
+
+2026-09-28 durumu: proje tek operatörlüdür. "Birincil ve yedek aynı olamaz"
+kuralı bu nedenle karşılanmıyor; yedek sahip bilinen bir açık olarak `Yok`
+yazılmıştır ve dış yayın öncesi kabul edilen bir risk olarak kalır.
 
 Rol ataması bir GitHub environment, secret, sertifika, uygulama kaydı, branch
 protection veya hosting hedefi oluşturmaz. Bunların her biri canlı ve ayrı
@@ -173,19 +177,25 @@ runtime'ını hosting'e kurmak değildir.
    korunur. Ref temizliği ayrı dış yazma yetkisi ister.
 
 Hosting tarafındaki atomik helper ve versioned release düzeni canlı ortamda
-henüz doğrulanmamıştır. Sağlayıcıya özgü kesin komut, dizin ve sağlık endpoint'i
+henüz doğrulanmamıştır; gerçek site 0.1.56 döngüsünde kullanıcı kararıyla
+kapsam dışıdır. Sağlayıcıya özgü kesin komut, dizin ve sağlık endpoint'i
 ayrı staging tatbikatında kanıtlanıp bu belgeye secret içermeden eklenmelidir.
 
 ## Yerel veri kurtarma ve masaüstü rollback'i
 
 - Kurulu sürüm hata verirse mevcut yerel çalışma alanı yerinde bırakılır;
   otomatik reset, temiz profil veya veri silme yapılmaz.
-- Yedek önce doğrulanır ve **temiz, disposable bir Windows profiline** preview
-  edilir. Satır/medya beklentisi ile şema ve sürüm uyumu kayda alınır.
+- Yedek önce doğrulanır ve **aynı Windows kullanıcı profili altında ayrı,
+  disposable bir uygulama/veri dizinine** preview edilir (DPAPI sınırı için
+  [ADR 0003](../adr/0003-local-recovery-and-unsigned-update-boundaries.md)).
+  Satır/medya beklentisi ile şema ve sürüm uyumu kayda alınır.
 - Mevcut kullanıcı verisinin üzerine restore, uygulama downgrade'i veya veri
   dizini değişimi hemen öncesinde ayrı açık onay ister.
-- İmzalanmamış ya da publisher pini uyuşmayan eski installer rollback için
-  çalıştırılmaz.
+- İmzalı dağıtım lane'inde imzalanmamış ya da publisher pini uyuşmayan eski
+  installer rollback için çalıştırılmaz. İmzasız manuel lane'de
+  ([ADR 0009](../adr/0009-unsigned-manual-delivery.md)) rollback yalnız GitHub
+  Release'teki SHA-256'sı yeniden hesaplanıp yayımlanan digest'le eşleşen önceki
+  installer ile yapılır.
 - Başarısız restore sonrasında orijinal workspace'in değişmediği salt-okunur
   karşılaştırmayla kanıtlanmadan olay kapanmaz.
 

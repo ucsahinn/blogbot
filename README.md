@@ -154,7 +154,10 @@ Repo şu yerel runtime temelini içerir:
 
 Bu listedeki her madde "kaynak mevcut" demektir; "gerçek kullanıcı yolunda
 çalışıyor" demek değildir. Aradaki farkın güncel ve kanıtlı dökümü
-[2026-08-20 master completion index'tedir](docs/audits/OPE-MASTER-COMPLETION-INDEX-20260820.md).
+[master tamamlanma kontrol listesindedir](docs/audits/OPE-MASTER-COMPLETION-CHECKLIST-20260903.md).
+Teslimat kapsamı imzasız manuel dağıtımdır
+([ADR 0009](docs/adr/0009-unsigned-manual-delivery.md)); sürüm notları
+[docs/releases](docs/releases) altında tutulur.
 Yedekleme/doğrulama/önizleme/geri yükleme ile immutable preview/outbox tabanlı
 `PUBLISH` yolu yerel olarak bağlıdır ve önkoşulları eksik olduğunda fail-closed
 davranır. Bu yerel kanıt, herhangi bir uzak depo, CI veya hosting ortamının
@@ -196,7 +199,10 @@ kendiliğinden ücretli aşımı etkinleştirmez.
 
 Belge haritası [docs/README.md](docs/README.md) içindedir. Mimari kararların
 tarihsel kaydı [docs/adr](docs/adr) altında tutulur.
-Güncel yerel bulgu defteri
-[2026-08-20 master indeksinde](docs/audits/OPE-MASTER-COMPLETION-INDEX-20260820.md),
-komut kanıtı ve dış kabul sınırları ise
-[2026-08-20 doğrulama kaydındadır](docs/audits/end-to-end-verification-20260820.md).
+Güncel bulgu ve dış kabul defteri
+[master tamamlanma kontrol listesindedir](docs/audits/OPE-MASTER-COMPLETION-CHECKLIST-20260903.md);
+yayımlanmış sürümün kapanışı
+[imzasız sürüm kapanış raporunda](docs/audits/unsigned-release-closure-20260908.md),
+devam eden teslimat görevleri ise
+[teslimat planındadır](docs/audits/delivery-plan-20260928.md). 2026-08-20
+tarihli indeks ve doğrulama kaydı tarihsel kanıttır.

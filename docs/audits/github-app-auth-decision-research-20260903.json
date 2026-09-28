@@ -229,7 +229,7 @@
   "gaps": [
     "A human owner must register the GitHub App, enable device flow, select the target repository, and accept the exact permission set.",
     "A disposable repository must prove token refresh, revocation, repository removal, insufficient-permission failure, branch protection reads, PR merge, ref cleanup, and workflow dispatch.",
-    "The native implementation and migration from any existing classic OAuth authorization state remain to be designed and tested."
+    "Resolved locally after this research (2026-09-28 note): the native device-flow broker (apps/desktop/src-tauri/src/github_broker.rs, secure_store.rs) and classic-OAuth rejection are implemented and tested per ADR 0008; live App registration and disposable-repository lifecycle remain external acceptance gates."
   ],
   "approvalGates": [
     "GitHub App registration or account configuration requires explicit approval.",

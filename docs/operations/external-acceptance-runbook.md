@@ -12,6 +12,23 @@ execution unverified** olarak kalır. Güncel geçiş durumu
 [`OPE-MASTER-COMPLETION-CHECKLIST-20260903.md`](../audits/OPE-MASTER-COMPLETION-CHECKLIST-20260903.md)
 dosyasındaki `UNVERIFIED_EXTERNAL` kayıtlarıdır.
 
+## 0.1.56 döngüsü kapsamı (2026-09-28)
+
+Operatör kararıyla bu döngüde yalnız aşağıdaki kapılar çalıştırılır. Diğerleri
+**kapsam dışıdır**; açık kalırlar ve geçmiş sayılmazlar. Görev durumu
+[`delivery-plan-20260928.md`](../audits/delivery-plan-20260928.md) içindedir.
+
+| Durum | Kapılar |
+| --- | --- |
+| Kapsam içi | `GH-01`–`GH-05` (tek-kullanımlık fixture deposu), `SITE-01` (sentetik Astro fixture), `DATA-01`, gerçek Codex taslak + Boby turu |
+| Kapsam dışı — imzasız teslimat ([ADR 0009](../adr/0009-unsigned-manual-delivery.md)) | `WIN-01`–`WIN-04` |
+| Kapsam dışı — ortam yok | `WIN-05` (temiz Windows VM), `DATA-02` gerçek eski profil, `DATA-03` (24 saat), `DATA-04` kurulu yaşam döngüsü matrisi |
+| Kapsam dışı — gerçek site/sağlayıcı yok | `SITE-02`, `PROV-01`–`PROV-03`, `OPS-01` tatbikatları |
+
+Bu döngü tek operatörlüdür: uygulayan ve kabul eden aynı kişidir. Bu nedenle
+aşağıdaki "farklı kişi yeniden doğrular" koşulu karşılanamaz; kapsam içi kapılar
+`PASS` değil **`PASS_SINGLE_OPERATOR`** olarak kaydedilir.
+
 ## Ortak sözleşme
 
 Her koşu başlamadan önce operatör aşağıdaki alanları doldurur. Kanıt paketi
@@ -138,7 +155,14 @@ private key'in export edilmesi veya secret değerinin kanıta alınması.
 Her satır temiz snapshot'tan başlar ve ayrı sonuç üretir: Windows 10 22H2 x64
 clean install, güncel Windows 11 x64 clean install, N-1 → aday upgrade, bir byte'ı
 değiştirilmiş download, indirme/kurulum kesintisi, zorlanmış installer hatası ve
-önceki imzalı sürüme rollback.
+önceki sürüme rollback.
+
+İmzasız manuel lane'de ([ADR 0009](../adr/0009-unsigned-manual-delivery.md))
+Authenticode ve publisher pini adımları uygulanmaz. Onların yerine: installer
+SHA-256'sı GitHub Release digest'iyle yeniden hesaplanarak eşleştirilir,
+SmartScreen "Daha fazla bilgi → Yine de çalıştır" uyarısı beklenen sonuç olarak
+kaydedilir ve uygulama içi güncelleme kurulumu `UPDATE_SIGNER_NOT_CONFIGURED`
+ile kapalı kalmalıdır. Rollback, digest'i doğrulanmış önceki installer ile yapılır.
 
 1. Koşudan önce OS build, profil durumu, installer SHA-256 ve beklenen publisher
    pinini kaydedin.
@@ -317,7 +341,8 @@ raporundadır.
 
 ### `DATA-04` — kurulu masaüstü yaşam döngüsü
 
-Temiz profilde imzalı installer kullanarak tray göster/gizle, pencere kapatma,
+Temiz profilde yayımlanan installer kullanarak (imzasız lane'de SHA-256'sı
+Release digest'iyle eşleşen installer) tray göster/gizle, pencere kapatma,
 uygulamadan çıkış, notification izin ver/reddet, autostart enable/disable ve
 Windows login başlangıcını ayrı satırlar olarak test edin. Her satırda görünür UI
 sonucu ile process envanterini eşleştirin. Çıkıştan sonra yalnız Blogbot'un sahip

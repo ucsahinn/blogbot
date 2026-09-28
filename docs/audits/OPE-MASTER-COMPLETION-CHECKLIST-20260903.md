@@ -22,6 +22,40 @@ original observations and test counts as historical evidence. The earlier
 [unsigned source handoff](unsigned-source-handoff-20260906.md) likewise records
 the source-only stage before release authorization.
 
+## 0.1.56 cycle — opened 2026-09-28
+
+The operator asked to collect every remaining item, run and visually verify the
+application, fix the remaining defects and deliver an unsigned v0.1.56. The live
+task board for this cycle is
+[`delivery-plan-20260928.md`](delivery-plan-20260928.md); it supersedes the
+`PENDING_BOARD_TARGET` item below.
+
+In scope: GitHub App registration by the operator plus a disposable fixture
+repository rehearsal (`GH-01`–`GH-05`, `SITE-01`), a real Codex draft and Boby
+turn, same-profile separate-directory restore (`DATA-01`), local code fixes,
+visual verification and the unsigned 0.1.56 release. Out of scope by operator
+decision: signing (`WIN-01`–`WIN-04`), clean Windows VMs (`WIN-05`), the 24-hour
+soak (`DATA-03`), installed lifecycle matrix (`DATA-04`), the real site
+(`SITE-02`), real provider quota/quality/ImageGen gates (`PROV-01`–`PROV-03`)
+and drills (`OPS-01`). Those remain open; they are not passed.
+
+Code findings triage for this cycle (source scan 2026-09-28; no TODO/FIXME
+markers exist in apps, packages, scripts or tests):
+
+| Finding | Decision |
+| --- | --- |
+| Codex usage role `.expect` in the dashboard projection can panic | Fix with regression test |
+| Autostart rollback result dropped after an engine settings failure | Fix with regression test |
+| Backup-verification record write failure dropped silently | Fix (log) |
+| Scheduler drops a due revision whose record is missing without a skip record | Fix with regression test |
+| Engine silently falls back to in-process fetch without `BLOGBOT_FETCHER_BIN` | Fix: report the transport in doctor |
+| Dead `RuntimeMode::Degraded`, stale `allow(dead_code)`, legacy GitHub token helpers | Remove |
+| `pilot:report` prints hard-coded status, not evidence | Remove |
+| Setup stepper label overlap seen in an August screenshot | Fix only if reproduced |
+| Fixed Europe/Istanbul timezone across desktop, engine and database | Document; single-market product |
+| Memory-only `editorial_mutations`, ADR 0005 legacy fallback, ADR 0007 bridge names | Defer |
+| Async site adapter unsupported; native smoke cannot attach to a running app | Document |
+
 ## Historical full-acceptance ledger
 
 Status: **IN PROGRESS — IR-08 queue settlement/ownership fixes have nine focused passing checks, independent source closure and a passing final Node matrix: 907 tests, 903 passed, four explicit live-provider skips, zero failures/cancellations. Rebuilt-engine/native, controller preflight, lint, typecheck and redacted secret scans also pass. Long-duration verification remains open. The first long run was intentionally stopped before changing its queue source and is not accepted. The unchanged Rust surfaces retain 255 passing tests. External acceptance and board attachment remain open; no bug-free or release-complete claim is made.**
@@ -106,7 +140,7 @@ The native smoke passed after its embedded review-heading selector was updated t
 ## Coordination workflow status
 
 - [x] `PASS_LOCAL`: the explicitly requested independent read-only security, GitHub and backup/runner reviews completed, including follow-up review of the local fixes. Returned evidence is retained in [independent-review-20260905.md](independent-review-20260905.md). The user asking to create a board task was sufficient to authorize coordination; requiring an existing board item before reviews was an incorrect interpretation.
-- [ ] `PENDING_BOARD_TARGET`: identify the user's active board and attach the task/evidence there. The catalog exposes no board/task writer and the user has been asked for the application/board name or link. GitHub Projects must not be assumed. No board item or permission change has been made.
+- [x] `SUPERSEDED 2026-09-28`: the operator chose an in-repository board, [`delivery-plan-20260928.md`](delivery-plan-20260928.md). Original item: identify the user's active board and attach the task/evidence there. The catalog exposes no board/task writer and the user has been asked for the application/board name or link. GitHub Projects must not be assumed. No board item or permission change has been made.
 
 ## Repository-controlled work ledger
 

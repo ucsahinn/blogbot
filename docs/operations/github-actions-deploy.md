@@ -58,7 +58,7 @@ workflow'un kendi güvenlik sınırı içinde kurulmalıdır.
 - DEPLOY_SSH_KNOWN_HOSTS: önceden sabitlenmiş host fingerprint satırları.
 
 Bu değerler Blogbot.exe'ye, yerel engine'e, PR build job'ına veya repository
-dosyalarına verilmez. Masaüstü uygulaması Hetzner deploy anahtarı saklamaz.
+dosyalarına verilmez. Masaüstü uygulaması hiçbir hosting deploy anahtarı saklamaz.
 
 ## Workflow güvenlik adımları
 

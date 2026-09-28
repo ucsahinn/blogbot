@@ -1,5 +1,11 @@
 # Blogbot security best-practices review — 2026-09-03
 
+> Scope update (2026-09-28): [ADR 0009](../adr/0009-unsigned-manual-delivery.md)
+> selected unsigned manual delivery. The signed-release controls below remain
+> implemented as an opt-in lane (`sign_windows=true`); they are not the default
+> delivery path, and in-app update installation stays fail-closed without a
+> configured publisher pin.
+
 ## Outcome
 
 The repository-controlled attack surface was reviewed across the Windows

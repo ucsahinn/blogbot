@@ -146,7 +146,7 @@ kaynak, regresyon ailesi ve dış kabul sınırı master defterde ayrı satırd�
 | `VERIFIED_EXTERNAL` | GitHub Release | PR #1/#2 merge, main Verify, release run, tag/target SHA, release nesnesi ve iki yayın asset'ı canlı doğrulandı |
 | `VERIFIED_EXTERNAL` | Updater feed | `latest.json` ve doğrudan EXE URL'si HTTP 200; manifest/release asset byte-identity, version, size ve SHA doğrulandı |
 | `UNVERIFIED_EXTERNAL` | Uygulama içi GitHub publication/deploy | Device auth, gerçek içerik publication PR/merge, ref cleanup ve deploy dispatch |
-| `UNVERIFIED_EXTERNAL` | Temiz profil restore | Başka/temiz Windows profilinde gerçek PGlite logical backup → verify → restore → açılış kontrolü |
+| `UNVERIFIED_EXTERNAL` | Aynı profilde ayrı dizine restore | Aynı Windows profilinde ayrı disposable veri dizinine gerçek PGlite logical backup → verify → restore → açılış kontrolü (ADR 0003; profil/makine arası kurtarma desteklenmez) |
 | `UNVERIFIED_EXTERNAL` | Installed update/rollback | Temiz Windows VM'de kurulum, installed native/WebView smoke, gerçek update ve rollback |
 | `UNVERIFIED_EXTERNAL` | 24 saat scheduler | Kesintisiz gerçek süreyle overdue catch-up, günlük backup, retention ve duplicate-effect gözlemi |
 | `UNVERIFIED_EXTERNAL` | Search Console/site | Gerçek site adapter, DNS/public URL, Search Console, production CI ve deploy sonucu |

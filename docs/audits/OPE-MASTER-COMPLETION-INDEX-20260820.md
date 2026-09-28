@@ -44,7 +44,7 @@ gelmez. Dış kapısı olmayan satırlarda `Yok` yazılır.
 
 | ID | Yerel kapatma | Kaynak | Regresyon | Dış kapı |
 |---|---|---|---|---|
-| C1 | Canlı PGlite dosya yürüyüşü yerine doğrulanabilir mantıksal yedek üretimi | `packages/backup/src/logical-backup.ts`; `apps/engine/src/stdio-entrypoint.ts` | `BACKUP` | `UNVERIFIED_EXTERNAL`: temiz profil restore |
+| C1 | Canlı PGlite dosya yürüyüşü yerine doğrulanabilir mantıksal yedek üretimi | `packages/backup/src/logical-backup.ts`; `apps/engine/src/stdio-entrypoint.ts` | `BACKUP` | `UNVERIFIED_EXTERNAL`: aynı profilde ayrı dizine restore (ADR 0003) |
 
 ### Yüksek — 7/7 `CLOSED_LOCAL`
 
@@ -53,7 +53,7 @@ gelmez. Dış kapısı olmayan satırlarda `Yok` yazılır.
 | H1 | Gecikmiş günlük yedek için açılış catch-up ve tekil zamanlama | `apps/engine/src/stdio-entrypoint.ts` | `BACKUP` | `UNVERIFIED_EXTERNAL`: 24 saatlik gerçek zamanlayıcı |
 | H2 | İddia kanıtı artık iddiaya özgü alıntı aralığı ve hash taşıyor | `apps/engine/src/codex-draft.ts`; `packages/editorial/src/revision.ts` | `CODEX`, `CONTRACT` | `UNVERIFIED_EXTERNAL`: canlı Codex ve gerçek haber havuzu |
 | H3 | `publication-target` kapısı sabit sözleşmeye alındı; ekstra kapılar paketi bozmuyor | `apps/engine/src/codex-draft.ts`; `packages/editorial/src/revision.ts` | `CODEX`, `CONTRACT` | Yok |
-| H4 | Otomatik ve manuel yedek doğrulaması yapısal olarak gerçek veri biçimine uyarlandı | `packages/backup/src/logical-backup.ts`; `apps/engine/src/stdio-entrypoint.ts` | `BACKUP` | `UNVERIFIED_EXTERNAL`: temiz profil restore |
+| H4 | Otomatik ve manuel yedek doğrulaması yapısal olarak gerçek veri biçimine uyarlandı | `packages/backup/src/logical-backup.ts`; `apps/engine/src/stdio-entrypoint.ts` | `BACKUP` | `UNVERIFIED_EXTERNAL`: aynı profilde ayrı dizine restore (ADR 0003) |
 | H5 | Dashboard iş/outbox penceresi UUID yerine monoton sıra ile en yeniyi seçiyor | `packages/database/src/pglite-backend-repository.ts` | `DB` | Yok |
 | H6 | İş ve outbox yazımları sürüm/CAS ve ortak mutasyon sırası ile korunuyor | `packages/database/src/pglite-backend-repository.ts`; `apps/engine/src/stdio-entrypoint.ts` | `DB`, `RUNTIME` | Yok |
 | H7 | `PUBLISH` için doğrulanmış branch/base SHA üreticisi ve kalıcı bağ kuruldu | `apps/desktop/src-tauri/src/commands.rs`; `apps/desktop/src-tauri/src/github_rest_adapter.rs`; `apps/engine/src/codex-draft.ts` | `PUB`, `CODEX` | `UNVERIFIED_EXTERNAL`: GitHub auth, gerçek base SHA ve branch |
@@ -63,8 +63,8 @@ gelmez. Dış kapısı olmayan satırlarda `Yok` yazılır.
 | ID | Yerel kapatma | Kaynak | Regresyon | Dış kapı |
 |---|---|---|---|---|
 | M1 | Tanılama paketindeki başlık ve plan ayrıntıları allowlist/redaction ile sınırlandı | `apps/desktop/src-tauri/src/commands.rs` | `DESKTOP` | Yok |
-| M2 | Native restore child süreci stdin hatası, timeout ve kill ile fail-closed | `apps/engine/src/stdio-entrypoint.ts` | `BACKUP`, `RUNTIME` | `UNVERIFIED_EXTERNAL`: temiz profil restore |
-| M3 | Restore hedefi staging + atomic rename ile ya tamamen oluşuyor ya geri alınıyor | `apps/desktop/src-tauri/src/secure_preview_fs.rs` | `BACKUP` | `UNVERIFIED_EXTERNAL`: temiz profil restore |
+| M2 | Native restore child süreci stdin hatası, timeout ve kill ile fail-closed | `apps/engine/src/stdio-entrypoint.ts` | `BACKUP`, `RUNTIME` | `UNVERIFIED_EXTERNAL`: aynı profilde ayrı dizine restore (ADR 0003) |
+| M3 | Restore hedefi staging + atomic rename ile ya tamamen oluşuyor ya geri alınıyor | `apps/desktop/src-tauri/src/secure_preview_fs.rs` | `BACKUP` | `UNVERIFIED_EXTERNAL`: aynı profilde ayrı dizine restore (ADR 0003) |
 | M4 | `backup.*` istekleri bakım timeout sınıfına alındı | `apps/desktop/src-tauri/src/engine_bridge.rs` | `BACKUP`, `RUNTIME` | Yok |
 | M5 | Yarım kalan Boby Codex işleri bounded recovery ile toparlanıyor | `apps/engine/src/stdio-entrypoint.ts` | `CODEX`, `RUNTIME` | `UNVERIFIED_EXTERNAL`: canlı Codex session |
 | M6 | `DENIED_EVENT` izolasyon duruşu kalıcı kodla işaretleniyor ve yeniden oynatılmıyor | `apps/engine/src/stdio-entrypoint.ts` | `CODEX` | `UNVERIFIED_EXTERNAL`: canlı Codex izolasyon olayı |
@@ -82,7 +82,7 @@ gelmez. Dış kapısı olmayan satırlarda `Yok` yazılır.
 | M18 | Approval revoke, onayı silmek yerine immutable revocation kaydı ekliyor; yayın öncesi final kontrol bu kaydı fail-closed uyguluyor | `packages/contracts/src/index.ts`; `packages/database/src/backend-repository.ts`; `packages/database/src/pglite-backend-repository.ts`; `packages/database/src/in-memory-backend-store.ts`; `apps/engine/src/stdio-entrypoint.ts` | `CONTRACT`, `PUB` | Yok |
 | M19 | SEO ve contradiction model beyanlarına deterministik yerel backstop eklendi | `apps/engine/src/codex-draft.ts`; `packages/editorial/src/quality-gates.ts` | `CODEX`, `CONTRACT` | `UNVERIFIED_EXTERNAL`: gerçek içerik kalibrasyonu |
 | M20 | Makale türü seçilen bölümün sözleşmesinden türetiliyor | `apps/engine/src/codex-draft.ts`; `packages/contracts/src/index.ts` | `CODEX`, `CONTRACT` | Yok |
-| M21 | Restore writer stdin yazımını ve child sonucunu ayrı ayrı onaylıyor | `apps/engine/src/stdio-entrypoint.ts` | `BACKUP`, `RUNTIME` | `UNVERIFIED_EXTERNAL`: temiz profil restore |
+| M21 | Restore writer stdin yazımını ve child sonucunu ayrı ayrı onaylıyor | `apps/engine/src/stdio-entrypoint.ts` | `BACKUP`, `RUNTIME` | `UNVERIFIED_EXTERNAL`: aynı profilde ayrı dizine restore (ADR 0003) |
 | M22 | Çalıştırıcı olmayan `JOB.RETRY` başarı raporlamıyor ve state silmiyor | `apps/engine/src/stdio-entrypoint.ts` | `CODEX`, `RUNTIME` | Yok |
 | M23 | Taslak kanıt toplama ortak, komut timeout'undan kısa toplam bütçe ile sınırlı | `apps/engine/src/stdio-entrypoint.ts`; `apps/engine/src/codex-draft.ts` | `CODEX`, `RUNTIME` | `UNVERIFIED_EXTERNAL`: yavaş gerçek kaynaklar |
 | M24 | Retention purge sonrası latest işaretçisi hayatta kalan en yeni kayda taşınıyor | `packages/database/src/source-repository.ts` | `DB` | Yok |
@@ -111,7 +111,7 @@ gelmez. Dış kapısı olmayan satırlarda `Yok` yazılır.
 |---|---|---|---|---|
 | L1 | Retention yalnız otomatik yedeklerde çalışıyor; manuel arşivleri silmiyor | `apps/engine/src/stdio-entrypoint.ts`; `packages/backup/src/retention.ts` | `BACKUP` | Yok |
 | L2 | Retention arızası başarılı yedek sonucunu geri almıyor, ayrı tanılanıyor | `apps/engine/src/stdio-entrypoint.ts` | `BACKUP` | Yok |
-| L3 | Secure preview filesystem kök `HANDLE` sahipliği açık; başarı ve hata yollarında handle sızıntısı yok | `apps/desktop/src-tauri/src/secure_preview_fs.rs` | `BACKUP`, `DESKTOP` | `UNVERIFIED_EXTERNAL`: temiz profil restore |
+| L3 | Secure preview filesystem kök `HANDLE` sahipliği açık; başarı ve hata yollarında handle sızıntısı yok | `apps/desktop/src-tauri/src/secure_preview_fs.rs` | `BACKUP`, `DESKTOP` | `UNVERIFIED_EXTERNAL`: aynı profilde ayrı dizine restore (ADR 0003) |
 | L4 | Manuel ve otomatik yedek, random UUID temp adına yazıp sibling hard-link ile atomik no-replace commit eden tek helper'ı kullanıyor; outer `finally` ENOSPC/IO sonrası kısmi temp'i temizliyor, exclusive temp-create `EEXIST` ise başka writer'ın dosyasını silmiyor | `apps/engine/src/stdio-entrypoint.ts`; `tests/unit/engine-stdio.test.ts` | `BACKUP`, `RUNTIME` | `UNVERIFIED_EXTERNAL`: gerçek backup klasörü |
 | L5 | Tanılama arşiv adları çakışmaya dayanıklı benzersiz kimlik taşıyor | `apps/desktop/src-tauri/src/commands.rs` | `DESKTOP` | Yok |
 | L6 | Codex CLI yeteneği per-command açıkça kapatılabiliyor | `apps/codex-runner/src/cli-port.ts`; `apps/codex-runner/src/structured-runner.ts` | `CODEX` | `UNVERIFIED_EXTERNAL`: gerçek Codex CLI |
@@ -151,7 +151,7 @@ gelmez. Dış kapısı olmayan satırlarda `Yok` yazılır.
 | L40 | Büyük broker claim/media istekleri bakım timeout ve response sınırı kullanıyor | `apps/desktop/src-tauri/src/engine_bridge.rs`; `apps/engine/src/stdio-entrypoint.ts` | `RUNTIME`, `PUB` | Yok |
 | L41 | Local-dev stop degraded durumda da çalışıyor ve app exit'te sahipli process kapanıyor | `apps/desktop/src-tauri/src/commands.rs`; `apps/desktop/src-tauri/src/lib.rs` | `DESKTOP` | `UNVERIFIED_EXTERNAL`: gerçek app exit |
 | L42 | Secure-store key aday sırası tek, açık ve test edilebilir hale getirildi | `apps/desktop/src-tauri/src/secure_store.rs` | `DESKTOP`, `SEC` | `UNVERIFIED_EXTERNAL`: gerçek Windows DPAPI profili |
-| L43 | Şifreli backup önkoşulu verified/restore-preview gözlemlerini engine'in döndürdüğü aynı 64-hex `archiveSha256` değerine bağlıyor; farklı SHA iki timestamp'i resetliyor, hashesiz legacy kayıt `READY` sayılmıyor | `apps/desktop/src-tauri/src/commands.rs`; `apps/engine/src/stdio-entrypoint.ts` | `BACKUP`, `DESKTOP` | `UNVERIFIED_EXTERNAL`: temiz profil restore |
+| L43 | Şifreli backup önkoşulu verified/restore-preview gözlemlerini engine'in döndürdüğü aynı 64-hex `archiveSha256` değerine bağlıyor; farklı SHA iki timestamp'i resetliyor, hashesiz legacy kayıt `READY` sayılmıyor | `apps/desktop/src-tauri/src/commands.rs`; `apps/engine/src/stdio-entrypoint.ts` | `BACKUP`, `DESKTOP` | `UNVERIFIED_EXTERNAL`: aynı profilde ayrı dizine restore (ADR 0003) |
 | L44 | Tray canlı durum satırları ve review-ready bildirimi gerçek projection ile güncelleniyor | `apps/desktop/src-tauri/src/tray.rs`; `apps/desktop/src-tauri/src/commands.rs` | `DESKTOP` | `UNVERIFIED_EXTERNAL`: installed tray/notification |
 | L45 | Bildirim tercihi restart sonrası engine state'ten yeniden yükleniyor | `apps/desktop/src-tauri/src/commands.rs` | `DESKTOP` | `UNVERIFIED_EXTERNAL`: installed restart |
 | L46 | Source scan operasyon kimliği nanosaniye + sayaçla çakışmaya dayanıklı | `apps/desktop/src-tauri/src/commands.rs` | `DESKTOP`, `RUNTIME` | Yok |
@@ -220,7 +220,7 @@ hedef gerektiren kabul kapılarıdır:
 
 - canlı Codex/Luna ve ImageGen oturumları;
 - uygulama içi GitHub device auth, içerik publication akışı, ref cleanup ve deploy dispatch;
-- temiz Windows profilinde backup/restore ve PGlite kurtarma;
+- aynı Windows profilinde ayrı dizine backup/restore ve PGlite kurtarma (ADR 0003);
 - temiz Windows VM'de installer, installed native/WebView smoke, update ve rollback;
 - kesintisiz 24 saat scheduler/retention gözlemi;
 - Search Console, DNS, public site ve production deploy doğrulaması.

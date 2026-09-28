@@ -6,8 +6,8 @@ Date: 2026-09-03
 
 Blogbot is a local-only Windows desktop application. Its primary security
 property is that article state, approvals, the queue, database and privileged
-connectors remain on the editor's computer. Hetzner serves only the public
-static site; it is not a Blogbot control plane.
+connectors remain on the editor's computer. The operator's chosen static host
+serves only the public site; it is not a Blogbot control plane.
 
 The strongest residual risks are outside the repository's current local proof:
 Windows release signing has not been provisioned, the GitHub App has not been

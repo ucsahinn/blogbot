@@ -52,6 +52,10 @@ listeler; bir belge burada yoksa ya yeni eklenmiştir ya da kaldırılmalıdır.
 
 ## Denetimler ve tamamlanma kanıtı
 
+- [Teslimat planı ve görev panosu (2026-09-28)](audits/delivery-plan-20260928.md):
+  0.1.56 döngüsünün faz faz görevleri, durumları ve kanıt yolları.
+- [İmzasız sürüm kapanışı (2026-09-08)](audits/unsigned-release-closure-20260908.md):
+  yayımlanmış OPE 0.1.55, doğrulanan payload hash'leri ve kalan kabul işleri.
 - [İmzasız kaynak teslimatı (2026-09-06)](audits/unsigned-source-handoff-20260906.md):
   güncel yerel doğrulama, commit/push kapsamı ve sonraya bırakılan dış kontroller.
 - [Master tamamlanma kontrol listesi (2026-09-03)](audits/OPE-MASTER-COMPLETION-CHECKLIST-20260903.md):
