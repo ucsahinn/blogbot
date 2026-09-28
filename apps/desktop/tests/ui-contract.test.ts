@@ -261,7 +261,8 @@ test("compact desktop turns the editable weekly calendar into an operable grid i
 test("weekly cadence configures only future NEXT_SLOT drafts and treats legacy article assignments as non-binding", async () => {
   const publishing = await readFile(source("screens", "PublishingCenter.tsx"), "utf8");
 
-  assert.match(publishing, /Yeni taslaklar için NEXT_SLOT ritmi/u);
+  assert.match(publishing, /Yeni taslaklar “ilk uygun slot” seçeneğinde bu ritmi izler/u);
+  assert.doesNotMatch(publishing, /taslaklar için NEXT_SLOT/u, "the editor never sees the internal NEXT_SLOT code");
   assert.match(publishing, /Geçmiş atama:/u);
   assert.match(publishing, /slot\.articleId \|\| slot\.articleTitle/u);
   assert.doesNotMatch(publishing, /Paylaşılacak onaylı post/u);
