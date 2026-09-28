@@ -7623,11 +7623,14 @@ pub fn complete_onboarding(
     );
     if let Err(error) = engine_result {
         if settings.autostart_enabled != previous_autostart {
-            let _ = if previous_autostart {
-                autostart.enable()
-            } else {
-                autostart.disable()
-            };
+            restore_autostart_after_failed_update(&bridge, || {
+                if previous_autostart {
+                    autostart.enable()
+                } else {
+                    autostart.disable()
+                }
+                .map_err(|error| error.to_string())
+            });
         }
         return Err(error);
     }
@@ -7851,6 +7854,18 @@ fn update_backup_verification_record(
     Ok(())
 }
 
+/// Returns the OS autostart entry to its previous value after the engine
+/// rejected the settings update. A failed rollback leaves autostart out of sync
+/// with the saved settings, so it is recorded (without the raw OS error text).
+fn restore_autostart_after_failed_update(
+    bridge: &EngineBridge,
+    restore: impl FnOnce() -> Result<(), String>,
+) {
+    if restore().is_err() {
+        bridge.record_diagnostic_event("AUTOSTART_ROLLBACK_FAILED");
+    }
+}
+
 fn record_backup_check(bridge: &EngineBridge, field: &str, archive_path: &Path, response: &Value) {
     let archive_name = archive_path
         .file_name()
@@ -7863,7 +7878,7 @@ fn record_backup_check(bridge: &EngineBridge, field: &str, archive_path: &Path, 
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let _ = mutate_engine_local_state(bridge, "desktop.connectorChecks", |checks| {
+    let recorded = mutate_engine_local_state(bridge, "desktop.connectorChecks", |checks| {
         let object = checks.as_object_mut().ok_or_else(|| {
             CommandError::EngineUnavailable("CONNECTOR_CHECK_STATE_INVALID".into())
         })?;
@@ -7872,6 +7887,11 @@ fn record_backup_check(bridge: &EngineBridge, field: &str, archive_path: &Path, 
             .or_insert_with(|| json!({}));
         update_backup_verification_record(record, field, &archive_name, archive_sha256, recorded_at)
     });
+    // The archive itself is fine, but the publication prerequisite will not see
+    // this verification. Keep that visible in the support diagnostics.
+    if recorded.is_err() {
+        bridge.record_diagnostic_event("BACKUP_VERIFICATION_RECORD_FAILED");
+    }
 }
 
 #[tauri::command(async)]
@@ -10869,5 +10889,61 @@ mod tests {
             CommandError::EngineUnavailable(code)
                 if code == "GITHUB_REAUTHORIZATION_REQUIRED"
         ));
+    }
+
+    fn diagnostic_test_directory(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("blogbot-{label}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("create diagnostic directory");
+        directory
+    }
+
+    #[test]
+    fn a_failed_backup_verification_record_leaves_a_diagnostic_event() {
+        let directory = diagnostic_test_directory("backup-record");
+        let log = directory.join("engine.stderr.log");
+        let bridge = crate::engine_bridge::EngineBridge::for_local_test(
+            Box::new(|| None),
+            Some(log.clone()),
+        );
+
+        super::record_backup_check(
+            &bridge,
+            "verifiedAtUnixMs",
+            std::path::Path::new("C:/backups/ope.blogbot-backup"),
+            &json!({ "archiveSha256": "a".repeat(64) }),
+        );
+
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(
+            written.contains("BACKUP_VERIFICATION_RECORD_FAILED"),
+            "an unrecorded backup verification must be visible in diagnostics"
+        );
+    }
+
+    #[test]
+    fn a_failed_autostart_rollback_leaves_a_diagnostic_event() {
+        let directory = diagnostic_test_directory("autostart-rollback");
+        let log = directory.join("engine.stderr.log");
+        let bridge = crate::engine_bridge::EngineBridge::for_local_test(
+            Box::new(|| None),
+            Some(log.clone()),
+        );
+
+        super::restore_autostart_after_failed_update(&bridge, || Err("registry denied".into()));
+        super::restore_autostart_after_failed_update(&bridge, || Ok(()));
+
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(written.matches("AUTOSTART_ROLLBACK_FAILED").count(), 1);
+        assert!(
+            !written.contains("registry denied"),
+            "raw OS error text is not persisted"
+        );
     }
 }

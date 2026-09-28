@@ -1048,7 +1048,7 @@ impl EngineBridge {
         }
     }
 
-    fn record_diagnostic_event(&self, event: &str) {
+    pub(crate) fn record_diagnostic_event(&self, event: &str) {
         let Some(path) = &self.diagnostic_log else {
             return;
         };
@@ -1078,7 +1078,7 @@ impl EngineBridge {
     /// A bridge with no discovered sidecar, used to exercise runner discovery
     /// and diagnostic-log bounds without an AppHandle or a live engine.
     #[cfg(test)]
-    fn for_local_test(
+    pub(crate) fn for_local_test(
         codex_command_probe: CodexCommandProbe,
         diagnostic_log: Option<PathBuf>,
     ) -> Self {
