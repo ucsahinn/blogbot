@@ -1195,9 +1195,27 @@ export async function handleBackupRequest(
   }
 }
 
+export type SourceTransportKind = "sidecar" | "in-process";
+
+/**
+ * The packaged host always passes the isolated fetcher sidecar. Without it the
+ * engine still works (development and tests) but reads sources in-process, so
+ * the chosen transport is reported by doctor instead of being silent.
+ */
+export function selectSourceTransport(
+  env: Record<string, string | undefined>
+): { transport: FetchTransport; kind: SourceTransportKind } {
+  const fetcherBinary = env.BLOGBOT_FETCHER_BIN;
+  return fetcherBinary
+    ? { transport: createFetcherSidecarTransport(fetcherBinary), kind: "sidecar" }
+    : { transport: createNodeFetchTransport(), kind: "in-process" };
+}
+
 export interface EngineProtocolOptions {
   sourceRepository?: SourceRepository;
   sourceTransport?: FetchTransport;
+  /** How `sourceTransport` reaches the network; reported by doctor. */
+  sourceTransportKind?: SourceTransportKind;
   sourceScanCoordinator?: SourceScanCoordinator;
   /** Changes whenever a completed source scan makes candidate data stale. */
   candidateRefreshEpoch?: () => number;
@@ -1439,6 +1457,9 @@ export function createEngineProtocol(
           : "DEGRADED",
         persistence: repository.persistence,
         queue: queueStatus,
+        sourceTransport: options.sourceTransport
+          ? options.sourceTransportKind ?? "injected"
+          : "unavailable",
         maintenance,
         capabilities: [
           "AUTOMATION.SET",
@@ -4228,12 +4249,11 @@ export async function createPersistentEngineProtocol(
   const queue = new LocalQueueRuntime(repository.getDatabase(), {
     onFault: () => reportBackgroundTaskFault("LOCAL_QUEUE_UNAVAILABLE")
   });
-  const fetcherBinary = process.env.BLOGBOT_FETCHER_BIN;
-  const sourceTransport = options.sourceTransport ?? (
-    fetcherBinary
-      ? createFetcherSidecarTransport(fetcherBinary)
-      : createNodeFetchTransport()
-  );
+  const selectedTransport = options.sourceTransport
+    ? undefined
+    : selectSourceTransport(process.env);
+  const sourceTransport = options.sourceTransport ?? selectedTransport!.transport;
+  const sourceTransportKind = selectedTransport?.kind;
   const imageGenerator = options.imageGenerator ?? imageGeneratorFromEnvironment();
   const sourceScanCoordinator = new SourceScanCoordinator(
     sourceRepository,
@@ -4567,6 +4587,7 @@ export async function createPersistentEngineProtocol(
   const protocolOptions: EngineProtocolOptions = {
     sourceRepository,
     sourceTransport,
+    ...(sourceTransportKind ? { sourceTransportKind } : {}),
     sourceScanCoordinator,
     candidateRefreshEpoch: () => candidateRefreshEpoch,
     publicationReady,

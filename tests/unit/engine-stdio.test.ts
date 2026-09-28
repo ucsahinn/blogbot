@@ -28,6 +28,7 @@ import {
   isParallelReadRequest,
   scheduleOverdueAutomaticBackup,
   scrubbedRestoreEnvironment,
+  selectSourceTransport,
   DRAFT_EVIDENCE_FETCH_BUDGET_MS
 } from "../../apps/engine/src/stdio-entrypoint.ts";
 import { buildPublicationPreview } from "../../apps/engine/src/publication-preview.ts";
@@ -1455,4 +1456,22 @@ test("an automatic snapshot cannot be read back with the wrong local data key", 
   );
   assert.equal(verified.ok, false);
   assert.equal(verified.code, "BACKUP_INVALID");
+});
+
+test("doctor reports whether source reads run through the isolated fetcher sidecar", async () => {
+  const sidecar = selectSourceTransport({ BLOGBOT_FETCHER_BIN: "C:/OPE/blogbot-fetcher.exe" });
+  assert.equal(sidecar.kind, "sidecar");
+  await sidecar.transport.close?.();
+  const inProcess = selectSourceTransport({});
+  assert.equal(inProcess.kind, "in-process");
+
+  const withoutTransport = await createEngineProtocol()({ version: 1, id: "doctor-no-transport", kind: "doctor" });
+  assert.equal(withoutTransport.sourceTransport, "unavailable");
+
+  const handle = createEngineProtocol(new InMemoryBackendStore(), "memory", {
+    sourceTransport: inProcess.transport,
+    sourceTransportKind: inProcess.kind
+  });
+  const doctor = await handle({ version: 1, id: "doctor-in-process", kind: "doctor" });
+  assert.equal(doctor.sourceTransport, "in-process");
 });
