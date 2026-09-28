@@ -283,3 +283,17 @@ test("a preview record without a usable preview hash is a skip, not a workspace-
   assert.deepEqual(faults, [], "a regenerable preview is not a scheduler fault");
   assert.deepEqual((await backend.listOutbox()).map((effect) => effect.aggregateId), ["rev-2"]);
 });
+
+test("a due-list id whose revision record cannot be read is reported as a skip, not dropped silently", async () => {
+  const { backend, now } = await setup("2026-07-30T10:00:00.000Z", "2026-07-30T09:00:00.000Z");
+  const listDue = backend.listDueRevisionIds.bind(backend);
+  backend.listDueRevisionIds = async (nowUnixMs: number, limit?: number, offset?: number) => {
+    const ids = await listDue(nowUnixMs, limit, offset);
+    return offset === 0 ? [...ids, "rev-dangling"] : ids;
+  };
+
+  const result = await new PublicationScheduler(backend, () => now).tick();
+
+  assert.equal(result.enqueued.length, 1, JSON.stringify(result));
+  assert.deepEqual(result.skipped, [{ revisionId: "rev-dangling", reason: "REVISION_UNAVAILABLE" }]);
+});

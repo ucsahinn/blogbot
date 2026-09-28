@@ -13,6 +13,7 @@ export type PublicationSchedulerSkipReason =
   | "APPROVAL_REVOKED"
   | "PREVIEW_REQUIRED"
   | "PREVIEW_STALE"
+  | "REVISION_UNAVAILABLE"
   | "SCHEDULING_FAILED";
 
 export interface PublicationSchedulerResult {
@@ -116,10 +117,13 @@ export class PublicationScheduler {
         // A due-list index row can outlive the revision it points at. Reading
         // the batch with Promise.all made that single dangling id reject the
         // whole tick, so every other approved revision stayed unpublished.
+        // The unreadable id is still reported, so a scheduled item never
+        // disappears without a trace.
         ? (await Promise.all(dueRevisionIds.map(async (id) => {
             try {
               return [await this.backend.getRevision(id)];
             } catch {
+              result.skipped.push({ revisionId: id, reason: "REVISION_UNAVAILABLE" });
               return [];
             }
           }))).flat()
