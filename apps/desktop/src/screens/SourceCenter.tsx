@@ -308,11 +308,15 @@ export function SourceCenter({
         itemIndex === index ? { ...item, testing: true } : item
       )
     );
+    // Results are matched by the tested URL, not the row index: the list can
+    // be re-analysed while a test is running, and an index match attached the
+    // old result to a different address.
+    const testedUrl = candidate.url;
     try {
-      const test = await bridge.testSource(candidate.url);
+      const test = await bridge.testSource(testedUrl);
       setCandidates((current) =>
-        current.map((item, itemIndex) =>
-          itemIndex === index
+        current.map((item) =>
+          item.url === testedUrl
             ? {
                 ...item,
                 test,
@@ -329,8 +333,8 @@ export function SourceCenter({
         userFacingBridgeError(reason, "Kaynak testi tamamlanamadı.")
       );
       setCandidates((current) =>
-        current.map((item, itemIndex) =>
-          itemIndex === index ? { ...item, testing: false } : item
+        current.map((item) =>
+          item.url === testedUrl ? { ...item, testing: false } : item
         )
       );
     }
@@ -529,7 +533,7 @@ export function SourceCenter({
             <button
               className="button button-secondary"
               type="button"
-              disabled={busy || !canTest || input.trim().length === 0}
+              disabled={busy || !canTest || input.trim().length === 0 || candidates.some((item) => item.testing)}
               aria-describedby={addressCheckUnavailableReason ? "source-address-action-reason" : undefined}
               onClick={() => void analyzeInput()}
             >
@@ -611,7 +615,7 @@ export function SourceCenter({
             <button
               className="button button-primary"
               type="button"
-              disabled={busy || !canSave}
+              disabled={busy || !canSave || candidates.some((item) => item.testing)}
               onClick={() => void saveCandidates()}
             >
               Tümünü izlemeye al

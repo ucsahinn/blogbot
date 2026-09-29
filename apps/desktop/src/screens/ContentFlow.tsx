@@ -241,21 +241,27 @@ export function ContentFlow({
         }
       setBatchProgress({ completed: completed.size + failed.length, total: targets.length, currentTitle: candidate.title, failed: failed.length });
       }
-      const nextWorkspace = await bridge.getEditorialWorkspace({ includeCandidates: true });
-      onWorkspaceChange(nextWorkspace);
+      // Completed items are durable even if the follow-up read fails, so the
+      // selection is pruned and the counts are reported either way; a retry
+      // must not resend them.
+      setSelectedIds((current) => new Set([...current].filter((id) => !completed.has(id))));
+      const actionLabel = action === "promote" ? "Araştırma kuyruğuna alındı" : "Akıştan kapatıldı";
+      const summary = failed.length
+        ? `${completed.size} aday ${actionLabel.toLocaleLowerCase("tr-TR")}. ${failed.length} aday değişmedi: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}.`
+        : `${completed.size} aday ${actionLabel.toLocaleLowerCase("tr-TR")}.`;
+      setMessage(summary);
+      try {
+        const nextWorkspace = await bridge.getEditorialWorkspace({ includeCandidates: true });
+        onWorkspaceChange(nextWorkspace);
+      } catch {
+        setMessage(`${summary} Aday listesi henüz yenilenemedi; “Yeni aday bul” ile yeniden okuyun.`);
+      }
       try {
         await onSourceCatalogChange();
       } catch {
         // The durable candidate action succeeded; only the optional dashboard
         // summary refresh needs another attempt.
       }
-      setSelectedIds((current) => new Set([...current].filter((id) => !completed.has(id))));
-      const actionLabel = action === "promote" ? "Araştırma kuyruğuna alındı" : "Akıştan kapatıldı";
-      setMessage(
-        failed.length
-          ? `${completed.size} aday ${actionLabel.toLocaleLowerCase("tr-TR")}. ${failed.length} aday değişmedi: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}.`
-          : `${completed.size} aday ${actionLabel.toLocaleLowerCase("tr-TR")}.`
-      );
     } catch (reason) {
       setMessage(userFacingBridgeError(reason, "Toplu işlem tamamlanamadı."));
     } finally {

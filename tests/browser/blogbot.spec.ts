@@ -1822,6 +1822,53 @@ test("setup guide finishes with evidence from a fresh prerequisite check", async
   await expect(page.getByRole("button", { name: "OPE’yi bu hedefle kullan" })).toBeEnabled();
 });
 
+test("dashboard headline admits when text generation is unavailable", async ({ page }) => {
+  await page.goto("?state=degraded#dashboard");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Yazı üretimi bekliyor.");
+});
+
+test("a retryable draft keeps its retry action inside the same row surface", async ({ page }) => {
+  await page.goto("?state=codex-provider-waits#editorial");
+  const retry = page.getByRole("button", { name: "Tekrar dene" }).first();
+  await expect(retry).toBeVisible();
+  const layout = await retry.evaluate((button) => {
+    const row = button.closest("article")!;
+    const rowBox = row.getBoundingClientRect();
+    const box = button.getBoundingClientRect();
+    return {
+      inside: box.left >= rowBox.left && box.right <= rowBox.right,
+      rowBackground: getComputedStyle(row).backgroundColor,
+      duplicateLabel: row.textContent?.includes("Yeniden dene") ?? false
+    };
+  });
+  expect(layout.inside).toBe(true);
+  expect(layout.rowBackground).not.toBe("rgba(0, 0, 0, 0)");
+  expect(layout.duplicateLabel).toBe(false);
+});
+
+test("the empty review queue keeps its hint directly under its heading", async ({ page }) => {
+  await page.goto("?state=empty#editorial-review");
+  const heading = page.getByText("İncelenecek revizyon yok.");
+  const hint = page.getByText("İçerik Akışı'ndan bir işi araştırmaya alın.");
+  await expect(hint).toBeVisible();
+  const gap = await hint.evaluate((element, headingText) => {
+    const title = [...document.querySelectorAll("strong")].find((node) => node.textContent === headingText)!;
+    return element.getBoundingClientRect().top - title.getBoundingClientRect().bottom;
+  }, await heading.textContent());
+  expect(gap).toBeLessThan(24);
+});
+
+test("a bulk promotion reports what succeeded even when the follow-up read fails", async ({ page }) => {
+  await page.goto("?state=candidate-inventory-read-failure#content-candidates");
+  await page.getByRole("button", { name: "Görünenleri seç" }).click();
+  await page.getByRole("button", { name: "Seçilmiş adayları araştır" }).click();
+  const status = page.getByText(/aday araştırma kuyruğuna alındı/u).first();
+  await expect(status).toBeVisible();
+  await expect(status).toContainText("henüz yenilenemedi");
+  await expect(page.getByText("Toplu işlem tamamlanamadı.")).toHaveCount(0);
+  await expect(page.getByText("0 aday seçildi")).toBeVisible();
+});
+
 test("a failed dashboard refresh never reports success", async ({ page }) => {
   await page.goto("?state=dashboard-refresh-failure#dashboard");
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();

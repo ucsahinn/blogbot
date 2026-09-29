@@ -274,12 +274,13 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
           <img className="boot-avatar" src={bobyAvatar} alt="" width="64" height="64" />
           <p className="section-kicker">GÜVENLİ BAŞLATMA DURDU</p>
           <h1>Çalışma alanı açılamadı.</h1>
-          <p>{error}</p>
-                    <button type="button" className="button button-primary" onClick={() => { setError(""); setBridge(null); setSnapshot(null); setWorkspace(null); setConnectorState(null); setBootstrapAttempt((attempt) => attempt + 1); }}>Yeniden dene</button>
+          {/* The detail often repeats the heading; show it only when it adds something. */}
+          {error && !/çalışma alanı açılamadı/iu.test(error) ? <p>{error}</p> : null}
           <small>
             OPE'nin yerel çalışma bileşeni başlatılamadı. Uygulamayı yeniden başlatın veya Kurulum
             Merkezi'ndeki "Önkoşul testi"ni çalıştırın.
           </small>
+          <button type="button" className="button button-primary" onClick={() => { setError(""); setBridge(null); setSnapshot(null); setWorkspace(null); setConnectorState(null); setBootstrapAttempt((attempt) => attempt + 1); }}>Yeniden dene</button>
         </div>
       </main>
     );

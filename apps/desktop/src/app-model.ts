@@ -229,6 +229,18 @@ export function connectorDraftFromState(
   };
 }
 
+/** One wording for a draft's execution state on every screen. */
+export function draftExecutionLabel(draft: { executionState?: string | undefined }): string {
+  switch (draft.executionState) {
+    case "RUNNING": return "Çalışıyor";
+    case "WAITING": return "Müdahale bekliyor";
+    case "RETRY_SCHEDULED": return "Otomatik yeniden denenecek";
+    case "FAILED": return "Durduruldu";
+    case "COMPLETED": return "İncelemeye hazır";
+    default: return "Kuyrukta";
+  }
+}
+
 /**
  * The native workspace read returns an empty candidate list unless candidates
  * were requested. A refresh that skipped them (startup reconciliation, tray

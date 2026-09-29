@@ -1501,11 +1501,11 @@ strong {
 
 .pulse-bars > div {
   display: grid;
-  grid-template-columns: 58px minmax(70px, 1fr) 14px;
+  grid-template-columns: 76px minmax(70px, 1fr) 18px;
   align-items: center;
   gap: 9px;
   color: var(--ink-soft);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .pulse-bars strong {
@@ -7415,4 +7415,114 @@ h1, h2, h3 { text-wrap: balance; }
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+/* Editorial draft rows: checkbox, row and retry share one surface. The retry
+   button used to sit outside the white row on the grey list background, and
+   rows without a retry kept an empty third track. */
+.draft-row-with-action {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0;
+  align-items: stretch;
+  background: var(--surface-raised);
+}
+.draft-row-with-action.has-retry {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+.draft-row-with-action .draft-row-select {
+  padding-left: 12px;
+}
+.draft-row-with-action .draft-row {
+  background: transparent;
+}
+.draft-row-with-action .draft-row-retry {
+  margin: 0 16px 0 4px;
+}
+.draft-next-action.is-passive {
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+.draft-next-action {
+  font-size: 12px;
+}
+/* The detail line explains when a waiting job resumes; show two lines. */
+.draft-copy > span[id^="draft-detail-"] {
+  display: -webkit-box;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.progress-ring {
+  font-size: 11px;
+}
+
+/* Waiting and failed states used the neutral blue "in progress" pill, so
+   "Müdahale bekliyor" and "Araştırma başarısız" looked like normal work. */
+.state-pill.state-waiting,
+.state-pill.state-waiting_codex,
+.state-pill.state-retry_scheduled,
+.state-pill.state-unavailable {
+  color: var(--amber-dark, var(--amber));
+  background: var(--amber-soft);
+}
+.state-pill.state-failed,
+.state-pill.state-research_failed,
+.state-pill.state-block {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+/* Startup error: one centred column. The avatar sat left of a centred
+   heading, the retry button shared a row with 9px text. */
+.fatal-state > div {
+  display: flex;
+  max-width: 560px;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.fatal-state > div > * {
+  margin: 0;
+}
+.fatal-state .boot-avatar {
+  margin-bottom: 8px;
+}
+.fatal-state p {
+  color: #d3dddf;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.fatal-state small {
+  color: #b6c4c6;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Review empty and loading states: one centred block. Two children of a
+   stretched grid landed as two full-height rows, pushing the hint to the
+   bottom edge. */
+.review-loading {
+  align-content: center;
+  gap: 6px;
+  font-size: 13px;
+  text-align: center;
+}
+.review-empty strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+.review-empty span {
+  color: var(--ink-soft);
+}
+/* Dashboard pulse empty state inherited the 58px bar grid and 9px type. */
+.pulse-bars > .empty-state {
+  display: block;
+  padding: 14px 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+/* Empty states were 11px grey. */
+.empty-state {
+  color: var(--ink-soft);
+  font-size: 13px;
 }

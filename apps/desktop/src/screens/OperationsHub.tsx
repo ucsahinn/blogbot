@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
-import { failureStateLabel, jobTypeLabel, retryModeLabel } from "../app-model.ts";
+import { draftExecutionLabel, failureStateLabel, jobTypeLabel, retryModeLabel } from "../app-model.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import { Operations } from "./Operations.tsx";
 
@@ -248,23 +248,25 @@ export function OperationsHub(props: OperationsHubProps) {
               {visibleActiveDrafts.map((draft) => (
                 <article className="failure-row active-job-row" key={draft.id} aria-label="Devam eden taslak işi">
                   <div>
-                    <span className="state-pill state-drafting">Taslak hazırlanıyor</span>
+                    {/* Blocked jobs said "Taslak hazırlanıyor" here while Editoryal
+                        Masa said "Müdahale bekliyor" for the same job. */}
+                    <span className={`state-pill state-${draft.executionState?.toLowerCase() ?? "drafting"}`}>{draftExecutionLabel(draft)}</span>
                     <h2>{draft.titleTr}</h2>
                     <p>{draft.detail}</p>
                     <small>İnceleme, taslak ve kanıt paketi hazır olduğunda açılır.</small>
                   </div>
                   <div className="row-actions">
-                    <button className="button button-primary" type="button" onClick={props.onOpenEditorial}>
+                    <button className={`button ${draft.nextAction === "RETRY" || draft.nextAction === "CONNECT_CODEX" ? "button-secondary" : "button-primary"}`} type="button" onClick={props.onOpenEditorial}>
                       Editoryal Masa’da aç
                     </button>
                     {draft.nextAction === "CONNECT_CODEX" ? (
-                      <button className="button button-secondary" type="button" onClick={props.onOpenSetup}>
+                      <button className="button button-primary" type="button" onClick={props.onOpenSetup}>
                         Codex’i bağla
                       </button>
                     ) : null}
                     {draft.nextAction === "RETRY" ? (
                       <button
-                        className="button button-secondary"
+                        className="button button-primary"
                         type="button"
                         disabled={props.readOnly || busyId === draft.id}
                         aria-describedby={props.readOnly ? `blocked-draft-retry-unavailable-${draft.id}` : undefined}

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
-import { draftStateLabel, sectionLabel } from "../app-model.ts";
+import { draftExecutionLabel, draftStateLabel, sectionLabel } from "../app-model.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import { ReviewWorkspace } from "./ReviewWorkspace.tsx";
 
@@ -191,16 +191,7 @@ export function EditorialDesk({
     }
   };
 
-  const executionLabel = (draft: EditorialWorkspaceSnapshot["drafts"][number]) => {
-    switch (draft.executionState) {
-      case "RUNNING": return "Çalışıyor";
-      case "WAITING": return "Müdahale bekliyor";
-      case "RETRY_SCHEDULED": return "Otomatik yeniden denenecek";
-      case "FAILED": return "Durduruldu";
-      case "COMPLETED": return "İncelemeye hazır";
-      default: return "Kuyrukta";
-    }
-  };
+  const executionLabel = draftExecutionLabel;
 
   const handleDraftOpen = (draft: EditorialWorkspaceSnapshot["drafts"][number]) => {
     setSelectedRevisionId(draft.id);
@@ -272,13 +263,13 @@ export function EditorialDesk({
                   <span>İlerleme ölçümü henüz yok; işin durumunu Operasyonlar'dan takip edin.</span>
                 </span>
                 <span className="state-pill state-drafting">Araştırma kuyruğunda</span>
-                <span className="draft-next-action">Takip ediliyor</span>
+                <span className="draft-next-action is-passive">Takip ediliyor</span>
               </article>
             ) : null}
             {workspace.drafts.map((draft) => {
               const canRetry = !draft.reviewable && draft.nextAction === "RETRY";
               const status = executionLabel(draft);
-              return <article className="draft-row-with-action" key={draft.id} aria-label={!draft.reviewable ? `${status}: ${draft.titleTr}` : undefined}>
+              return <article className={`draft-row-with-action${canRetry ? " has-retry" : ""}`} key={draft.id} aria-label={!draft.reviewable ? `${status}: ${draft.titleTr}` : undefined}>
               <label className="draft-row-select">
                 <input type="checkbox" checked={selectedDraftIds.has(draft.id)} onChange={(event) => toggleDraftSelection(draft.id, event.target.checked)} aria-label={`${draft.titleTr} taslağını seç`} />
                 <span className="sr-only">{draft.titleTr} taslağını seç</span>
@@ -295,8 +286,8 @@ export function EditorialDesk({
                     •
                   </span>
                 ) : (
-                  <span className={`progress-ring progress-${Math.round(draft.completion / 10) * 10}`} aria-label={`Yüzde ${draft.completion} tamamlandı`}>
-                    {draft.completion}
+                  <span className={`progress-ring progress-${Math.round(draft.completion / 10) * 10}`} aria-label={`Yüzde ${draft.completion} tamamlandı`} title="Hazırlık">
+                    %{draft.completion}
                   </span>
                 )}
                 <span className="draft-copy">
@@ -306,7 +297,13 @@ export function EditorialDesk({
                   <span id={`draft-detail-${draft.id}`}>{draft.detail}</span>
                 </span>
                 <span className={`state-pill state-${draft.executionState?.toLowerCase() ?? draft.state.toLowerCase()}`}>{draft.reviewable ? draftStateLabel(draft.state) : status}</span>
-                <span className="draft-next-action">{draft.reviewable ? "İncelemeyi aç" : draft.nextAction === "CONNECT_CODEX" ? "Boby'den yardım al" : draft.nextAction === "RETRY" ? "Yeniden dene" : "Takip ediliyor"}</span>
+                {/* A retryable row shows its real "Tekrar dene" button beside it; a
+                    second, non-clickable "Yeniden dene" label only confused. */}
+                {canRetry ? null : (
+                  <span className={`draft-next-action${draft.reviewable || draft.nextAction === "CONNECT_CODEX" ? "" : " is-passive"}`}>
+                    {draft.reviewable ? "İncelemeyi aç" : draft.nextAction === "CONNECT_CODEX" ? "Boby'den yardım al" : "Takip ediliyor"}
+                  </span>
+                )}
               </button>
               {canRetry ? (
                 <button

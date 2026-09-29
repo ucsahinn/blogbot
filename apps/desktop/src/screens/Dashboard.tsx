@@ -17,6 +17,8 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
   const [refreshMessage, setRefreshMessage] = useState("");
   const summary = summarizeWorkspace(workspace);
   const offline = snapshot.runtime === "OFFLINE_READ_ONLY";
+  // The headline must not say "kontrol altında" while text generation is down.
+  const writingUnavailable = !offline && snapshot.codex.state === "UNAVAILABLE";
   const primaryToday = workspace.today.find((item) => item.state !== "DONE") ?? workspace.today[0];
   const formatTime = (value: string) => {
     const date = new Date(value);
@@ -64,11 +66,13 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
       <header className="page-header dashboard-header">
         <div>
           <p className="section-kicker">{todayLabel.toLocaleUpperCase("tr-TR")}</p>
-          <h1>{offline ? "Yayın akışı bekletiliyor." : "Yayın akışı kontrol altında."}</h1>
+          <h1>{offline ? "Yayın akışı bekletiliyor." : writingUnavailable ? "Yazı üretimi bekliyor." : "Yayın akışı kontrol altında."}</h1>
           <p>
             {offline
               ? "Yerel sistem çalışmıyor; son sağlam görünüm salt okunur gösteriliyor ve hiçbir revizyon yayın hattına geçmiyor."
-              : "Kaynaklar izleniyor, kanıt eksiği olan işler duruyor ve hiçbir revizyon insan onayı olmadan yayın hattına geçmiyor."}
+              : writingUnavailable
+                ? "Mevcut taslaklar incelenebilir; yeni taslaklar yazı üretimi hazır olunca başlar. Hiçbir revizyon insan onayı olmadan yayın hattına geçmiyor."
+                : "Kaynaklar izleniyor, kanıt eksiği olan işler duruyor ve hiçbir revizyon insan onayı olmadan yayın hattına geçmiyor."}
           </p>
         </div>
         <div className="header-actions">
