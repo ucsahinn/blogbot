@@ -920,9 +920,10 @@ async function verifySingleSourceAddressCheckJourney(sessionId) {
   const inputUpdated = await execute(
     sessionId,
     `return (() => {
-      const input = document.querySelector('textarea');
+      const input = document.querySelector('#source-input-panel input[type="url"]') ?? document.querySelector('#source-input-panel textarea');
       if (!input) return false;
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      const prototype = input instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
       setter?.call(input, ${JSON.stringify(smokeFeedUrl)});
       input.dispatchEvent(new Event('input', { bubbles: true }));
       return true;

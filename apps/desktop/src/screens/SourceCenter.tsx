@@ -79,7 +79,7 @@ function relativeCheck(value: string | null): string {
   if (minutes < 60) return `${minutes} dk önce`;
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours} sa önce`;
-  return new Intl.DateTimeFormat("tr-TR", { dateStyle: "medium" }).format(new Date(value));
+  return new Intl.DateTimeFormat("tr-TR", { dateStyle: "medium", timeZone: "Europe/Istanbul" }).format(new Date(value));
 }
 
 export function SourceCenter({
@@ -518,19 +518,29 @@ export function SourceCenter({
                   ? "Her satıra bir adres"
                   : "OPML adresi veya XML içeriği"}
             </span>
-            <textarea
-              rows={inputMode === "single" ? 2 : 6}
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder={
-                inputMode === "single"
-                  ? "https://example.com/security"
-                  : inputMode === "bulk"
+            {inputMode === "single" ? (
+              <input
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                placeholder="https://example.com/security"
+                spellCheck={false}
+              />
+            ) : (
+              <textarea
+                rows={6}
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                placeholder={
+                  inputMode === "bulk"
                     ? "https://example.com/feed.xml\nhttps://example.org/sitemap.xml\nhttps://example.net/article"
                     : "https://example.com/sources.opml veya <opml>…</opml>"
-              }
-              spellCheck={false}
-            />
+                }
+                spellCheck={false}
+              />
+            )}
           </label>
           </div>
           <div className="composer-actions">

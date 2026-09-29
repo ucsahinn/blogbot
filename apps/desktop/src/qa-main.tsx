@@ -364,7 +364,7 @@ async function createQaBridge(): Promise<BlogbotBridge> {
     if (state === "codex-provider-waits" && command === "get_editorial_workspace") {
       const workspace = structuredClone(value) as { drafts: Array<Record<string, unknown>> };
       const baseDraft = {
-        titleEn: "Provider wait",
+        titleEn: "Waiting for the writing provider",
         section: "haberler",
         completion: null,
         blockers: 1,
@@ -375,18 +375,18 @@ async function createQaBridge(): Promise<BlogbotBridge> {
         executionState: "WAITING"
       };
       workspace.drafts = [
-        { ...baseDraft, id: "qa-auth-wait", titleTr: "Codex auth wait", detail: "Codex hesabi baglanti bekliyor.", nextAction: "CONNECT_CODEX", reasonCode: "AUTH_REQUIRED" },
+        { ...baseDraft, id: "qa-auth-wait", titleTr: "Codex girişi bekleniyor", detail: "Codex hesabının bağlanması bekleniyor.", nextAction: "CONNECT_CODEX", reasonCode: "AUTH_REQUIRED" },
         {
           ...baseDraft,
           id: "qa-rate-wait",
-          titleTr: "Codex rate wait",
-          detail: providerWaitRetryAccepted ? "Is guvenli yerel kuyrukta yeniden deneniyor." : "Saglayici hiz siniri bekleniyor.",
+          titleTr: "Codex hız sınırı bekleniyor",
+          detail: providerWaitRetryAccepted ? "İş güvenli yerel kuyrukta yeniden deneniyor." : "Sağlayıcının hız sınırının açılması bekleniyor.",
           blockers: providerWaitRetryAccepted ? 0 : 1,
           executionState: providerWaitRetryAccepted ? "RETRY_SCHEDULED" : "WAITING",
           nextAction: providerWaitRetryAccepted ? "NONE" : "RETRY",
           reasonCode: providerWaitRetryAccepted ? null : "RATE_LIMIT"
         },
-        { ...baseDraft, id: "qa-paid-disabled", titleTr: "Paid fallback disabled", detail: "Ucretli fallback kapali.", nextAction: "NONE", reasonCode: "PAID_FALLBACK_DISABLED" }
+        { ...baseDraft, id: "qa-paid-disabled", titleTr: "Ücretli yedek yol kapalı", detail: "Ücretli yedek yol kapalı; iş kendiliğinden ilerlemez.", nextAction: "NONE", reasonCode: "PAID_FALLBACK_DISABLED" }
       ];
       return workspace;
     }

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
-import { sectionLabel, slotStateLabel } from "../app-model.ts";
+import { sectionLabel, slotStateLabel, formatDateSafe } from "../app-model.ts";
 import {
   PREFERRED_PUBLISHING_TIMES,
   resolveScheduleTime,
@@ -74,7 +74,7 @@ export function PublishingCenter({
   onConnectorStateChange
 }: PublishingCenterProps) {
   const [tab, setTab] = useState<"calendar" | "scheduled" | "history">("calendar");
-  const [busyId, setBusyId] = useState("");
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
   const [message, setMessage] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [slotDrafts, setSlotDrafts] = useState<Record<string, SlotDraft>>({});
@@ -99,7 +99,7 @@ export function PublishingCenter({
   const slotActionUnavailableReason = (slotId: string): string =>
     readOnly
       ? "Yerel çalışma alanı yeniden bağlanana kadar bu yayın saati değiştirilemez."
-      : busyId === slotId
+      : busyIds.has(slotId)
         ? "Bu yayın saati kaydediliyor; işlem tamamlanana kadar bekleyin."
         : "";
 
@@ -133,7 +133,7 @@ export function PublishingCenter({
 
   const saveSlot = async (slot: EditorialWorkspaceSnapshot["weeklySlots"][number]) => {
     const draft = getSlotDraft(slot);
-    setBusyId(slot.id);
+    setBusyIds((current) => new Set(current).add(slot.id));
     setMessage("");
     try {
       const time = resolveScheduleTime(draft.choice, draft.customTime);
@@ -155,7 +155,7 @@ export function PublishingCenter({
     } catch (reason) {
       setMessage(userFacingBridgeError(reason, "Yayın saati güncellenemedi."));
     } finally {
-      setBusyId("");
+      setBusyIds((current) => { const next = new Set(current); next.delete(slot.id); return next; });
     }
   };
 
@@ -230,7 +230,7 @@ export function PublishingCenter({
                   <select
                     aria-label={`${slot.dayLabel} yayın saati seçimi`}
                     value={getSlotDraft(slot).choice}
-                    disabled={readOnly || busyId === slot.id}
+                    disabled={readOnly || busyIds.has(slot.id)}
                     aria-describedby={actionReason ? actionReasonId : undefined}
                     onChange={(event) => updateSlotDraft(slot.id, { choice: event.target.value as ScheduleTimeChoice })}
                   >
@@ -239,7 +239,7 @@ export function PublishingCenter({
                   </select>
                 </label>
                 {getSlotDraft(slot).choice === "CUSTOM" ? (
-                  <fieldset className="slot-custom-time" disabled={readOnly || busyId === slot.id} aria-describedby={actionReason ? actionReasonId : undefined}>
+                  <fieldset className="slot-custom-time" disabled={readOnly || busyIds.has(slot.id)} aria-describedby={actionReason ? actionReasonId : undefined}>
                     <legend>Özel saat (24 saat)</legend>
                     <label>
                       <span>Saat</span>
@@ -270,17 +270,17 @@ export function PublishingCenter({
                   <input
                     type="checkbox"
                     checked={getSlotDraft(slot).enabled}
-                    disabled={readOnly || busyId === slot.id}
+                    disabled={readOnly || busyIds.has(slot.id)}
                     aria-describedby={actionReason ? actionReasonId : undefined}
                     onChange={(event) => updateSlotDraft(slot.id, { enabled: event.target.checked })}
                   />
                   <span>{getSlotDraft(slot).enabled ? "Saat etkin" : "Saat kapalı"}</span>
                 </label>
-                <button className="button button-secondary slot-save" type="button" disabled={readOnly || busyId === slot.id} aria-describedby={actionReason ? actionReasonId : undefined} onClick={() => void saveSlot(slot)}>
-                  {busyId === slot.id ? "Kaydediliyor…" : "Saati kaydet"}
+                <button className="button button-secondary slot-save" type="button" disabled={readOnly || busyIds.has(slot.id)} aria-describedby={actionReason ? actionReasonId : undefined} onClick={() => void saveSlot(slot)}>
+                  {busyIds.has(slot.id) ? "Kaydediliyor…" : "Saati kaydet"}
                 </button>
                 {actionReason ? <small id={actionReasonId} className="action-unavailable-reason">{actionReason}</small> : null}
-                {busyId === slot.id ? <div className="slot-progress" role="progressbar" aria-label={`${slot.dayLabel} slotu kaydediliyor`} aria-valuetext="Takvim ayarı kaydediliyor"><span /></div> : null}
+                {busyIds.has(slot.id) ? <div className="slot-progress" role="progressbar" aria-label={`${slot.dayLabel} yayın saati kaydediliyor`} aria-valuetext="Takvim ayarı kaydediliyor"><span /></div> : null}
               </article>
               );
                   })}
@@ -293,7 +293,7 @@ export function PublishingCenter({
           <div className="data-list">
             {workspace.scheduled.map((item) => (
               <article className="data-row" key={item.id}>
-                <div><strong>{item.title}</strong><small>{sectionLabel(item.section)} · {new Date(item.scheduledAt).toLocaleString("tr-TR")}</small></div>
+                <div><strong>{item.title}</strong><small>{sectionLabel(item.section)} · {formatDateSafe(item.scheduledAt, { dateStyle: "medium", timeStyle: "short" })}</small></div>
                 <span className="muted">Yerel hedef hazır</span>
                 <span className={`state-pill state-${item.state.toLowerCase()}`}>{siteMode === "PUBLISH" ? publicationStateLabel[item.state] : publicationStateLabel[item.state].replace("Yayın", "Çıktı")} · {ciStateLabel[item.ciState]}</span>
               </article>
@@ -307,7 +307,7 @@ export function PublishingCenter({
           <div className="data-list">
             {workspace.history.map((item) => (
               <article className="data-row" key={item.id}>
-                <div><strong>{item.title}</strong><small>{new Date(item.publishedAt).toLocaleString("tr-TR")} · {sectionLabel(item.section)}</small></div>
+                <div><strong>{item.title}</strong><small>{formatDateSafe(item.publishedAt, { dateStyle: "medium", timeStyle: "short" })} · {sectionLabel(item.section)}</small></div>
                 {item.url ? <a href={item.url} target="_blank" rel="noreferrer">Yayın URL'si</a> : <span className="muted">{siteMode === "PUBLISH" ? "Site adresi yapılandırılmadı" : "Yerel hedefe yazıldı"}</span>}
                 <span className={`state-pill state-${item.verificationState.toLowerCase()}`}>
                   {item.verificationState === "VERIFIED" || item.verificationState === "PASSED"

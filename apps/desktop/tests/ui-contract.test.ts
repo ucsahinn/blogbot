@@ -697,8 +697,8 @@ test("content routes preserve the mounted flow while switching its visible tab",
   const flow = await readFile(source("screens", "ContentFlow.tsx"), "utf8");
 
   assert.doesNotMatch(app, /<ContentFlow\s+key=\{activePage\}/u);
-  assert.match(flow, /const \[previousInitialTab, setPreviousInitialTab\] = useState\(initialTab\);/u);
-  assert.match(flow, /if \(initialTab !== previousInitialTab\) \{\s*setPreviousInitialTab\(initialTab\);\s*setTab\(initialTab\);\s*\}/u);
+  assert.match(flow, /const requestedTab = `\$\{initialTab\}:\$\{navigationKey\}`;\s*const \[previousRequestedTab, setPreviousRequestedTab\] = useState\(requestedTab\);/u);
+  assert.match(flow, /if \(requestedTab !== previousRequestedTab\) \{\s*setPreviousRequestedTab\(requestedTab\);\s*setTab\(initialTab\);\s*\}/u);
   assert.doesNotMatch(flow, /setQuery\(""\);[\s\S]*?setSelectedIds\(new Set\(\)\);/u);
 });
 

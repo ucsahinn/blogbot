@@ -7730,3 +7730,14 @@ textarea::placeholder {
 .guided-setup-panel > .guided-actions {
   margin-bottom: 0;
 }
+
+/* Sidebar status detail was ~4.6:1 on the dark card; lift it. The Boby
+   subtitle wrapped "iste" onto its own line in the 208px rail. */
+.connection-card small {
+  color: #9fb3b8;
+}
+.sidebar .boby-launcher > span > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

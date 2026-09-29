@@ -81,6 +81,9 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   const [bridge, setBridge] = useState<BlogbotBridge | null>(null);
   const [snapshot, setSnapshot] = useState<BootstrapSnapshot | null>(null);
   const [workspace, setWorkspaceRaw] = useState<EditorialWorkspaceSnapshot | null>(null);
+  // Re-navigating to the page already open (e.g. Ctrl+N while #instant is
+  // in the address but another inner tab is showing) must still switch tabs.
+  const [navigationKey, setNavigationKey] = useState(0);
   // Focus must not fall to <body> when a control disables or replaces itself.
   useEffect(() => installFocusRescue(), []);
 
@@ -338,6 +341,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   };  const readOnly =
     !canMutateLocally(snapshot.connection);
   const navigate = (page: PageId) => {
+    setNavigationKey((value) => value + 1);
     if (page !== "editorial") {
       setEditorialNotice("");
       setPendingEditorialDraft(undefined);
@@ -377,6 +381,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             canScanSources={hasRuntimeCapability(snapshot.capabilities, "SOURCE.SCAN")}
             workspace={workspace}
             initialTab={activePage === "instant" ? "instant" : activePage === "content-candidates" ? "candidates" : "sources"}
+            navigationKey={navigationKey}
             onWorkspaceChange={setWorkspace}
             onSourceCatalogChange={refreshWorkspaceForMutation}
             onOpenEditorial={(notice, pendingDraftId, pendingDraftTitle) => {

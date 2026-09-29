@@ -8,7 +8,7 @@ import {
 } from "../bridge.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
-import { contentCategoryLabel, sectionLabel } from "../app-model.ts";
+import { contentCategoryLabel, sectionLabel, formatDateSafe } from "../app-model.ts";
 import { buildPublicationFiles } from "../publication-files.ts";
 import {
   loadRevisionMediaPreviews,
@@ -131,7 +131,8 @@ function scheduledAtLabel(value: string): string {
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false
+    hour12: false,
+    timeZone: "Europe/Istanbul"
   }).format(new Date(timestamp));
 }
 
@@ -752,9 +753,9 @@ export function ReviewWorkspace({
       setLastPreview({ revisionId: currentRevision.id, hash: preview.previewHash });
       try {
         await onRevisionApproved?.();
-        setNotice(`Revizyon onaylandı ve ${new Date(currentRevision.scheduledAt).toLocaleString("tr-TR")} için hazırlandı. Seçili zamanda yerel zamanlayıcı hedefe gönderir.`);
+        setNotice(`Revizyon onaylandı ve ${formatDateSafe(currentRevision.scheduledAt, { dateStyle: "medium", timeStyle: "short" })} için hazırlandı. Seçili zamanda yerel zamanlayıcı hedefe gönderir.`);
       } catch {
-        setNotice(`Revizyon onaylandı ve ${new Date(currentRevision.scheduledAt).toLocaleString("tr-TR")} için hazırlandı. İnceleme görünümü henüz yenilenemedi; Takvim ve Yayın ekranından yeniden açın.`);
+        setNotice(`Revizyon onaylandı ve ${formatDateSafe(currentRevision.scheduledAt, { dateStyle: "medium", timeStyle: "short" })} için hazırlandı. İnceleme görünümü henüz yenilenemedi; Takvim ve Yayın ekranından yeniden açın.`);
       }
     } catch (reason) {
       setNotice(userFacingPublicationQueueError(reason));

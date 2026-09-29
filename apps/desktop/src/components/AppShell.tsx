@@ -260,7 +260,7 @@ export function AppShell({
           <img src={bobyAvatar} alt="" width="32" height="32" />
           <span>
             <strong>Editör Boby</strong>
-            <small>Doğrudan yardım iste</small>
+            <small>Yardım iste</small>
           </span>
         </button>
 

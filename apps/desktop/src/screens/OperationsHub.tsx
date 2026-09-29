@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
-import { draftExecutionLabel, failureStateLabel, jobTypeLabel, retryModeLabel } from "../app-model.ts";
+import { draftExecutionLabel, failureStateLabel, jobTypeLabel, retryModeLabel, formatDateSafe } from "../app-model.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import { Operations } from "./Operations.tsx";
 
@@ -50,16 +50,16 @@ const MAX_INITIAL_OPERATION_JOBS = 50;
 
 function formatObservedTime(value: string): string {
   const timestamp = Date.parse(value);
-  return Number.isNaN(timestamp) ? "Ölçülmedi" : new Date(timestamp).toLocaleString("tr-TR");
+  return Number.isNaN(timestamp) ? "Ölçülmedi" : formatDateSafe(timestamp, { dateStyle: "medium", timeStyle: "short" });
 }
 
 function retryUnavailableReason(
   failure: EditorialWorkspaceSnapshot["failures"][number],
   readOnly: boolean,
-  busyId: string
+  busyIds: ReadonlySet<string>
 ): string | undefined {
   if (readOnly) return "Yerel çalışma alanı yeniden bağlanana kadar işler yeniden başlatılamaz.";
-  if (busyId === failure.id || failure.state === "RETRYING") return "İş zaten tekrar deneme kuyruğunda.";
+  if (busyIds.has(failure.id) || failure.state === "RETRYING") return "İş zaten tekrar deneme kuyruğunda.";
   if (failure.retryMode === "MANUAL") return "Bu iş otomatik tekrar için güvenli değil; önce hata ayrıntısını inceleyin.";
   return undefined;
 }
@@ -75,7 +75,7 @@ function userFacingRetryError(reason: unknown): string {
 
 export function OperationsHub(props: OperationsHubProps) {
   const [tab, setTab] = useState<"jobs" | "codex" | "health" | "activity">("jobs");
-  const [busyId, setBusyId] = useState("");
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
   const [message, setMessage] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [automationBusy, setAutomationBusy] = useState(false);
@@ -127,7 +127,7 @@ export function OperationsHub(props: OperationsHubProps) {
   };
 
   const retry = async (jobId: string) => {
-    setBusyId(jobId);
+    setBusyIds((current) => new Set(current).add(jobId));
     setMessage("");
     try {
       await props.bridge.retryJob(jobId);
@@ -140,7 +140,7 @@ export function OperationsHub(props: OperationsHubProps) {
     } catch (reason) {
       setMessage(userFacingRetryError(reason));
     } finally {
-      setBusyId("");
+      setBusyIds((current) => { const next = new Set(current); next.delete(jobId); return next; });
     }
   };
 
@@ -268,11 +268,11 @@ export function OperationsHub(props: OperationsHubProps) {
                       <button
                         className="button button-primary"
                         type="button"
-                        disabled={props.readOnly || busyId === draft.id}
+                        disabled={props.readOnly || busyIds.has(draft.id)}
                         aria-describedby={props.readOnly ? `blocked-draft-retry-unavailable-${draft.id}` : undefined}
                         onClick={() => void retry(draft.id)}
                       >
-                        {busyId === draft.id ? "Kuyruğa alınıyor" : "Tekrar dene"}
+                        {busyIds.has(draft.id) ? "Kuyruğa alınıyor" : "Tekrar dene"}
                       </button>
                     ) : null}
                     {draft.nextAction === "RETRY" && props.readOnly ? (
@@ -285,7 +285,7 @@ export function OperationsHub(props: OperationsHubProps) {
               ))}
               {visibleFailures.length > 0 ? <h2 className="operation-group-title">Müdahale gereken</h2> : null}
               {visibleFailures.map((failure) => {
-                const unavailableReason = retryUnavailableReason(failure, props.readOnly, busyId);
+                const unavailableReason = retryUnavailableReason(failure, props.readOnly, busyIds);
                 const unavailableReasonId = `retry-unavailable-${failure.id}`;
                 return (
                   <article className="failure-row" key={failure.id}>
@@ -378,7 +378,7 @@ export function OperationsHub(props: OperationsHubProps) {
                       </span>
                     </div>
                     <p>{item.detail}</p>
-                    <small>{new Date(item.checkedAt).toLocaleTimeString("tr-TR")}</small>
+                    <small>{formatDateSafe(item.checkedAt, { timeStyle: "medium" })}</small>
                   </div>
                 </article>
               ))}

@@ -231,6 +231,37 @@ export function connectorDraftFromState(
   };
 }
 
+/** The editorial schedule's time zone; every displayed publication time uses it. */
+export const EDITORIAL_TIME_ZONE = "Europe/Istanbul";
+
+/** YYYY-MM-DD of the Istanbul calendar day that contains the instant. */
+export function editorialDateKey(date: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: EDITORIAL_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+const editorialDayLabels = ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"] as const;
+
+/** Monday-first week of Istanbul calendar days: [label, day number, key]. */
+export function editorialWeek(now = new Date()): Array<readonly [string, string, string]> {
+  const [year = 1970, month = 1, day = 1] = editorialDateKey(now).split("-").map(Number);
+  const anchor = Date.UTC(year, month - 1, day, 12);
+  const weekday = new Date(anchor).getUTCDay();
+  const mondayOffset = weekday === 0 ? -6 : 1 - weekday;
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(anchor + (mondayOffset + index) * 86_400_000);
+    return [
+      editorialDayLabels[date.getUTCDay()] ?? "Gün",
+      String(date.getUTCDate()).padStart(2, "0"),
+      date.toISOString().slice(0, 10)
+    ] as const;
+  });
+}
+
 /**
  * Formats an engine timestamp without throwing. Intl throws a RangeError on an
  * invalid Date, and with no error boundary one malformed timestamp blanked the
@@ -244,7 +275,7 @@ export function formatDateSafe(
   if (typeof value !== "string" && typeof value !== "number" && !(value instanceof Date)) return fallback;
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return fallback;
-  return new Intl.DateTimeFormat("tr-TR", options).format(date);
+  return new Intl.DateTimeFormat("tr-TR", { timeZone: EDITORIAL_TIME_ZONE, ...options }).format(date);
 }
 
 /** One wording for a draft's execution state on every screen. */

@@ -847,16 +847,16 @@ test("operations retry sends an actionable failed job back to the durable queue"
 test("provider waits expose only their typed safe action", async ({ page }) => {
   await page.goto("?state=codex-provider-waits#operations");
 
-  const authWait = page.getByRole("article").filter({ hasText: "Codex auth wait" });
+  const authWait = page.getByRole("article").filter({ hasText: "Codex girişi bekleniyor" });
   await expect(authWait.getByRole("button", { name: /Codex.*bağla/u })).toBeVisible();
   await expect(authWait.getByRole("button", { name: "Tekrar dene" })).toHaveCount(0);
 
-  const rateWait = page.getByRole("article").filter({ hasText: "Codex rate wait" });
+  const rateWait = page.getByRole("article").filter({ hasText: "Codex hız sınırı bekleniyor" });
   await expect(rateWait.getByRole("button", { name: "Tekrar dene" })).toBeVisible();
   await rateWait.getByRole("button", { name: "Tekrar dene" }).click();
   await expect(page.getByRole("status")).toContainText("İş güvenli tekrar deneme kuyruğuna alındı.");
 
-  const paidDisabled = page.getByRole("article").filter({ hasText: "Paid fallback disabled" });
+  const paidDisabled = page.getByRole("article").filter({ hasText: "Ücretli yedek yol kapalı" });
   await expect(paidDisabled.getByRole("button", { name: "Tekrar dene" })).toHaveCount(0);
   await expect(paidDisabled.getByRole("button", { name: /Codex.*bağla/u })).toHaveCount(0);
 
@@ -1834,6 +1834,14 @@ test("a screen that fails to render is contained and the rest of the app keeps w
   const errors = runtimeErrors.get(page) ?? [];
   const unexpected = errors.filter((message) => !/reading 'some'|ScreenErrorBoundary|The above error occurred/u.test(message));
   errors.splice(0, errors.length, ...unexpected);
+});
+
+test("Ctrl+N opens Instant Create even when another content tab is showing", async ({ page }) => {
+  await page.goto("?state=ready#instant");
+  await page.getByRole("tab", { name: /Haber adayları/u }).click();
+  await expect(page.getByRole("tab", { name: /Haber adayları/u })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Control+n");
+  await expect(page.getByRole("tab", { name: "Anlık oluştur" })).toHaveAttribute("aria-selected", "true");
 });
 
 test("Escape closes the About panel and returns focus to its toggle", async ({ page }) => {

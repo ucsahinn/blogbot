@@ -17,6 +17,8 @@ interface ContentFlowProps {
   canScanSources: boolean;
   workspace: EditorialWorkspaceSnapshot;
   initialTab?: ContentTab;
+  /** Changes on every navigation so re-opening the same page resets the tab. */
+  navigationKey?: number;
   onWorkspaceChange: (snapshot: EditorialWorkspaceSnapshot) => void;
   onSourceCatalogChange: () => Promise<void>;
   onOpenEditorial: (notice?: string, pendingDraftId?: string, pendingDraftTitle?: string) => void;
@@ -44,7 +46,8 @@ function candidatePublicationLabel(value: string | null | undefined): string {
   if (!value || !Number.isFinite(Date.parse(value))) return "Kaynak tarihi alınamadı";
   return new Intl.DateTimeFormat("tr-TR", {
     dateStyle: "medium",
-    timeStyle: "short"
+    timeStyle: "short",
+    timeZone: "Europe/Istanbul"
   }).format(new Date(value));
 }
 
@@ -56,6 +59,7 @@ export function ContentFlow({
   canScanSources,
   workspace,
   initialTab = "sources",
+  navigationKey = 0,
   onWorkspaceChange,
   onSourceCatalogChange,
   onOpenEditorial,
@@ -63,9 +67,10 @@ export function ContentFlow({
   onOpenOperations
 }: ContentFlowProps) {
   const [tab, setTab] = useState<ContentTab>(initialTab);
-  const [previousInitialTab, setPreviousInitialTab] = useState(initialTab);
-  if (initialTab !== previousInitialTab) {
-    setPreviousInitialTab(initialTab);
+  const requestedTab = `${initialTab}:${navigationKey}`;
+  const [previousRequestedTab, setPreviousRequestedTab] = useState(requestedTab);
+  if (requestedTab !== previousRequestedTab) {
+    setPreviousRequestedTab(requestedTab);
     setTab(initialTab);
   }
   const [query, setQuery] = useState("");
@@ -255,7 +260,7 @@ export function ContentFlow({
         const nextWorkspace = await bridge.getEditorialWorkspace({ includeCandidates: true });
         onWorkspaceChange(nextWorkspace);
       } catch {
-        setMessage(`${summary} Aday listesi henüz yenilenemedi; “Yeni aday bul” ile yeniden okuyun.`);
+        setMessage(`${summary} Aday listesi henüz yenilenemedi; Haber adayları sekmesini yeniden açın.`);
       }
       try {
         await onSourceCatalogChange();
@@ -342,6 +347,7 @@ export function ContentFlow({
               />
             </label>
             <span>{candidates.length} etkin aday</span>
+            <button className="button button-secondary" type="button" disabled={Boolean(busyId)} onClick={() => setTab("sources")}>Yeni aday bul</button>
           </div>
           <div className="candidate-bulk-actions" aria-label="Seçili aday işlemleri">
             <span>{selectedCandidates.length} aday seçildi</span>
@@ -359,7 +365,6 @@ export function ContentFlow({
           <div className="candidate-action-guidance" role="note">
             <strong>Araştırmaya almak yerel kuyruğu başlatır; hemen yayın yapmaz.</strong>
             <span>Yayın yalnızca hazır taslağı inceledikten sonra başlar; insan onayı olmadan hiçbir içerik gönderilmez.</span>
-          <button className="button button-ghost" type="button" disabled={Boolean(busyId)} onClick={() => setTab("sources")}>Yeni aday bul</button>
           </div>
           {candidates.length ? (
             <div className="candidate-grid">

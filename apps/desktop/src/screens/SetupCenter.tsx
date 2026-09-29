@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { canEnableAutomationMode, connectorDraftFromState, generateRecoveryKey, reconcileConnectorDraft, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
+import { canEnableAutomationMode, connectorDraftFromState, generateRecoveryKey, reconcileConnectorDraft, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites, formatDateSafe } from "../app-model.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
 import { describePrerequisiteState, summarizeGuidedStates, type SetupStatusTone } from "../setup-status.ts";
 import { buildSetupRequirements } from "../types.ts";
@@ -456,7 +456,7 @@ export function SetupCenter({
     setConnectionMessage("Yerel şifreli verilerin bütünlüğü doğrulanıyor… Bu işlem veri değiştirmez; büyük arşivlerde birkaç dakika sürebilir.");
     try {
       const result = await bridge.verifyLocalIntegrity();
-      setConnectionMessage(`Yerel şifreli veri bütünlüğü doğrulandı. Tamamlanma: ${new Date(result.completedAt).toLocaleString("tr-TR")}.`);
+      setConnectionMessage(`Yerel şifreli veri bütünlüğü doğrulandı. Tamamlanma: ${formatDateSafe(result.completedAt, { dateStyle: "medium", timeStyle: "short" })}.`);
     } catch (reason) {
       setConnectionMessage(
         explainFailure(
@@ -1431,7 +1431,7 @@ export function SetupCenter({
               <span>Snapshot seçin</span>
               <select value={selectedAutomaticBackupName} onChange={(event) => setSelectedAutomaticBackupName(event.target.value)} disabled={busy || automaticSnapshots.length === 0}>
                 {automaticSnapshots.length === 0 ? <option value="">Snapshot yok</option> : null}
-                {automaticSnapshots.map((snapshot) => <option key={snapshot.name} value={snapshot.name}>{new Date(snapshot.createdAt).toLocaleString("tr-TR")} · {Math.ceil(snapshot.bytes / 1024)} KB</option>)}
+                {automaticSnapshots.map((snapshot) => <option key={snapshot.name} value={snapshot.name}>{formatDateSafe(snapshot.createdAt, { dateStyle: "medium", timeStyle: "short" })} · {Math.ceil(snapshot.bytes / 1024)} KB</option>)}
               </select>
             </label>
           </div>

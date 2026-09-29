@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { formatDateSafe } from "../app-model.ts";
+import { formatDateSafe, editorialDateKey, editorialWeek } from "../app-model.ts";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { formatOperationTimestamp } from "../operation-timestamp.ts";
@@ -23,20 +23,10 @@ const eventStateLabel = {
   BLOCKED: "Durduruldu"
 };
 
-const dayLabels = ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"] as const;
-const localDateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-
-function getOperationWeek(now = new Date()): ReadonlyArray<readonly [string, string, string]> {
-  const day = now.getDay();
-  const mondayOffset = day === 0 ? -6 : 1 - day;
-  return Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(now);
-    date.setHours(0, 0, 0, 0);
-    date.setDate(now.getDate() + mondayOffset + index);
-    const iso = localDateKey(date);
-    return [dayLabels[date.getDay()] ?? "Gün", String(date.getDate()).padStart(2, "0"), iso] as const;
-  });
-}
+// Days are Istanbul calendar days, matching the Istanbul times shown for each
+// item; the PC's own time zone used to put items on the wrong day.
+const localDateKey = editorialDateKey;
+const getOperationWeek = editorialWeek;
 
 export function Operations({
   bridge,

@@ -47,7 +47,7 @@ export function EditorialDesk({
   const [selectedDraftIds, setSelectedDraftIds] = useState<ReadonlySet<string>>(new Set());
   const [hidingDrafts, setHidingDrafts] = useState(false);
   const [restoringDrafts, setRestoringDrafts] = useState(false);
-  const [retryingDraftId, setRetryingDraftId] = useState<string | undefined>();
+  const [retryingDraftIds, setRetryingDraftIds] = useState<ReadonlySet<string>>(() => new Set());
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState(initialMessage);
   const [queuedDraftId, setQueuedDraftId] = useState<string | undefined>();
@@ -176,7 +176,7 @@ export function EditorialDesk({
   };
 
   const retryDraft = async (draftId: string) => {
-    setRetryingDraftId(draftId);
+    setRetryingDraftIds((current) => new Set(current).add(draftId));
     setMessage("");
     try {
       await bridge.retryJob(draftId);
@@ -187,7 +187,7 @@ export function EditorialDesk({
     } catch (reason) {
       setMessage(userFacingBridgeError(reason, "Taslak yeniden kuyruğa alınamadı."));
     } finally {
-      setRetryingDraftId(undefined);
+      setRetryingDraftIds((current) => { const next = new Set(current); next.delete(draftId); return next; });
     }
   };
 
@@ -292,7 +292,7 @@ export function EditorialDesk({
                 )}
                 <span className="draft-copy">
                   <strong>{draft.titleTr}</strong>
-                  <small>{draft.titleEn === "Research is being prepared" ? "İngilizce başlık araştırmadan sonra hazırlanacak" : draft.titleEn}</small>
+                  <small>{draft.titleEn === "Research is being prepared" ? "İngilizce başlık araştırmadan sonra hazırlanacak" : <><span lang="en" className="locale-tag">EN · </span><span lang="en">{draft.titleEn}</span></>}</small>
                   <span>{sectionLabel(draft.section)} · {draft.blockers ? `${draft.blockers} engel` : "engel yok"}</span>
                   <span id={`draft-detail-${draft.id}`}>{draft.detail}</span>
                 </span>
@@ -309,10 +309,10 @@ export function EditorialDesk({
                 <button
                   className="draft-row-retry"
                   type="button"
-                  disabled={retryingDraftId === draft.id}
+                  disabled={retryingDraftIds.has(draft.id)}
                   onClick={() => void retryDraft(draft.id)}
                 >
-                  {retryingDraftId === draft.id ? "Kuyruğa alınıyor…" : "Tekrar dene"}
+                  {retryingDraftIds.has(draft.id) ? "Kuyruğa alınıyor…" : "Tekrar dene"}
                 </button>
               ) : null}
               </article>;

@@ -385,3 +385,18 @@ test("date formatting never throws on malformed engine timestamps", () => {
   assert.equal(format!(undefined, { dateStyle: "medium" }, "Henüz yok"), "Henüz yok");
   assert.match(format!("2026-09-28T10:00:00.000Z", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Istanbul" }), /^13[.:]00$/u);
 });
+
+test("the operations week and day keys follow the Istanbul calendar, not the PC time zone", () => {
+  const model = appModel as Record<string, unknown>;
+  const dateKey = model.editorialDateKey as ((date: Date) => string) | undefined;
+  const week = model.editorialWeek as ((now: Date) => Array<readonly [string, string, string]>) | undefined;
+  assert.equal(typeof dateKey, "function");
+  assert.equal(typeof week, "function");
+  // Sunday 22:30 UTC is Monday 01:30 in Istanbul.
+  const now = new Date("2026-09-27T22:30:00.000Z");
+  assert.equal(dateKey!(now), "2026-09-28");
+  const days = week!(now);
+  assert.equal(days.length, 7);
+  assert.deepEqual(days[0], ["Pzt", "28", "2026-09-28"]);
+  assert.deepEqual(days[6], ["Paz", "04", "2026-10-04"]);
+});
