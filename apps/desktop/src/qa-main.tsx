@@ -97,6 +97,11 @@ async function createQaBridge(): Promise<BlogbotBridge> {
       if (bootstrapCalls > 1) bootstrapCompleted = false;
     }
     const value = await base(command, args);
+    if (state === "screen-render-failure" && command === "get_operations") {
+      const operations = structuredClone(value) as Record<string, unknown>;
+      operations.schedule = null;
+      return operations;
+    }
     if (state === "materialization-ready" && command === "save_setup_connector") {
       window.sessionStorage.setItem("blogbot.qa.materialization-target", "saved");
     }

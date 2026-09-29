@@ -971,7 +971,7 @@ export function SetupCenter({
               >
                 <span className="setup-task-index" aria-hidden="true">{index + 1}</span>
                 <span>
-                  {task.id === "publishing" || task.id === "backup" ? <small className="setup-task-kind">İsteğe bağlı</small> : null}
+                  {(task.id === "publishing" || task.id === "backup") && setupTaskState(task.id).label.toLocaleLowerCase("tr-TR") !== "isteğe bağlı" ? <small className="setup-task-kind">İsteğe bağlı</small> : null}
                   {task.id === nextSetupTask?.task.id ? <small className="setup-task-kind">Önerilen sonraki adım</small> : null}
                   <small className={`setup-task-state state-${setupTaskState(task.id).tone}`}><span aria-hidden="true">{setupTaskState(task.id).tone === "ready" ? "✓" : setupTaskState(task.id).tone === "blocker" ? "!" : "•"}</span>{setupTaskState(task.id).label}</small>
                   <strong>{task.title}</strong>
@@ -985,11 +985,11 @@ export function SetupCenter({
       ) : (
         <section className="setup-task-heading" aria-labelledby="setup-task-title">
           <button
-            className="button button-secondary"
+            className="text-button setup-task-back"
             type="button"
             onClick={() => setSelectedTask("overview")}
           >
-            Kurulum görevlerine dön
+            <span aria-hidden="true">←</span> Kurulum görevlerine dön
           </button>
           <div>
             <p className="section-kicker">ODAKLI KURULUM GÖREVİ</p>

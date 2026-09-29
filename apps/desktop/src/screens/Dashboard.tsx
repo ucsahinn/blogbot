@@ -85,8 +85,10 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
             {refreshing ? "Yenileniyor…" : "Çalışma alanını yenile"}
           </button>
           <button
-            className="button button-primary"
+            className={`button ${offline ? "button-secondary" : "button-primary"}`}
             type="button"
+            disabled={offline}
+            title={offline ? "Yerel motor çalışmıyor; yeni içerik oluşturma bekletiliyor." : undefined}
             onClick={() => onNavigate("instant")}
           >
             <span aria-hidden="true">+</span>

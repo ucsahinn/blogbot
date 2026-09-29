@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { formatDateSafe } from "../app-model.ts";
 
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { formatOperationTimestamp } from "../operation-timestamp.ts";
@@ -337,11 +338,7 @@ export function Operations({
               <dt>{siteMode === "PUBLISH" ? "Mutabakat" : "Son işlem"}</dt>
               <dd>
                 {operations?.publisher.lastReconciledAt
-                  ? new Intl.DateTimeFormat("tr-TR", {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      timeZone: "Europe/Istanbul"
-                    }).format(new Date(operations.publisher.lastReconciledAt))
+                  ? formatDateSafe(operations.publisher.lastReconciledAt, { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Istanbul" })
                   : "Henüz yok"}
                 {operations?.publisher.lastReconciledAt ? " · eşleşti" : ""}
               </dd>
@@ -384,11 +381,7 @@ export function Operations({
             {operations?.schedule
               .filter((item) => scheduleDateKey(item.at) === selectedDate)
               .map((item) => {
-              const time = new Intl.DateTimeFormat("tr-TR", {
-                hour: "2-digit",
-                minute: "2-digit",
-                timeZone: "Europe/Istanbul"
-              }).format(new Date(item.at));
+              const time = formatDateSafe(item.at, { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Istanbul" }, "Saat yok");
               return (
                 <div className="schedule-row" key={item.id}>
                   <time>{time}</time>

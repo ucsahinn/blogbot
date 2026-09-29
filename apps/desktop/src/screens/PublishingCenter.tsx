@@ -164,7 +164,7 @@ export function PublishingCenter({
     <div className="page hub-page">
       <header className="page-header">
         <div>
-          <p className="section-kicker">{siteMode === "PUBLISH" ? "TAKVİM VE YAYIN" : "TAKVİM VE ÇIKTI"}</p>
+          <p className="section-kicker">TAKVİM VE YAYIN</p>
           <h1>{siteMode === "PUBLISH" ? "Haftalık ritim, hazır yayınlar ve geçmiş." : "Haftalık ritim, hazır çıktılar ve geçmiş."}</h1>
           <p>Her gün için beşe kadar yayın saati açın. Yeni taslaklar “ilk uygun yayın saati” seçeneğinde bu ritmi izler; onaylı bir içerik bu takvimden atanmaz veya planlanmaz.</p>
           {readOnly ? (
@@ -215,8 +215,10 @@ export function PublishingCenter({
                     onClick={() => setActiveSlotId(slot.id)}
                   >
                     <span><strong>{slotLabel(slot)}</strong><em>{getSlotDraft(slot).enabled ? resolveScheduleTime(getSlotDraft(slot).choice, getSlotDraft(slot).customTime) : "Kapalı"}</em></span>
-                    <span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span>
-                    <small>{legacyAssignment ?? "Yeni taslaklar ilk uygun etkin yayın saatine göre ilerler."}</small>
+                    {getSlotDraft(slot).enabled ? (
+                      <span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span>
+                    ) : null}
+                    <small>{legacyAssignment ?? (getSlotDraft(slot).enabled ? "Yeni taslaklar ilk uygun etkin yayın saatine göre ilerler." : "Bu saat kapalı; yeni taslaklara atanmaz.")}</small>
                   </button>
                 );
               }

@@ -1822,6 +1822,20 @@ test("setup guide finishes with evidence from a fresh prerequisite check", async
   await expect(page.getByRole("button", { name: "OPE’yi bu hedefle kullan" })).toBeEnabled();
 });
 
+test("a screen that fails to render is contained and the rest of the app keeps working", async ({ page }) => {
+  await page.goto("?state=screen-render-failure#operations");
+  await page.getByRole("tab", { name: "İş günlüğü" }).click();
+  await expect(page.getByRole("heading", { name: "Bu ekran beklenmeyen bir veriyle karşılaştı." })).toBeVisible();
+  const nav = page.getByRole("navigation", { name: "Ana menü" });
+  await nav.getByRole("button", { name: "Genel Bakış" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("Yayın akışı");
+  // React reports the deliberately injected, contained render error on the
+  // console; drop only that expected report.
+  const errors = runtimeErrors.get(page) ?? [];
+  const unexpected = errors.filter((message) => !/reading 'some'|ScreenErrorBoundary|The above error occurred/u.test(message));
+  errors.splice(0, errors.length, ...unexpected);
+});
+
 test("Escape closes the About panel and returns focus to its toggle", async ({ page }) => {
   await page.goto("?state=ready#dashboard");
   const about = page.locator(".sidebar").getByRole("button", { name: "OPE hakkında" });

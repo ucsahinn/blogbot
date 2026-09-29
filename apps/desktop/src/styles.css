@@ -7700,3 +7700,33 @@ textarea::placeholder {
   outline: 3px solid var(--blue);
   outline-offset: -3px;
 }
+
+/* Setup task view: the back control is a small link above the title, so
+   the title starts at the left edge instead of in a second column. */
+.setup-task-heading {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.4fr);
+}
+.setup-task-heading > .setup-task-back {
+  grid-column: 1 / -1;
+  justify-self: start;
+  font-size: 13px;
+}
+@media (max-width: 920px) {
+  .setup-task-heading {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* Task titles were smaller than their kicker. The global type floor uses
+   !important, so the title needs a more specific !important size. */
+.app-shell .setup-task-card strong {
+  font-size: 15px !important;
+}
+/* The guide's note left white stripes between the grey action row and the
+   bottom edge. */
+.guided-setup-panel > small {
+  margin: 0;
+  padding-top: 0;
+}
+.guided-setup-panel > .guided-actions {
+  margin-bottom: 0;
+}

@@ -5,6 +5,7 @@ import { AppShell, type PageId } from "./components/AppShell.tsx";
 import { BobyAssistant } from "./components/BobyAssistant.tsx";
 import { canMutateLocally, hasRuntimeCapability, mergeWorkspaceCandidates } from "./app-model.ts";
 import { installFocusRescue } from "./components/focus-rescue.ts";
+import { ScreenErrorBoundary } from "./components/ScreenErrorBoundary.tsx";
 import { createCoalescingBridge, userFacingBridgeError, type BlogbotBridge } from "./bridge.ts";
 import { createRuntimeBridge } from "./runtime-bridge.ts";
 import { Dashboard } from "./screens/Dashboard.tsx";
@@ -358,6 +359,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         onExportDiagnostics={() => bridge.exportDiagnostics()}
         syncError={syncError}
       >
+        <ScreenErrorBoundary resetKey={activePage}>
         {activePage === "dashboard" ? (
           <Dashboard
             snapshot={snapshot}
@@ -447,6 +449,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
             onCompleted={refreshWorkspace}
           />
         ) : null}
+        </ScreenErrorBoundary>
       </AppShell>
       <BobyAssistant activePage={activePage} snapshot={snapshot} workspace={workspace} bridge={bridge} open={bobyOpen} onClose={() => setBobyOpen(false)} onNavigate={navigate} />
     </>

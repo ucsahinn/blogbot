@@ -375,3 +375,13 @@ test("a workspace read without candidates keeps the candidate list it did not lo
   assert.deepEqual(merge!(previous, { candidates: [], candidatesIncluded: true }).candidates, []);
   assert.deepEqual(merge!(null, { candidates: [], candidatesIncluded: false }).candidates, []);
 });
+
+test("date formatting never throws on malformed engine timestamps", () => {
+  const format = (appModel as Record<string, unknown>).formatDateSafe as
+    | ((value: unknown, options: Intl.DateTimeFormatOptions, fallback?: string) => string)
+    | undefined;
+  assert.equal(typeof format, "function");
+  assert.equal(format!("not-a-date", { dateStyle: "medium" }), "Zaman bilgisi yok");
+  assert.equal(format!(undefined, { dateStyle: "medium" }, "Henüz yok"), "Henüz yok");
+  assert.match(format!("2026-09-28T10:00:00.000Z", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Istanbul" }), /^13[.:]00$/u);
+});

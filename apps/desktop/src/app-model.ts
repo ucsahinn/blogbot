@@ -198,7 +198,9 @@ export const articleTypeLabel = (value: ArticleType): string => articleTypeLabel
 export const contentCategoryLabel = (section: Section, articleType: ArticleType): string => {
   const sectionText = sectionLabel(section);
   const articleTypeText = articleTypeLabel(articleType);
-  return sectionText === articleTypeText ? sectionText : `${sectionText} · ${articleTypeText}`;
+  return sectionText === articleTypeText || articleType === sectionArticleType(section)
+    ? sectionText
+    : `${sectionText} · ${articleTypeText}`;
 };
 export const candidateStateLabel = (value: CandidateView["state"]): string => candidateStateLabels[value];
 export const draftStateLabel = (value: DraftView["state"]): string => draftStateLabels[value];
@@ -227,6 +229,22 @@ export function connectorDraftFromState(
     deploy: { ...state.config.deploy },
     backup: { ...state.config.backup }
   };
+}
+
+/**
+ * Formats an engine timestamp without throwing. Intl throws a RangeError on an
+ * invalid Date, and with no error boundary one malformed timestamp blanked the
+ * whole workspace.
+ */
+export function formatDateSafe(
+  value: unknown,
+  options: Intl.DateTimeFormatOptions,
+  fallback = "Zaman bilgisi yok"
+): string {
+  if (typeof value !== "string" && typeof value !== "number" && !(value instanceof Date)) return fallback;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return new Intl.DateTimeFormat("tr-TR", options).format(date);
 }
 
 /** One wording for a draft's execution state on every screen. */

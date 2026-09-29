@@ -72,7 +72,9 @@ const healthLabels: Record<SourceRecord["health"], string> = {
 
 function relativeCheck(value: string | null): string {
   if (!value) return "Henüz kontrol edilmedi";
-  const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60_000));
+  const checkedAt = new Date(value).getTime();
+  if (Number.isNaN(checkedAt)) return "Kontrol zamanı okunamadı";
+  const minutes = Math.max(0, Math.round((Date.now() - checkedAt) / 60_000));
   if (minutes < 1) return "Az önce";
   if (minutes < 60) return `${minutes} dk önce`;
   const hours = Math.round(minutes / 60);
