@@ -71,8 +71,8 @@ test("coalescing bridge makes one native workspace call for concurrent readers",
     bridge.getEditorialWorkspace()
   ]);
 
-  assert.deepEqual(first, { drafts: [] });
-  assert.deepEqual(second, { drafts: [] });
+  assert.deepEqual(first, { drafts: [], candidatesIncluded: false });
+  assert.deepEqual(second, { drafts: [], candidatesIncluded: false });
   assert.equal(calls, 1);
 });
 
@@ -104,7 +104,7 @@ test("coalescing bridge retries an in-flight workspace read after a mutation", a
   assert.equal(workspaceCalls, 2);
 
   workspaceResponses[1]!({ snapshot: "after-mutation" });
-  assert.deepEqual(await staleRead, { snapshot: "after-mutation" });
+  assert.deepEqual(await staleRead, { snapshot: "after-mutation", candidatesIncluded: false });
 });
 
 test("Boby guidance uses a bounded native request and a separate non-blocking status read", async () => {
@@ -167,7 +167,7 @@ test("coalescing bridge does not hold a newly opened workspace behind a long mut
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("workspace read was held behind backup")), 50))
   ]);
 
-  assert.deepEqual(workspace, { snapshot: "available-during-backup" });
+  assert.deepEqual(workspace, { snapshot: "available-during-backup", candidatesIncluded: false });
   finishBackup?.();
   await backup;
 });
@@ -182,7 +182,7 @@ test("coalescing bridge clears rejected reads so a later reader can retry", asyn
   }));
 
   await assert.rejects(bridge.getEditorialWorkspace(), /temporary native failure/u);
-  assert.deepEqual(await bridge.getEditorialWorkspace(), { drafts: [] });
+  assert.deepEqual(await bridge.getEditorialWorkspace(), { drafts: [], candidatesIncluded: false });
   assert.equal(calls, 2);
 });
 

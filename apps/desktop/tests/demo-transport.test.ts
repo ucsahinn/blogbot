@@ -85,8 +85,8 @@ test("demo transports isolate source and workspace mutations", async () => {
     time: "09:15"
   });
 
-  const mutated = await first.getEditorialWorkspace();
-  const isolated = await second.getEditorialWorkspace();
+  const mutated = await first.getEditorialWorkspace({ includeCandidates: true });
+  const isolated = await second.getEditorialWorkspace({ includeCandidates: true });
 
   assert.equal(
     mutated.candidates.find((item) => item.id === "candidate-cisa-001")?.state,
