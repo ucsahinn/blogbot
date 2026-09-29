@@ -141,7 +141,7 @@ test("primary navigation preserves five stable workspaces and route focus", asyn
 
 test("collapsed and mobile navigation retain names and setup/settings entry points", async () => {
   const shell = await readFile(source("components", "AppShell.tsx"), "utf8");
-  assert.match(shell, /aria-label=\{item\.label\}/u);
+  assert.match(shell, /aria-label=\{item\.id === "editorial" && reviewWaitingCount \? `\$\{item\.label\}, \$\{reviewWaitingCount\} inceleme bekliyor` : item\.label\}/u);
   assert.match(shell, /className="mobile-utility-nav"/u);
   assert.match(shell, /aria-label="Ayarlar"/u);
   assert.match(shell, /aria-label="Kurulum ve önkoşullar"/u);
@@ -353,7 +353,7 @@ test("Operations bounds initial job rendering so a large local history cannot st
   assert.match(operations, /const visibleActiveDrafts = showAllJobs \? activeDrafts : activeDrafts\.slice\(0, MAX_INITIAL_OPERATION_JOBS\);/u);
   assert.match(operations, /const visibleFailures = showAllJobs\s*\? props\.workspace\.failures\s*:\s*props\.workspace\.failures\.slice\(0, Math\.max\(0, MAX_INITIAL_OPERATION_JOBS - visibleActiveDrafts\.length\)\);/u);
   assert.match(operations, /const hiddenJobCount = Math\.max\(\s*0,\s*activeDrafts\.length \+ props\.workspace\.failures\.length - visibleActiveDrafts\.length - visibleFailures\.length\s*\);/u);
-  assert.match(operations, /Tüm \{hiddenJobCount\} işi göster/u);
+  assert.match(operations, /\{hiddenJobCount\} işi daha göster/u);
   assert.match(operations, /visibleActiveDrafts\.map/u);
   assert.match(operations, /visibleFailures\.map/u);
 });

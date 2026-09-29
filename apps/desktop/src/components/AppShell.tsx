@@ -199,6 +199,7 @@ export function AppShell({
     activePage === page ||
     (page === "content" && ["content-candidates", "instant"].includes(activePage)) ||
     (page === "editorial" && activePage === "editorial-review");
+  const reviewWaitingCount = snapshot.pipeline.find((stage) => stage.label === "İnceleme")?.count ?? 0;
   const updateAvailable = updatePhase === "available" && pendingUpdate !== null;
   const aboutControlLabel = updateAvailable ? `${pendingUpdate.version} indir ve kur` : "Hakkında";
   const aboutControlAriaLabel = updateAvailable
@@ -225,7 +226,7 @@ export function AppShell({
               key={item.id}
               type="button"
               onClick={() => onNavigate(item.id)}
-              aria-label={item.label}
+              aria-label={item.id === "editorial" && reviewWaitingCount ? `${item.label}, ${reviewWaitingCount} inceleme bekliyor` : item.label}
               aria-current={isNavigationActive(item.id) ? "page" : undefined}
             >
               <span className="nav-icon" aria-hidden="true">
@@ -233,8 +234,10 @@ export function AppShell({
               </span>
               <span>{item.label}</span>
               {item.shortcut ? <kbd>{item.shortcut}</kbd> : null}
-              {item.id === "content" && snapshot.pipeline[2]?.count ? (
-                <span className="nav-count">{snapshot.pipeline[2].count}</span>
+              {/* The count is the "İnceleme" stage: revisions waiting for the
+                  editor on Editoryal Masa, not content-flow candidates. */}
+              {item.id === "editorial" && reviewWaitingCount ? (
+                <span className="nav-count" aria-hidden="true">{reviewWaitingCount}</span>
               ) : null}
             </button>
           ))}

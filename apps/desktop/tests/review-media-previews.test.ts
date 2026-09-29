@@ -56,3 +56,20 @@ test("preview reads prioritize hero media and remain bounded", async () => {
   assert.equal(result.errors[media[4]!.sha256], undefined);
   assert.equal(selectMediaPreviewAssets(media).some((asset) => asset.sha256 === media[4]!.sha256), false);
 });
+
+test("media facts come from the asset, not a fixed 16:9 WebP label", async () => {
+  const module = await import("../src/screens/review-media-previews.ts") as Record<string, unknown>;
+  const aspect = module.mediaAspectLabel as ((width: number, height: number) => string) | undefined;
+  const format = module.mediaFormatLabel as ((filename: string) => string) | undefined;
+  assert.equal(typeof aspect, "function");
+  assert.equal(typeof format, "function");
+  assert.equal(aspect!(1600, 900), "16:9");
+  assert.equal(aspect!(1200, 1200), "1:1");
+  assert.equal(aspect!(1080, 1350), "4:5");
+  assert.equal(aspect!(1000, 523), "1.91:1");
+  assert.equal(aspect!(0, 0), "Bilinmiyor");
+  assert.equal(format!("hero-1600x900.webp"), "WebP");
+  assert.equal(format!("hero.PNG"), "PNG");
+  assert.equal(format!("hero.jpeg"), "JPEG");
+  assert.equal(format!("hero"), "Bilinmiyor");
+});

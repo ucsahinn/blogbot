@@ -304,7 +304,7 @@ export function OperationsHub(props: OperationsHubProps) {
               })}
               {hiddenJobCount > 0 ? (
                 <button className="button button-secondary" type="button" onClick={() => setShowAllJobs(true)}>
-                  Tüm {hiddenJobCount} işi göster
+                  {hiddenJobCount} işi daha göster
                 </button>
               ) : null}
               {props.workspace.failures.length === 0 && activeDrafts.length === 0 ? (

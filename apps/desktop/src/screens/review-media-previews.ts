@@ -69,3 +69,29 @@ export async function loadRevisionMediaPreviews({
   );
   return { urls, errors, selectedSha256: selected.map((asset) => asset.sha256) };
 }
+
+/** Aspect label from real pixel sizes; common editorial ratios are named. */
+export function mediaAspectLabel(width: number, height: number): string {
+  if (!(width > 0 && height > 0)) return "Bilinmiyor";
+  const ratio = width / height;
+  const named: Array<[number, string]> = [[16 / 9, "16:9"], [1, "1:1"], [4 / 5, "4:5"], [4 / 3, "4:3"], [3 / 2, "3:2"], [1.91, "1.91:1"], [9 / 16, "9:16"]];
+  for (const [value, label] of named) {
+    if (Math.abs(ratio - value) / value < 0.01) return label;
+  }
+  return `${ratio.toFixed(2)}:1`;
+}
+
+/** Format label from the file extension. */
+export function mediaFormatLabel(filename: string): string {
+  const extension = /\.([a-z0-9]+)$/iu.exec(filename)?.[1]?.toLowerCase();
+  switch (extension) {
+    case "webp": return "WebP";
+    case "png": return "PNG";
+    case "jpg":
+    case "jpeg": return "JPEG";
+    case "avif": return "AVIF";
+    case "gif": return "GIF";
+    case "svg": return "SVG";
+    default: return "Bilinmiyor";
+  }
+}

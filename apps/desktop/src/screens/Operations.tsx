@@ -283,9 +283,11 @@ export function Operations({
           </div>
           <p className="section-kicker">İŞ KUYRUĞU</p>
           <h2>
-            {operations?.worker.state === "HEALTHY"
-              ? "İşler normal ilerliyor"
-              : "İşler gecikiyor"}
+            {!operations
+              ? "Kuyruk durumu okunuyor"
+              : operations.worker.state === "HEALTHY"
+                ? "İşler normal ilerliyor"
+                : "İşler gecikiyor"}
           </h2>
           <dl>
             <div>
@@ -340,8 +342,8 @@ export function Operations({
                       minute: "2-digit",
                       timeZone: "Europe/Istanbul"
                     }).format(new Date(operations.publisher.lastReconciledAt))
-                  : "Bilinmiyor"}{" "}
-                · eşleşiyor
+                  : "Henüz yok"}
+                {operations?.publisher.lastReconciledAt ? " · eşleşti" : ""}
               </dd>
             </div>
             <div>

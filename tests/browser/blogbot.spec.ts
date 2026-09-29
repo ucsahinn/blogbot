@@ -1822,6 +1822,13 @@ test("setup guide finishes with evidence from a fresh prerequisite check", async
   await expect(page.getByRole("button", { name: "OPE’yi bu hedefle kullan" })).toBeEnabled();
 });
 
+test("the review count badge belongs to Editoryal Masa and is announced", async ({ page }) => {
+  await page.goto("?state=ready#dashboard");
+  const nav = page.getByRole("navigation", { name: "Ana menü" });
+  await expect(nav.getByRole("button", { name: /^Editoryal Masa, \d+ inceleme bekliyor$/u })).toBeVisible();
+  await expect(nav.getByRole("button", { name: "İçerik Akışı", exact: true }).locator(".nav-count")).toHaveCount(0);
+});
+
 test("dashboard headline admits when text generation is unavailable", async ({ page }) => {
   await page.goto("?state=degraded#dashboard");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Yazı üretimi bekliyor.");

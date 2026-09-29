@@ -12,6 +12,8 @@ import { contentCategoryLabel, sectionLabel } from "../app-model.ts";
 import { buildPublicationFiles } from "../publication-files.ts";
 import {
   loadRevisionMediaPreviews,
+  mediaAspectLabel,
+  mediaFormatLabel,
   selectMediaPreviewAssets,
   type MediaPreviewAsset
 } from "./review-media-previews.ts";
@@ -108,6 +110,12 @@ function isScheduledForFuture(scheduledAt: string): boolean {
 
 function wordCount(value: string): number {
   return value.trim().split(/\s+/u).filter(Boolean).length;
+}
+
+function bodyWordDeltaLabel(before: number, after: number): string {
+  const delta = after - before;
+  if (delta === 0) return `${after} kelime · uzunluk değişmedi`;
+  return `${after} kelime · ${delta > 0 ? "+" : "−"}${Math.abs(delta)} kelime`;
 }
 
 function readingTimeMinutes(value: string): number {
@@ -1250,7 +1258,7 @@ export function ReviewWorkspace({
                             </div>
                           ) : null}
                           <div className="markdown-preview">
-                            {content.bodyMarkdown.split("\n\n").map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
+                            {content.bodyMarkdown.split("\n\n").map((paragraph, index) => <p key={index}>{paragraph}</p>)}
                           </div>
                         </article>
                       );
@@ -1425,8 +1433,8 @@ export function ReviewWorkspace({
                         <div className="media-card-body">
                           <h3>{media.filename}</h3>
                           <div className="media-facts">
-                            <span><strong>Oran</strong> 16:9</span>
-                            <span><strong>Biçim</strong> WebP</span>
+                            <span><strong>Oran</strong> {mediaAspectLabel(media.width, media.height)}</span>
+                            <span><strong>Biçim</strong> {mediaFormatLabel(media.filename)}</span>
                             <span><strong>Hash</strong> {media.sha256.slice(0, 16)}…</span>
                           </div>
                           <div className="alt-copy">
@@ -1526,7 +1534,7 @@ export function ReviewWorkspace({
                       <p className="section-kicker">REVİZYON FARKI</p>
                       <h2>Önceki taslaktan değişenler</h2>
                     </div>
-                    <span className="count-label">Revizyon 7 → 8</span>
+                    <span className="count-label">Önceki taslak → bu revizyon</span>
                   </div>
                   <div className="diff-block">
                     <header>
@@ -1555,15 +1563,15 @@ export function ReviewWorkspace({
                   <div className="diff-block">
                     <header>
                       <strong>Gövde</strong>
-                      <span>Kanıt sentezi genişletildi</span>
+                      <span>{bodyWordDeltaLabel(wordCount(previousContent.bodyMarkdown), wordCount(activeContent.bodyMarkdown))}</span>
                     </header>
                     <p className="diff-removed">
                       <span>−</span>{previousContent.bodyMarkdown}
                     </p>
                     {activeContent.bodyMarkdown
                       .split("\n\n")
-                      .map((paragraph) => (
-                        <p className="diff-added" key={paragraph}>
+                      .map((paragraph, index) => (
+                        <p className="diff-added" key={index}>
                           <span>+</span>{paragraph}
                         </p>
                       ))}

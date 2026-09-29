@@ -302,7 +302,7 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
         </span>
         <span>
           <strong>Onay bütünlüğü korunuyor</strong>
-          Son görünüm {formatTime(workspace.sync.generatedAt)}’te üretildi.{" "}
+          Son görünüm: {formatTime(workspace.sync.generatedAt)}.{" "}
           {workspace.sync.stale
             ? "Son sağlam yerel görünüm gösteriliyor."
             : "Revizyon hash’leri ve görünüm dizisi eşleşiyor."}
