@@ -329,3 +329,49 @@ test("workspace summary separates daily editorial work from intervention failure
     }
   );
 });
+
+test("a connector refresh keeps unsaved edits and adopts newly saved values", () => {
+  const reconcile = (appModel as Record<string, unknown>).reconcileConnectorDraft as
+    | ((draft: unknown, previousSaved: unknown, nextSaved: unknown) => {
+      site: Record<string, unknown>; github: Record<string, unknown>;
+      backup: Record<string, unknown>; deploy: Record<string, unknown>;
+    })
+    | undefined;
+  assert.equal(typeof reconcile, "function", "reconcileConnectorDraft must exist");
+  const saved = {
+    codex: { accountLabel: "" },
+    github: { owner: "", repository: "", clientId: "" },
+    site: { mode: "LOCAL_ONLY", repositoryPath: "", publicSiteUrl: "" },
+    deploy: { workflowName: "", requiredChecks: [] as string[] },
+    backup: { directory: "" }
+  };
+  // The editor picked a folder and typed a repository but saved neither.
+  const draft = {
+    ...saved,
+    github: { ...saved.github, owner: "ucsahinn", repository: "site" },
+    site: { ...saved.site, repositoryPath: "C:\Sites\demo" }
+  };
+  // A connector test refresh then reports the same saved config plus one
+  // value the engine persisted (the backup folder).
+  const nextSaved = { ...saved, backup: { directory: "D:\Yedek" } };
+
+  const merged = reconcile!(draft, saved, nextSaved);
+
+  assert.equal(merged.site.repositoryPath, "C:\Sites\demo");
+  assert.equal(merged.github.owner, "ucsahinn");
+  assert.equal(merged.github.repository, "site");
+  assert.equal(merged.backup.directory, "D:\Yedek");
+  assert.deepEqual(merged.deploy.requiredChecks, []);
+});
+
+test("a workspace read without candidates keeps the candidate list it did not load", () => {
+  const merge = (appModel as Record<string, unknown>).mergeWorkspaceCandidates as
+    | ((previous: unknown, next: unknown) => { candidates: unknown[] })
+    | undefined;
+  assert.equal(typeof merge, "function", "mergeWorkspaceCandidates must exist");
+  const previous = { candidates: [{ id: "c1" }, { id: "c2" }], candidatesIncluded: true };
+  assert.deepEqual(merge!(previous, { candidates: [], candidatesIncluded: false }).candidates, previous.candidates);
+  // A read that did load candidates is authoritative, even when it is empty.
+  assert.deepEqual(merge!(previous, { candidates: [], candidatesIncluded: true }).candidates, []);
+  assert.deepEqual(merge!(null, { candidates: [], candidatesIncluded: false }).candidates, []);
+});

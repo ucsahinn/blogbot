@@ -1101,8 +1101,11 @@ export function createDemoTransport(): InvokeTransport {
       }
       case "get_operations":
         return structuredClone(demoOperations);
-      case "get_editorial_workspace":
-        return structuredClone(editorialWorkspace);
+      case "get_editorial_workspace": {
+        // Mirrors the native command: candidates are returned only on request.
+        const workspace = structuredClone(editorialWorkspace);
+        return args?.includeCandidates === true ? workspace : { ...workspace, candidates: [] };
+      }
       case "promote_candidate": {
         const candidateId = String(args?.candidateId ?? "");
         const candidate = editorialWorkspace.candidates.find(

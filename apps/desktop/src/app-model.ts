@@ -229,6 +229,44 @@ export function connectorDraftFromState(
   };
 }
 
+/**
+ * The native workspace read returns an empty candidate list unless candidates
+ * were requested. A refresh that skipped them (startup reconciliation, tray
+ * sync, other screens) must not wipe the list the content screen loaded.
+ */
+export function mergeWorkspaceCandidates<T extends { candidates: unknown[]; candidatesIncluded?: boolean }>(
+  previous: T | null,
+  next: T
+): T {
+  if (next.candidatesIncluded !== false || !previous) return next;
+  return { ...next, candidates: previous.candidates, candidatesIncluded: previous.candidatesIncluded };
+}
+
+/**
+ * Merges a refreshed saved connector config into the editor's draft. A field the
+ * editor has not changed since the previous saved config follows the new saved
+ * value; a field the editor edited (for example a picked folder that has only
+ * been tested, not saved) is kept. Replacing the whole draft on every refresh
+ * erased unsaved edits right after "Klasörü test et".
+ */
+export function reconcileConnectorDraft(
+  draft: SetupConnectorDraft,
+  previousSaved: SetupConnectorDraft,
+  nextSaved: SetupConnectorDraft
+): SetupConnectorDraft {
+  const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+  const merged = connectorDraftFromState({ config: nextSaved } as ConnectorStateSnapshot);
+  for (const section of Object.keys(merged) as Array<keyof SetupConnectorDraft>) {
+    const draftSection = draft[section] as Record<string, unknown>;
+    const previousSection = previousSaved[section] as Record<string, unknown>;
+    const mergedSection = merged[section] as Record<string, unknown>;
+    for (const key of Object.keys(draftSection)) {
+      if (!same(draftSection[key], previousSection[key])) mergedSection[key] = draftSection[key];
+    }
+  }
+  return merged;
+}
+
 const forbiddenHostnames = new Set([
   "localhost",
   "metadata",

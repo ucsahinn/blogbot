@@ -561,6 +561,8 @@ export interface SystemHealthView {
 }
 
 export interface EditorialWorkspaceSnapshot {
+  /** Set by the bridge: false when this read skipped the candidate inventory. */
+  candidatesIncluded?: boolean;
   sync: {
     sequence: number;
     snapshotId: string;

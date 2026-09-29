@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { canEnableAutomationMode, connectorDraftFromState, generateRecoveryKey, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
+import { canEnableAutomationMode, connectorDraftFromState, generateRecoveryKey, reconcileConnectorDraft, isRecoveryKeyUsable, nextSetupPrerequisite, setupConnectorLabel, summarizePrerequisites } from "../app-model.ts";
 import { ConfirmationDialog } from "../components/ConfirmationDialog.tsx";
 import { describePrerequisiteState, summarizeGuidedStates, type SetupStatusTone } from "../setup-status.ts";
 import { buildSetupRequirements } from "../types.ts";
@@ -164,8 +164,13 @@ export function SetupCenter({
     setGuidedOutputStatus("not-tested");
   }, [connectorDraft.site.mode, guidedMode, guidedStep]);
 
+  // A refresh (after a connector test, a save, a tray sync or a workspace
+  // refresh) must not erase what the editor picked or typed but has not saved.
+  const lastSavedConnectorDraft = useRef(connectorDraftFromState(connectorState));
   useEffect(() => {
-    setConnectorDraft(connectorDraftFromState(connectorState));
+    const nextSaved = connectorDraftFromState(connectorState);
+    setConnectorDraft((current) => reconcileConnectorDraft(current, lastSavedConnectorDraft.current, nextSaved));
+    lastSavedConnectorDraft.current = nextSaved;
   }, [connectorState]);
 
   useEffect(() => {
@@ -1260,9 +1265,27 @@ export function SetupCenter({
               <legend>{connector.label}</legend>
               <p className="field-help">{connector.description}</p>
               {connector.id === "site" ? (
-                <label className="field">
-                  <span>İçeriğin nereye gideceği</span>
-                  <div className="mode-choice-grid" role="radiogroup" aria-label="İçerik hedefi">
+                // A <label> around these buttons forwarded clicks on its helper
+                // text to the first button and silently switched the mode.
+                <div className="field">
+                  <span id="site-mode-label">İçeriğin nereye gideceği</span>
+                  <div
+                    className="mode-choice-grid"
+                    role="radiogroup"
+                    aria-labelledby="site-mode-label"
+                    onKeyDown={(event) => {
+                      const order = ["LOCAL_ONLY", "LOCAL_DEV", "PUBLISH"] as const;
+                      const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
+                        : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+                      if (!step) return;
+                      event.preventDefault();
+                      const index = Math.max(0, order.indexOf(connectorDraft.site.mode));
+                      const next = order[(index + step + order.length) % order.length]!;
+                      setConnectorDraft((current) => ({ ...current, site: { ...current.site, mode: next } }));
+                      const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>("[role='radio']");
+                      buttons[order.indexOf(next)]?.focus();
+                    }}
+                  >
                     {([
                       ["LOCAL_ONLY", "Klasöre yaz", "Bir klasör seçin; onaylı OPE içerik paketi ve manifest yalnızca oraya yazılır."],
                       ["LOCAL_DEV", "Yerel projeye gönder", "package.json içindeki npm run dev ile çalışan projenize yazar."],
@@ -1275,6 +1298,7 @@ export function SetupCenter({
                           type="button"
                           role="radio"
                           aria-checked={selected}
+                          tabIndex={selected ? 0 : -1}
                           className={`mode-choice ${selected ? "is-selected" : ""}`}
                           onClick={() => setConnectorDraft((current) => ({ ...current, site: { ...current.site, mode: value } }))}
                         >
@@ -1291,7 +1315,7 @@ export function SetupCenter({
                         ? "Proje klasörünü seçin; OPE scripts.dev komutunu test eder ve isterse başlatır."
                         : "Site deposu, public adres ve yayın workflow'u doğrulanmadan yayın düğmesi açılmaz."}
                   </small>
-                </label>
+                </div>
               ) : null}
               {connector.fields
                 .filter(([key]) => !(connector.id === "site" && key === "publicSiteUrl" && connectorDraft.site.mode !== "PUBLISH"))

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import bobyAvatar from "./assets/boby-avatar-v3.webp";
 import { AppShell, type PageId } from "./components/AppShell.tsx";
 import { BobyAssistant } from "./components/BobyAssistant.tsx";
-import { canMutateLocally, hasRuntimeCapability } from "./app-model.ts";
+import { canMutateLocally, hasRuntimeCapability, mergeWorkspaceCandidates } from "./app-model.ts";
 import { createCoalescingBridge, userFacingBridgeError, type BlogbotBridge } from "./bridge.ts";
 import { createRuntimeBridge } from "./runtime-bridge.ts";
 import { Dashboard } from "./screens/Dashboard.tsx";
@@ -78,7 +78,11 @@ interface AppProps {
 export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   const [bridge, setBridge] = useState<BlogbotBridge | null>(null);
   const [snapshot, setSnapshot] = useState<BootstrapSnapshot | null>(null);
-  const [workspace, setWorkspace] = useState<EditorialWorkspaceSnapshot | null>(null);
+  const [workspace, setWorkspaceRaw] = useState<EditorialWorkspaceSnapshot | null>(null);
+  // Every workspace update keeps candidates a read did not load.
+  const setWorkspace = useCallback((next: EditorialWorkspaceSnapshot | null) => {
+    setWorkspaceRaw((previous) => (next ? mergeWorkspaceCandidates(previous, next) : null));
+  }, []);
   const [connectorState, setConnectorState] = useState<ConnectorStateSnapshot | null>(null);
   const [activePage, setActivePage] = useState<PageId>(pageFromHash);
   const [error, setError] = useState("");
@@ -202,7 +206,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
         runtimeBridgeRef.current = null;
       }
     };
-  }, [bridgeFactory, bootstrapAttempt]);
+  }, [bridgeFactory, bootstrapAttempt, setWorkspace]);
 
   useEffect(() => {
     const handleHashChange = () => setActivePage(pageFromHash());
@@ -261,7 +265,7 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
       disposed = true;
       unlisten?.();
     };
-  }, [bridge]);
+  }, [bridge, setWorkspace]);
 
   if (error) {
     return (

@@ -454,7 +454,8 @@ export function createInvokeBridge(
     sendTestNotification: () => mutate("send_test_notification"),
     requestBobyGuidance: (request) => mutate("request_boby_guidance", { request }),
     getBobyGuidance: (guidanceId) => read("get_boby_guidance", { guidanceId }),
-    getEditorialWorkspace: (options) => read("get_editorial_workspace", options?.includeCandidates ? { includeCandidates: true } : undefined),
+    getEditorialWorkspace: (options) => read<EditorialWorkspaceSnapshot>("get_editorial_workspace", options?.includeCandidates ? { includeCandidates: true } : undefined)
+      .then((workspace) => ({ ...workspace, candidatesIncluded: Boolean(options?.includeCandidates) })),
     promoteCandidate: (candidateId) =>
       mutate("promote_candidate", { candidateId }),
     dismissCandidate: (candidateId) =>

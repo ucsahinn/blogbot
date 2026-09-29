@@ -1815,6 +1815,39 @@ test("setup guide finishes with evidence from a fresh prerequisite check", async
   await page.getByRole("button", { name: "Klasörü test et" }).click();
   const finalResult = page.getByText("Biçim doğrulandı", { exact: false });
   await expect(finalResult).toContainText("Biçim doğrulandı");
+  // Testing only validates; the picked but unsaved folder must survive the
+  // connector refresh that follows the test.
+  await expect(page.getByText("C:\\OPE-Demo").first()).toBeVisible();
+  await page.getByRole("checkbox", { name: /yeniden onay gerektiğini anlıyorum/u }).check();
+  await expect(page.getByRole("button", { name: "OPE’yi bu hedefle kullan" })).toBeEnabled();
+});
+
+test("candidates opened directly survive the startup and tray workspace refreshes", async ({ page }) => {
+  await page.goto("?state=ready#content-candidates");
+  await expect(page.getByRole("tab", { name: /Haber adayları · 3/u })).toBeVisible();
+  // Startup reconciliation and other refreshes read the workspace without
+  // candidates; the list the content screen loaded must stay.
+  await page.waitForTimeout(3_000);
+  await page.getByRole("button", { name: "Çalışma alanını yenile" }).count();
+  await expect(page.getByRole("tab", { name: /Haber adayları · 3/u })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Araştırmaya al" }).first()).toBeVisible();
+});
+
+test("site target helper text never changes the selected target and arrow keys move it", async ({ page }) => {
+  await page.goto("?state=ready#setup");
+  await page.getByRole("button", { name: /Yayın bağlantısı/u }).click();
+  const publish = page.getByRole("radio", { name: /Yayındaki siteye gönder/u });
+  await publish.click();
+  await expect(publish).toHaveAttribute("aria-checked", "true");
+
+  await page.getByText("İçeriğin nereye gideceği", { exact: true }).click();
+  await page.getByText(/doğrulanmadan yayın düğmesi açılmaz/u).click();
+  await expect(publish).toHaveAttribute("aria-checked", "true");
+
+  await publish.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByRole("radio", { name: /Yerel projeye gönder/u })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("radio", { name: /Yerel projeye gönder/u })).toBeFocused();
 });
 
 test("setup explains security-gated external execution and filesystem actions", async ({ page }) => {
