@@ -43,6 +43,15 @@ Kept under `build/verification/0.1.56/` (excluded from Git). Phase summaries:
 baseline, fixes with red and green logs, visual QA and native screenshots, live
 provider evidence and local installer builds.
 
+## Local upgrade on the operator's machine
+
+The published NSIS installer (hash above) was installed silently over 0.1.55
+on 2026-09-29 with exit code 0; the uninstall entry and `blogbot.exe` report
+0.1.56. A read-only native check against the real profile passed: local
+engine, PGlite and Codex healthy, all 11 routes rendered, zero editorial error
+alerts, and the same candidate and draft counts as before the upgrade. This is
+one existing-profile upgrade, not the clean-machine matrix (`WIN-05`).
+
 ## Open acceptance, not passed
 
 - Live Codex draft and Boby turn: the real account returned `USAGE_LIMIT`; rerun
@@ -53,4 +62,3 @@ provider evidence and local installer builds.
 - Out of scope by operator decision: signing, clean Windows VMs, 24-hour soak,
   installed lifecycle matrix, real archive restore, real site and provider
   quality gates, incident drills.
-- Installing 0.1.56 over the local 0.1.55 installation awaits separate approval.
