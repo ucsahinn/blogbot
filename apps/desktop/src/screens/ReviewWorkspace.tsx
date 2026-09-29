@@ -1161,7 +1161,7 @@ export function ReviewWorkspace({
                     type="button"
                     role="tab"
                     id={`review-tab-${item.id}`}
-                    aria-controls={`review-panel-${item.id}`}
+                    aria-controls={tab === item.id ? `review-panel-${item.id}` : undefined}
                     aria-selected={tab === item.id}
                     tabIndex={tab === item.id ? 0 : -1}
                     className={tab === item.id ? "is-selected" : ""}

@@ -74,6 +74,19 @@ export function AppShell({
   syncError = ""
 }: AppShellProps) {
   const [aboutOpen, setAboutOpen] = useState(false);
+  // Escape closes the About disclosure like the Boby panel, and focus returns
+  // to the control that opened it.
+  useEffect(() => {
+    if (!aboutOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setAboutOpen(false);
+      const toggle = document.querySelector<HTMLElement>("[aria-controls='blogbot-about-card']");
+      toggle?.focus();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [aboutOpen]);
   const [pendingUpdate, setPendingUpdate] = useState<UnsignedDesktopUpdate | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updatePhase, setUpdatePhase] = useState("idle");
@@ -285,7 +298,7 @@ export function AppShell({
             type="button"
             aria-label={aboutControlAriaLabel}
             aria-expanded={updateAvailable ? undefined : aboutOpen}
-            aria-controls="blogbot-about-card"
+            aria-controls={aboutOpen ? "blogbot-about-card" : undefined}
             onClick={updateAvailable ? () => void installPendingUpdate() : () => setAboutOpen((open) => !open)}
           >
             <span aria-hidden="true">i</span>

@@ -4,6 +4,7 @@ import bobyAvatar from "./assets/boby-avatar-v3.webp";
 import { AppShell, type PageId } from "./components/AppShell.tsx";
 import { BobyAssistant } from "./components/BobyAssistant.tsx";
 import { canMutateLocally, hasRuntimeCapability, mergeWorkspaceCandidates } from "./app-model.ts";
+import { installFocusRescue } from "./components/focus-rescue.ts";
 import { createCoalescingBridge, userFacingBridgeError, type BlogbotBridge } from "./bridge.ts";
 import { createRuntimeBridge } from "./runtime-bridge.ts";
 import { Dashboard } from "./screens/Dashboard.tsx";
@@ -79,6 +80,9 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
   const [bridge, setBridge] = useState<BlogbotBridge | null>(null);
   const [snapshot, setSnapshot] = useState<BootstrapSnapshot | null>(null);
   const [workspace, setWorkspaceRaw] = useState<EditorialWorkspaceSnapshot | null>(null);
+  // Focus must not fall to <body> when a control disables or replaces itself.
+  useEffect(() => installFocusRescue(), []);
+
   // Every workspace update keeps candidates a read did not load.
   const setWorkspace = useCallback((next: EditorialWorkspaceSnapshot | null) => {
     setWorkspaceRaw((previous) => (next ? mergeWorkspaceCandidates(previous, next) : null));

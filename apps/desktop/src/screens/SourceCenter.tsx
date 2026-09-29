@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
 
 import { parseOpmlSources, parseUrlSources, sectionArticleType } from "../app-model.ts";
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
@@ -480,7 +481,7 @@ export function SourceCenter({
           </div>
         </div>
         <div className="composer-main">
-          <div className="segmented-control" role="tablist" aria-label="Kaynak giriş türü">
+          <div className="segmented-control" role="tablist" aria-label="Kaynak giriş türü" onKeyDown={handleTabListKeyDown}>
             {[
               { id: "single" as const, label: "Tek URL" },
               { id: "bulk" as const, label: "Toplu URL" },
@@ -490,7 +491,10 @@ export function SourceCenter({
                 key={mode.id}
                 type="button"
                 role="tab"
+                id={`source-input-tab-${mode.id}`}
                 aria-selected={inputMode === mode.id}
+                aria-controls="source-input-panel"
+                tabIndex={inputMode === mode.id ? 0 : -1}
                 className={inputMode === mode.id ? "is-selected" : ""}
                 onClick={() => {
                   setInputMode(mode.id);
@@ -503,6 +507,7 @@ export function SourceCenter({
               </button>
             ))}
           </div>
+          <div id="source-input-panel" role="tabpanel" aria-labelledby={`source-input-tab-${inputMode}`}>
           <label className="field field-wide source-input">
             <span>
               {inputMode === "single"
@@ -525,6 +530,7 @@ export function SourceCenter({
               spellCheck={false}
             />
           </label>
+          </div>
           <div className="composer-actions">
             <span>
               OPE ev/ofis ağınızdaki cihazlara bağlanmamak için yalnız herkese açık

@@ -185,7 +185,7 @@ export function PublishingCenter({
           ["scheduled", `Planlananlar · ${workspace.scheduled.length}`],
           ["history", "Yayın geçmişi"]
         ] as const).map(([id, label]) => (
-          <button key={id} type="button" role="tab" id={`publishing-tab-${id}`} aria-controls={`publishing-panel-${id}`} aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{label}</button>
+          <button key={id} type="button" role="tab" id={`publishing-tab-${id}`} aria-controls={tab === id ? `publishing-panel-${id}` : undefined} aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{label}</button>
         ))}
       </div>
       <section className="hub-panel" role="tabpanel" id={`publishing-panel-${tab}`} aria-labelledby={`publishing-tab-${tab}`}>

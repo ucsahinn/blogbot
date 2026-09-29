@@ -226,7 +226,7 @@ export function OperationsHub(props: OperationsHubProps) {
           ["health", "Yerel sistem ve bağlantılar"],
           ["activity", "İş günlüğü"]
         ] as const).map(([id, label]) => (
-          <button key={id} type="button" role="tab" id={`operations-tab-${id}`} aria-controls={`operations-panel-${id}`} aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{label}</button>
+          <button key={id} type="button" role="tab" id={`operations-tab-${id}`} aria-controls={tab === id ? `operations-panel-${id}` : undefined} aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{label}</button>
         ))}
       </div>
       {tab === "activity" ? (

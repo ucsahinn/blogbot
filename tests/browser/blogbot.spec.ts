@@ -1822,6 +1822,65 @@ test("setup guide finishes with evidence from a fresh prerequisite check", async
   await expect(page.getByRole("button", { name: "OPE’yi bu hedefle kullan" })).toBeEnabled();
 });
 
+test("Escape closes the About panel and returns focus to its toggle", async ({ page }) => {
+  await page.goto("?state=ready#dashboard");
+  const about = page.locator(".sidebar").getByRole("button", { name: "OPE hakkında" });
+  await about.click();
+  await expect(about).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(about).toHaveAttribute("aria-expanded", "false");
+  await expect(about).toBeFocused();
+});
+
+test("focus stays in the workspace when the activated control disables itself", async ({ page }) => {
+  await page.goto("?state=ready#content-candidates");
+  await page.getByRole("button", { name: "Görünenleri seç" }).click();
+  const clear = page.getByRole("button", { name: "Seçimi temizle" });
+  await clear.focus();
+  await page.keyboard.press("Enter");
+  await expect(clear).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).not.toBe("BODY");
+  await expect.poll(() => page.evaluate(() => Boolean(document.activeElement?.closest(".candidate-bulk-actions")))).toBe(true);
+
+  await page.goto("?state=ready#setup-guide");
+  await page.getByRole("button", { name: "Codex bağlantısına devam et" }).click();
+  const back = page.getByRole("button", { name: "Geri" });
+  await back.focus();
+  await page.keyboard.press("Enter");
+  await expect(back).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).not.toBe("BODY");
+});
+
+test("source input mode tabs follow the arrow-key tab pattern", async ({ page }) => {
+  await page.goto("?state=ready#content");
+  const tabs = page.getByRole("tablist", { name: "Kaynak giriş türü" });
+  await tabs.getByRole("tab", { name: "Tek URL" }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(tabs.getByRole("tab", { name: "Toplu URL" })).toBeFocused();
+  await expect(tabs.getByRole("tab", { name: "Toplu URL" })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("End");
+  await expect(tabs.getByRole("tab", { name: "OPML" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#source-input-panel")).toHaveAttribute("aria-labelledby", "source-input-tab-opml");
+});
+
+test("offline settings actions never overlap their neighbors", async ({ page }) => {
+  for (const viewport of [{ width: 1600, height: 940 }, { width: 1280, height: 800 }, { width: 960, height: 680 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto("?state=offline#settings");
+    await expect(page.getByRole("button", { name: "Test bildirimi gönder" })).toBeVisible();
+    const overlaps = await page.locator(".settings-actions").evaluate((bar) => {
+      const boxes = [...bar.querySelectorAll("button, small")].map((node) => node.getBoundingClientRect()).filter((box) => box.width > 0);
+      let count = 0;
+      for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i]!, b = boxes[j]!;
+        if (a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1) count++;
+      }
+      return count;
+    });
+    expect(overlaps, `overlaps at ${viewport.width}px`).toBe(0);
+  }
+});
+
 test("the review count badge belongs to Editoryal Masa and is announced", async ({ page }) => {
   await page.goto("?state=ready#dashboard");
   const nav = page.getByRole("navigation", { name: "Ana menü" });
@@ -2153,6 +2212,26 @@ test("an approved revision can revoke its exact approval before publication", as
 
   await expect(page.getByRole("status")).toContainText("Revizyon onayı geri çekildi");
   await expect(page.getByRole("button", { name: "Bu revizyonu onayla" })).toBeVisible();
+});
+
+test("the confirmation dialog is modal: backdrop clicks and Tab never reach the page behind it", async ({ page }) => {
+  await page.goto("#editorial-review");
+  await approveCurrentRevision(page);
+  await page.getByRole("button", { name: "Onayı geri çek" }).click();
+  await page.getByRole("textbox", { name: "Onayı geri çekme gerekçesi" }).fill("Kaynak doğrulaması yeniden yapılacak.");
+  const opener = page.getByRole("button", { name: "Geri çekmeyi onayla" });
+  await opener.click();
+  const confirmation = page.getByRole("alertdialog", { name: "Revizyon onayını geri çek" });
+  await expect(confirmation.getByRole("button", { name: "Vazgeç" })).toBeFocused();
+
+  await page.mouse.click(5, 5);
+  for (let step = 0; step < 4; step++) {
+    await page.keyboard.press("Tab");
+    expect(await confirmation.evaluate((dialog) => dialog.contains(document.activeElement))).toBe(true);
+  }
+  await page.keyboard.press("Escape");
+  await expect(confirmation).toHaveCount(0);
+  await expect(opener).toBeFocused();
 });
 
 test("mobile About opens above the fixed utility navigation without overflow", async ({ page }) => {

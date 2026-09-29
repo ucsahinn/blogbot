@@ -228,10 +228,10 @@ export function EditorialDesk({
       </header>
       {message ? <div className="inline-notice" role="status" aria-live="polite">{message}</div> : null}
       <div className="workspace-tabs" role="tablist" aria-label="Editoryal masa bölümleri" onKeyDown={handleTabListKeyDown}>
-        <button type="button" role="tab" id="editorial-tab-drafts" aria-controls="editorial-panel-drafts" aria-selected={tab === "drafts"} tabIndex={tab === "drafts" ? 0 : -1} className={tab === "drafts" ? "is-active" : ""} onClick={() => setTab("drafts")}>
+        <button type="button" role="tab" id="editorial-tab-drafts" aria-controls={tab === "drafts" ? "editorial-panel-drafts" : undefined} aria-selected={tab === "drafts"} tabIndex={tab === "drafts" ? 0 : -1} className={tab === "drafts" ? "is-active" : ""} onClick={() => setTab("drafts")}>
           Taslaklar · {workspace.drafts.length}
         </button>
-        <button type="button" role="tab" id="editorial-tab-review" aria-controls="editorial-panel-review" aria-selected={tab === "review"} tabIndex={tab === "review" ? 0 : -1} className={tab === "review" ? "is-active" : ""} onClick={() => setTab("review")}>
+        <button type="button" role="tab" id="editorial-tab-review" aria-controls={tab === "review" ? "editorial-panel-review" : undefined} aria-selected={tab === "review"} tabIndex={tab === "review" ? 0 : -1} className={tab === "review" ? "is-active" : ""} onClick={() => setTab("review")}>
           TR / EN inceleme
         </button>
       </div>

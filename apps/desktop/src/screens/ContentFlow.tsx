@@ -297,7 +297,7 @@ export function ContentFlow({
             type="button"
             role="tab"
             id={`content-flow-tab-${id}`}
-            aria-controls={`content-flow-panel-${id}`}
+            aria-controls={tab === id ? `content-flow-panel-${id}` : undefined}
             aria-selected={tab === id}
             tabIndex={tab === id ? 0 : -1}
             className={tab === id ? "is-active" : ""}

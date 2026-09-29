@@ -7649,3 +7649,54 @@ textarea::placeholder {
   display: block;
   font-size: 12px;
 }
+
+/* Settings actions: with unavailable reasons present, the auto columns took
+   all the width and the middle column collapsed to 0px, stacking "Değişiklikleri
+   iptal et" over "Test bildirimi gönder" (offline settings). */
+.settings-actions {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+.settings-action-secondary {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.settings-action-secondary > small {
+  flex-basis: 100%;
+}
+.settings-action-primary,
+.settings-action-notification {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  align-content: start;
+}
+
+/* Claims tab: two columns were kept until a 920px viewport, but the review
+   pane is only ~666px wide at 1280 (beside the queue), so claim text wrapped
+   one word per line (26px column at 960). Lay it out by the pane's width. */
+.review-content-scroll {
+  container-type: inline-size;
+}
+@container (max-width: 900px) {
+  .evidence-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* Adjacent source links ran together ("Uygulama rehberiİkincil kaynak"). */
+.claim-source-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+/* 4.33:1 contrast on the gate score (axe color-contrast); darker and legible. */
+.gate-score span {
+  color: #3f6158;
+  font-size: 12px;
+}
+/* The selected queue item's accent outline hid the keyboard focus ring. */
+.review-queue-item.is-selected:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: -3px;
+}
