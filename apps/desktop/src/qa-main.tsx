@@ -64,6 +64,9 @@ async function createQaBridge(): Promise<BlogbotBridge> {
       if (!existing) throw new Error("QA_SENTINEL: EXPECTED_EXISTING_SOURCE_MISSING");
       return { sources: [existing] };
     }
+    if (state === "dashboard-refresh-failure" && command === "get_bootstrap_snapshot" && window.sessionStorage.getItem("blogbot.qa.fail-refresh") === "1") {
+      throw new Error("QA_SENTINEL: WORKSPACE_REFRESH_UNAVAILABLE");
+    }
     if (state === "engine-diagnostics-failure" && command === "get_engine_diagnostics") {
       throw new Error("QA_SENTINEL: ENGINE_DIAGNOSTICS_UNAVAILABLE");
     }

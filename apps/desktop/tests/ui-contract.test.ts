@@ -383,7 +383,7 @@ test("review queue selection is locked while an async revision mutation is runni
   const review = await readFile(source("screens", "ReviewWorkspace.tsx"), "utf8");
 
   assert.match(review, /const actionBusy = approving \|\| approvingHighRisk \|\| requestingEdit \|\| requestingComprehensiveRewrite \|\| repairingMedia \|\| enqueueingPublication \|\| previewingPublication \|\| materializingLocal;/u);
-  assert.match(review, /if \(actionBusy\) return;[\s\S]*?setSelectedId\(revisionId\)/u);
+  assert.match(review, /if \(actionBusy \|\| revisionId === selectedId\) return;[\s\S]*?setSelectedId\(revisionId\)/u);
   assert.match(review, /<QueueCard[\s\S]*?disabled=\{actionBusy\}/u);
   assert.match(review, /disabled=\{disabled\}/u);
 });

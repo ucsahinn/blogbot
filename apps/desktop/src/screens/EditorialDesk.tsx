@@ -181,7 +181,9 @@ export function EditorialDesk({
     try {
       await bridge.retryJob(draftId);
       setMessage("Taslak yerel kuyruğa yeniden alındı. İlerlemeyi burada veya Operasyonlar ekranında takip edebilirsiniz.");
-      await onRefreshWorkspace();
+      await onRefreshWorkspace().catch(() => {
+        setMessage("Taslak yerel kuyruğa yeniden alındı; görünüm henüz yenilenemedi. Taslak envanterini yenileyin.");
+      });
     } catch (reason) {
       setMessage(userFacingBridgeError(reason, "Taslak yeniden kuyruğa alınamadı."));
     } finally {

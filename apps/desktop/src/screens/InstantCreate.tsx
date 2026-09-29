@@ -47,7 +47,7 @@ export function InstantCreate({
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [urlInput, setUrlInput] = useState("");
   const [section, setSection] = useState<Section | "">(defaultSection);
-  const [articleType, setArticleType] = useState<ArticleType>("news");
+  const [articleType, setArticleType] = useState<ArticleType>(() => sectionArticleType(defaultSection));
   const [urgency, setUrgency] = useState<"normal" | "urgent">("normal");
   const [tone, setTone] = useState<"neutral" | "technical" | "accessible">("neutral");
   const [length, setLength] = useState<"standard" | "deep">("standard");

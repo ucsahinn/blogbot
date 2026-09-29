@@ -831,8 +831,11 @@ export function SetupCenter({
     setBusy(true); setBackupMessage("Yerel çalışma alanı doğrulanmış snapshot'tan geri yükleniyor…");
     try {
       const result = await bridge.restoreAutomaticBackup({ backupName: selectedAutomaticBackupName, confirmReplaceLocalData: true });
-      await onCompleted();
-      setBackupMessage(`Yerel çalışma alanı geri yüklendi: ${result.restoredRows} satır snapshot verisiyle değiştirildi.`);
+      const restored = `Yerel çalışma alanı geri yüklendi: ${result.restoredRows} satır snapshot verisiyle değiştirildi.`;
+      setBackupMessage(restored);
+      await onCompleted().catch(() => {
+        setBackupMessage(`${restored} Görünüm henüz yenilenemedi; Kurulum Merkezi'nden durumu yenileyin.`);
+      });
     } catch (reason) {
       setBackupMessage(explainFailure(reason, "Yerel çalışma alanı geri yüklenemedi.", "snapshot seçimini doğrulayıp tekrar deneyin."));
     } finally { setBusy(false); }

@@ -297,10 +297,11 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
 
   const refreshWorkspace = async () => {
     try {
-      const nextSnapshot = await bridge.getBootstrapSnapshot();
-      const nextWorkspace = await bridge.getEditorialWorkspace();
+      // An explicit refresh must read the engine, not a cached snapshot.
+      const nextSnapshot = await bridge.getBootstrapSnapshot({ fresh: true });
+      const nextWorkspace = await bridge.getEditorialWorkspace({ fresh: true });
       const nextConnectorState = nextSnapshot.runtime === "ONLINE"
-        ? await bridge.getConnectorState()
+        ? await bridge.getConnectorState({ fresh: true })
         : fallbackConnectorState;
       setSnapshot(nextSnapshot);
       setWorkspace(nextWorkspace);
@@ -308,6 +309,9 @@ export function App({ bridgeFactory = createRuntimeBridge }: AppProps) {
       setSyncError("");
     } catch (reason) {
       setSyncError(userFacingBridgeError(reason, "Çalışma alanı yenilenemedi. Operasyonlar ekranından yerel durumu kontrol edin."));
+      // Callers must know the refresh failed; swallowing it made the
+      // dashboard report "yenilendi" next to the failure banner.
+      throw reason;
     }
   };
 

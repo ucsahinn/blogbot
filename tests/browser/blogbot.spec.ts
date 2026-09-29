@@ -1822,6 +1822,44 @@ test("setup guide finishes with evidence from a fresh prerequisite check", async
   await expect(page.getByRole("button", { name: "OPE’yi bu hedefle kullan" })).toBeEnabled();
 });
 
+test("a failed dashboard refresh never reports success", async ({ page }) => {
+  await page.goto("?state=dashboard-refresh-failure#dashboard");
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await page.evaluate(() => window.sessionStorage.setItem("blogbot.qa.fail-refresh", "1"));
+  await page.getByRole("button", { name: "Çalışma alanını yenile" }).click();
+  await expect(page.getByText(/Çalışma alanı yenilenemedi/u).first()).toBeVisible();
+  await expect(page.getByText("Çalışma alanı yerel veriden yenilendi.")).toHaveCount(0);
+  await page.evaluate(() => window.sessionStorage.removeItem("blogbot.qa.fail-refresh"));
+});
+
+test("an edit request written for one revision never follows the editor to the next", async ({ page }) => {
+  await page.goto("?state=ready#editorial-review");
+  const queue = page.getByRole("complementary", { name: "İnceleme kuyruğu" });
+  const items = queue.locator(".review-queue-item");
+  await expect(items.nth(1)).toBeVisible();
+  // Re-selecting the already open revision must not strand the pane loading.
+  await items.first().click();
+  await expect(page.getByText("Değişmez revizyon yükleniyor…")).toHaveCount(0);
+  await page.getByRole("button", { name: "Düzenleme iste" }).click();
+  const panel = page.getByRole("region", { name: "Düzenleme isteği" });
+  await panel.getByRole("textbox").fill("İkinci iddiayı birincil kaynakla yeniden doğrula.");
+
+  await items.nth(1).click();
+  await expect(page.getByRole("region", { name: "Revizyon inceleme çalışma alanı" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Düzenleme isteği" })).toHaveCount(0);
+});
+
+test("instant create derives the content type from the default section", async ({ page }) => {
+  await page.goto("?state=ready#settings");
+  await page.getByLabel("Varsayılan bölüm").selectOption("analiz");
+  await page.getByRole("button", { name: "Ayarları kaydet" }).click();
+  await expect(page.getByRole("button", { name: "Ayarları kaydet" })).toBeDisabled();
+  await page.getByRole("button", { name: "İçerik Akışı" }).click();
+  await page.getByRole("tab", { name: "Anlık oluştur" }).click();
+  await expect(page.getByLabel("Site bölümü")).toHaveValue("analiz");
+  await expect(page.getByLabel("İçerik türü")).toHaveValue("analysis");
+});
+
 test("candidates opened directly survive the startup and tray workspace refreshes", async ({ page }) => {
   await page.goto("?state=ready#content-candidates");
   await expect(page.getByRole("tab", { name: /Haber adayları · 3/u })).toBeVisible();

@@ -290,6 +290,14 @@ export function ReviewWorkspace({
           setEthicsReviewer("");
           setEthicsReviewScope("");
           setEthicsRationale("");
+          // Acknowledgements and open panels belong to one revision; carrying
+          // them over let a high-risk re-read or an edit instruction written
+          // for revision A apply to revision B.
+          setReauthenticated(false);
+          setEditRequestOpen(false);
+          setEditInstruction("");
+          setRevokePanelOpen(false);
+          setRevokeReason("");
         }
       })
       .catch((reason) => {
@@ -438,7 +446,10 @@ export function ReviewWorkspace({
     setRevisionLoadNonce((value) => value + 1);
   };
   const selectRevision = (revisionId: string) => {
-    if (actionBusy) return;
+    // Re-selecting the open revision cleared it and set loading, but the load
+    // effect only re-runs when the id changes, so the pane stayed on
+    // "yükleniyor" forever.
+    if (actionBusy || revisionId === selectedId) return;
     setLoading(true);
     setNotice("");
     setRevision(null);

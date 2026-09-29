@@ -349,18 +349,18 @@ test("a connector refresh keeps unsaved edits and adopts newly saved values", ()
   const draft = {
     ...saved,
     github: { ...saved.github, owner: "ucsahinn", repository: "site" },
-    site: { ...saved.site, repositoryPath: "C:\Sites\demo" }
+    site: { ...saved.site, repositoryPath: "C:/Sites/demo" }
   };
   // A connector test refresh then reports the same saved config plus one
   // value the engine persisted (the backup folder).
-  const nextSaved = { ...saved, backup: { directory: "D:\Yedek" } };
+  const nextSaved = { ...saved, backup: { directory: "D:/Yedek" } };
 
   const merged = reconcile!(draft, saved, nextSaved);
 
-  assert.equal(merged.site.repositoryPath, "C:\Sites\demo");
+  assert.equal(merged.site.repositoryPath, "C:/Sites/demo");
   assert.equal(merged.github.owner, "ucsahinn");
   assert.equal(merged.github.repository, "site");
-  assert.equal(merged.backup.directory, "D:\Yedek");
+  assert.equal(merged.backup.directory, "D:/Yedek");
   assert.deepEqual(merged.deploy.requiredChecks, []);
 });
 
