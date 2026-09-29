@@ -166,7 +166,7 @@ export function SourceCenter({
   const addressCheckUnavailableReason = busy
     ? "Adres kontrolü sürüyor; sonuç gelene kadar bekleyin."
     : !canTest
-      ? "Yerel engine hazır olmadığı için adres kontrolü şu anda başlatılamaz."
+      ? "Yerel motor hazır olmadığı için adres kontrolü şu anda başlatılamaz."
       : input.trim().length === 0
         ? "Önce kontrol etmek istediğiniz herkese açık kaynak adresini girin."
         : "";
@@ -474,7 +474,7 @@ export function SourceCenter({
             olmadığını sınar. Bu işlem yayın izni vermez ve hiçbir şey yayınlamaz.
           </p>
           <div className="detection-legend">
-            {["RSS", "ATOM", "SITEMAP", "SITE", "ARTICLE"].map((kind) => (
+            {["RSS", "Atom", "Site haritası", "Site", "Makale"].map((kind) => (
               <span key={kind}>{kind}</span>
             ))}
           </div>

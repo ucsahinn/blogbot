@@ -254,14 +254,14 @@ test("compact desktop turns the editable weekly calendar into an operable grid i
   assert.match(publishing, /activeSlotId/u);
   assert.doesNotMatch(publishing, /recommendBalancedSeoSlots/u);
   assert.match(styles, /\.slot-picker\s*\{[\s\S]*?grid-template-columns:\s*repeat\(auto-fit, minmax\(240px, 1fr\)\)/u);
-  assert.match(publishing, /aria-label="Düzenlenecek haftalık slot"/u);
+  assert.match(publishing, /aria-label="Düzenlenecek haftalık yayın saati"/u);
   assert.doesNotMatch(publishing, /slot-card-active/u);
 });
 
 test("weekly cadence configures only future NEXT_SLOT drafts and treats legacy article assignments as non-binding", async () => {
   const publishing = await readFile(source("screens", "PublishingCenter.tsx"), "utf8");
 
-  assert.match(publishing, /Yeni taslaklar “ilk uygun slot” seçeneğinde bu ritmi izler/u);
+  assert.match(publishing, /Yeni taslaklar “ilk uygun yayın saati” seçeneğinde bu ritmi izler/u);
   assert.doesNotMatch(publishing, /taslaklar için NEXT_SLOT/u, "the editor never sees the internal NEXT_SLOT code");
   assert.match(publishing, /Geçmiş atama:/u);
   assert.match(publishing, /slot\.articleId \|\| slot\.articleTitle/u);

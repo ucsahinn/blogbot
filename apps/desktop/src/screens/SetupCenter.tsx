@@ -935,7 +935,7 @@ export function SetupCenter({
         <section className="sync-error-banner" role="status" aria-live="polite">
           <div>
             <strong>Eski tarayıcı ayarları kullanılmıyor.</strong>
-            <span>Bağlantıların kaynak gerçeği artık yalnız yerel engine veritabanıdır. Eski değerler içe aktarılmadı.</span>
+            <span>Bağlantıların kaynak gerçeği artık yalnız yerel motor veritabanıdır. Eski değerler içe aktarılmadı.</span>
           </div>
           <button className="button button-secondary" type="button" onClick={acknowledgeLegacyConnectorData}>
             Anladım, eski veriyi kaldır
@@ -1495,7 +1495,7 @@ export function SetupCenter({
             <button className="button button-secondary" type="button" aria-label="Şifreli yedek geri yüklemesini önizle" disabled={busy || !backupArchivePath || !backupTargetPath || !restoreFolderNameValid || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => void previewBackup()}>Geri yüklemeyi önizle</button>
             <button className="button button-danger" type="button" disabled={busy || !backupArchivePath || !backupTargetPath || !restoreFolderNameValid || !isRecoveryKeyUsable(backupRecoveryKey)} onClick={() => setRestoreConfirmationOpen(true)}>Yeni klasöre geri yükle</button>
           </div>
-          <small id="backup-help">Şifre anahtarı yalnızca engine belleğine gönderilir. Önizleme dosya yazmaz; geri yükleme yalnız açık onaydan sonra seçtiğiniz üst klasörün altında henüz var olmayan yeni klasörü oluşturur. Yedek dosyaları çıkarır; OPE'nin aktif çalışma alanını otomatik değiştirmez.</small>
+          <small id="backup-help">Şifre anahtarı yalnızca motor belleğine gönderilir. Önizleme dosya yazmaz; geri yükleme yalnız açık onaydan sonra seçtiğiniz üst klasörün altında henüz var olmayan yeni klasörü oluşturur. Yedek dosyaları çıkarır; OPE'nin aktif çalışma alanını otomatik değiştirmez.</small>
           {backupMessage ? <p className="form-message" role="status" aria-live="polite">{backupMessage}</p> : null}
         </fieldset>
         </> : null}

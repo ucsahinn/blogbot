@@ -14,7 +14,7 @@ async function createQaBridge(): Promise<BlogbotBridge> {
   const requestedState = new URLSearchParams(window.location.search).get("state");
   if (requestedState) window.sessionStorage.setItem("blogbot.qa.state", requestedState);
   const state = requestedState ?? window.sessionStorage.getItem("blogbot.qa.state") ?? "ready";
-  if (state === "error") throw new Error("QA_SENTINEL: Yerel engine başlatılamadı.");
+  if (state === "error") throw new Error("QA_SENTINEL: Yerel motor başlatılamadı.");
   if (state === "loading") return new Promise<BlogbotBridge>(() => undefined);
   const base = createDemoTransport();
   if (state === "materialization-ready" && window.sessionStorage.getItem("blogbot.qa.materialization-target") === "saved") {
@@ -425,14 +425,14 @@ async function createQaBridge(): Promise<BlogbotBridge> {
           return {
             ...item,
             state: "OFFLINE",
-            detail: "Yerel engine bağlantısı şu anda kullanılamıyor."
+            detail: "Yerel motor bağlantısı şu anda kullanılamıyor."
           };
         }
         if (item.id === "pglite") {
           return {
             ...item,
             state: "DEGRADED",
-            detail: "PGlite durumu engine yeniden bağlanınca doğrulanacak."
+            detail: "PGlite durumu motor yeniden bağlanınca doğrulanacak."
           };
         }
         return item;

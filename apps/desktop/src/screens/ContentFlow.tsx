@@ -36,7 +36,8 @@ const candidateStateLabels: Record<CandidateView["state"], string> = {
 
 function candidateScoreLabel(score: number | undefined): string {
   if (typeof score !== "number" || !Number.isFinite(score)) return "Ölçülmedi";
-  return `${Math.max(0, Math.min(100, Math.round(score)))}%`;
+  // Turkish writes the percent sign first: %92.
+  return `%${Math.max(0, Math.min(100, Math.round(score)))}`;
 }
 
 function candidatePublicationLabel(value: string | null | undefined): string {

@@ -167,7 +167,7 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
             <button className="button button-secondary" type="button" disabled={Boolean(notificationUnavailableReason)} title={notificationUnavailableReason || undefined} aria-describedby={notificationUnavailableReason ? "settings-notification-unavailable" : undefined} onClick={() => void testNotification()}>Test bildirimi gönder</button>
           {notificationUnavailableReason ? <small id="settings-notification-unavailable" className="action-unavailable-reason">{notificationUnavailableReason}</small> : null}
           </div>
-          <small>{readOnly ? "Yerel engine kurtarma modundayken ayarlar ve bildirim testi değişiklik yapmaz." : dirty ? "Kaydedilmemiş değişiklik var." : "Tüm değişiklikler kaydedildi."}</small>
+          <small>{readOnly ? "Yerel motor kurtarma modundayken ayarlar ve bildirim testi değişiklik yapmaz." : dirty ? "Kaydedilmemiş değişiklik var." : "Tüm değişiklikler kaydedildi."}</small>
         </div>
         {message ? <p className="form-message" role="status" aria-live="polite">{message}</p> : null}
       </section>

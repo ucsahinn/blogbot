@@ -215,7 +215,7 @@ test("demo doctor and workspace expose only local runtime capabilities and logic
   assert.deepEqual(engineProbe, {
     ready: true,
     component: "local-engine",
-    detail: "Yerel engine, PGlite ve iş kuyruğu çalışıyor."
+    detail: "Yerel motor, PGlite ve iş kuyruğu çalışıyor."
   });
 });
 

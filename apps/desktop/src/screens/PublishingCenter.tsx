@@ -27,7 +27,7 @@ function customTimeParts(value: string): { hour: string; minute: string } {
 
 function slotLabel(slot: EditorialWorkspaceSnapshot["weeklySlots"][number]): string {
   const position = /-(\d+)$/u.exec(slot.id)?.[1] ?? "1";
-  return `${slot.dayLabel} · ${position}. slot`;
+  return `${slot.dayLabel} · ${position}. saat`;
 }
 
 
@@ -98,9 +98,9 @@ export function PublishingCenter({
 
   const slotActionUnavailableReason = (slotId: string): string =>
     readOnly
-      ? "Yerel çalışma alanı yeniden bağlanana kadar bu slot değiştirilemez."
+      ? "Yerel çalışma alanı yeniden bağlanana kadar bu yayın saati değiştirilemez."
       : busyId === slotId
-        ? "Bu slot kaydediliyor; işlem tamamlanana kadar bekleyin."
+        ? "Bu yayın saati kaydediliyor; işlem tamamlanana kadar bekleyin."
         : "";
 
   const updateSlotDraft = (slotId: string, update: Partial<SlotDraft>) => {
@@ -125,7 +125,7 @@ export function PublishingCenter({
       setMessage("Takvim ve yayın durumu yerel veriden yenilendi.");
     } catch {
       if (requestId !== refreshRequestId.current) return;
-      setMessage("Takvim ve yayın durumu yenilenemedi. Yerel engine ve bağlantıları Kurulum Merkezi'nden denetleyin.");
+      setMessage("Takvim ve yayın durumu yenilenemedi. Yerel motoru ve bağlantıları Kurulum Merkezi'nden denetleyin.");
     } finally {
       if (requestId === refreshRequestId.current) setRefreshing(false);
     }
@@ -148,12 +148,12 @@ export function PublishingCenter({
       });
       try {
         onWorkspaceChange(await bridge.getEditorialWorkspace());
-        setMessage(`${slot.dayLabel} için haftalık yayın slotu güncellendi.`);
+        setMessage(`${slot.dayLabel} için haftalık yayın saati güncellendi.`);
       } catch {
-        setMessage(`${slot.dayLabel} için haftalık yayın slotu güncellendi; takvim görünümü henüz yenilenemedi. Takvim durumunu yenileyin.`);
+        setMessage(`${slot.dayLabel} için haftalık yayın saati güncellendi; takvim görünümü henüz yenilenemedi. Takvim durumunu yenileyin.`);
       }
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "Slot güncellenemedi."));
+      setMessage(userFacingBridgeError(reason, "Yayın saati güncellenemedi."));
     } finally {
       setBusyId("");
     }
@@ -166,7 +166,7 @@ export function PublishingCenter({
         <div>
           <p className="section-kicker">{siteMode === "PUBLISH" ? "TAKVİM VE YAYIN" : "TAKVİM VE ÇIKTI"}</p>
           <h1>{siteMode === "PUBLISH" ? "Haftalık ritim, hazır yayınlar ve geçmiş." : "Haftalık ritim, hazır çıktılar ve geçmiş."}</h1>
-          <p>Her gün için beşe kadar yayın saati açın. Yeni taslaklar “ilk uygun slot” seçeneğinde bu ritmi izler; onaylı bir içerik bu takvimden atanmaz veya planlanmaz.</p>
+          <p>Her gün için beşe kadar yayın saati açın. Yeni taslaklar “ilk uygun yayın saati” seçeneğinde bu ritmi izler; onaylı bir içerik bu takvimden atanmaz veya planlanmaz.</p>
           {readOnly ? (
             <p className="inline-notice" role="status" aria-live="polite">
               Takvim ayarları yerel çalışma alanı yeniden bağlanana kadar salt okunur.
@@ -190,11 +190,11 @@ export function PublishingCenter({
       </div>
       <section className="hub-panel" role="tabpanel" id={`publishing-panel-${tab}`} aria-labelledby={`publishing-tab-${tab}`}>
         {tab === "calendar" ? (
-          <div className="week-grid slot-picker week-day-groups" role="group" aria-label="Düzenlenecek haftalık slot">
+          <div className="week-grid slot-picker week-day-groups" role="group" aria-label="Düzenlenecek haftalık yayın saati">
             {groupSlotsByDay(workspace.weeklySlots).map(({ dayLabel, slots }) => (
-              <section className="week-day-group" key={dayLabel} aria-label={`${dayLabel} yayın slotları`}>
+              <section className="week-day-group" key={dayLabel} aria-label={`${dayLabel} yayın saatleri`}>
                 <header className="week-day-group-header">
-                  <div><strong>{dayLabel}</strong><small>{slots.filter((slot) => getSlotDraft(slot).enabled).length}/{slots.length} slot açık</small></div>
+                  <div><strong>{dayLabel}</strong><small>{slots.filter((slot) => getSlotDraft(slot).enabled).length}/{slots.length} saat açık</small></div>
                   <span>Bir saati seçip düzenleyin</span>
                 </header>
                 <div className="week-day-slots">
@@ -211,17 +211,17 @@ export function PublishingCenter({
                     type="button"
                     key={slot.id}
                     aria-pressed={false}
-                    aria-label={`${slotLabel(slot)}: Takvimde bu slotu düzenle`}
+                    aria-label={`${slotLabel(slot)}: Takvimde bu yayın saatini düzenle`}
                     onClick={() => setActiveSlotId(slot.id)}
                   >
                     <span><strong>{slotLabel(slot)}</strong><em>{getSlotDraft(slot).enabled ? resolveScheduleTime(getSlotDraft(slot).choice, getSlotDraft(slot).customTime) : "Kapalı"}</em></span>
                     <span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span>
-                    <small>{legacyAssignment ?? "Yeni taslaklar ilk uygun etkin slota göre ilerler."}</small>
+                    <small>{legacyAssignment ?? "Yeni taslaklar ilk uygun etkin yayın saatine göre ilerler."}</small>
                   </button>
                 );
               }
               return (
-              <article aria-label={`${slotLabel(slot)} yayın slotu`} className={`slot-card ${getSlotDraft(slot).enabled ? "" : "is-disabled"}`} key={slot.id}>
+              <article aria-label={`${slotLabel(slot)} yayın saati`} className={`slot-card ${getSlotDraft(slot).enabled ? "" : "is-disabled"}`} key={slot.id}>
                 <div><strong>{slotLabel(slot)}</strong><span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span></div>
                 <label className="slot-time-field">
                   <span>Yayın saati</span>
@@ -272,10 +272,10 @@ export function PublishingCenter({
                     aria-describedby={actionReason ? actionReasonId : undefined}
                     onChange={(event) => updateSlotDraft(slot.id, { enabled: event.target.checked })}
                   />
-                  <span>{getSlotDraft(slot).enabled ? "Slot etkin" : "Slot kapalı"}</span>
+                  <span>{getSlotDraft(slot).enabled ? "Saat etkin" : "Saat kapalı"}</span>
                 </label>
                 <button className="button button-secondary slot-save" type="button" disabled={readOnly || busyId === slot.id} aria-describedby={actionReason ? actionReasonId : undefined} onClick={() => void saveSlot(slot)}>
-                  {busyId === slot.id ? "Kaydediliyor…" : "Slotu kaydet"}
+                  {busyId === slot.id ? "Kaydediliyor…" : "Saati kaydet"}
                 </button>
                 {actionReason ? <small id={actionReasonId} className="action-unavailable-reason">{actionReason}</small> : null}
                 {busyId === slot.id ? <div className="slot-progress" role="progressbar" aria-label={`${slot.dayLabel} slotu kaydediliyor`} aria-valuetext="Takvim ayarı kaydediliyor"><span /></div> : null}
@@ -317,7 +317,7 @@ export function PublishingCenter({
               </article>
             ))}
             {workspace.history.length === 0 ? (
-              <div className="empty-state"><strong>Henüz çıktı geçmişi yok.</strong><span>Başarı yalnız yerel engine tamamlanan işlemi doğruladığında burada görünür.</span></div>
+              <div className="empty-state"><strong>Henüz çıktı geçmişi yok.</strong><span>Başarı yalnız yerel motor tamamlanan işlemi doğruladığında burada görünür.</span></div>
             ) : null}
           </div>
         ) : null}

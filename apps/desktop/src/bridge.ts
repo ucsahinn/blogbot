@@ -314,7 +314,7 @@ export function userFacingBridgeError(
   const code = raw.toUpperCase();
   if (!raw) return fallback;
   if (code.includes("ENGINE_NATIVE_MODULES_MISSING")) {
-    return "OPE'nin paketlenmiş yerel engine bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun.";
+    return "OPE'nin paketlenmiş yerel motor bileşenleri eksik veya bozuk. Uygulamayı yeniden kurun; sorun sürerse Operasyonlar'dan sır içermeyen tanılama paketi oluşturun.";
   }
   if (code.includes("LOCAL_DATA_KEY_RECOVERY_REQUIRED")) {
     return "Yerel şifreli çalışma alanı bu Windows kullanıcısının anahtarıyla açılamadı. Uygulamayı kapatıp yeniden açın; sorun sürerse Operasyonlar’dan tanılama paketi oluşturun.";
@@ -344,7 +344,7 @@ export function userFacingBridgeError(
     return "Bu adayın bağlı kaynağı artık bulunamadı. Kaynak envanterini yenileyip adayı yeniden tarayın.";
   }
   if (code.includes("CANDIDATE_CATALOG_UNAVAILABLE")) {
-    return "Aday kataloğu şu anda okunamıyor. Yerel engine durumunu yenileyip tekrar deneyin.";
+    return "Aday kataloğu şu anda okunamıyor. Yerel motor durumunu yenileyip tekrar deneyin.";
   }
   if (code.includes("CODEX")) {
     return "Yazı üretimi çalışma zamanı hazır değil. Kurulum Merkezi’nden Codex hesabını ve yerel runner durumunu kontrol edin.";
@@ -454,8 +454,8 @@ export function createInvokeBridge(
     sendTestNotification: () => mutate("send_test_notification"),
     requestBobyGuidance: (request) => mutate("request_boby_guidance", { request }),
     getBobyGuidance: (guidanceId) => read("get_boby_guidance", { guidanceId }),
-    getEditorialWorkspace: (options) => read<EditorialWorkspaceSnapshot>("get_editorial_workspace", options?.includeCandidates ? { includeCandidates: true } : undefined)
-      .then((workspace) => ({ ...workspace, candidatesIncluded: Boolean(options?.includeCandidates) })),
+    getEditorialWorkspace: (options) => read("get_editorial_workspace", options?.includeCandidates ? { includeCandidates: true } : undefined)
+      .then((workspace) => ({ ...(workspace as EditorialWorkspaceSnapshot), candidatesIncluded: Boolean(options?.includeCandidates) })),
     promoteCandidate: (candidateId) =>
       mutate("promote_candidate", { candidateId }),
     dismissCandidate: (candidateId) =>

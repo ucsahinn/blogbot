@@ -7526,3 +7526,126 @@ h1, h2, h3 { text-wrap: balance; }
   color: var(--ink-soft);
   font-size: 13px;
 }
+
+/* Candidate cards: the status pill floated mid-card between the checkbox
+   and the category because the meta row used space-between with 3 items. */
+.candidate-card .candidate-meta {
+  justify-content: flex-start;
+}
+.candidate-card .candidate-meta > span:last-child {
+  margin-left: auto;
+}
+/* "Adresi kontrol et" wrapped onto two or three lines beside its hint. */
+.composer-actions > .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.composer-actions > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+}
+/* Settings and Setup stretched their grid rows over min-height:100%, which
+   pushed the page header down and opened a gap under it. */
+.settings-page,
+.setup-page {
+  align-content: start;
+}
+/* Review actions: equal-height buttons, no stretched wrappers. */
+.review-actions {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.review-local-output-action small {
+  font-size: 12px;
+}
+/* capitalize mis-cased Turkish statuses ("İnceleme Bekliyor"). */
+.review-breadcrumb,
+.article-meta {
+  text-transform: none;
+}
+/* Info banners sat flush against the next block. */
+.automation-continuity {
+  margin-bottom: 16px;
+}
+/* Recovery and inline notices were 11px. */
+.offline-banner,
+.inline-notice {
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+/* The active setup step used the accent (danger-looking) red even when done. */
+.guided-progress button.is-active {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+.guided-progress button.is-active .guided-step-index {
+  background: var(--blue);
+}
+/* Placeholders rendered as bold as typed text. */
+input::placeholder,
+textarea::placeholder {
+  font-weight: 400;
+}
+
+/* Source rows: the health + actions column was squeezed to ~146px, so
+   "Şimdi tara" and "Kullanım kararını güncelle" wrapped onto 2-3 lines, the
+   status pill wrapped and the row menu overflowed the card. */
+.source-list-labels,
+.source-row {
+  grid-template-columns: minmax(220px, 1.3fr) 64px minmax(110px, 0.6fr) minmax(110px, 0.55fr) minmax(250px, 1.05fr);
+}
+@media (max-width: 1180px) {
+  .source-list-labels,
+  .source-row {
+    grid-template-columns: minmax(200px, 1.1fr) 64px minmax(100px, 0.5fr) minmax(230px, 1fr);
+  }
+}
+@media (max-width: 920px) {
+  .source-list-labels,
+  .source-row {
+    grid-template-columns: minmax(200px, 1fr) 64px minmax(230px, 1fr);
+  }
+}
+.source-readiness {
+  white-space: nowrap;
+}
+.source-row-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.source-row-actions .button {
+  white-space: nowrap;
+}
+.health-cell .state-pill,
+.source-health-summary .state-pill {
+  white-space: nowrap;
+}
+.source-list-labels {
+  font-size: 11px;
+}
+/* 8px/10px text found by the typography scan. */
+.review-queue > footer,
+.event-row > time {
+  font-size: 12px;
+}
+.form-section-number {
+  font-size: 12px;
+}
+
+/* Review actions: the local-output wrapper was the only non-full-width
+   action at narrow widths; the approve reason spans its own line. */
+@media (max-width: 1180px) {
+  .review-actions > .review-local-output-action {
+    flex: 1 1 150px;
+  }
+  .review-local-output-action .button {
+    width: 100%;
+  }
+}
+.review-approve-reason {
+  display: block;
+  font-size: 12px;
+}

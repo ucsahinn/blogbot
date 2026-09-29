@@ -568,27 +568,27 @@ test("notification test waits until a changed notification preference is saved",
 
 test("weekly calendar lets every day use a preset or an explicit custom publishing time", async ({ page }) => {
   await page.goto("#publishing");
-  const monday = page.getByRole("article", { name: "Pazartesi · 1. slot yayın slotu" });
+  const monday = page.getByRole("article", { name: "Pazartesi · 1. saat yayın saati" });
   const timeChoice = monday.getByRole("combobox", { name: "Pazartesi yayın saati seçimi" });
 
   await timeChoice.selectOption("18:30");
-  await monday.getByRole("button", { name: "Slotu kaydet" }).click();
-  await expect(page.getByText("Pazartesi için haftalık yayın slotu güncellendi.")).toBeVisible();
+  await monday.getByRole("button", { name: "Saati kaydet" }).click();
+  await expect(page.getByText("Pazartesi için haftalık yayın saati güncellendi.")).toBeVisible();
 
   await timeChoice.selectOption("CUSTOM");
   await monday.getByRole("combobox", { name: "Pazartesi özel saat" }).selectOption("17");
   await monday.getByRole("combobox", { name: "Pazartesi özel dakika" }).selectOption("15");
   await expect(monday.getByText("17:15", { exact: true })).toBeVisible();
-  await monday.getByRole("button", { name: "Slotu kaydet" }).click();
-  await expect(page.getByText("Pazartesi için haftalık yayın slotu güncellendi.")).toBeVisible();
+  await monday.getByRole("button", { name: "Saati kaydet" }).click();
+  await expect(page.getByText("Pazartesi için haftalık yayın saati güncellendi.")).toBeVisible();
 });
 
 test("weekly calendar keeps legacy assignments visible without a separate SEO recommendation action", async ({ page }) => {
   await page.goto("#publishing");
   await expect(page.getByRole("button", { name: "Dengeli SEO saatlerini öner" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Perşembe · 1. slot: Takvimde bu slotu düzenle" }).click();
-  const thursday = page.getByRole("article", { name: "Perşembe · 1. slot yayın slotu" });
+  await page.getByRole("button", { name: "Perşembe · 1. saat: Takvimde bu yayın saatini düzenle" }).click();
+  const thursday = page.getByRole("article", { name: "Perşembe · 1. saat yayın saati" });
   await expect(thursday.getByText(/Geçmiş atama: Ekipler için uygulama kontrol listesi\. Bu bilgi yeni planlama yapmaz\./u)).toBeVisible();
   await expect(thursday.getByRole("combobox", { name: "Perşembe paylaşılacak onaylı post" })).toHaveCount(0);
 });
@@ -630,11 +630,11 @@ test("editorial desk refreshes its draft inventory from the local engine", async
 
 test("offline publishing explains why weekly schedule controls are unavailable", async ({ page }) => {
   await page.goto("?state=offline#publishing");
-  const monday = page.getByRole("article", { name: "Pazartesi · 1. slot yayın slotu" });
-  const save = monday.getByRole("button", { name: "Slotu kaydet" });
+  const monday = page.getByRole("article", { name: "Pazartesi · 1. saat yayın saati" });
+  const save = monday.getByRole("button", { name: "Saati kaydet" });
   await expect(save).toBeDisabled();
   await expect(save).toHaveAttribute("aria-describedby", "slot-action-unavailable-slot-mon-1");
-  await expect(monday.getByText("Yerel çalışma alanı yeniden bağlanana kadar bu slot değiştirilemez.")).toBeVisible();
+  await expect(monday.getByText("Yerel çalışma alanı yeniden bağlanana kadar bu yayın saati değiştirilemez.")).toBeVisible();
   await expect(page.getByText("Takvim ayarları yerel çalışma alanı yeniden bağlanana kadar salt okunur.", { exact: true })).toBeVisible();
 });
 
@@ -1240,7 +1240,7 @@ test("candidate triage presents a simple priority, source date, and accessible b
     has: page.getByRole("heading", { name: "Resmî kurum yeni bir duyuru yayımladı" })
   });
 
-  await expect(candidate.getByText("İnceleme önceliği: 92%", { exact: true })).toBeVisible();
+  await expect(candidate.getByText("İnceleme önceliği: %92", { exact: true })).toBeVisible();
   await expect(candidate.getByText(/3 kaynak/u)).toBeVisible();
   await expect(candidate.getByRole("checkbox", { name: /adayını seç/u })).toBeVisible();
   await expect(page.getByRole("button", { name: "Görünenleri seç" })).toBeVisible();
@@ -1372,7 +1372,7 @@ test("offline engine health has direct recovery and redacted diagnostics actions
   await page.goto("?state=engine-offline#operations");
   await page.getByRole("tab", { name: "Yerel sistem ve bağlantılar" }).click();
 
-  await expect(page.getByText("Yerel engine bağlantısı şu anda kullanılamıyor.")).toBeVisible();
+  await expect(page.getByText("Yerel motor bağlantısı şu anda kullanılamıyor.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Yerel durumu yeniden dene" })).toBeVisible();
   await page.getByRole("button", { name: "Tanılama ve günlükleri aç" }).click();
   await expect(page.getByRole("button", { name: "Tanılama paketi oluştur" })).toBeVisible();

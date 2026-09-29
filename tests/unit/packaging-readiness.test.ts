@@ -510,7 +510,7 @@ test("native WebView smoke is an explicit, environment-gated evidence command", 
   );
   assert.match(
     smokeScript,
-    /Pazar · 1\. slot: Takvimde bu slotu düzenle/u,
+    /Pazar · 1\. saat: Takvimde bu yayın saatini düzenle/u,
     "native smoke must select the compact Sunday slot before editing it"
   );
   assert.match(

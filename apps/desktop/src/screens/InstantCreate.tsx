@@ -513,13 +513,13 @@ export function InstantCreate({
           </div>
           <div className="brief-row">
             <span>Takvim / görsel</span>
-            <strong>{scheduleIntent === "NEXT_SLOT" ? "İlk uygun slot" : "Takvimsiz"} · {visualPolicy === "GENERATE" ? "ImageGen görseli" : "Yerel kapak"}</strong>
+            <strong>{scheduleIntent === "NEXT_SLOT" ? "İlk uygun yayın saati" : "Takvimsiz"} · {visualPolicy === "GENERATE" ? "Üretilen görsel" : "Yerel kapak"}</strong>
           </div>
           <div className="brief-checks">
             <p><span>✓</span> Kaynak metni kopyalanmaz</p>
             <p><span>✓</span> İddia defteri oluşturulur</p>
             <p><span>✓</span> Medya oranları doğrulanır</p>
-            <p><span>✓</span> Onay revizyon hash’ine bağlanır</p>
+            <p><span>✓</span> Onay bu revizyonun parmak izine bağlanır</p>
           </div>
         </aside>
       </div>

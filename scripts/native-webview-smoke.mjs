@@ -327,7 +327,7 @@ async function safeFatalDiagnostic(sessionId) {
       const safeMessages = [
         ['çalışma alanı hazırlanırken zaman aşımına uğradı', 'BOOTSTRAP_TIMEOUT'],
         ['zamanında yanıt vermedi', 'ENGINE_RESPONSE_TIMEOUT'],
-        ['paketlenmiş yerel engine bileşenleri eksik veya bozuk', 'ENGINE_NATIVE_MODULES_MISSING'],
+        ['paketlenmiş yerel motor bileşenleri eksik veya bozuk', 'ENGINE_NATIVE_MODULES_MISSING'],
         ['yerel şifreli çalışma alanı açılamadı', 'ENGINE_STORAGE_UNAVAILABLE'],
         ['şu anda salt okunur', 'ENGINE_DEGRADED'],
         ['yerel çalışma bileşeni bu işlemi doğrulayamadı', 'ENGINE_VALIDATION_FAILED']
@@ -726,10 +726,10 @@ async function verifyInitialEngineSurface(sessionId) {
   await waitForVisibleHeading(sessionId, "operations", MAX_INITIAL_BOOT_RENDER_MS);
   await execute(sessionId, "document.getElementById('operations-tab-health')?.click(); return true;");
   const visible = await execute(sessionId, "return document.body?.innerText?.replace(/\\s+/g, ' ').trim() ?? ''; ");
-  if (visible.includes("Yerel engine bağlantısı şu anda kullanılamıyor.")) {
+  if (visible.includes("Yerel motor bağlantısı şu anda kullanılamıyor.")) {
     fail("the first rendered Operations health view falsely reported the ready local engine as offline.");
   }
-  if (!visible.includes("Paketlenmiş sidecar stdio üzerinden çalışıyor.")) {
+  if (!visible.includes("Paketlenmiş yerel motor bu bilgisayarda çalışıyor.")) {
     fail(`the first rendered Operations health view did not show the ready engine detail: ${JSON.stringify(visible.slice(0, 700))}`);
   }
 }
@@ -1157,7 +1157,7 @@ async function verifyVisibleWeeklyScheduleJourney(sessionId) {
   await waitForVisibleHeading(sessionId, "publishing");
   const opened = await execute(sessionId, `return (() => {
     const button = [...document.querySelectorAll('button')].find((item) =>
-      item.getAttribute('aria-label') === 'Pazar · 1. slot: Takvimde bu slotu düzenle'
+      item.getAttribute('aria-label') === 'Pazar · 1. saat: Takvimde bu yayın saatini düzenle'
     );
     if (!button || button.disabled) return false;
     button.click();
@@ -1167,7 +1167,7 @@ async function verifyVisibleWeeklyScheduleJourney(sessionId) {
   let configured = false;
   for (let attempt = 0; attempt < 40; attempt += 1) {
     configured = await execute(sessionId, `return (() => {
-      const card = document.querySelector('article[aria-label="Pazar · 1. slot yayın slotu"]');
+      const card = document.querySelector('article[aria-label="Pazar · 1. saat yayın saati"]');
       const select = card?.querySelector('select');
       if (!card || !select) return false;
       const setValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
@@ -1181,10 +1181,10 @@ async function verifyVisibleWeeklyScheduleJourney(sessionId) {
   if (!configured) fail("Sunday weekly schedule selector was not available to native smoke.");
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const updated = await execute(sessionId, `return (() => {
-      const card = document.querySelector('article[aria-label="Pazar · 1. slot yayın slotu"]');
+      const card = document.querySelector('article[aria-label="Pazar · 1. saat yayın saati"]');
       const hour = card?.querySelector('select[aria-label="Pazar özel saat"]');
       const minute = card?.querySelector('select[aria-label="Pazar özel dakika"]');
-      const save = [...(card?.querySelectorAll('button') ?? [])].find((item) => item.textContent?.trim() === 'Slotu kaydet');
+      const save = [...(card?.querySelectorAll('button') ?? [])].find((item) => item.textContent?.trim() === 'Saati kaydet');
       if (!hour || !minute || !save || save.disabled) return false;
       const setValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
       setValue?.call(hour, '18'); hour.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1195,7 +1195,7 @@ async function verifyVisibleWeeklyScheduleJourney(sessionId) {
     await new Promise((resolveWait) => setTimeout(resolveWait, 150));
   }
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    const saved = await execute(sessionId, "return document.body?.innerText?.includes('Pazar için haftalık yayın slotu güncellendi.') ?? false;");
+    const saved = await execute(sessionId, "return document.body?.innerText?.includes('Pazar için haftalık yayın saati güncellendi.') ?? false;");
     if (saved) break;
     if (attempt === 59) fail("visible Sunday weekly schedule save did not report success.");
     await new Promise((resolveWait) => setTimeout(resolveWait, 150));

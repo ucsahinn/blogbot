@@ -120,7 +120,7 @@ export function OperationsHub(props: OperationsHubProps) {
       props.onConnectorStateChange(connectorState);
       setMessage("Operasyon durumu yerel veriden yenilendi.");
     } catch {
-      setMessage("Operasyon durumu yenilenemedi. Yerel engine ve bağlantıları Kurulum Merkezi'nden denetleyin.");
+      setMessage("Operasyon durumu yenilenemedi. Yerel motoru ve bağlantıları Kurulum Merkezi'nden denetleyin.");
     } finally {
       setRefreshing(false);
     }
@@ -339,7 +339,7 @@ export function OperationsHub(props: OperationsHubProps) {
                   </article>
                 ))}
                 {props.workspace.codexRoles.length === 0 ? (
-                  <div className="empty-state"><strong>Codex kapasite verisi alınamadı.</strong><span>Yerel engine bağlantısını ve Codex önkoşulunu Kurulum Merkezi'nden yeniden denetleyin.</span></div>
+                  <div className="empty-state"><strong>Codex kapasite verisi alınamadı.</strong><span>Yerel motor bağlantısını ve Codex önkoşulunu Kurulum Merkezi'nden yeniden denetleyin.</span></div>
                 ) : null}
               </div>
               <aside className="setup-note"><strong>Token ve kota ölçümü yok</strong><p>Sadece kalıcı yerel iş kaydından türetilen veriler gösterilir. Yerel Codex çalışma zamanı token, abonelik limiti veya hesap bakiyesi vermediğinde tahmini sayaç gösterilmez. Ücretli OpenAI API adaptörü kullanıcı onayı olmadan çalışmaz.</p></aside>
@@ -350,7 +350,7 @@ export function OperationsHub(props: OperationsHubProps) {
               {engineOffline ? (
                 <aside className="engine-recovery-callout" role="alert">
                   <div>
-                    <strong>Yerel engine yeniden bağlanmayı bekliyor.</strong>
+                    <strong>Yerel motor yeniden bağlanmayı bekliyor.</strong>
                     <p>İçerik ve yayın işlemleri güvenle durduruldu. Önce yerel durumu yeniden deneyin; sorun sürerse günlüklerden sır içermeyen tanılama paketi oluşturun.</p>
                   </div>
                   <div className="engine-recovery-actions">
@@ -361,7 +361,7 @@ export function OperationsHub(props: OperationsHubProps) {
                       Tanılama ve günlükleri aç
                     </button>
                     <button className="text-button" type="button" onClick={props.onOpenSetup}>
-                      Kurulum Merkezi'nde engine'i test et
+                      Kurulum Merkezi'nde motoru test et
                     </button>
                   </div>
                 </aside>

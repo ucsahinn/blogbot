@@ -948,7 +948,7 @@ export function ReviewWorkspace({
                     ? "Onay bağlanıyor…"
                     : revision.state === "APPROVED"
                       ? "Revizyon onaylı"
-                      : remotePublicationReady ? "Onayla ve hedefe gönder" : siteMode === "PUBLISH" ? "Bu revizyonu onayla" : "Bu revizyonu onayla"}
+                      : remotePublicationReady ? "Onayla ve hedefe gönder" : "Bu revizyonu onayla"}
                 </button>
                 {siteMode === "PUBLISH" && remotePublicationReady ? (
                   <button
@@ -963,6 +963,13 @@ export function ReviewWorkspace({
                 ) : null}
               </div>
               {readOnly ? <small id="review-approval-read-only" className="action-unavailable-reason">Yerel çalışma alanı yeniden bağlanana kadar bu revizyon onaylanamaz.</small> : null}
+              {/* The full reason sits far below in İnsan incelemesi; say why the
+                  approve button is disabled right beside the actions. */}
+              {!readOnly && !approvalReady && revision.state !== "APPROVED" ? (
+                <small className="action-unavailable-reason review-approve-reason">
+                  Onay için kontroller ve aşağıdaki insan inceleme beyanı tamamlanmalı.
+                </small>
+              ) : null}
             </header>
 
             {revokePanelOpen && revision.state === "APPROVED" ? (
@@ -1027,7 +1034,7 @@ export function ReviewWorkspace({
           <div className="revision-integrity-bar">
             <div>
               <span className="integrity-icon" aria-hidden="true">
-                ⌁
+                ✓
               </span>
               <span>
                   <strong>Onay kaydı</strong>
@@ -1378,7 +1385,7 @@ export function ReviewWorkspace({
                     </div>
                     <p className="evidence-note">
                       Kaynak bağlantıları burada yalnızca kanıt kimliği olarak
-                      gösterilir. İçerik yerel engine tarafından alınmış anlık
+                      gösterilir. İçerik yerel motor tarafından alınmış anlık
                       görüntüden doğrulanır; webview doğrudan ağ çağrısı yapmaz.
                     </p>
                   </section>

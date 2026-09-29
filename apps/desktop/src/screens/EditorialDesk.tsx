@@ -169,7 +169,7 @@ export function EditorialDesk({
       onWorkspaceChange(await bridge.getEditorialWorkspace());
       setMessage("Taslak envanteri yerel veriden yenilendi.");
     } catch {
-      setMessage("Taslak envanteri yenilenemedi. Yerel engine durumunu Operasyonlar ekranından inceleyin.");
+      setMessage("Taslak envanteri yenilenemedi. Yerel motor durumunu Operasyonlar ekranından inceleyin.");
     } finally {
       setRefreshing(false);
     }

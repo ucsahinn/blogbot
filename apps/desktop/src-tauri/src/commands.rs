@@ -682,9 +682,9 @@ pub fn test_local_engine(
         "component": "local-engine",
         "latencyMs": started_at.elapsed().as_millis(),
         "detail": if ready {
-            "Paketlenmiş yerel engine, PGlite veritabanı ve kalıcı iş kuyruğu hazır."
+            "Paketlenmiş yerel motor, PGlite veritabanı ve kalıcı iş kuyruğu hazır."
         } else {
-            "Yerel engine başlatılamadı. Doctor ayrıntılarını açıp kurulum bileşenlerini doğrulayın."
+            "Yerel motor başlatılamadı. Tanılama ayrıntılarını açıp kurulum bileşenlerini doğrulayın."
         },
         "doctor": doctor
     }))
@@ -2497,7 +2497,7 @@ pub async fn get_bootstrap_snapshot(
         "capabilities": capabilities,
         "connection": {
             "engineRunning": matches!(runtime, RuntimeMode::Online),
-            "engineLabel": if matches!(runtime, RuntimeMode::Online) { "Yerel engine · hazır" } else { "Yerel engine · kullanılamıyor" },
+            "engineLabel": if matches!(runtime, RuntimeMode::Online) { "Yerel motor · hazır" } else { "Yerel motor · kullanılamıyor" },
             "bridgeReady": matches!(runtime, RuntimeMode::Online),
             "latencyMs": Value::Null,
             "storageLabel": "PGlite · bu Windows bilgisayarı",
@@ -2827,18 +2827,18 @@ pub fn get_prerequisite_status(
             },
             {
                 "id": "local-engine",
-                "label": "Yerel engine",
+                "label": "Yerel motor",
                 "state": if engine_ready { "READY" } else { "MISSING" },
                 "scope": "WRITE",
                 "detail": if engine_ready {
-                    "Paketlenmiş yerel engine el sıkışması tamamlandı."
+                    "Paketlenmiş yerel motor el sıkışması tamamlandı."
                 } else {
-                    "Paketlenmiş yerel engine henüz başlatılmadı."
+                    "Paketlenmiş yerel motor henüz başlatılmadı."
                 },
                 "userAction": if engine_ready {
                     Value::Null
                 } else {
-                    json!("Uygulamayı yeniden başlatın veya kurulum paketindeki engine bileşenini onarın.")
+                    json!("Uygulamayı yeniden başlatın veya kurulum paketindeki yerel motor bileşenini onarın.")
                 }
             },
             {
@@ -2846,8 +2846,8 @@ pub fn get_prerequisite_status(
                 "label": "Yerel PGlite veritabanı",
                 "state": if engine_ready { "READY" } else { "MISSING" },
                 "scope": "WRITE",
-                "detail": if engine_ready { "Şifreli yerel veri deposu açıldı." } else { "Engine hazır olduğunda yerel veri deposu test edilecek." },
-                "userAction": if engine_ready { Value::Null } else { json!("Önce yerel engine'i yeniden test edin.") }
+                "detail": if engine_ready { "Şifreli yerel veri deposu açıldı." } else { "Yerel motor hazır olduğunda yerel veri deposu test edilecek." },
+                "userAction": if engine_ready { Value::Null } else { json!("Önce yerel motoru yeniden test edin.") }
             },
             {
                 "id": "local-queue",
@@ -2855,7 +2855,7 @@ pub fn get_prerequisite_status(
                 "state": if queue_ready { "READY" } else { "MISSING" },
                 "scope": "WRITE",
                 "detail": if queue_ready { "Retry, zamanlama ve dead-letter kuyruğu hazır." } else { "Engine hazır olduğunda yerel kuyruk test edilecek." },
-                "userAction": if queue_ready { Value::Null } else { json!("Önce yerel engine'i yeniden test edin.") }
+                "userAction": if queue_ready { Value::Null } else { json!("Önce yerel motoru yeniden test edin.") }
             },
             {
                 "id": "codex",
@@ -6882,8 +6882,8 @@ pub async fn get_editorial_workspace(
         }).collect::<Vec<_>>(),
         "preferences": preferences,
         "systemHealth": [
-            { "id": "engine", "label": "Yerel engine", "state": health_state, "detail": if stale { "Yerel engine bağlantısı şu anda kullanılamıyor." } else { "Paketlenmiş sidecar stdio üzerinden çalışıyor." }, "checkedAt": checked_at },
-            { "id": "pglite", "label": "PGlite ve kalıcı kuyruk", "state": health_state, "detail": if stale { "PGlite durumu engine yeniden bağlanınca doğrulanacak." } else { "Yerel veri ve pg-boss kuyruğu hazır." }, "checkedAt": checked_at },
+            { "id": "engine", "label": "Yerel motor", "state": health_state, "detail": if stale { "Yerel motor bağlantısı şu anda kullanılamıyor." } else { "Paketlenmiş yerel motor bu bilgisayarda çalışıyor." }, "checkedAt": checked_at },
+            { "id": "pglite", "label": "PGlite ve kalıcı kuyruk", "state": health_state, "detail": if stale { "PGlite durumu motor yeniden bağlanınca doğrulanacak." } else { "Yerel veri ve pg-boss kuyruğu hazır." }, "checkedAt": checked_at },
             { "id": "codex", "label": "Codex çalışma zamanı", "state": if codex_role_state == "READY" || codex_role_state == "BUSY" { "HEALTHY" } else if codex_available { "DEGRADED" } else { "NOT_CONFIGURED" }, "detail": if codex_role_state == "READY" { "Codex hesabı ve izole yerel runner hazır." } else if codex_role_state == "BUSY" { "Codex runner yerel iş kuyruğunu işliyor." } else if codex_available { "Codex bulundu; hesap veya izole runner doğrulaması bekleniyor." } else { "Codex çalışma zamanı bu bilgisayarda bulunamadı." }, "checkedAt": checked_at },
             { "id": "github", "label": "GitHub yayıncısı", "state": if github_configured { "DEGRADED" } else { "NOT_CONFIGURED" }, "detail": if github_configured { "Depo hedefi kayıtlı; depo ile sınırlandırılmış güvenli yetki aracısı hazır olmadığı için yayın kilitli." } else { "GitHub depo hedefi yapılandırılmadı; güvenli yetki aracısı olmadan yetkilendirme yapılmaz." }, "checkedAt": checked_at },
             { "id": "site-adapter", "label": "Site adaptörü", "state": if site_ready { "HEALTHY" } else if site_configured { "DEGRADED" } else { "NOT_CONFIGURED" }, "detail": if site_ready { "Seçilen site adaptörü ve route dry-run doğrulandı." } else if site_configured { "Site hedefi kayıtlı; biçim doğrulaması bekleniyor." } else { "Seçilen site hedefi henüz yapılandırılmadı." }, "checkedAt": checked_at }

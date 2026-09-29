@@ -112,7 +112,7 @@ const prerequisites: PrerequisiteSnapshot = {
       label: "Paketlenmiş OPE Engine",
       state: "READY",
       scope: "WRITE",
-      detail: "Yerel engine bu Windows oturumunda çalışıyor.",
+      detail: "Yerel motor bu Windows oturumunda çalışıyor.",
       userAction: null
     },
     {
@@ -751,7 +751,7 @@ export function createDemoTransport(): InvokeTransport {
         return {
           ready: true,
           component: "local-engine",
-          detail: "Yerel engine, PGlite ve iş kuyruğu çalışıyor."
+          detail: "Yerel motor, PGlite ve iş kuyruğu çalışıyor."
         };
       case "verify_local_integrity":
         return { verified: true, completedAt: new Date().toISOString() };
