@@ -139,3 +139,18 @@ Beş dosyalık payload doğrulaması (`verify-release-payload.ps1`) CI'ın üret
 | Yayımlanan payload hash doğrulaması | DONE — 4/4 varlık GitHub digest'iyle eşleşiyor; provenance ve SBOM attestation doğrulandı; ayrıntı: [kapanış raporu](unsigned-release-closure-20260928.md) |
 | Bu makinede 0.1.55 → 0.1.56 kurulum | DONE — yayımlanan NSIS (hash doğrulandı) sessiz kuruldu; kayıt ve exe 0.1.56; gerçek profil salt-okunur kontrolü PASS, yükseltme öncesiyle aynı 50 aday ve 1 inceleme taslağı |
 | Blogbot 0.1.30 kaydını güvenli kaldırma (veri klasörünü paylaşıyor) | DONE — kaldırıcı çalıştırılmadı; eski ikililer, iki kısayol ve kayıt girdisi `C:\Users\ulasc\OPE-profile-backup-20260928\blogbot-0.1.30-quarantine` altına alındı; `data`, `secrets`, `diagnostics`, `logs` yerinde |
+
+### Faz 6 — 0.1.57 arayüz ve doğruluk sürümü (`/goal`: tüm kusurları düzelt)
+
+Kanıt dizini: `build/verification/0.1.57/` (gitignored).
+
+| Kalem | Durum |
+| --- | --- |
+| Tasarım, erişilebilirlik ve kod inceleme raporları, iki görsel geçiş, boşluk ekran görüntüleri | DONE — bulguların tamamı kırmızı→yeşil testle düzeltildi; ayrıntı: [sürüm notu](../releases/OPE-0.1.57.md) |
+| Test yüzeyleri | DONE — tarayıcı 186/186, uygulama 176/176, birim 491/491, entegrasyon 246/246 (`--test-concurrency=1`), Rust 257, lint ve tip denetimi temiz |
+| Entegrasyon paralel koşuda yük kaynaklı düşüş | DOCUMENTED — `pipeline-codex` "JSONL kapandıktan sonra süre aşımı" testi, ~100 artık node süreci olan makinede paralel koşuda 2 sn'lik temizlik penceresini aşıyor; tek başına ve eşzamanlılık 1 ile geçiyor; kod 0.1.55'ten beri değişmedi |
+| Yerel WebView smoke (yeni derleme, geçici profil) | DONE — `native-visible-action-matrix` tek kaynak modu denetimi `input[type=url]`'e güncellendi |
+| Beş yerde sürüm 0.1.57, `docs/releases/OPE-0.1.57.md` | DONE |
+| Push, Verify CI, Release workflow | DONE — `a6409c5`; Verify 36673177382 ve Release 36675478522 başarılı |
+| Yayımlanan payload | DONE — `setup.exe` SHA-256 `5d38cd8e…21cb` `latest.json` ile eşleşiyor; `msi` `34cdf6c4…8d90`; iki dosyanın provenance attestation'ı JSON çıktısıyla doğrulandı |
+| Bu makinede 0.1.56 → 0.1.57 kurulum | DONE — önce gerçek profil yedeği alındı (1207 dosya); NSIS sessiz kuruldu, kayıt ve exe 0.1.57; gerçek profille açılış PASS (9 kaynak, 16 inceleme, motor çalışıyor); yalnız salt-okunur gezinti, kaydet/onayla/yayınla yapılmadı |
