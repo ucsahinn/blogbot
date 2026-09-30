@@ -17,6 +17,8 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
   const [refreshMessage, setRefreshMessage] = useState("");
   const summary = summarizeWorkspace(workspace);
   const offline = snapshot.runtime === "OFFLINE_READ_ONLY";
+  const engineRunning = snapshot.connection.engineRunning
+    && workspace.systemHealth.find((item) => item.id === "engine")?.state !== "OFFLINE";
   // The headline must not say "kontrol altında" while text generation is down.
   const writingUnavailable = !offline && snapshot.codex.state === "UNAVAILABLE";
   const primaryToday = workspace.today.find((item) => item.state !== "DONE") ?? workspace.today[0];
@@ -120,7 +122,7 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
         </section>
       ) : null}
 
-      <div className="automation-continuity" role="note">
+      <div className="automation-continuity" role="note" hidden={offline}>
         <span aria-hidden="true">↻</span>
         <p><strong>OPE bilgisayarınız açıkken tepside çalışmaya devam eder.</strong> Uygulama kapanırsa işler bekler; yeniden açıldığında güvenli şekilde devam eder.</p>
       </div>
@@ -154,13 +156,13 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
         </div>
         <div className="compact-status">
           <span
-            className={`status-dot ${snapshot.connection.engineRunning ? "status-online" : "status-offline_read_only"}`}
+            className={`status-dot ${engineRunning ? "status-online" : "status-offline_read_only"}`}
             aria-hidden="true"
           />
           <div>
               <small>YEREL MOTOR</small>
             <strong>
-              {snapshot.connection.engineRunning
+              {engineRunning
                 ? "Yerel sistem çalışıyor"
                 : "Yerel sistem çalışmıyor"}
             </strong>
@@ -307,7 +309,7 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
           Son görünüm: {formatTime(workspace.sync.generatedAt)}.{" "}
           {workspace.sync.stale
             ? "Son sağlam yerel görünüm gösteriliyor."
-            : "Revizyon hash’leri ve görünüm dizisi eşleşiyor."}
+            : "Revizyon parmak izleri ve görünüm sırası eşleşiyor."}
         </span>
         <button type="button" onClick={() => onNavigate("operations")}>
           Ayrıntılar

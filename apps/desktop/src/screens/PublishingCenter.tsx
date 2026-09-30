@@ -216,7 +216,7 @@ export function PublishingCenter({
                   >
                     <span><strong>{slotLabel(slot)}</strong><em>{getSlotDraft(slot).enabled ? resolveScheduleTime(getSlotDraft(slot).choice, getSlotDraft(slot).customTime) : "Kapalı"}</em></span>
                     {getSlotDraft(slot).enabled ? (
-                      <span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span>
+                      <span className={`state-pill ${legacyAssignment ? "state-disabled" : `state-${slot.state.toLowerCase()}`}`}>{slotStateLabel(slot.state)}</span>
                     ) : null}
                     <small>{legacyAssignment ?? (getSlotDraft(slot).enabled ? "Yeni taslaklar ilk uygun etkin yayın saatine göre ilerler." : "Bu saat kapalı; yeni taslaklara atanmaz.")}</small>
                   </button>
@@ -224,7 +224,7 @@ export function PublishingCenter({
               }
               return (
               <article aria-label={`${slotLabel(slot)} yayın saati`} className={`slot-card ${getSlotDraft(slot).enabled ? "" : "is-disabled"}`} key={slot.id}>
-                <div><strong>{slotLabel(slot)}</strong><span className={`state-pill state-${slot.state.toLowerCase()}`}>{slotStateLabel(slot.state)}</span></div>
+                <div><strong>{slotLabel(slot)}</strong><span className={`state-pill ${legacyAssignment ? "state-disabled" : `state-${slot.state.toLowerCase()}`}`}>{slotStateLabel(slot.state)}</span></div>
                 <label className="slot-time-field">
                   <span>Yayın saati</span>
                   <select
@@ -262,7 +262,7 @@ export function PublishingCenter({
                         {MINUTES.map((minute) => <option key={minute} value={minute}>{minute}</option>)}
                       </select>
                     </label>
-                    <output aria-label={`${slot.dayLabel} seçilen özel yayın saati`}>{getSlotDraft(slot).customTime}</output>
+                    <output className="sr-only" aria-label={`${slot.dayLabel} seçilen özel yayın saati`}>{getSlotDraft(slot).customTime}</output>
                   </fieldset>
                 ) : null}
                 {legacyAssignment ? <p>{legacyAssignment}</p> : null}

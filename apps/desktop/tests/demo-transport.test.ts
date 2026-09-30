@@ -209,7 +209,7 @@ test("demo doctor and workspace expose only local runtime capabilities and logic
     engineLabel: "OPE Engine · bu bilgisayar",
     bridgeReady: true,
     latencyMs: 8,
-    storageLabel: "PGlite · hassas kayıtlar şifreli",
+    storageLabel: "Yerel veritabanı · şifreli",
     lastSyncAt: "2026-07-29T12:44:12.000Z"
   });
   assert.deepEqual(engineProbe, {

@@ -146,7 +146,7 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
         scheduledAt: "2026-07-31T11:00:00.000Z",
         state: "APPROVED",
         reviewable: true,
-        detail: "Onaylı revizyon; yerel paylaşım slotuna atanabilir."
+        detail: "Onaylı revizyon; yerel yayın saatine atanabilir."
       }
     ],
     weeklySlots: expandWeeklySlots([
@@ -272,7 +272,7 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
         title: "Yayın sonucu henüz doğrulanmadı",
         jobType: "RECONCILE_PUBLICATION",
         message:
-          "Dış etkinin sonucu belirsiz. Yeni PR oluşturmadan önce uzlaştırma gerekir.",
+          "Dış etkinin sonucu belirsiz. Yeni değişiklik isteği (PR) açmadan önce uzlaştırma gerekir.",
         attempts: 1,
         lastAttemptAt: "2026-07-29T12:02:00.000Z",
         retryMode: "RECONCILE_FIRST",

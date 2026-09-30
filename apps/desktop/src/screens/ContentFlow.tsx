@@ -286,7 +286,7 @@ export function ContentFlow({
             seçtiğiniz kanıtlardan hemen yeni bir taslak başlatın.
           </p>
         </div>
-        <button className="button button-primary" type="button" onClick={() => setTab("instant")}>
+        <button className="button button-primary" type="button" hidden={tab === "instant"} onClick={() => setTab("instant")}>
           <span aria-hidden="true">+</span> Anlık oluştur
         </button>
       </header>
@@ -294,7 +294,7 @@ export function ContentFlow({
       <div className="workspace-tabs" role="tablist" aria-label="İçerik akışı bölümleri" onKeyDown={handleTabListKeyDown}>
         {([
           ["sources", "Kaynaklar"],
-          ["candidates", `Haber adayları · ${workspace.candidates.filter((item) => item.state !== "DISMISSED").length}`],
+          ["candidates", workspace.candidatesIncluded ? `Haber adayları · ${workspace.candidates.filter((item) => item.state !== "DISMISSED").length}` : "Haber adayları"],
           ["instant", "Anlık oluştur"]
         ] as const).map(([id, label]) => (
           <button

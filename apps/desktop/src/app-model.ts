@@ -12,7 +12,8 @@ import type {
   TodayWorkItem,
   Section,
   SetupConnectorId,
-  WeeklySlotView
+  WeeklySlotView,
+  SourceKind
 } from "./types.ts";
 
 /**
@@ -193,6 +194,14 @@ const retryModeLabels: Record<FailureView["retryMode"], string> = {
 };
 
 export const sectionLabel = (value: Section): string => sectionLabels[value];
+const sourceKindLabels: Record<SourceKind, string> = {
+  RSS: "RSS",
+  ATOM: "Atom",
+  SITEMAP: "Site haritası",
+  SITE: "Site",
+  ARTICLE: "Makale"
+};
+export const sourceKindLabel = (value: SourceKind): string => sourceKindLabels[value] ?? value;
 export const sectionArticleType = (value: Section): ArticleType => sectionArticleTypes[value];
 export const articleTypeLabel = (value: ArticleType): string => articleTypeLabels[value];
 export const contentCategoryLabel = (section: Section, articleType: ArticleType): string => {

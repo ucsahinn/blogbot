@@ -7741,3 +7741,89 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Second visual pass. */
+/* Links used the browser's default blue/purple. */
+.review-workspace a,
+.data-row a,
+.claim-source-links a {
+  color: var(--blue);
+  font-weight: 600;
+  text-decoration: none;
+}
+.review-workspace a:visited,
+.data-row a:visited,
+.claim-source-links a:visited {
+  color: var(--blue);
+}
+.review-workspace a:hover,
+.data-row a:hover,
+.claim-source-links a:hover {
+  text-decoration: underline;
+}
+/* "İnceleme bekliyor" was blue in lists and amber in the review header. */
+.state-pill.state-review_required {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+/* The approval-scope note is informational until the revision is approved. */
+.revision-integrity-bar:not(.is-approved) .integrity-icon {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+/* Settings actions: natural-width buttons in a wrapping row. */
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px 14px;
+}
+.settings-actions > small,
+.settings-page .form-message {
+  flex-basis: 100%;
+}
+.settings-action-primary,
+.settings-action-notification {
+  display: grid;
+  justify-items: start;
+  max-width: 320px;
+}
+.settings-action-notification {
+  margin-left: auto;
+}
+.settings-action-secondary {
+  max-width: 420px;
+}
+/* Candidate actions: one fixed column so rows line up. */
+.candidate-card {
+  grid-template-columns: minmax(0, 1fr) 200px;
+}
+.candidate-card .card-actions .button {
+  width: 100%;
+}
+/* Candidate toolbar: count and button never wrap. */
+.hub-toolbar > span,
+.hub-toolbar > .button {
+  white-space: nowrap;
+}
+/* A neutral hint before the user has typed anything. */
+.field-hint {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+/* Zero planned items is not an error. */
+.pulse-metric strong {
+  color: var(--ink);
+}
+/* Setup card actions should read as actions. */
+.setup-task-card > b {
+  color: var(--blue);
+}
+.setup-task-card > b::after {
+  content: " →";
+}
+.slot-custom-time legend {
+  padding: 0;
+  font-size: 12px;
+}

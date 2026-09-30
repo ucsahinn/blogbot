@@ -591,7 +591,7 @@ test("review explains approval without exposing a technical revision record", as
   assert.match(review, /\{ id: "claims", label: "Kaynak kontrolü" \}/u);
   assert.match(review, /\{ id: "gates", label: "Yayın kontrolü" \}/u);
   assert.doesNotMatch(review, /snapshot-integrity/u);
-  assert.match(review, /<strong>Onay kaydı<\/strong>/u);
+  assert.match(review, /<strong>\{revision\.state === "APPROVED" \? "Onay kaydı" : "Onay neyi kapsar"\}<\/strong>/u);
   assert.doesNotMatch(review, /revision-technical-record/u);
   assert.doesNotMatch(review, /sha256:\{revision\.revisionHash\.slice/u);
   assert.doesNotMatch(review, /label: "İddialar ve kaynaklar"/u);

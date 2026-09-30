@@ -22,7 +22,8 @@ import type {
   ConnectorStateSnapshot,
   GateView,
   QueueItem,
-  ReviewRevision
+  ReviewRevision,
+  Section
 } from "../types.ts";
 
 interface ReviewWorkspaceProps {
@@ -201,7 +202,7 @@ function QueueCard({
       <span>
         <strong>{item.title}</strong>
         <small>
-          {item.section} · {item.sourceCount} kaynak
+          {sectionLabel(item.section as Section)} · {item.sourceCount} kaynak
         </small>
       </span>
       {item.blockers > 0 ? (
@@ -1040,13 +1041,13 @@ export function ReviewWorkspace({
               </section>
             ) : null}
 
-          <div className="revision-integrity-bar">
+          <div className={`revision-integrity-bar${revision.state === "APPROVED" ? " is-approved" : ""}`}>
             <div>
               <span className="integrity-icon" aria-hidden="true">
-                ✓
+                {revision.state === "APPROVED" ? "✓" : "i"}
               </span>
               <span>
-                  <strong>Onay kaydı</strong>
+                  <strong>{revision.state === "APPROVED" ? "Onay kaydı" : "Onay neyi kapsar"}</strong>
                   Bu onay, metin, kaynaklar, görseller, plan ve iki dil sürümü için geçerlidir.
                   Bir şey değişirse yeniden inceleme gerekir.
               </span>

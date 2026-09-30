@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { buildInstantCreateRequest, describeInstantDraftSubmission, parseUrlSources, sectionArticleType, sectionLabel } from "../app-model.ts";
+import { buildInstantCreateRequest, describeInstantDraftSubmission, parseUrlSources, sectionArticleType, sectionLabel, sourceKindLabel } from "../app-model.ts";
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import type { ArticleType, EditorialWorkspaceSnapshot, InstantDraftSubmission, Section, SourceRecord } from "../types.ts";
 
@@ -295,7 +295,7 @@ export function InstantCreate({
                     <span>
                       <strong>{source.name}</strong>
                       <small>
-                        {source.kind} · {source.section}
+                        {sourceKindLabel(source.kind)} · {sectionLabel(source.section)}
                       </small>
                       <small className={`source-evidence-state ${source.canPublish ? "is-ready" : "needs-review"}`}>
                         {source.canPublish
@@ -501,7 +501,7 @@ export function InstantCreate({
           </div>
           <div className="brief-row">
             <span>Rota</span>
-            <strong>{section || "Seçilmedi"}</strong>
+            <strong>{section ? sectionLabel(section) : "Seçilmedi"}</strong>
           </div>
           <div className="brief-row">
             <span>Dil</span>

@@ -225,7 +225,7 @@ export function Operations({
             </div>
             <div>
               <dt>Gecikme</dt>
-              <dd>{snapshot.connection.latencyMs ?? "Bilinmiyor"} ms</dd>
+              <dd>{snapshot.connection.latencyMs == null ? "Ölçülmedi" : `${snapshot.connection.latencyMs} ms`}</dd>
             </div>
             <div>
               <dt>Yerel uygulama bağlantısı</dt>

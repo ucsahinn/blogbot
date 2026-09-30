@@ -291,7 +291,7 @@ const bootstrap: BootstrapSnapshot = {
     engineLabel: "OPE Engine · bu bilgisayar",
     bridgeReady: true,
     latencyMs: 8,
-    storageLabel: "PGlite · hassas kayıtlar şifreli",
+    storageLabel: "Yerel veritabanı · şifreli",
     lastSyncAt: "2026-07-29T12:44:12.000Z"
   },
   automation: {

@@ -559,7 +559,7 @@ export function SourceCenter({
             </button>
           </div>
           {addressCheckUnavailableReason ? (
-            <small id="source-address-action-reason" className="action-unavailable-reason">
+            <small id="source-address-action-reason" className={input.trim().length === 0 && !busy && canTest ? "field-hint" : "action-unavailable-reason"}>
               {addressCheckUnavailableReason}
             </small>
           ) : null}

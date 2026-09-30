@@ -256,7 +256,7 @@ export function OperationsHub(props: OperationsHubProps) {
                     <small>İnceleme, taslak ve kanıt paketi hazır olduğunda açılır.</small>
                   </div>
                   <div className="row-actions">
-                    <button className={`button ${draft.nextAction === "RETRY" || draft.nextAction === "CONNECT_CODEX" ? "button-secondary" : "button-primary"}`} type="button" onClick={props.onOpenEditorial}>
+                    <button className="button button-secondary" type="button" onClick={props.onOpenEditorial}>
                       Editoryal Masa’da aç
                     </button>
                     {draft.nextAction === "CONNECT_CODEX" ? (
