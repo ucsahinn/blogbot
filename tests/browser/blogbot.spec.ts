@@ -883,7 +883,7 @@ test("offline, empty, loading and fatal states are distinguishable", async ({ pa
 
   await page.goto("?state=empty#operations");
   await expect(page.getByText("Müdahale bekleyen iş yok.")).toBeVisible();
-  await page.getByRole("tab", { name: "Codex kullanım ve limit" }).click();
+  await page.getByRole("tab", { name: "Codex kullanımı ve limiti" }).click();
   await expect(page.getByText("Codex kapasite verisi alınamadı.")).toBeVisible();
 
   await page.goto("?state=loading");
@@ -1415,6 +1415,26 @@ test("operations read failure does not leave the activity screen falsely loading
   await expect(page.getByText("Operasyon günlüğü yükleniyor…")).toHaveCount(0);
 });
 
+test("a failed read renders as a warning, not as a teal confirmation", async ({ page }) => {
+  await page.goto("?state=operations-read-failure#operations");
+  await page.getByRole("tab", { name: /İş günlüğü/u }).click();
+
+  const notice = page.locator(".inline-notice", { hasText: "Operasyon günlüğü okunamadı." });
+  await expect(notice).toHaveClass(/is-warning/u);
+  const heading = page.locator(".operation-log .panel-heading");
+  await expect(heading.locator(".panel-actions button")).toHaveCount(3);
+});
+
+test("a confirmation keeps the neutral notice tone", async ({ page }) => {
+  await page.goto("?state=ready#operations");
+  await page.getByRole("tab", { name: /İş günlüğü/u }).click();
+  await page.getByRole("button", { name: "Günlüğü yenile" }).click();
+
+  const notice = page.locator(".inline-notice", { hasText: "Günlük yenilendi." });
+  await expect(notice).toBeVisible();
+  await expect(notice).not.toHaveClass(/is-warning/u);
+});
+
 test("diagnostics keeps raw engine log records off the live screen", async ({ page }) => {
   await page.goto("?state=engine-diagnostics-failure#operations");
   await page.getByRole("tab", { name: /İş günlüğü/u }).click();
@@ -1588,6 +1608,89 @@ test("review content makes missing hero media actionable instead of showing a sy
   await expect(page.getByText("Bu taslakta hero medya yok.")).toHaveCount(2);
   await expect(page.getByRole("button", { name: "Görseli hazırla" })).toHaveCount(2);
   await expect(page.getByText("Hero medya güvenli önizlemesi")).toHaveCount(0);
+});
+
+test("the media tab explains a missing media package and offers the repair action", async ({ page }) => {
+  await page.goto("?state=missing-media#editorial-review");
+  await expect(page.getByRole("button", { name: "Görseli hazırla" }).first()).toHaveClass(/button-secondary/u);
+  await page.getByRole("tab", { name: /^Medya/u }).click();
+
+  const note = page.getByRole("note", { name: "Medya paketi durumu" });
+  await expect(note).toContainText("Bu revizyonda görsel yok.");
+  await expect(note.getByRole("button", { name: "Görseli hazırla" })).toBeVisible();
+});
+
+test("review warning labels render as amber chips, like their passing counterparts", async ({ page }) => {
+  await page.goto("?state=missing-media#editorial-review");
+  await page.getByRole("tab", { name: /^Medya/u }).click();
+
+  const label = page.locator(".warning-label", { hasText: "Medya eksik" });
+  const style = await label.evaluate((node) => {
+    const computed = getComputedStyle(node);
+    return { background: computed.backgroundColor, radius: computed.borderTopLeftRadius };
+  });
+  expect(style.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(style.radius).not.toBe("0px");
+  await expect(page.getByRole("heading", { name: "Oran, alt metin ve parmak izi kontrolleri" })).toBeVisible();
+});
+
+test("system health rows use plain Turkish names and a labelled check time", async ({ page }) => {
+  await page.goto("?state=ready#operations");
+  await page.getByRole("tab", { name: /Yerel sistem ve bağlantılar/u }).click();
+
+  const panel = page.locator("main");
+  await expect(panel.getByText("Yerel veritabanı ve iş kuyruğu", { exact: true })).toBeVisible();
+  await expect(panel.getByText(/OPE Engine|stdio|PGlite/u)).toHaveCount(0);
+  await expect(panel.getByText(/^Son kontrol: \d{2}:\d{2}$/u).first()).toBeVisible();
+});
+
+test("planned items in local output mode name the destination without jargon or aligned-column drift", async ({ page }) => {
+  await page.goto("?state=ready#publishing");
+  await page.getByRole("tab", { name: /Planlananlar/u }).click();
+
+  const rows = page.locator(".publication-list .data-row");
+  await expect(rows.first()).toBeVisible();
+  await expect(page.getByText(/niyeti/u)).toHaveCount(0);
+  await expect(page.getByText(/Kontrol başlamadı/u)).toHaveCount(0);
+  await expect(rows.first()).toContainText("Hedef: yerel klasör");
+  const rights = await rows.evaluateAll((items) => items.map((item) => Math.round(item.lastElementChild!.getBoundingClientRect().right)));
+  expect(new Set(rights).size).toBe(1);
+
+  await page.setViewportSize({ width: 960, height: 680 });
+  const clipped = await rows.locator("small").evaluateAll((items) => items.filter((item) => item.scrollWidth > item.clientWidth + 1).length);
+  expect(clipped).toBe(0);
+});
+
+test("the diff language switch never squeezes review tab labels onto two lines", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("?state=ready#editorial-review");
+  const claimsTab = page.getByRole("tab", { name: /Kaynak kontrolü/u });
+  const before = await claimsTab.boundingBox();
+  await page.getByRole("tab", { name: /Değişiklikler/u }).click();
+  await expect(page.getByRole("button", { name: /EN/u, pressed: false })).toBeVisible();
+  const after = await claimsTab.boundingBox();
+
+  expect(after?.height).toBe(before?.height);
+  expect(after?.width).toBe(before?.width);
+});
+
+test("review tabs stay inside the review panel at 960px", async ({ page }) => {
+  await page.setViewportSize({ width: 960, height: 680 });
+  await page.goto("?state=ready#editorial-review");
+  await page.getByRole("tab", { name: /Değişiklikler/u }).click();
+
+  const row = await page.locator(".review-tabs-row").boundingBox();
+  const last = await page.getByRole("tab", { name: /Değişiklikler/u }).boundingBox();
+  expect(row).not.toBeNull();
+  expect(last).not.toBeNull();
+  expect(last!.x + last!.width).toBeLessThanOrEqual(row!.x + row!.width);
+});
+
+test("operation log filters are labelled in Turkish", async ({ page }) => {
+  await page.goto("?state=ready#operations");
+  await page.getByRole("tab", { name: /İş günlüğü/u }).click();
+  await expect(page.getByRole("button", { name: "Ayrıntı", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Debug", exact: true })).toHaveCount(0);
 });
 
 test("a short legacy review draft offers one-step comprehensive regeneration", async ({ page }) => {

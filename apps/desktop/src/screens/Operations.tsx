@@ -4,6 +4,7 @@ import { formatDateSafe, editorialDateKey, editorialWeek } from "../app-model.ts
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { formatOperationTimestamp } from "../operation-timestamp.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, OperationsSnapshot } from "../types.ts";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 interface OperationsProps {
   bridge: BlogbotBridge;
@@ -49,7 +50,7 @@ export function Operations({
       ?? getOperationWeek()[0]?.[2]
       ?? new Date().toISOString().slice(0, 10)
   );
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice, warnNotice, noticeTone] = useNotice();
   const operationWeek = useMemo(() => getOperationWeek(), []);
   const siteMode = connectorState.mode;
   const runtimeModeLabel = snapshot.runtime === "ONLINE"
@@ -76,13 +77,13 @@ export function Operations({
       .catch((reason) => {
         if (alive) {
           setOperationsLoadFailed(true);
-          setNotice(userFacingBridgeError(reason, "Operasyon günlüğü okunamadı."));
+          warnNotice(userFacingBridgeError(reason, "Operasyon günlüğü okunamadı."));
         }
       });
     return () => {
       alive = false;
     };
-  }, [bridge]);
+  }, [bridge, warnNotice]);
 
   const refreshOperations = async () => {
     setBusyTarget("logs");
@@ -93,7 +94,7 @@ export function Operations({
       setNotice("Günlük yenilendi.");
     } catch (reason) {
       setOperationsLoadFailed(true);
-      setNotice(userFacingBridgeError(reason, "Günlük okunamadı."));
+      warnNotice(userFacingBridgeError(reason, "Günlük okunamadı."));
     } finally {
       setBusyTarget("");
     }
@@ -107,7 +108,7 @@ export function Operations({
       setDiagnosticsOpen(true);
       setNotice("Tanılama paketi hazırlandı ve yerel klasörde açıldı.");
     } catch (reason) {
-      setNotice(userFacingBridgeError(reason, "Tanılama paketi oluşturulamadı."));
+      warnNotice(userFacingBridgeError(reason, "Tanılama paketi oluşturulamadı."));
     } finally {
       setDiagnosticExportBusy(false);
     }
@@ -147,7 +148,7 @@ export function Operations({
         }.`
       );
     } catch (reason) {
-      setNotice(
+      warnNotice(
         userFacingBridgeError(reason, "Durum değiştirilemedi.")
       );
     } finally {
@@ -196,7 +197,7 @@ export function Operations({
         </div>
       </header>
 
-      {notice ? <div className="inline-notice" role="status">{notice}</div> : null}
+      {notice ? <div className={`inline-notice${noticeToneClass(noticeTone)}`} role="status">{notice}</div> : null}
 
       <section className="runtime-grid">
         <article className="runtime-card">
@@ -410,6 +411,7 @@ export function Operations({
               <p className="section-kicker">OPERASYON GÜNLÜĞÜ</p>
               <h2>Son hareketler</h2>
             </div>
+            <div className="panel-actions">
             <button
               className="text-button"
               type="button"
@@ -437,6 +439,7 @@ export function Operations({
             >
               {busyTarget === "logs" ? "Yenileniyor…" : "Günlüğü yenile"}
             </button>
+            </div>
           </div>
           {diagnosticsVisible ? (
             <div className="diagnostic-summary" role="region" aria-label="Tanılama özeti">
@@ -466,7 +469,7 @@ export function Operations({
                 aria-pressed={logFilter === filter}
                 onClick={() => setLogFilter(filter)}
               >
-                {filter === "all" ? "Tümü" : filter === "errors" ? "Hatalar" : filter === "changes" ? "Değişiklikler" : "Debug"}
+                {filter === "all" ? "Tümü" : filter === "errors" ? "Hatalar" : filter === "changes" ? "Değişiklikler" : "Ayrıntı"}
               </button>
             ))}
             <small>{visibleEvents.length} kayıt</small>

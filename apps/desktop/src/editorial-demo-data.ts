@@ -282,7 +282,7 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
     codexRoles: [
       {
         role: "FAST",
-        label: "Hızlı sınıflandırma, metadata ve belirsiz tekrar analizi",
+        label: "Hızlı sınıflandırma, üst veri ve olası tekrar analizi",
         state: "READY",
         queueDepth: 0,
         completedToday: 28,
@@ -316,14 +316,14 @@ export function createEditorialWorkspaceDemo(): EditorialWorkspaceSnapshot {
     systemHealth: [
       {
         id: "engine",
-        label: "Yerel OPE Engine",
+        label: "Yerel motor",
         state: "HEALTHY",
-        detail: "Paketlenmiş engine çalışıyor; stdio köprüsü yanıt veriyor.",
+        detail: "Paketlenmiş yerel motor bu bilgisayarda çalışıyor.",
         checkedAt: "2026-07-29T14:00:00.000Z"
       },
       {
         id: "pglite",
-        label: "PGlite ve yerel kuyruk",
+        label: "Yerel veritabanı ve iş kuyruğu",
         state: "HEALTHY",
         detail: "Veri dizini yazılabilir; en eski bekleyen iş 2 dakika.",
         checkedAt: "2026-07-29T14:00:00.000Z"

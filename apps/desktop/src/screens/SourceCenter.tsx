@@ -12,6 +12,7 @@ import type {
   SourceScanStatus,
   SourceTestResult
 } from "../types.ts";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 interface SourceCenterProps {
   bridge: BlogbotBridge;
@@ -106,7 +107,7 @@ export function SourceCenter({
   const [reviewRationale, setReviewRationale] = useState("");
   const [reviewTrust, setReviewTrust] = useState<"APPROVED" | "REJECTED">("APPROVED");
   const [reviewRights, setReviewRights] = useState<"APPROVED" | "REJECTED">("APPROVED");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice, warnNotice, noticeTone] = useNotice();
   const [query, setQuery] = useState("");
   const reviewHeadingRef = useRef<HTMLHeadingElement>(null);
   const latestRefreshId = useRef(0);
@@ -138,14 +139,14 @@ export function SourceCenter({
       if (!options.silent) setNotice("Kaynak envanteri yenilendi.");
     } catch (reason) {
       if (refreshId !== latestRefreshId.current) return;
-      setNotice(userFacingBridgeError(reason, "Kaynak envanteri yenilenemedi."));
+      warnNotice(userFacingBridgeError(reason, "Kaynak envanteri yenilenemedi."));
     } finally {
       if (refreshId === latestRefreshId.current) {
         setRefreshing(false);
         setLoading(false);
       }
     }
-  }, [bridge]);
+  }, [bridge, setNotice, warnNotice]);
 
   useEffect(() => {
     const initialRefresh = window.setTimeout(() => void refreshSources({ silent: true }), 0);
@@ -224,18 +225,18 @@ export function SourceCenter({
             if (!isCurrentScan()) return;
           } catch {
             if (!isCurrentScan()) return;
-            setNotice(`${lastStatus.detail} Genel Bakış sayaçları henüz yenilenemedi; Genel Bakış ekranından yeniden deneyin.`);
+            warnNotice(`${lastStatus.detail} Genel Bakış sayaçları henüz yenilenemedi; Genel Bakış ekranından yeniden deneyin.`);
           }
         }
       } catch (reason) {
         if (!isCurrentScan()) return;
-        setNotice(
+        warnNotice(
           `Tarama yerel kuyruğa alındı; ancak durumu henüz okunamadı. Sonraki adım: Kaynak envanterini veya Operasyonlar ekranını yenileyin. (${userFacingBridgeError(reason, "Ayrıntı alınamadı.")})`
         );
       }
     } catch (reason) {
       if (!isCurrentScan()) return;
-      setNotice(
+      warnNotice(
         userFacingBridgeError(reason, "Kaynak taraması başlatılamadı.")
       );
     } finally {
@@ -285,7 +286,7 @@ export function SourceCenter({
             }]);
           } catch (reason) {
             setCandidates([{ ...candidate, testing: false }]);
-            setNotice(userFacingBridgeError(reason, "Kaynak teknik olarak doğrulanamadı. Yeniden deneyin veya kaydetmeden önce aday satırındaki ‘Test et’ düğmesini kullanın."));
+            warnNotice(userFacingBridgeError(reason, "Kaynak teknik olarak doğrulanamadı. Yeniden deneyin veya kaydetmeden önce aday satırındaki ‘Test et’ düğmesini kullanın."));
           }
         }
       }
@@ -293,7 +294,7 @@ export function SourceCenter({
         setNotice("Eklenebilir bir kaynak bulunamadı.");
       }
     } catch (reason) {
-      setNotice(
+      warnNotice(
         userFacingBridgeError(reason, "Kaynaklar çözümlenemedi.")
       );
     } finally {
@@ -332,7 +333,7 @@ export function SourceCenter({
         )
       );
     } catch (reason) {
-      setNotice(
+      warnNotice(
         userFacingBridgeError(reason, "Kaynak testi tamamlanamadı.")
       );
       setCandidates((current) =>
@@ -381,7 +382,7 @@ export function SourceCenter({
       } catch {
         // Keep the last known catalog when recovery refresh is unavailable.
       }
-      setNotice(
+      warnNotice(
         `${
           userFacingBridgeError(reason, "Kaynaklar kaydedilemedi.")
         } Katalog olası kısmi kayıtları göstermek için yenilendi.`
@@ -441,10 +442,10 @@ export function SourceCenter({
         setLastRefreshedAt(Date.now());
         setNotice("Kaynak incelemesi yerel kayda işlendi. Bu işlem revizyon veya yayın onayı vermez.");
       } catch {
-        setNotice("Kaynak incelemesi yerel kayda işlendi; envanter henüz yenilenemedi. Bu işlem revizyon veya yayın onayı vermez.");
+        warnNotice("Kaynak incelemesi yerel kayda işlendi; envanter henüz yenilenemedi. Bu işlem revizyon veya yayın onayı vermez.");
       }
     } catch (reason) {
-      setNotice(userFacingBridgeError(reason, "Kaynak incelemesi kaydedilemedi."));
+      warnNotice(userFacingBridgeError(reason, "Kaynak incelemesi kaydedilemedi."));
     } finally {
       setReviewBusy(false);
     }
@@ -457,7 +458,7 @@ export function SourceCenter({
           <p className="section-kicker">AKILLI KAYNAK MERKEZİ</p>
           <h1>Kanıt akışını tek yerden yönetin.</h1>
           <p>
-            Genel bloglar, haber siteleri, RSS/Atom akışları, sitemap'ler ve tekil
+            Genel bloglar, haber siteleri, RSS/Atom akışları, site haritaları ve tekil
             makaleler için tek giriş noktası. Önce adresin çalışıp çalışmadığını
             kontrol eder, sonra içerik alanına yönlendirirsiniz.
           </p>
@@ -570,7 +571,7 @@ export function SourceCenter({
         <div>
           <span aria-hidden="true">1</span>
           <strong>Kaynak ekle</strong>
-          <p>Site, RSS, Atom, sitemap veya OPML adresini ekleyin.</p>
+          <p>Site, RSS, Atom, site haritası veya OPML adresini ekleyin.</p>
         </div>
         <div>
           <span aria-hidden="true">2</span>
@@ -589,7 +590,7 @@ export function SourceCenter({
         </div>
       </section>
 
-      {notice ? <div className="inline-notice" role="status">{notice}</div> : null}
+      {notice ? <div className={`inline-notice${noticeToneClass(noticeTone)}`} role="status">{notice}</div> : null}
       {scanStatus ? (() => {
         const total = Math.max(
           1,

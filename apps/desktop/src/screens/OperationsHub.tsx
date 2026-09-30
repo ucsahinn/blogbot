@@ -5,6 +5,7 @@ import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
 import { draftExecutionLabel, failureStateLabel, jobTypeLabel, retryModeLabel, formatDateSafe } from "../app-model.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import { Operations } from "./Operations.tsx";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 interface OperationsHubProps {
   bridge: BlogbotBridge;
@@ -76,7 +77,7 @@ function userFacingRetryError(reason: unknown): string {
 export function OperationsHub(props: OperationsHubProps) {
   const [tab, setTab] = useState<"jobs" | "codex" | "health" | "activity">("jobs");
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [message, setMessage] = useState("");
+  const [message, setMessage, warnMessage, messageTone] = useNotice();
   const [refreshing, setRefreshing] = useState(false);
   const [automationBusy, setAutomationBusy] = useState(false);
   const [diagnosticsRequested, setDiagnosticsRequested] = useState(false);
@@ -120,7 +121,7 @@ export function OperationsHub(props: OperationsHubProps) {
       props.onConnectorStateChange(connectorState);
       setMessage("Operasyon durumu yerel veriden yenilendi.");
     } catch {
-      setMessage("Operasyon durumu yenilenemedi. Yerel motoru ve bağlantıları Kurulum Merkezi'nden denetleyin.");
+      warnMessage("Operasyon durumu yenilenemedi. Yerel motoru ve bağlantıları Kurulum Merkezi'nden denetleyin.");
     } finally {
       setRefreshing(false);
     }
@@ -135,10 +136,10 @@ export function OperationsHub(props: OperationsHubProps) {
         props.onWorkspaceChange(await props.bridge.getEditorialWorkspace());
         setMessage("İş güvenli tekrar deneme kuyruğuna alındı.");
       } catch {
-        setMessage("İş güvenli tekrar deneme kuyruğuna alındı; ancak envanter henüz yenilenemedi. Operasyon durumunu yenileyin.");
+        warnMessage("İş güvenli tekrar deneme kuyruğuna alındı; ancak envanter henüz yenilenemedi. Operasyon durumunu yenileyin.");
       }
     } catch (reason) {
-      setMessage(userFacingRetryError(reason));
+      warnMessage(userFacingRetryError(reason));
     } finally {
       setBusyIds((current) => { const next = new Set(current); next.delete(jobId); return next; });
     }
@@ -167,7 +168,7 @@ export function OperationsHub(props: OperationsHubProps) {
       });
       setMessage(result.paused ? `${label} duraklatıldı.` : `${label} devam ettirildi.`);
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, `${label} durumu değiştirilemedi.`));
+      warnMessage(userFacingBridgeError(reason, `${label} durumu değiştirilemedi.`));
     } finally {
       setAutomationBusy(false);
     }
@@ -209,7 +210,7 @@ export function OperationsHub(props: OperationsHubProps) {
           {refreshUnavailableReason ? <small id="operations-refresh-unavailable" className="action-unavailable-reason">{refreshUnavailableReason}</small> : null}
         </div>
       </header>
-      {message ? <div className="inline-notice" role="status" aria-live="polite">{message}</div> : null}
+      {message ? <div className={`inline-notice${noticeToneClass(messageTone)}`} role="status" aria-live="polite">{message}</div> : null}
       <aside className="automation-continuity" aria-label="Yerel otomasyon durumu">
         <span aria-hidden="true">{props.snapshot.automation.ingestionPaused ? "Ⅱ" : "●"}</span>
         <div>
@@ -222,7 +223,7 @@ export function OperationsHub(props: OperationsHubProps) {
       <div className="workspace-tabs" role="tablist" aria-label="Operasyon bölümleri" onKeyDown={handleTabListKeyDown}>
         {([
           ["jobs", `İşler · ${activeDrafts.length + props.workspace.failures.filter((item) => item.state === "ACTION_REQUIRED").length}`],
-          ["codex", "Codex kullanım ve limit"],
+          ["codex", "Codex kullanımı ve limiti"],
           ["health", "Yerel sistem ve bağlantılar"],
           ["activity", "İş günlüğü"]
         ] as const).map(([id, label]) => (
@@ -378,7 +379,7 @@ export function OperationsHub(props: OperationsHubProps) {
                       </span>
                     </div>
                     <p>{item.detail}</p>
-                    <small>{formatDateSafe(item.checkedAt, { timeStyle: "medium" })}</small>
+                    <small>Son kontrol: {formatDateSafe(item.checkedAt, { timeStyle: "short" }, "bilinmiyor")}</small>
                   </div>
                 </article>
               ))}

@@ -5,6 +5,7 @@ import { handleTabListKeyDown } from "../components/tab-keyboard.ts";
 import { draftExecutionLabel, draftStateLabel, sectionLabel } from "../app-model.ts";
 import type { BootstrapSnapshot, ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import { ReviewWorkspace } from "./ReviewWorkspace.tsx";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 const EDITORIAL_DRAFT_POLL_MS = 20_000;
 
@@ -49,7 +50,7 @@ export function EditorialDesk({
   const [restoringDrafts, setRestoringDrafts] = useState(false);
   const [retryingDraftIds, setRetryingDraftIds] = useState<ReadonlySet<string>>(() => new Set());
   const [refreshing, setRefreshing] = useState(false);
-  const [message, setMessage] = useState(initialMessage);
+  const [message, setMessage, warnMessage, messageTone] = useNotice(initialMessage);
   const [queuedDraftId, setQueuedDraftId] = useState<string | undefined>();
   const hasPendingDraft = Boolean(pendingDraftId && !workspace.drafts.some((draft) => draft.id === pendingDraftId));
   const hasQueuedDraft = hasPendingDraft || workspace.drafts.some((draft) => !draft.reviewable);
@@ -79,7 +80,7 @@ export function EditorialDesk({
       onWorkspaceChange(await bridge.getEditorialWorkspace());
       setMessage(`${result.hidden} taslak masadan gizlendi. Kalıcı kayıtlar ve inceleme geçmişi silinmedi.`);
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "Taslaklar masadan gizlenemedi."));
+      warnMessage(userFacingBridgeError(reason, "Taslaklar masadan gizlenemedi."));
     } finally {
       setHidingDrafts(false);
     }
@@ -93,7 +94,7 @@ export function EditorialDesk({
       onWorkspaceChange(await bridge.getEditorialWorkspace());
       setMessage(`${result.restored} gizlenen taslak yeniden masada gösteriliyor.`);
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "Gizlenen taslaklar geri getirilemedi."));
+      warnMessage(userFacingBridgeError(reason, "Gizlenen taslaklar geri getirilemedi."));
     } finally {
       setRestoringDrafts(false);
     }
@@ -127,7 +128,7 @@ export function EditorialDesk({
     };
     void poll();
     return () => { cancelled = true; };
-  }, [bridge, draftIdToSync, onWorkspaceChange]);
+  }, [bridge, draftIdToSync, onWorkspaceChange, setMessage]);
 
   useEffect(() => {
     if (tab !== "drafts" || !activeDraftSignature) return;
@@ -169,7 +170,7 @@ export function EditorialDesk({
       onWorkspaceChange(await bridge.getEditorialWorkspace());
       setMessage("Taslak envanteri yerel veriden yenilendi.");
     } catch {
-      setMessage("Taslak envanteri yenilenemedi. Yerel motor durumunu Operasyonlar ekranından inceleyin.");
+      warnMessage("Taslak envanteri yenilenemedi. Yerel motor durumunu Operasyonlar ekranından inceleyin.");
     } finally {
       setRefreshing(false);
     }
@@ -182,10 +183,10 @@ export function EditorialDesk({
       await bridge.retryJob(draftId);
       setMessage("Taslak yerel kuyruğa yeniden alındı. İlerlemeyi burada veya Operasyonlar ekranında takip edebilirsiniz.");
       await onRefreshWorkspace().catch(() => {
-        setMessage("Taslak yerel kuyruğa yeniden alındı; görünüm henüz yenilenemedi. Taslak envanterini yenileyin.");
+        warnMessage("Taslak yerel kuyruğa yeniden alındı; görünüm henüz yenilenemedi. Taslak envanterini yenileyin.");
       });
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "Taslak yeniden kuyruğa alınamadı."));
+      warnMessage(userFacingBridgeError(reason, "Taslak yeniden kuyruğa alınamadı."));
     } finally {
       setRetryingDraftIds((current) => { const next = new Set(current); next.delete(draftId); return next; });
     }
@@ -226,7 +227,7 @@ export function EditorialDesk({
           {refreshing ? "Yenileniyor…" : "Taslak envanterini yenile"}
         </button>
       </header>
-      {message ? <div className="inline-notice" role="status" aria-live="polite">{message}</div> : null}
+      {message ? <div className={`inline-notice${noticeToneClass(messageTone)}`} role="status" aria-live="polite">{message}</div> : null}
       <div className="workspace-tabs" role="tablist" aria-label="Editoryal masa bölümleri" onKeyDown={handleTabListKeyDown}>
         <button type="button" role="tab" id="editorial-tab-drafts" aria-controls={tab === "drafts" ? "editorial-panel-drafts" : undefined} aria-selected={tab === "drafts"} tabIndex={tab === "drafts" ? 0 : -1} className={tab === "drafts" ? "is-active" : ""} onClick={() => setTab("drafts")}>
           Taslaklar · {workspace.drafts.length}

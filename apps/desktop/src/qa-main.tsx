@@ -344,7 +344,7 @@ async function createQaBridge(): Promise<BlogbotBridge> {
         engineLabel: "OPE Engine · bağlantı bekleniyor",
         bridgeReady: false,
         latencyMs: null,
-        storageLabel: "PGlite · son doğrulanmış yerel veri",
+        storageLabel: "Yerel veritabanı · son doğrulanmış yerel veri",
         lastSyncAt: "2026-07-29T12:44:12.000Z"
       };
       return snapshot;
@@ -437,7 +437,7 @@ async function createQaBridge(): Promise<BlogbotBridge> {
           return {
             ...item,
             state: "DEGRADED",
-            detail: "PGlite durumu motor yeniden bağlanınca doğrulanacak."
+            detail: "Veritabanı durumu yerel motor yeniden bağlanınca doğrulanacak."
           };
         }
         return item;

@@ -4,6 +4,7 @@ import { summarizeWorkspace } from "../app-model.ts";
 import { codexRuntimeLabel } from "../app-model.ts";
 import type { BootstrapSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
 import type { PageId } from "../components/AppShell.tsx";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 interface DashboardProps {
   snapshot: BootstrapSnapshot;
@@ -14,7 +15,7 @@ interface DashboardProps {
 
 export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: DashboardProps) {
   const [refreshing, setRefreshing] = useState(false);
-  const [refreshMessage, setRefreshMessage] = useState("");
+  const [refreshMessage, setRefreshMessage, warnRefreshMessage, refreshMessageTone] = useNotice();
   const summary = summarizeWorkspace(workspace);
   const offline = snapshot.runtime === "OFFLINE_READ_ONLY";
   const engineRunning = snapshot.connection.engineRunning
@@ -58,7 +59,7 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
       await onRefresh();
       setRefreshMessage("Çalışma alanı yerel veriden yenilendi.");
     } catch {
-      setRefreshMessage("Çalışma alanı yenilenemedi. Yerel sistem durumunu Operasyonlar ekranından inceleyin.");
+      warnRefreshMessage("Çalışma alanı yenilenemedi. Yerel sistem durumunu Operasyonlar ekranından inceleyin.");
     } finally {
       setRefreshing(false);
     }
@@ -99,7 +100,7 @@ export function Dashboard({ snapshot, workspace, onNavigate, onRefresh }: Dashbo
         </div>
       </header>
 
-      {refreshMessage ? <div className="inline-notice" role="status" aria-live="polite">{refreshMessage}</div> : null}
+      {refreshMessage ? <div className={`inline-notice${noticeToneClass(refreshMessageTone)}`} role="status" aria-live="polite">{refreshMessage}</div> : null}
 
       {snapshot.runtime === "OFFLINE_READ_ONLY" ? (
         <div className="offline-banner" role="status">

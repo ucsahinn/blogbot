@@ -2500,7 +2500,7 @@ pub async fn get_bootstrap_snapshot(
             "engineLabel": if matches!(runtime, RuntimeMode::Online) { "Yerel motor · hazır" } else { "Yerel motor · kullanılamıyor" },
             "bridgeReady": matches!(runtime, RuntimeMode::Online),
             "latencyMs": Value::Null,
-            "storageLabel": "PGlite · bu Windows bilgisayarı",
+            "storageLabel": "Yerel veritabanı · bu Windows bilgisayarı",
             "lastSyncAt": "1970-01-01T00:00:00.000Z"
         },
         "automation": {
@@ -2862,7 +2862,7 @@ pub fn get_prerequisite_status(
                 "label": "Codex çalışma zamanı",
                 "state": if codex_runner_ready && codex_authenticated && codex_configured { "READY" } else if codex_available { "ATTENTION" } else { "BLOCKED" },
                 "scope": "WRITE",
-                "detail": if !codex_configured { "Yazı üretimi hesabı henüz seçilmedi." } else if !codex_authenticated { "Codex bağlantısı henüz açıkça test edilmedi." } else if !codex_runner_ready { "Hesap hazır; izole yerel runner henüz başlatılmadı." } else { "Codex hesabı ve izole yerel runner hazır." },
+                "detail": if !codex_configured { "Yazı üretimi hesabı henüz seçilmedi." } else if !codex_authenticated { "Codex bağlantısı henüz açıkça test edilmedi." } else if !codex_runner_ready { "Hesap hazır; izole yerel runner henüz başlatılmadı." } else { "Codex hesabı ve yalıtılmış yerel çalıştırıcı hazır." },
                 "userAction": if codex_runner_ready && codex_authenticated && codex_configured { Value::Null } else { json!("Codex hesabını bağlayıp izole runner testini tamamlayın.") }
             },
             clock_prerequisite_check(None),
@@ -6883,10 +6883,10 @@ pub async fn get_editorial_workspace(
         "preferences": preferences,
         "systemHealth": [
             { "id": "engine", "label": "Yerel motor", "state": health_state, "detail": if stale { "Yerel motor bağlantısı şu anda kullanılamıyor." } else { "Paketlenmiş yerel motor bu bilgisayarda çalışıyor." }, "checkedAt": checked_at },
-            { "id": "pglite", "label": "PGlite ve kalıcı kuyruk", "state": health_state, "detail": if stale { "PGlite durumu motor yeniden bağlanınca doğrulanacak." } else { "Yerel veri ve pg-boss kuyruğu hazır." }, "checkedAt": checked_at },
-            { "id": "codex", "label": "Codex çalışma zamanı", "state": if codex_role_state == "READY" || codex_role_state == "BUSY" { "HEALTHY" } else if codex_available { "DEGRADED" } else { "NOT_CONFIGURED" }, "detail": if codex_role_state == "READY" { "Codex hesabı ve izole yerel runner hazır." } else if codex_role_state == "BUSY" { "Codex runner yerel iş kuyruğunu işliyor." } else if codex_available { "Codex bulundu; hesap veya izole runner doğrulaması bekleniyor." } else { "Codex çalışma zamanı bu bilgisayarda bulunamadı." }, "checkedAt": checked_at },
+            { "id": "pglite", "label": "Yerel veritabanı ve iş kuyruğu", "state": health_state, "detail": if stale { "Veritabanı durumu yerel motor yeniden bağlanınca doğrulanacak." } else { "Yerel veritabanı ve kalıcı iş kuyruğu hazır." }, "checkedAt": checked_at },
+            { "id": "codex", "label": "Codex çalışma zamanı", "state": if codex_role_state == "READY" || codex_role_state == "BUSY" { "HEALTHY" } else if codex_available { "DEGRADED" } else { "NOT_CONFIGURED" }, "detail": if codex_role_state == "READY" { "Codex hesabı ve yalıtılmış yerel çalıştırıcı hazır." } else if codex_role_state == "BUSY" { "Codex yerel iş kuyruğunu işliyor." } else if codex_available { "Codex bulundu; hesap veya yalıtılmış çalıştırıcı doğrulaması bekleniyor." } else { "Codex çalışma zamanı bu bilgisayarda bulunamadı." }, "checkedAt": checked_at },
             { "id": "github", "label": "GitHub yayıncısı", "state": if github_configured { "DEGRADED" } else { "NOT_CONFIGURED" }, "detail": if github_configured { "Depo hedefi kayıtlı; depo ile sınırlandırılmış güvenli yetki aracısı hazır olmadığı için yayın kilitli." } else { "GitHub depo hedefi yapılandırılmadı; güvenli yetki aracısı olmadan yetkilendirme yapılmaz." }, "checkedAt": checked_at },
-            { "id": "site-adapter", "label": "Site adaptörü", "state": if site_ready { "HEALTHY" } else if site_configured { "DEGRADED" } else { "NOT_CONFIGURED" }, "detail": if site_ready { "Seçilen site adaptörü ve route dry-run doğrulandı." } else if site_configured { "Site hedefi kayıtlı; biçim doğrulaması bekleniyor." } else { "Seçilen site hedefi henüz yapılandırılmadı." }, "checkedAt": checked_at }
+            { "id": "site-adapter", "label": "Site adaptörü", "state": if site_ready { "HEALTHY" } else if site_configured { "DEGRADED" } else { "NOT_CONFIGURED" }, "detail": if site_ready { "Seçilen site adaptörü ve yayın yolu deneme çalıştırmasıyla doğrulandı." } else if site_configured { "Site hedefi kayıtlı; biçim doğrulaması bekleniyor." } else { "Seçilen site hedefi henüz yapılandırılmadı." }, "checkedAt": checked_at }
         ]
     }))
 }

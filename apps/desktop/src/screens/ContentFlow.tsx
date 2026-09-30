@@ -6,6 +6,7 @@ import { contentCategoryLabel } from "../app-model.ts";
 import type { CandidateView, EditorialWorkspaceSnapshot } from "../types.ts";
 import { InstantCreate } from "./InstantCreate.tsx";
 import { SourceCenter } from "./SourceCenter.tsx";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 type ContentTab = "sources" | "candidates" | "instant";
 
@@ -75,7 +76,7 @@ export function ContentFlow({
   }
   const [query, setQuery] = useState("");
   const [busyId, setBusyId] = useState("");
-  const [message, setMessage] = useState("");
+  const [message, setMessage, warnMessage, messageTone] = useNotice();
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [batchProgress, setBatchProgress] = useState<{
     completed: number;
@@ -206,13 +207,13 @@ export function ContentFlow({
           await onSourceCatalogChange();
           setMessage("Aday bu akıştan kapatıldı.");
         } catch {
-          setMessage("Aday bu akıştan kapatıldı; Genel Bakış sayaçları henüz yenilenemedi. Genel Bakış ekranından yeniden deneyin.");
+          warnMessage("Aday bu akıştan kapatıldı; Genel Bakış sayaçları henüz yenilenemedi. Genel Bakış ekranından yeniden deneyin.");
         }
       } catch {
-        setMessage("Aday bu akıştan kapatıldı; envanter henüz yenilenemedi. Aday listesini yenileyin.");
+        warnMessage("Aday bu akıştan kapatıldı; envanter henüz yenilenemedi. Aday listesini yenileyin.");
       }
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "İşlem tamamlanamadı."));
+      warnMessage(userFacingBridgeError(reason, "İşlem tamamlanamadı."));
     } finally {
       setBusyId("");
     }
@@ -260,7 +261,7 @@ export function ContentFlow({
         const nextWorkspace = await bridge.getEditorialWorkspace({ includeCandidates: true });
         onWorkspaceChange(nextWorkspace);
       } catch {
-        setMessage(`${summary} Aday listesi henüz yenilenemedi; Haber adayları sekmesini yeniden açın.`);
+        warnMessage(`${summary} Aday listesi henüz yenilenemedi; Haber adayları sekmesini yeniden açın.`);
       }
       try {
         await onSourceCatalogChange();
@@ -269,7 +270,7 @@ export function ContentFlow({
         // summary refresh needs another attempt.
       }
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "Toplu işlem tamamlanamadı."));
+      warnMessage(userFacingBridgeError(reason, "Toplu işlem tamamlanamadı."));
     } finally {
       setBusyId("");
     }
@@ -452,7 +453,7 @@ export function ContentFlow({
               <span>Aramayı temizleyin veya sonraki kaynak taramasını bekleyin.</span>
             </div>
           )}
-          {message ? <p className="form-message" role="status" aria-live="polite">{message}</p> : null}
+          {message ? <p className={`form-message${noticeToneClass(messageTone)}`} role="status" aria-live="polite">{message}</p> : null}
         </section>
       ) : null}
     </div>

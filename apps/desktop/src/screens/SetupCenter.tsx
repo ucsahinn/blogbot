@@ -12,6 +12,7 @@ import type {
   SetupConnectorDraft,
   SetupConnectorId
 } from "../types.ts";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 interface SetupCenterProps {
   bridge: BlogbotBridge;
@@ -109,7 +110,7 @@ export function SetupCenter({
   const scanIntervalMinutes = 30;
   const [acknowledged, setAcknowledged] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage, warnMessage, messageTone] = useNotice();
   const [connectionMessage, setConnectionMessage] = useState("");
   const [connectorMessages, setConnectorMessages] = useState<Partial<Record<SetupConnectorId, string>>>({});
   const [connectorDraft, setConnectorDraft] = useState<SetupConnectorDraft>(() => connectorDraftFromState(connectorState));
@@ -225,7 +226,7 @@ export function SetupCenter({
     try {
       setStatus(await bridge.getPrerequisiteStatus());
     } catch (reason) {
-      setMessage(
+      warnMessage(
         explainFailure(reason, "Önkoşul denetimi tamamlanamadı.", "yeniden test edin; sürerse uygulamayı yeniden başlatın.")
       );
     } finally {
@@ -242,7 +243,7 @@ export function SetupCenter({
       })
       .catch((reason) => {
         if (active) {
-          setMessage(
+          warnMessage(
             explainFailure(reason, "Önkoşul denetimi tamamlanamadı.", "yeniden test edin; sürerse uygulamayı yeniden başlatın.")
           );
         }
@@ -250,7 +251,7 @@ export function SetupCenter({
     return () => {
       active = false;
     };
-  }, [bridge]);
+  }, [bridge, warnMessage]);
 
   const refreshLocalDevStatus = useCallback(async () => {
     const requestId = localDevStatusRequestId.current + 1;
@@ -375,7 +376,7 @@ export function SetupCenter({
       return;
     }
     if (!Number.isInteger(scanIntervalMinutes) || scanIntervalMinutes < 5 || scanIntervalMinutes > 1440) {
-      setMessage("Tarama aralığı 5 ile 1440 dakika arasında tam sayı olmalı.");
+      warnMessage("Tarama aralığı 5 ile 1440 dakika arasında tam sayı olmalı.");
       return;
     }
     if (!canEnableAutomationMode(mode, summary)) {
@@ -409,12 +410,12 @@ export function SetupCenter({
         await onCompleted();
         setMessage("Bu cihazın çalışma ayarları kaydedildi.");
       } catch (reason) {
-        setMessage(
+        warnMessage(
           `Bu cihazın çalışma ayarları kaydedildi; ancak güncel bağlantı veya çalışma alanı görünümü yenilenemedi. Sonraki adım: Kurulum Merkezi'nden yenileyin. (${explainFailure(reason, "Ayrıntı alınamadı.", "yeniden deneyin.")})`
         );
       }
     } catch (reason) {
-      setMessage(
+      warnMessage(
         targetSaved
           ? explainFailure(
               reason,
@@ -1504,7 +1505,7 @@ export function SetupCenter({
       </section>
       ) : null}
 
-      {message ? <p className="form-message" role="status" aria-live="polite">{message}</p> : null}
+      {message ? <p className={`form-message${noticeToneClass(messageTone)}`} role="status" aria-live="polite">{message}</p> : null}
 
       <aside className="setup-note">
         <strong>Son kullanıcı bilgisayarına kurulmayacaklar</strong>

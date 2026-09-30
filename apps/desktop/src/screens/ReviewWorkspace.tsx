@@ -25,6 +25,7 @@ import type {
   ReviewRevision,
   Section
 } from "../types.ts";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 interface ReviewWorkspaceProps {
   bridge: BlogbotBridge;
@@ -267,7 +268,7 @@ export function ReviewWorkspace({
   const [materializeConfirmationOpen, setMaterializeConfirmationOpen] = useState(false);
   const [editRequestOpen, setEditRequestOpen] = useState(false);
   const [editInstruction, setEditInstruction] = useState("");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice, warnNotice, noticeTone] = useNotice();
   const [revokeReason, setRevokeReason] = useState("");
   const [revokePanelOpen, setRevokePanelOpen] = useState(false);
   const [revokeConfirmationOpen, setRevokeConfirmationOpen] = useState(false);
@@ -313,7 +314,7 @@ export function ReviewWorkspace({
       .catch((reason) => {
         if (alive) {
           setRevision(null);
-          setNotice(
+          warnNotice(
             userFacingBridgeError(reason, "Revizyon açılamadı.")
           );
         }
@@ -326,7 +327,7 @@ export function ReviewWorkspace({
     return () => {
       alive = false;
     };
-  }, [bridge, revisionLoadNonce, selectedId]);
+  }, [bridge, revisionLoadNonce, selectedId, warnNotice]);
 
   useEffect(() => {
     mediaPreviewLatestRequest.current = {
@@ -474,11 +475,11 @@ export function ReviewWorkspace({
     }
     const approvalRevision = asReviewRevisionV3(revision);
     if (!approvalRevision) {
-      setNotice("Bu eski revizyon yalnızca okunabilir. İnsan inceleme beyanı içeren V3 paketini oluşturup yeni revizyonu açın.");
+      warnNotice("Bu eski revizyon yalnızca okunabilir. İnsan inceleme beyanı içeren V3 paketini oluşturup yeni revizyonu açın.");
       return;
     }
     if (!humanAttestationComplete) {
-      setNotice("Onaydan önce editör adını, her kaynağın rol onayını ve gerekli uzman veya etik inceleme alanlarını tamamlayın.");
+      warnNotice("Onaydan önce editör adını, her kaynağın rol onayını ve gerekli uzman veya etik inceleme alanlarını tamamlayın.");
       return;
     }
     setApproving(true);
@@ -535,7 +536,7 @@ export function ReviewWorkspace({
           : `Editoryal onay kaydedildi; yüksek risk ikinci onayı bekleniyor${refreshNotice}`
       );
     } catch (reason) {
-      setNotice(
+      warnNotice(
         userFacingBridgeError(reason, "Onay kaydedilemedi.")
       );
     } finally {
@@ -560,10 +561,10 @@ export function ReviewWorkspace({
         await onRevisionApproved?.();
         setNotice(`Yüksek risk onayı kaydedildi.`);
       } catch {
-        setNotice(`Yüksek risk onayı kaydedildi. İnceleme kuyruğu görünümü henüz yenilenemedi; sayfayı yenileyin veya Editoryal Masa'dan yeniden deneyin.`);
+        warnNotice(`Yüksek risk onayı kaydedildi. İnceleme kuyruğu görünümü henüz yenilenemedi; sayfayı yenileyin veya Editoryal Masa'dan yeniden deneyin.`);
       }
     } catch (reason) {
-      setNotice(userFacingBridgeError(reason, "Yüksek risk onayı kaydedilemedi."));
+      warnNotice(userFacingBridgeError(reason, "Yüksek risk onayı kaydedilemedi."));
     } finally {
       setApprovingHighRisk(false);
     }
@@ -592,10 +593,10 @@ export function ReviewWorkspace({
         await onRevisionApproved?.();
         setNotice(`Revizyon onayı geri çekildi.`);
       } catch {
-        setNotice(`Revizyon onayı geri çekildi. İnceleme kuyruğu henüz yenilenemedi; sayfayı yenileyin.`);
+        warnNotice(`Revizyon onayı geri çekildi. İnceleme kuyruğu henüz yenilenemedi; sayfayı yenileyin.`);
       }
     } catch (reason) {
-      setNotice(userFacingBridgeError(reason, "Onay geri çekilemedi."));
+      warnNotice(userFacingBridgeError(reason, "Onay geri çekilemedi."));
     } finally {
       setRevoking(false);
       setRevokeConfirmationOpen(false);
@@ -620,13 +621,13 @@ export function ReviewWorkspace({
         try {
           await onDraftQueued(queuedMessage, queued.job?.id);
         } catch {
-          setNotice(`${queuedMessage} Taslak envanteri şu an yenilenemedi; Taslaklar sekmesinden yeniden deneyin.`);
+          warnNotice(`${queuedMessage} Taslak envanteri şu an yenilenemedi; Taslaklar sekmesinden yeniden deneyin.`);
         }
       } else {
         setNotice(queuedMessage);
       }
     } catch (reason) {
-      setNotice(
+      warnNotice(
         userFacingBridgeError(reason, "Düzenleme talebi kaydedilemedi.")
       );
     } finally {
@@ -638,7 +639,7 @@ export function ReviewWorkspace({
     if (!currentRevision || currentRevision.state !== "APPROVED") return;
     const previewBridge = bridge as PreviewCapableBridge;
     if (typeof previewBridge.previewPublication !== "function") {
-      setNotice("Yayın kuyruğu için önce değişmez yayın önizlemesi gerekir; yerel köprü bu özelliği sunmuyor.");
+      warnNotice("Yayın kuyruğu için önce değişmez yayın önizlemesi gerekir; yerel köprü bu özelliği sunmuyor.");
       return;
     }
     setPreviewingPublication(true);
@@ -657,10 +658,10 @@ export function ReviewWorkspace({
         await onPublicationQueued?.();
         setNotice("Onaylı revizyon yerel yayın kuyruğuna alındı. GitHub bağlantısı hazır değilse güvenle beklemede kalır.");
       } catch {
-        setNotice("Onaylı revizyon yerel yayın kuyruğuna alındı. Yayın ve planlanan işler görünümü henüz yenilenemedi; Takvim ve Yayın ekranından yeniden deneyin.");
+        warnNotice("Onaylı revizyon yerel yayın kuyruğuna alındı. Yayın ve planlanan işler görünümü henüz yenilenemedi; Takvim ve Yayın ekranından yeniden deneyin.");
       }
     } catch (reason) {
-      setNotice(userFacingPublicationQueueError(reason));
+      warnNotice(userFacingPublicationQueueError(reason));
     } finally {
       setPreviewingPublication(false);
       setEnqueueingPublication(false);
@@ -684,7 +685,7 @@ export function ReviewWorkspace({
         setNotice(queuedMessage);
       }
     } catch (reason) {
-      setNotice(userFacingBridgeError(reason, "Kanıt düzeltmesi kuyruğa alınamadı."));
+      warnNotice(userFacingBridgeError(reason, "Kanıt düzeltmesi kuyruğa alınamadı."));
     } finally {
       setRequestingEdit(false);
     }
@@ -705,13 +706,13 @@ export function ReviewWorkspace({
         try {
           await onDraftQueued(queuedMessage, queued.job?.id);
         } catch {
-          setNotice(`${queuedMessage} Taslak envanteri şu an yenilenemedi; Taslaklar sekmesinden yeniden deneyin.`);
+          warnNotice(`${queuedMessage} Taslak envanteri şu an yenilenemedi; Taslaklar sekmesinden yeniden deneyin.`);
         }
       } else {
         setNotice(queuedMessage);
       }
     } catch (reason) {
-      setNotice(userFacingBridgeError(reason, "Kapsamlı yeniden oluşturma kaydedilemedi."));
+      warnNotice(userFacingBridgeError(reason, "Kapsamlı yeniden oluşturma kaydedilemedi."));
     } finally {
       setRequestingComprehensiveRewrite(false);
     }
@@ -735,7 +736,7 @@ export function ReviewWorkspace({
       setWarningsAcknowledged(false);
       setNotice("Görsel paketi yeni, onay bekleyen revizyona eklendi. Eski revizyon korunur ve yayınlanamaz.");
     } catch (reason) {
-      setNotice(userFacingBridgeError(reason, "Görsel paketi hazırlanamadı."));
+      warnNotice(userFacingBridgeError(reason, "Görsel paketi hazırlanamadı."));
     } finally {
       setRepairingMedia(false);
     }
@@ -756,10 +757,10 @@ export function ReviewWorkspace({
         await onRevisionApproved?.();
         setNotice(`Revizyon onaylandı ve ${formatDateSafe(currentRevision.scheduledAt, { dateStyle: "medium", timeStyle: "short" })} için hazırlandı. Seçili zamanda yerel zamanlayıcı hedefe gönderir.`);
       } catch {
-        setNotice(`Revizyon onaylandı ve ${formatDateSafe(currentRevision.scheduledAt, { dateStyle: "medium", timeStyle: "short" })} için hazırlandı. İnceleme görünümü henüz yenilenemedi; Takvim ve Yayın ekranından yeniden açın.`);
+        warnNotice(`Revizyon onaylandı ve ${formatDateSafe(currentRevision.scheduledAt, { dateStyle: "medium", timeStyle: "short" })} için hazırlandı. İnceleme görünümü henüz yenilenemedi; Takvim ve Yayın ekranından yeniden açın.`);
       }
     } catch (reason) {
-      setNotice(userFacingPublicationQueueError(reason));
+      warnNotice(userFacingPublicationQueueError(reason));
     } finally {
       setPreviewingPublication(false);
     }
@@ -807,7 +808,7 @@ export function ReviewWorkspace({
       const result = await bridge.materializeLocalPreview({ revisionId: revision.id, revisionHash: revision.revisionHash, previewHash, targetDirectory });
       setNotice(`${result.written} dosya yerel proje klasörüne yazıldı. ${result.backupDirectory ? "Eski dosyalar OPE yedeğine alındı." : ""}`);
     } catch (reason) {
-      setNotice(userFacingBridgeError(reason, "Yerel proje klasörüne yazılamadı."));
+      warnNotice(userFacingBridgeError(reason, "Yerel proje klasörüne yazılamadı."));
     } finally { setMaterializingLocal(false); }
   };
 
@@ -1054,7 +1055,7 @@ export function ReviewWorkspace({
             </div>
           </div>
 
-            {notice ? <div className="inline-notice review-notice" role="status" aria-live="polite">{notice}</div> : null}
+            {notice ? <div className={`inline-notice review-notice${noticeToneClass(noticeTone)}`} role="status" aria-live="polite">{notice}</div> : null}
             {acceptedWarnings.length > 0 && !hasUnacceptableWarning && revision.state !== "APPROVED" ? (
               <label className="acknowledgement warning-acknowledgement">
                 <input
@@ -1184,6 +1185,7 @@ export function ReviewWorkspace({
                   <button
                     type="button"
                     className={locale === "tr" ? "is-selected" : ""}
+                    aria-pressed={locale === "tr"}
                     onClick={() => setLocale("tr")}
                   >
                     TR <small>Özgün</small>
@@ -1191,6 +1193,7 @@ export function ReviewWorkspace({
                   <button
                     type="button"
                     className={locale === "en" ? "is-selected" : ""}
+                    aria-pressed={locale === "en"}
                     onClick={() => setLocale("en")}
                   >
                     EN <small>Yerelleştirme</small>
@@ -1208,7 +1211,7 @@ export function ReviewWorkspace({
                         <strong>Bu taslak {trWordCount} kelimeyle kısa kaldı.</strong>
                         <span>Kaynakları yeniden inceleyip, mevcut metni değiştirmeden yeni ve kapsamlı bir inceleme revizyonu oluşturabilirsiniz.</span>
                         {!readOnly ? (
-                          <button type="button" className="secondary-button" onClick={() => void requestComprehensiveRewrite()} disabled={requestingComprehensiveRewrite}>
+                          <button type="button" className="button button-secondary" onClick={() => void requestComprehensiveRewrite()} disabled={requestingComprehensiveRewrite}>
                             {requestingComprehensiveRewrite ? "Kapsamlı yeniden oluşturma işleniyor…" : "Kapsamlı yeniden oluştur"}
                           </button>
                         ) : null}
@@ -1240,7 +1243,7 @@ export function ReviewWorkspace({
                           ) : heroMedia && heroLoadError ? (
                             <div className="article-no-media" role="status" aria-live="polite">
                               <strong>Hero görseli yüklenemedi.</strong>
-                              <button type="button" className="secondary-button" onClick={retryMediaPreviews} disabled={mediaPreviewLoading}>
+                              <button type="button" className="button button-secondary" onClick={retryMediaPreviews} disabled={mediaPreviewLoading}>
                                 Önizlemeyi tekrar dene
                               </button>
                             </div>
@@ -1253,7 +1256,7 @@ export function ReviewWorkspace({
                               <strong>Bu taslakta hero medya yok.</strong>
                               <span>Metin değişmeden, onaylanmamış yeni bir revizyona içerikle uyumlu üç görsel oranı ekleyebilirsiniz.</span>
                               {!heroMedia && revision.state === "REVIEW_REQUIRED" && !readOnly ? (
-                                <button type="button" className="secondary-button" onClick={() => void repairMedia()} disabled={repairingMedia}>
+                                <button type="button" className="button button-secondary" onClick={() => void repairMedia()} disabled={repairingMedia}>
                                   {repairingMedia ? "Görsel paketi hazırlanıyor…" : "Görseli hazırla"}
                                 </button>
                               ) : null}
@@ -1407,7 +1410,7 @@ export function ReviewWorkspace({
                   <div className="review-section-heading">
                     <div>
                       <p className="section-kicker">MEDYA PAKETİ</p>
-                      <h2>Oran, alt metin ve hash kontrolleri</h2>
+                      <h2>Oran, alt metin ve parmak izi kontrolleri</h2>
                     </div>
                     <span className={mediaGateState === "PASS" ? "pass-label" : "warning-label"}>
                       {mediaGateState === "PASS"
@@ -1415,6 +1418,17 @@ export function ReviewWorkspace({
                         : revision.media.length === 0 ? "Medya eksik" : `${revision.media.length} medya · kontrol gerekli`}
                     </span>
                   </div>
+                  {revision.media.length === 0 ? (
+                    <div className="article-no-media" role="note" aria-label="Medya paketi durumu">
+                      <strong>Bu revizyonda görsel yok.</strong>
+                      <span>Yayın için içerikle uyumlu üç oranlı bir görsel paketi gerekir. Metin değişmeden, onaylanmamış yeni bir revizyona eklenir.</span>
+                      {revision.state === "REVIEW_REQUIRED" && !readOnly ? (
+                        <button type="button" className="button button-secondary" onClick={() => void repairMedia()} disabled={repairingMedia}>
+                          {repairingMedia ? "Görsel paketi hazırlanıyor…" : "Görseli hazırla"}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="media-grid">
                     {revision.media.map((media) => (
                       <article className="media-card" key={media.id}>

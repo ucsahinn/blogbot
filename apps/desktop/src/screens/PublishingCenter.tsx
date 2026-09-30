@@ -10,6 +10,7 @@ import {
   type ScheduleTimeChoice
 } from "../schedule-options.ts";
 import type { ConnectorStateSnapshot, EditorialWorkspaceSnapshot } from "../types.ts";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 interface SlotDraft {
   enabled: boolean;
@@ -44,9 +45,15 @@ function groupSlotsByDay(slots: readonly WeeklySlot[]): Array<{ dayLabel: string
 }
 
 const publicationStateLabel: Record<"READY" | "BLOCKED" | "PUBLISHING", string> = {
-  READY: "Yayın niyeti hazır",
+  READY: "Yayına hazır",
   BLOCKED: "Yayın engellendi",
   PUBLISHING: "Yayın kuyruğunda"
+};
+
+const localOutputStateLabel: Record<"READY" | "BLOCKED" | "PUBLISHING", string> = {
+  READY: "Yerel çıktıya hazır",
+  BLOCKED: "Çıktı engellendi",
+  PUBLISHING: "Çıktı yazılıyor"
 };
 
 const ciStateLabel: Record<"NOT_STARTED" | "RUNNING" | "PASSED" | "FAILED", string> = {
@@ -75,7 +82,7 @@ export function PublishingCenter({
 }: PublishingCenterProps) {
   const [tab, setTab] = useState<"calendar" | "scheduled" | "history">("calendar");
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [message, setMessage] = useState("");
+  const [message, setMessage, warnMessage, messageTone] = useNotice();
   const [refreshing, setRefreshing] = useState(false);
   const [slotDrafts, setSlotDrafts] = useState<Record<string, SlotDraft>>({});
   const [activeSlotId, setActiveSlotId] = useState("");
@@ -125,7 +132,7 @@ export function PublishingCenter({
       setMessage("Takvim ve yayın durumu yerel veriden yenilendi.");
     } catch {
       if (requestId !== refreshRequestId.current) return;
-      setMessage("Takvim ve yayın durumu yenilenemedi. Yerel motoru ve bağlantıları Kurulum Merkezi'nden denetleyin.");
+      warnMessage("Takvim ve yayın durumu yenilenemedi. Yerel motoru ve bağlantıları Kurulum Merkezi'nden denetleyin.");
     } finally {
       if (requestId === refreshRequestId.current) setRefreshing(false);
     }
@@ -150,10 +157,10 @@ export function PublishingCenter({
         onWorkspaceChange(await bridge.getEditorialWorkspace());
         setMessage(`${slot.dayLabel} için haftalık yayın saati güncellendi.`);
       } catch {
-        setMessage(`${slot.dayLabel} için haftalık yayın saati güncellendi; takvim görünümü henüz yenilenemedi. Takvim durumunu yenileyin.`);
+        warnMessage(`${slot.dayLabel} için haftalık yayın saati güncellendi; takvim görünümü henüz yenilenemedi. Takvim durumunu yenileyin.`);
       }
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "Yayın saati güncellenemedi."));
+      warnMessage(userFacingBridgeError(reason, "Yayın saati güncellenemedi."));
     } finally {
       setBusyIds((current) => { const next = new Set(current); next.delete(slot.id); return next; });
     }
@@ -290,12 +297,11 @@ export function PublishingCenter({
           </div>
         ) : null}
         {tab === "scheduled" ? (
-          <div className="data-list">
+          <div className="data-list publication-list">
             {workspace.scheduled.map((item) => (
               <article className="data-row" key={item.id}>
-                <div><strong>{item.title}</strong><small>{sectionLabel(item.section)} · {formatDateSafe(item.scheduledAt, { dateStyle: "medium", timeStyle: "short" })}</small></div>
-                <span className="muted">Yerel hedef hazır</span>
-                <span className={`state-pill state-${item.state.toLowerCase()}`}>{siteMode === "PUBLISH" ? publicationStateLabel[item.state] : publicationStateLabel[item.state].replace("Yayın", "Çıktı")} · {ciStateLabel[item.ciState]}</span>
+                <div><strong>{item.title}</strong><small>{sectionLabel(item.section)} · {formatDateSafe(item.scheduledAt, { dateStyle: "medium", timeStyle: "short" })}</small><small>{siteMode === "PUBLISH" ? "Hedef: site deposu" : "Hedef: yerel klasör"}</small></div>
+                <span className={`state-pill state-${item.state.toLowerCase()}`}>{siteMode === "PUBLISH" ? `${publicationStateLabel[item.state]} · ${ciStateLabel[item.ciState]}` : localOutputStateLabel[item.state]}</span>
               </article>
             ))}
             {workspace.scheduled.length === 0 ? (
@@ -304,7 +310,7 @@ export function PublishingCenter({
           </div>
         ) : null}
         {tab === "history" ? (
-          <div className="data-list">
+          <div className="data-list publication-list">
             {workspace.history.map((item) => (
               <article className="data-row" key={item.id}>
                 <div><strong>{item.title}</strong><small>{formatDateSafe(item.publishedAt, { dateStyle: "medium", timeStyle: "short" })} · {sectionLabel(item.section)}</small></div>
@@ -323,7 +329,7 @@ export function PublishingCenter({
             ) : null}
           </div>
         ) : null}
-        {message ? <p className="form-message" role="status" aria-live="polite">{message}</p> : null}
+        {message ? <p className={`form-message${noticeToneClass(messageTone)}`} role="status" aria-live="polite">{message}</p> : null}
       </section>
     </div>
   );

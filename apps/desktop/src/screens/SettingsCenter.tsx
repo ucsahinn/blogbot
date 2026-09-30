@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { userFacingBridgeError, type BlogbotBridge } from "../bridge.ts";
 import { playFeedbackSound } from "../feedback-sounds.ts";
 import type { DesktopPreferences, EditorialWorkspaceSnapshot, Section } from "../types.ts";
+import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
 interface SettingsCenterProps {
   bridge: BlogbotBridge;
@@ -23,7 +24,7 @@ const defaultPreferences: DesktopPreferences = {
 export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange }: SettingsCenterProps) {
   const [form, setForm] = useState<DesktopPreferences>(workspace.preferences);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage, warnMessage, messageTone] = useNotice();
   const [autostart, setAutostart] = useState<boolean | null>(null);
   const [autostartStatusError, setAutostartStatusError] = useState(false);
   const dirty = JSON.stringify(form) !== JSON.stringify(workspace.preferences);
@@ -63,10 +64,10 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
         onWorkspaceChange(await bridge.getEditorialWorkspace());
         setMessage("Masaüstü tercihleri kaydedildi.");
       } catch {
-        setMessage("Masaüstü tercihleri kaydedildi; görünüm henüz yenilenemedi. Sayfayı yeniden açın veya Çalışma alanını yenile eylemini kullanın.");
+        warnMessage("Masaüstü tercihleri kaydedildi; görünüm henüz yenilenemedi. Sayfayı yeniden açın veya Çalışma alanını yenile eylemini kullanın.");
       }
     } catch (reason) {
-      setMessage(userFacingBridgeError(reason, "Ayarlar kaydedilemedi."));
+      warnMessage(userFacingBridgeError(reason, "Ayarlar kaydedilemedi."));
     } finally {
       setBusy(false);
     }
@@ -79,7 +80,7 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
       playFeedbackSound("notification");
       setMessage("Windows test bildirimi gönderildi.");
     } catch (reason) {
-      setMessage(
+      warnMessage(
         userFacingBridgeError(reason, "Test bildirimi gönderilemedi.")
       );
     }
@@ -97,7 +98,7 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
           : "Windows başlangıcında otomatik açılma kapatıldı."
       );
     } catch (reason) {
-      setMessage(
+      warnMessage(
         userFacingBridgeError(reason, "Windows başlangıç ayarı değiştirilemedi.")
       );
     } finally {
@@ -169,7 +170,7 @@ export function SettingsCenter({ bridge, workspace, readOnly, onWorkspaceChange 
           </div>
           <small>{readOnly ? "Yerel motor kurtarma modundayken ayarlar ve bildirim testi değişiklik yapmaz." : dirty ? "Kaydedilmemiş değişiklik var." : "Tüm değişiklikler kaydedildi."}</small>
         </div>
-        {message ? <p className="form-message" role="status" aria-live="polite">{message}</p> : null}
+        {message ? <p className={`form-message${noticeToneClass(messageTone)}`} role="status" aria-live="polite">{message}</p> : null}
       </section>
     </div>
   );

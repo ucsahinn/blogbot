@@ -7827,3 +7827,95 @@ textarea::placeholder {
   padding: 0;
   font-size: 12px;
 }
+
+/* Failures rendered in the teal confirmation style; warnings read as warnings. */
+.form-message.is-warning {
+  color: #73531c;
+  font-weight: 600;
+}
+/* The log heading spread four children across the row. */
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px 14px;
+}
+/* Empty-media actions were unstyled browser buttons stretched across the note. */
+.article-no-media > .button {
+  justify-self: start;
+  margin-top: 4px;
+}
+.media-review > .article-no-media {
+  margin: 0 0 18px;
+}
+/* .warning-label was used for unmet review facts but never styled. */
+.warning-label {
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+/* Classes used in markup but never defined. */
+.muted {
+  color: var(--ink-soft);
+}
+.selected-restore-path {
+  display: block;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.checkbox-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Two-column role stats: the right column doubled the card border and the
+   third stat sat alone without a divider. */
+.role-card dl > div:nth-child(2n) {
+  border-right: 0;
+}
+.role-card dl > div:nth-child(n + 3) {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--line);
+}
+/* Planned/history rows sized their middle column per row, so it drifted. */
+@media (min-width: 921px) {
+  .publication-list .data-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .publication-list .data-row:has(> a, > .muted) {
+    grid-template-columns: minmax(0, 1fr) 150px auto;
+  }
+  .publication-list .data-row > .state-pill {
+    justify-self: end;
+  }
+}
+/* The diff-only language switch squeezed the review tabs onto two lines. */
+.review-tabs-row {
+  flex-wrap: wrap;
+  column-gap: 20px;
+}
+.review-tabs button {
+  white-space: nowrap;
+}
+.review-tabs-row > .locale-switch {
+  margin: 6px 0 6px auto;
+}
+.locale-switch button small {
+  white-space: nowrap;
+}
+/* With single-line labels the tabs wrap instead of running past the panel. */
+.review-tabs {
+  min-width: 0;
+  flex-wrap: wrap;
+  row-gap: 0;
+}
