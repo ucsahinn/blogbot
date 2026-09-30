@@ -59,7 +59,7 @@ export async function verifyVisibleActionMatrix({ execute: rawExecute, fail, ses
   await execute(sessionId, "document.querySelector('.source-composer .composer-actions button').click(); return true;");
   await waitUntil("return document.querySelectorAll('.candidate-panel .candidate-row').length === 1;", "OPML preview did not produce one candidate");
   await execute(sessionId, "document.querySelectorAll('.source-composer .segmented-control button')[0].click(); return true;");
-  assert(await execute(sessionId, "return document.querySelector('.source-composer textarea')?.rows === 2;"), "single source mode did not reactivate");
+  assert(await execute(sessionId, "return document.querySelector('.source-composer input[type=url]') !== null && document.querySelector('.source-composer textarea') === null;"), "single source mode did not reactivate");
   evidence.push("source-opml-and-single-modes");
 
   const sourceHeaderButtons = await execute(sessionId, "return document.querySelectorAll('.source-list-actions button').length;");

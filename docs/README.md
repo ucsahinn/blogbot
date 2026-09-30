@@ -56,7 +56,7 @@ listeler; bir belge burada yoksa ya yeni eklenmiştir ya da kaldırılmalıdır.
   0.1.56 döngüsünün faz faz görevleri, durumları ve kanıt yolları.
 - [İmzasız sürüm kapanışı 0.1.56 (2026-09-28)](audits/unsigned-release-closure-20260928.md):
   yayımlanmış OPE 0.1.56, bağımsız hash/attestation doğrulaması ve açık kapılar.
-- [Sürüm notları](releases/OPE-0.1.56.md): OPE 0.1.56 değişiklikleri.
+- [Sürüm notları](releases/OPE-0.1.57.md): OPE 0.1.57 değişiklikleri.
 - [İmzasız sürüm kapanışı (2026-09-08)](audits/unsigned-release-closure-20260908.md):
   yayımlanmış OPE 0.1.55, doğrulanan payload hash'leri ve kalan kabul işleri.
 - [İmzasız kaynak teslimatı (2026-09-06)](audits/unsigned-source-handoff-20260906.md):
