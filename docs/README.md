@@ -56,11 +56,19 @@ listeler; bir belge burada yoksa ya yeni eklenmiştir ya da kaldırılmalıdır.
   0.1.56 döngüsünün faz faz görevleri, durumları ve kanıt yolları.
 - [İmzasız sürüm kapanışı 0.1.56 (2026-09-28)](audits/unsigned-release-closure-20260928.md):
   yayımlanmış OPE 0.1.56, bağımsız hash/attestation doğrulaması ve açık kapılar.
-- [Sürüm notları](releases/OPE-0.1.57.md): OPE 0.1.57 değişiklikleri.
+- [Sürüm notları 0.1.58](releases/OPE-0.1.58.md): OPE 0.1.58 bakım ve temizlik
+  sürümü; kullanıcıya görünen davranış değişmedi.
+- [Sürüm notları 0.1.57](releases/OPE-0.1.57.md): OPE 0.1.57 arayüz doğruluk ve
+  erişilebilirlik düzeltmeleri.
+- [Sürüm notları 0.1.56](releases/OPE-0.1.56.md): OPE 0.1.56 değişiklikleri ve
+  workflow notları.
 - [İmzasız sürüm kapanışı (2026-09-08)](audits/unsigned-release-closure-20260908.md):
   yayımlanmış OPE 0.1.55, doğrulanan payload hash'leri ve kalan kabul işleri.
 - [İmzasız kaynak teslimatı (2026-09-06)](audits/unsigned-source-handoff-20260906.md):
   güncel yerel doğrulama, commit/push kapsamı ve sonraya bırakılan dış kontroller.
+- [Bağımsız yerel inceleme ve regresyon kanıtı (2026-09-05)](audits/independent-review-20260905.md):
+  IR-01..IR-08 bulguları, kuyruk sahipliği düzeltmeleri ve kesintiye uğrayan
+  koşu kanıtı; sürüm kanıtı değildir.
 - [Master tamamlanma kontrol listesi (2026-09-03)](audits/OPE-MASTER-COMPLETION-CHECKLIST-20260903.md):
   OPE 0.1.54 çalışma ağacı için güncel ölçülen yerel kanıt, yerelde uygulanmış
   workflow sözleşmesi, tarihsel dış kabul defteri ve operatör kararları.

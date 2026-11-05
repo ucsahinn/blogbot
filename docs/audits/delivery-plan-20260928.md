@@ -154,3 +154,18 @@ Kanıt dizini: `build/verification/0.1.57/` (gitignored).
 | Push, Verify CI, Release workflow | DONE — `a6409c5`; Verify 36673177382 ve Release 36675478522 başarılı |
 | Yayımlanan payload | DONE — `setup.exe` SHA-256 `5d38cd8e…21cb` `latest.json` ile eşleşiyor; `msi` `34cdf6c4…8d90`; iki dosyanın provenance attestation'ı JSON çıktısıyla doğrulandı |
 | Bu makinede 0.1.56 → 0.1.57 kurulum | DONE — önce gerçek profil yedeği alındı (1207 dosya); NSIS sessiz kuruldu, kayıt ve exe 0.1.57; gerçek profille açılış PASS (9 kaynak, 16 inceleme, motor çalışıyor); yalnız salt-okunur gezinti, kaydet/onayla/yayınla yapılmadı |
+
+### Faz 7 — 0.1.58 bakım ve temizlik sürümü
+
+Kanıt: [sürüm notu](../releases/OPE-0.1.58.md). Kullanıcıya görünen davranış değişmedi.
+
+| Kalem | Durum |
+| --- | --- |
+| Depo taraması: kullanılmayan kaynak dosyası, boş `catch`, `as any`, TODO yok; belge dizini ve kırık bağlantı denetimi | DONE — yalnız 2 listelenmemiş belge ve 1 yinelenen `.d.ts` bulundu, düzeltildi |
+| `cargo audit`: rustls, rustls-webpki, webpki-roots, quinn-proto (11 RustSec bildirimi) | DONE — yalnız `Cargo.lock` yama güncellemesi; 0 açık, 12 izinli uyarı |
+| Verify/Release gitleaks pini eşitlendi; eski üç yerel dal (main'e eşdeğer yamalar) silindi | DONE — uzak dallar `docs/ope-0.1.38-release-evidence`, `hotfix/release-prepared-sidecars`, `release/ope-0.1.38` operatör kararına bırakıldı |
+| `pipeline-codex` "JSONL kapandıktan sonra süre aşımı" temizlik penceresi 2 sn → 15 sn (yalnız test) | DONE — tek başına ve tam entegrasyon koşusunda geçti |
+| Test yüzeyleri | DONE — birim 491, uygulama 176, entegrasyon 246, tarayıcı 186, Rust 257; lint, tip, derleme, motor/fetcher smoke, preflight, gitleaks, npm audit geçti |
+| Beş yerde sürüm 0.1.58, `docs/releases/OPE-0.1.58.md` | DONE |
+| Push, Verify CI, Release workflow | DOING — push sonrası kayıt |
+

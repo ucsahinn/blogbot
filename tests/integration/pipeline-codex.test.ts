@@ -787,7 +787,13 @@ test("a deadline that fires after the JSONL stream closes is still reported as a
       error instanceof CodexCliPortError && error.code === "PROCESS_TIMEOUT"
   );
 
-  const cleanupDeadline = Date.now() + 2_000;
+  // The port deliberately reports the timeout before the owned process tree
+  // is torn down, so removal of the task directory is a background promise
+  // that settles only after taskkill finishes. On a loaded Windows machine
+  // (the integration files run concurrently) that can take well over two
+  // seconds; the bound stays finite so a leak still fails, but generous
+  // enough that scheduling latency alone cannot fail the assertion.
+  const cleanupDeadline = Date.now() + 15_000;
   let taskDirectories: string[];
   do {
     taskDirectories = (await readdir(codexHome)).filter((entry) => entry.startsWith("task-"));

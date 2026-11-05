@@ -22,8 +22,7 @@ import type {
   ConnectorStateSnapshot,
   GateView,
   QueueItem,
-  ReviewRevision,
-  Section
+  ReviewRevision
 } from "../types.ts";
 import { noticeToneClass, useNotice } from "../components/use-notice.ts";
 
@@ -203,7 +202,7 @@ function QueueCard({
       <span>
         <strong>{item.title}</strong>
         <small>
-          {sectionLabel(item.section as Section)} · {item.sourceCount} kaynak
+          {sectionLabel(item.section)} · {item.sourceCount} kaynak
         </small>
       </span>
       {item.blockers > 0 ? (
