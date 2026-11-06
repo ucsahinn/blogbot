@@ -167,5 +167,5 @@ Kanıt: [sürüm notu](../releases/OPE-0.1.58.md). Kullanıcıya görünen davra
 | `pipeline-codex` "JSONL kapandıktan sonra süre aşımı" temizlik penceresi 2 sn → 15 sn (yalnız test) | DONE — tek başına ve tam entegrasyon koşusunda geçti |
 | Test yüzeyleri | DONE — birim 491, uygulama 176, entegrasyon 246, tarayıcı 186, Rust 257; lint, tip, derleme, motor/fetcher smoke, preflight, gitleaks, npm audit geçti |
 | Beş yerde sürüm 0.1.58, `docs/releases/OPE-0.1.58.md` | DONE |
-| Push, Verify CI, Release workflow | DOING — push sonrası kayıt |
+| Push, Verify CI, Release workflow | DOING — `04cc04f`; Verify 42105251850 başarılı; Release workflow tetiklenmesi kullanıcı onayı bekliyor |
 
