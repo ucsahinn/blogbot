@@ -53,7 +53,7 @@ listeler; bir belge burada yoksa ya yeni eklenmiştir ya da kaldırılmalıdır.
 ## Denetimler ve tamamlanma kanıtı
 
 - [Teslimat planı ve görev panosu (2026-09-28)](audits/delivery-plan-20260928.md):
-  0.1.56 döngüsünün faz faz görevleri, durumları ve kanıt yolları.
+  0.1.56, 0.1.57 ve 0.1.58 döngülerinin faz faz görevleri, durumları ve kanıt yolları.
 - [İmzasız sürüm kapanışı 0.1.56 (2026-09-28)](audits/unsigned-release-closure-20260928.md):
   yayımlanmış OPE 0.1.56, bağımsız hash/attestation doğrulaması ve açık kapılar.
 - [Sürüm notları 0.1.58](releases/OPE-0.1.58.md): OPE 0.1.58 bakım ve temizlik
